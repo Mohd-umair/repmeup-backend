@@ -1,0 +1,57 @@
+# Copy this file to .env and fill in your actual values
+
+# Environment
+NODE_ENV=development
+PORT=3000
+
+# MongoDB
+MONGODB_URI=mongodb://localhost:27017/orm_development
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# JWT
+JWT_SECRET=your-super-secret-jwt-key-change-in-production-minimum-32-characters
+JWT_EXPIRE=7d
+JWT_REFRESH_SECRET=your-refresh-token-secret-change-in-production
+JWT_REFRESH_EXPIRE=30d
+
+# Frontend
+FRONTEND_URL=http://localhost:4200
+CORS_ORIGIN=http://localhost:4200
+
+# Meta/Facebook/Instagram/WhatsApp
+META_APP_ID=your_meta_app_id
+META_APP_SECRET=your_meta_app_secret
+META_REDIRECT_URI=http://localhost:3000/api/platforms/meta/callback
+META_VERIFY_TOKEN=your_webhook_verify_token
+
+# WhatsApp Business API
+WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+WHATSAPP_BUSINESS_ACCOUNT_ID=your_business_account_id
+WHATSAPP_ACCESS_TOKEN=your_whatsapp_access_token
+
+# Google/YouTube
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+GOOGLE_REDIRECT_URI=http://localhost:3000/api/platforms/google/callback
+
+# OpenAI
+OPENAI_API_KEY=your_openai_api_key
+
+# Email Service (SendGrid)
+SENDGRID_API_KEY=your_sendgrid_api_key
+FROM_EMAIL=noreply@yourdomain.com
+FROM_NAME=ORM System
+
+# Rate Limiting
+RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX_REQUESTS=100
+
+# File Upload
+MAX_FILE_SIZE=5242880
+ALLOWED_FILE_TYPES=image/jpeg,image/png,image/gif,image/webp
+
+# Logging
+LOG_LEVEL=debug
+
