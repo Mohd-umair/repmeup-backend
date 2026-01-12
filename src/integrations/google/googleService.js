@@ -115,7 +115,19 @@ class GoogleService {
 
       return response.data.accounts || [];
     } catch (error) {
-      throw new Error(`Failed to get accounts: ${error.message}`);
+      // Provide more detailed error information
+      const statusCode = error.response?.status;
+      const errorMessage = error.response?.data?.error?.message || error.message;
+      
+      if (statusCode === 403) {
+        throw new Error(`Access denied (403): ${errorMessage}. The Google Business Profile API may not be enabled, or the user may not have a Business Profile account.`);
+      } else if (statusCode === 429) {
+        throw new Error(`Rate limit exceeded (429): ${errorMessage}. Please wait before retrying.`);
+      } else if (statusCode === 404) {
+        throw new Error(`Not found (404): ${errorMessage}. The API endpoint may be incorrect or the API is not enabled.`);
+      } else {
+        throw new Error(`Failed to get accounts (${statusCode || 'unknown'}): ${errorMessage}`);
+      }
     }
   }
 
@@ -135,7 +147,17 @@ class GoogleService {
 
       return response.data.locations || [];
     } catch (error) {
-      throw new Error(`Failed to get locations: ${error.message}`);
+      // Provide more detailed error information
+      const statusCode = error.response?.status;
+      const errorMessage = error.response?.data?.error?.message || error.message;
+      
+      if (statusCode === 403) {
+        throw new Error(`Access denied (403): ${errorMessage}`);
+      } else if (statusCode === 429) {
+        throw new Error(`Rate limit exceeded (429): ${errorMessage}`);
+      } else {
+        throw new Error(`Failed to get locations (${statusCode || 'unknown'}): ${errorMessage}`);
+      }
     }
   }
 
