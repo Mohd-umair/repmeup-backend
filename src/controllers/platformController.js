@@ -91,16 +91,56 @@ exports.handleGoogleCallback = async (req, res, next) => {
         }
       } else {
         // Google Business Profile
-        const accounts = await googleService.getAccounts(tokens.accessToken);
-        if (accounts && accounts.length > 0) {
-          const account = accounts[0];
-          const locations = await googleService.getLocations(tokens.accessToken, account.name);
-          
-          platformData = {
-            accountId: account.name,
-            accountName: account.accountName || account.name,
-            locationIds: locations.map(loc => loc.name.split('/').pop())
-          };
+        try {
+          const accounts = await googleService.getAccounts(tokens.accessToken);
+          if (accounts && accounts.length > 0) {
+            const account = accounts[0];
+            try {
+              const locations = await googleService.getLocations(tokens.accessToken, account.name);
+              
+              platformData = {
+                accountId: account.name,
+                accountName: account.accountName || account.name,
+                locationIds: locations.map(loc => loc.name.split('/').pop())
+              };
+            } catch (locationError) {
+              console.warn('Failed to get locations, continuing without location data:', locationError.message);
+              // Still save connection even without locations
+              platformData = {
+                accountId: account.name,
+                accountName: account.accountName || account.name,
+                locationIds: []
+              };
+            }
+          } else {
+            console.warn('No Google Business Profile accounts found for this user');
+            // Connection still succeeds, just no business profile data
+            platformData = {
+              note: 'No Business Profile account found. You can set up a Business Profile later.'
+            };
+          }
+        } catch (accountsError) {
+          // Handle 403 (permission denied) or 429 (rate limit) gracefully
+          if (accountsError.message.includes('403')) {
+            console.warn('Access denied to Google Business Profile API. User may not have a Business Profile or API not enabled.');
+            platformData = {
+              note: 'Business Profile access unavailable. This might require additional setup or the user may not have a Business Profile account.',
+              error: 'api_access_denied'
+            };
+          } else if (accountsError.message.includes('429')) {
+            console.warn('Rate limit reached for Google Business Profile API. Will retry later.');
+            platformData = {
+              note: 'Rate limit reached. Will sync Business Profile data later.',
+              error: 'rate_limit'
+            };
+          } else {
+            console.warn('Failed to get Google Business Profile accounts:', accountsError.message);
+            // Connection still succeeds
+            platformData = {
+              note: 'Could not fetch Business Profile data. Connection established successfully.',
+              error: accountsError.message
+            };
+          }
         }
       }
 
@@ -237,15 +277,47 @@ exports.disconnectPlatform = async (req, res, next) => {
       });
     }
 
+    // Check if already disconnected
+    if (!connection.isActive && connection.status === 'disconnected') {
+      return res.status(200).json({
+        success: true,
+        message: 'Platform is already disconnected'
+      });
+    }
+
+    // Mark as disconnected
+    const platformType = connection.platform; // Store before saving
     connection.isActive = false;
     connection.status = 'disconnected';
     await connection.save();
 
+    // Clear all cache for this organization's interactions
+    // This is important because the inbox query now filters by active connections
+    const cacheService = require('../services/cacheService');
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    // Optionally: Archive or hide interactions from this disconnected platform
+    // For now, they'll just be filtered out by the inbox query
+    // If you want to permanently hide them, uncomment below:
+    /*
+    const Interaction = require('../models/Interaction');
+    await Interaction.updateMany(
+      { 
+        organization: req.user.organization._id,
+        platformConnection: connection._id 
+      },
+      { 
+        $set: { status: 'archived' } 
+      }
+    );
+    */
+
     res.status(200).json({
       success: true,
-      message: 'Platform disconnected successfully'
+      message: `${platformType} disconnected successfully. Interactions from this platform will no longer appear in your inbox.`
     });
   } catch (error) {
+    console.error('Error disconnecting platform:', error);
     next(error);
   }
 };

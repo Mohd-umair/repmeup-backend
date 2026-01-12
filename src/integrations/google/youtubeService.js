@@ -278,6 +278,18 @@ class YouTubeService {
         interactions
       };
     } catch (error) {
+      // Handle 403 errors gracefully (comments disabled or restricted video)
+      if (error.response?.status === 403) {
+        console.warn(`Comments disabled or restricted for video ${videoId}:`, error.response?.data?.error?.message);
+        return { count: 0, interactions: [] }; // Return empty result instead of throwing error
+      }
+      
+      // Handle 404 errors (video not found or deleted)
+      if (error.response?.status === 404) {
+        console.warn(`Video ${videoId} not found or deleted`);
+        return { count: 0, interactions: [] }; // Return empty result instead of throwing error
+      }
+      
       console.error('Error fetching video comments:', error);
       throw new Error(`Failed to fetch video comments: ${error.message}`);
     }
@@ -329,12 +341,16 @@ class YouTubeService {
 
   /**
    * Reply to a comment
+   * @param {Object} platformConnection - The platform connection with access token
+   * @param {String} commentId - The ID of the comment to reply to (can be top-level or reply)
+   * @param {String} replyText - The text of the reply
    */
   async replyToComment(platformConnection, commentId, replyText) {
     try {
-      const { accessToken } = platformConnection;
+      // Ensure token is valid
+      const accessToken = await this.ensureValidToken(platformConnection);
 
-      // Get parent comment details first
+      // Get parent comment details to determine if it's a top-level comment or reply
       const parentComment = await axios.get(`${this.apiUrl}/comments`, {
         params: {
           part: 'snippet',
@@ -346,23 +362,28 @@ class YouTubeService {
       });
 
       if (!parentComment.data.items || parentComment.data.items.length === 0) {
-        throw new Error('Parent comment not found');
+        throw new Error(`Parent comment with ID ${commentId} not found`);
       }
 
       const parentSnippet = parentComment.data.items[0].snippet;
+      
+      // For YouTube API, parentId should be the ID of the comment you're replying to
+      // If it's a top-level comment, use its ID. If it's a reply, you can still use its ID
+      // But to maintain thread structure, if it's a reply, we should use the original comment's thread
+      let parentId = commentId;
+      
+      // If the comment has a parentId in its snippet, it means it's a reply itself
+      // In that case, we can still reply directly to it (YouTube allows nested replies)
+      // Or we can reply to the top-level comment - but for better UX, let's reply directly to what was clicked
+      // So we'll use the commentId as parentId
 
-      // Create reply
+      // Insert reply using the comments.insert endpoint
       const response = await axios.post(
-        `${this.apiUrl}/commentThreads`,
+        `${this.apiUrl}/comments?part=snippet`,
         {
           snippet: {
-            channelId: parentSnippet.channelId,
-            videoId: parentSnippet.videoId,
-            topLevelComment: {
-              snippet: {
-                textOriginal: replyText
-              }
-            }
+            parentId: parentId, // The comment we're replying to
+            textOriginal: replyText
           }
         },
         {
@@ -373,12 +394,34 @@ class YouTubeService {
         }
       );
 
+      if (!response.data || !response.data.id) {
+        throw new Error('Failed to create reply - no comment ID returned from YouTube API');
+      }
+
       return {
         success: true,
-        comment: response.data
+        commentId: response.data.id,
+        comment: response.data,
+        parentId: parentId
       };
     } catch (error) {
-      throw new Error(`Failed to reply to comment: ${error.message}`);
+      console.error('Error replying to YouTube comment:', {
+        commentId,
+        error: error.response?.data || error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText
+      });
+      
+      // Provide more helpful error messages
+      if (error.response?.status === 403) {
+        throw new Error('Permission denied. Make sure your YouTube account has permission to post comments and the OAuth scope includes youtube.force-ssl');
+      } else if (error.response?.status === 401) {
+        throw new Error('Authentication failed. Please reconnect your YouTube account.');
+      } else if (error.response?.status === 404) {
+        throw new Error('Comment not found. The comment may have been deleted.');
+      }
+      
+      throw new Error(`Failed to reply to comment: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 

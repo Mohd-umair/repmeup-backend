@@ -29,34 +29,93 @@ exports.getInteractions = async (req, res, next) => {
     if (sentiment) query.sentiment = sentiment;
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
-    if (search) {
-      query.$or = [
-        { content: { $regex: search, $options: 'i' } },
-        { 'author.name': { $regex: search, $options: 'i' } },
-        { 'author.username': { $regex: search, $options: 'i' } }
-      ];
-    }
+    
+    // Build search condition - escape special regex characters
+    // Trim and validate search term
+    const searchTerm = search ? search.trim() : null;
+    const searchCondition = searchTerm && searchTerm.length > 0 ? (() => {
+      // Escape special regex characters but allow emojis and unicode
+      // Replace special regex characters with escaped versions: . * + ? ^ $ { } ( ) | [ ] \
+      // Note: We don't escape emojis or unicode characters - MongoDB handles them fine with UTF-8
+      const escapedSearch = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
+      return {
+        $or: [
+          { content: { $regex: escapedSearch, $options: 'i' } },
+          { 'author.name': { $regex: escapedSearch, $options: 'i' } },
+          { 'author.username': { $regex: escapedSearch, $options: 'i' } }
+        ]
+      };
+    })() : null;
 
-    // For agents, show only assigned to them or unassigned
-    if (req.user.role === 'agent') {
-      query.$or = [
+    // Get active platform connections to filter interactions
+    const PlatformConnection = require('../models/PlatformConnection');
+    const activeConnections = await PlatformConnection.find({
+      organization: req.user.organization._id,
+      isActive: true,
+      status: 'connected'
+    }).select('_id');
+
+    const activeConnectionIds = activeConnections.map(conn => conn._id);
+
+    // Build platform connection filter: only show from active connections OR no connection (website interactions)
+    // This ensures disconnected platform interactions are hidden
+    const platformConnectionFilter = activeConnectionIds.length > 0 ? {
+      $or: [
+        { platformConnection: { $in: activeConnectionIds } },
+        { platformConnection: { $exists: false } },
+        { platformConnection: null }
+      ]
+    } : {
+      $or: [
+        { platformConnection: { $exists: false } },
+        { platformConnection: null }
+      ]
+    };
+
+    // Build agent condition
+    const agentCondition = req.user.role === 'agent' ? {
+      $or: [
         { assignedTo: req.user._id },
         { assignedTo: { $exists: false } }
-      ];
+      ]
+    } : null;
+
+    // Combine all conditions using $and
+    const conditionsToAnd = [platformConnectionFilter];
+    
+    if (searchCondition) {
+      conditionsToAnd.push(searchCondition);
+    }
+    
+    if (agentCondition) {
+      conditionsToAnd.push(agentCondition);
+    }
+
+    // If we have multiple conditions, use $and, otherwise merge directly
+    if (conditionsToAnd.length > 1) {
+      query.$and = conditionsToAnd;
+    } else if (conditionsToAnd.length === 1) {
+      Object.assign(query, conditionsToAnd[0]);
     }
 
     // Calculate pagination
     const skip = (page - 1) * limit;
     const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
-    // Try to get from cache
+    // Try to get from cache (include search in cache key, normalized)
+    // Normalize search term for cache key (lowercase and trimmed)
+    const cacheSearchKey = searchTerm ? searchTerm.toLowerCase().trim() : '';
     const cacheKey = cacheService.interactionsKey(req.user.organization._id, {
       platform,
       type,
       sentiment,
       status,
+      search: cacheSearchKey, // Include normalized search term in cache key
       page,
-      limit
+      limit,
+      assignedTo: req.user.role === 'agent' ? req.user._id.toString() : assignedTo || '',
+      activeConnections: activeConnectionIds.map(id => id.toString()).sort().join(',') // Include active connections in cache key
     });
 
     const cached = await cacheService.get(cacheKey);
@@ -73,6 +132,7 @@ exports.getInteractions = async (req, res, next) => {
       .populate('assignedTo', 'firstName lastName email avatar')
       .populate('labels', 'name color icon')
       .populate('replies.sentBy', 'firstName lastName')
+      .populate('platformConnection', 'platform isActive status') // Populate to verify
       .sort(sort)
       .limit(parseInt(limit))
       .skip(skip);
@@ -90,8 +150,9 @@ exports.getInteractions = async (req, res, next) => {
       }
     };
 
-    // Cache result for 5 minutes
-    await cacheService.set(cacheKey, result, 300);
+    // Cache result - shorter TTL for search queries (2 minutes) vs regular queries (5 minutes)
+    const cacheTTL = searchTerm ? 120 : 300; // 2 min for searches, 5 min for filters
+    await cacheService.set(cacheKey, result, cacheTTL);
 
     res.status(200).json({
       success: true,
@@ -152,7 +213,8 @@ exports.replyToInteraction = async (req, res, next) => {
   try {
     const { content, useTemplate, templateId, templateVariables } = req.body;
 
-    const interaction = await Interaction.findById(req.params.id);
+    const interaction = await Interaction.findById(req.params.id)
+      .populate('platformConnection');
 
     if (!interaction) {
       return res.status(404).json({
@@ -180,21 +242,98 @@ exports.replyToInteraction = async (req, res, next) => {
       }
     }
 
-    // Add reply
-    await interaction.addReply(replyContent, req.user._id);
+    // Initialize reply status
+    let platformResponseId = null;
+    let replyStatus = 'sent';
+    let errorMessage = null;
 
-    // TODO: Send actual reply to platform via integration service
-    // This would call instagramService.replyToComment() or similar
+    // Send actual reply to platform via integration service
+    try {
+      // Check if platform connection exists and is active
+      if (!interaction.platformConnection) {
+        replyStatus = 'failed';
+        errorMessage = 'Platform connection not found. Please reconnect your YouTube account in Settings.';
+      } else if (interaction.platformConnection.status !== 'connected' || !interaction.platformConnection.isActive) {
+        replyStatus = 'failed';
+        errorMessage = 'Platform connection is not active. Please reconnect your YouTube account in Settings.';
+      } else if (interaction.platform === 'youtube') {
+        const youtubeService = require('../integrations/google/youtubeService');
+        const result = await youtubeService.replyToComment(
+          interaction.platformConnection,
+          interaction.platformId,
+          replyContent
+        );
+        
+        if (result.success && result.commentId) {
+          platformResponseId = result.commentId;
+          replyStatus = 'sent';
+        } else {
+          replyStatus = 'failed';
+          errorMessage = 'Failed to post reply to YouTube';
+        }
+      } else if (interaction.platform === 'instagram') {
+        // TODO: Implement Instagram reply
+        console.log('Instagram reply not yet implemented');
+        replyStatus = 'failed';
+        errorMessage = 'Instagram replies are not yet implemented';
+      } else if (interaction.platform === 'facebook') {
+        // TODO: Implement Facebook reply
+        console.log('Facebook reply not yet implemented');
+        replyStatus = 'failed';
+        errorMessage = 'Facebook replies are not yet implemented';
+      } else {
+        replyStatus = 'failed';
+        errorMessage = `Replies for ${interaction.platform} are not yet implemented`;
+      }
+    } catch (platformError) {
+      console.error('Error posting reply to platform:', platformError.response?.data || platformError.message);
+      replyStatus = 'failed';
+      errorMessage = platformError.response?.data?.error?.message || platformError.message || 'Failed to post reply to platform';
+    }
+
+    // Add reply to database with platform response ID
+    // Note: addReply sets status to 'replied', so we'll update it if failed
+    const previousStatus = interaction.status;
+    await interaction.addReply(replyContent, req.user._id, platformResponseId);
+    
+    // Reload interaction to get the updated reply
+    await interaction.populate('replies.sentBy', 'firstName lastName');
+    
+    // Update the last reply status and interaction status if it failed
+    if (replyStatus === 'failed') {
+      if (interaction.replies && interaction.replies.length > 0) {
+        const lastReply = interaction.replies[interaction.replies.length - 1];
+        lastReply.status = 'failed';
+      }
+      // Revert status if reply failed
+      interaction.status = previousStatus;
+      await interaction.save();
+    } else {
+      // Update respondedAt timestamp if successful
+      interaction.respondedAt = new Date();
+      await interaction.save();
+    }
 
     // Clear cache
     await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
 
-    res.status(200).json({
-      success: true,
-      data: interaction,
-      message: 'Reply sent successfully'
-    });
+    // Return appropriate response
+    if (replyStatus === 'sent') {
+      res.status(200).json({
+        success: true,
+        data: interaction,
+        message: 'Reply sent successfully to YouTube'
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: errorMessage || 'Failed to send reply to platform',
+        data: interaction,
+        message: 'Reply saved locally but failed to post to platform'
+      });
+    }
   } catch (error) {
+    console.error('Error in replyToInteraction:', error);
     next(error);
   }
 };
