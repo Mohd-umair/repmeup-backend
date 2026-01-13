@@ -111,7 +111,7 @@ const organizationSchema = new mongoose.Schema({
 });
 
 // Indexes
-organizationSchema.index({ slug: 1 });
+// Note: slug index is automatically created by unique: true
 organizationSchema.index({ owner: 1 });
 
 // Generate slug from name before saving

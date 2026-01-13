@@ -279,12 +279,12 @@ const interactionSchema = new mongoose.Schema({
 });
 
 // Indexes for performance
+// Note: platformId index is automatically created by unique: true
 interactionSchema.index({ organization: 1, createdAt: -1 });
 interactionSchema.index({ organization: 1, status: 1 });
 interactionSchema.index({ organization: 1, platform: 1, createdAt: -1 });
 interactionSchema.index({ organization: 1, sentiment: 1 });
 interactionSchema.index({ assignedTo: 1, status: 1 });
-interactionSchema.index({ platformId: 1 });
 interactionSchema.index({ 'metadata.postId': 1 });
 
 // Update response count when adding replies
