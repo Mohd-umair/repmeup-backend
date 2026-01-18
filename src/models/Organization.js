@@ -97,6 +97,78 @@ const organizationSchema = new mongoose.Schema({
     customLogo: String
   },
   
+  // Auto-reply settings
+  autoReplySettings: {
+    enabled: {
+      type: Boolean,
+      default: false
+    },
+    enabledPlatforms: {
+      type: [String],
+      default: ['youtube', 'instagram', 'facebook', 'google']
+    },
+    enabledTypes: {
+      type: [String],
+      default: ['comment', 'review']
+    },
+    replyToNegative: {
+      type: Boolean,
+      default: false // Don't auto-reply to negative sentiment by default
+    },
+    replyToComplaints: {
+      type: Boolean,
+      default: false // Don't auto-reply to complaints by default
+    },
+    minConfidence: {
+      type: Number,
+      default: 0.75, // Minimum AI confidence to auto-reply
+      min: 0,
+      max: 1
+    },
+    autoSend: {
+      type: Boolean,
+      default: false // If true, automatically send; if false, save as draft
+    },
+    requireApproval: {
+      type: Boolean,
+      default: true // Require human approval before sending
+    },
+    maxRepliesPerDay: {
+      type: Number,
+      default: 50 // Limit auto-replies per day
+    },
+    repliesCountToday: {
+      type: Number,
+      default: 0
+    },
+    lastReplyResetDate: Date,
+    
+    // Scheduling settings
+    triggerMode: {
+      type: String,
+      enum: ['webhook', 'scheduled', 'manual', 'hybrid'],
+      default: 'hybrid' // Hybrid: webhook + scheduled fallback
+    },
+    webhookImmediate: {
+      type: Boolean,
+      default: true // Process webhook-triggered auto-replies immediately
+    },
+    webhookDelay: {
+      type: Number,
+      default: 5 // Delay in minutes before processing webhook auto-reply
+    },
+    scheduleInterval: {
+      type: String,
+      enum: ['15min', '30min', '1hour', '6hours', '12hours', '24hours'],
+      default: '24hours' // Default: check every 24 hours
+    },
+    scheduleEnabled: {
+      type: Boolean,
+      default: true // Enable scheduled processing
+    },
+    lastScheduledRun: Date // Track last scheduled run time
+  },
+  
   owner: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

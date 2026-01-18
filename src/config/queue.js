@@ -5,6 +5,7 @@ const webhookQueue = new Queue('webhook-processing', process.env.REDIS_URL || 'r
 const syncQueue = new Queue('platform-sync', process.env.REDIS_URL || 'redis://localhost:6379');
 const aiQueue = new Queue('ai-processing', process.env.REDIS_URL || 'redis://localhost:6379');
 const notificationQueue = new Queue('notifications', process.env.REDIS_URL || 'redis://localhost:6379');
+const autoReplyQueue = new Queue('auto-reply', process.env.REDIS_URL || 'redis://localhost:6379');
 
 // Configure queue settings
 const queueConfig = {
@@ -18,7 +19,7 @@ const queueConfig = {
 };
 
 // Error handling for all queues
-const queues = [webhookQueue, syncQueue, aiQueue, notificationQueue];
+const queues = [webhookQueue, syncQueue, aiQueue, notificationQueue, autoReplyQueue];
 
 queues.forEach(queue => {
   queue.on('error', (error) => {
@@ -39,6 +40,7 @@ module.exports = {
   syncQueue,
   aiQueue,
   notificationQueue,
+  autoReplyQueue,
   queueConfig
 };
 

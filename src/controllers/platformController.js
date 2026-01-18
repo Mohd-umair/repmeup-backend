@@ -358,9 +358,19 @@ exports.syncPlatform = async (req, res, next) => {
       await googleService.ensureValidToken(connection);
       const result = await googleService.fetchAllReviews(connection);
       
+      if (!result.success && result.error) {
+        return res.status(400).json({
+          success: false,
+          error: result.error,
+          data: {
+            interactionsAdded: result.count || 0
+          }
+        });
+      }
+      
       res.status(200).json({
         success: true,
-        message: 'Sync completed',
+        message: result.count > 0 ? `Sync completed. Found ${result.count} new reviews.` : 'Sync completed. No new reviews found.',
         data: {
           interactionsAdded: result.count
         }

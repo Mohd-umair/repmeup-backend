@@ -267,9 +267,17 @@ class YouTubeService {
         }
       }
 
-      // Bulk insert interactions
+      // Bulk upsert interactions (insert new, update existing)
       if (interactions.length > 0) {
-        await Interaction.insertMany(interactions, { ordered: false });
+        const bulkOps = interactions.map(interaction => ({
+          updateOne: {
+            filter: { platformId: interaction.platformId },
+            update: { $set: interaction },
+            upsert: true
+          }
+        }));
+        
+        await Interaction.bulkWrite(bulkOps, { ordered: false });
       }
 
       return {

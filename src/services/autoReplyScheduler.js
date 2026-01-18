@@ -1,0 +1,185 @@
+const { autoReplyQueue } = require('../config/queue');
+const Organization = require('../models/Organization');
+
+/**
+ * Auto-Reply Scheduler Service
+ * Manages scheduled auto-reply jobs using Bull repeatable jobs
+ */
+class AutoReplyScheduler {
+  /**
+   * Initialize scheduled jobs for all organizations
+   */
+  async initializeScheduledJobs() {
+    try {
+      console.log('Initializing auto-reply scheduled jobs...');
+
+      const organizations = await Organization.find({
+        'autoReplySettings.enabled': true,
+        'autoReplySettings.triggerMode': { $in: ['scheduled', 'hybrid'] },
+        'autoReplySettings.scheduleEnabled': true
+      });
+
+      console.log(`Found ${organizations.length} organizations with scheduled auto-reply enabled`);
+
+      for (const org of organizations) {
+        await this.scheduleForOrganization(org);
+      }
+
+      console.log('Auto-reply scheduler initialization complete');
+    } catch (error) {
+      console.error('Error initializing scheduled jobs:', error);
+    }
+  }
+
+  /**
+   * Schedule repeatable job for an organization
+   */
+  async scheduleForOrganization(organization) {
+    try {
+      const orgId = organization._id.toString();
+      const interval = this.getIntervalMs(
+        organization.autoReplySettings.scheduleInterval || '24hours'
+      );
+
+      // Remove existing repeatable job if any
+      await this.removeScheduledJob(orgId);
+
+      // Add new repeatable job
+      await autoReplyQueue.add(
+        {
+          type: 'scheduled',
+          organizationId: orgId
+        },
+        {
+          repeat: {
+            every: interval
+          },
+          jobId: `auto-reply-scheduled-${orgId}`,
+          removeOnComplete: 10, // Keep last 10 completed jobs
+          removeOnFail: 20 // Keep last 20 failed jobs
+        }
+      );
+
+      console.log(`Scheduled auto-reply job for org ${orgId} with interval: ${organization.autoReplySettings.scheduleInterval}`);
+    } catch (error) {
+      console.error(`Error scheduling job for org ${organization._id}:`, error);
+    }
+  }
+
+  /**
+   * Remove scheduled job for an organization
+   */
+  async removeScheduledJob(orgId) {
+    try {
+      const repeatableJobs = await autoReplyQueue.getRepeatableJobs();
+      const jobToRemove = repeatableJobs.find(j => j.id === `auto-reply-scheduled-${orgId}`);
+      
+      if (jobToRemove) {
+        await autoReplyQueue.removeRepeatableByKey(jobToRemove.key);
+        console.log(`Removed existing scheduled job for org ${orgId}`);
+      }
+    } catch (error) {
+      console.error(`Error removing scheduled job for org ${orgId}:`, error);
+    }
+  }
+
+  /**
+   * Update scheduled job when organization settings change
+   */
+  async updateScheduledJob(organization) {
+    const orgId = organization._id.toString();
+    const settings = organization.autoReplySettings;
+
+    if (settings.enabled && 
+        (settings.triggerMode === 'scheduled' || settings.triggerMode === 'hybrid') &&
+        settings.scheduleEnabled) {
+      await this.scheduleForOrganization(organization);
+    } else {
+      await this.removeScheduledJob(orgId);
+    }
+  }
+
+  /**
+   * Queue immediate auto-reply job (webhook-triggered)
+   */
+  async queueImmediateAutoReply(interactionId, organizationId, delayMinutes = 5) {
+    try {
+      const organization = await Organization.findById(organizationId);
+      
+      if (!organization || !organization.autoReplySettings.enabled) {
+        return false;
+      }
+
+      const settings = organization.autoReplySettings;
+      
+      // Check if webhook mode or hybrid mode is enabled
+      if (settings.triggerMode !== 'webhook' && settings.triggerMode !== 'hybrid') {
+        return false;
+      }
+
+      if (!settings.webhookImmediate) {
+        return false;
+      }
+
+      // Use configured delay
+      const delay = settings.webhookDelay || delayMinutes;
+
+      // Add job with delay
+      await autoReplyQueue.add(
+        {
+          type: 'single',
+          interactionId: interactionId,
+          organizationId: organizationId
+        },
+        {
+          delay: delay * 60 * 1000, // Convert minutes to milliseconds
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 2000
+          },
+          removeOnComplete: true,
+          removeOnFail: false
+        }
+      );
+
+      console.log(`Queued webhook auto-reply for interaction ${interactionId} with ${delay}min delay`);
+      return true;
+
+    } catch (error) {
+      console.error('Error queueing immediate auto-reply:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Convert interval string to milliseconds
+   */
+  getIntervalMs(interval) {
+    const map = {
+      '15min': 15 * 60 * 1000,
+      '30min': 30 * 60 * 1000,
+      '1hour': 60 * 60 * 1000,
+      '6hours': 6 * 60 * 60 * 1000,
+      '12hours': 12 * 60 * 60 * 1000,
+      '24hours': 24 * 60 * 60 * 1000
+    };
+    return map[interval] || map['24hours'];
+  }
+
+  /**
+   * Get all scheduled jobs status
+   */
+  async getScheduledJobsStatus() {
+    try {
+      const repeatableJobs = await autoReplyQueue.getRepeatableJobs();
+      return repeatableJobs.filter(j => j.id && j.id.startsWith('auto-reply-scheduled-'));
+    } catch (error) {
+      console.error('Error getting scheduled jobs status:', error);
+      return [];
+    }
+  }
+}
+
+module.exports = new AutoReplyScheduler();
+

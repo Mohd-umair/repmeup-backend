@@ -19,6 +19,16 @@ router.get('/:id', inboxController.getInteraction);
 // Reply to interaction
 router.post('/:id/reply', validateReply, inboxController.replyToInteraction);
 
+// Generate AI suggested reply for interaction
+router.post('/:id/suggest-reply', inboxController.suggestReply);
+
+// Generate auto-replies for pending interactions (Admin/Manager only)
+router.post(
+  '/auto-reply/generate',
+  authorize('admin', 'manager'),
+  inboxController.generateAutoReplies
+);
+
 // Assign interaction (Manager/Admin only)
 router.put(
   '/:id/assign',

@@ -166,7 +166,7 @@ class GoogleService {
    */
   async fetchReviews(platformConnection, locationId) {
     try {
-      const { accessToken } = platformConnection;
+      const accessToken = await this.ensureValidToken(platformConnection);
       const locationName = `locations/${locationId}`;
 
       const response = await axios.get(
@@ -174,11 +174,16 @@ class GoogleService {
         {
           headers: {
             Authorization: `Bearer ${accessToken}`
+          },
+          params: {
+            pageSize: 50,
+            orderBy: 'updateTime desc'
           }
         }
       );
 
       const reviews = response.data.reviews || [];
+      console.log(`Found ${reviews.length} reviews for location ${locationId}`);
       const interactions = [];
 
       for (const review of reviews) {
@@ -254,9 +259,17 @@ class GoogleService {
         }
       }
 
-      // Bulk insert interactions
+      // Bulk upsert interactions (insert new, update existing)
       if (interactions.length > 0) {
-        await Interaction.insertMany(interactions, { ordered: false });
+        const bulkOps = interactions.map(interaction => ({
+          updateOne: {
+            filter: { platformId: interaction.platformId },
+            update: { $set: interaction },
+            upsert: true
+          }
+        }));
+        
+        await Interaction.bulkWrite(bulkOps, { ordered: false });
       }
 
       return {
@@ -275,11 +288,41 @@ class GoogleService {
    */
   async fetchAllReviews(platformConnection) {
     try {
-      const { platformData } = platformConnection;
-      const locationIds = platformData.locationIds || [];
+      let { platformData } = platformConnection;
+      let locationIds = platformData.locationIds || [];
+
+      // If no locationIds, try to fetch them now
+      if (locationIds.length === 0 && platformData.accountId) {
+        try {
+          console.log('No locationIds found, attempting to fetch locations...');
+          const accessToken = await this.ensureValidToken(platformConnection);
+          const locations = await this.getLocations(accessToken, platformData.accountId);
+          locationIds = locations.map(loc => loc.name.split('/').pop());
+          
+          // Update platformData with locationIds
+          platformData.locationIds = locationIds;
+          platformConnection.platformData = platformData;
+          await platformConnection.save();
+          
+          console.log(`Found ${locationIds.length} location(s) for Google Business Profile`);
+        } catch (error) {
+          console.error('Failed to fetch locations during sync:', error.message);
+          return { 
+            success: false, 
+            count: 0, 
+            interactions: [],
+            error: `No locations found. Please ensure your Google Business Profile has locations set up. Error: ${error.message}`
+          };
+        }
+      }
 
       if (locationIds.length === 0) {
-        return { success: true, count: 0, interactions: [] };
+        return { 
+          success: false, 
+          count: 0, 
+          interactions: [],
+          error: 'No Google Business Profile locations found. Please ensure your account has locations set up.'
+        };
       }
 
       let totalCount = 0;

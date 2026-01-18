@@ -49,6 +49,13 @@ module.exports = async function processWebhook(job) {
       });
 
       console.log(`Interaction created and queued for AI processing: ${interaction._id}`);
+
+      // Queue auto-reply if webhook mode is enabled
+      const autoReplyScheduler = require('../services/autoReplyScheduler');
+      await autoReplyScheduler.queueImmediateAutoReply(
+        interaction._id,
+        organizationId
+      );
     }
 
     return {
