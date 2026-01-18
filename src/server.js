@@ -53,6 +53,11 @@ async function startServer() {
     await connectRedis();
     console.log('✅ Redis connected successfully');
 
+    // Initialize auto-reply scheduler
+    const autoReplyScheduler = require('./services/autoReplyScheduler');
+    await autoReplyScheduler.initializeScheduledJobs();
+    console.log('✅ Auto-reply scheduler initialized');
+
     // Start listening
     server.listen(PORT, () => {
       console.log(`

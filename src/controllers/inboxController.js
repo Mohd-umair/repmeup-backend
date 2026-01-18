@@ -2,6 +2,8 @@ const Interaction = require('../models/Interaction');
 const Label = require('../models/Label');
 const ResponseTemplate = require('../models/ResponseTemplate');
 const cacheService = require('../services/cacheService');
+const aiService = require('../services/aiService');
+const Organization = require('../models/Organization');
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
@@ -190,11 +192,18 @@ exports.getInteraction = async (req, res, next) => {
     }
 
     // Mark as read
-    if (!interaction.isRead) {
+    if (!interaction.isRead || interaction.status === 'unread') {
       interaction.isRead = true;
       interaction.readAt = new Date();
       interaction.readBy = req.user._id;
+      // Update status from 'unread' to 'read' if it's currently 'unread'
+      if (interaction.status === 'unread') {
+        interaction.status = 'read';
+      }
       await interaction.save();
+      
+      // Clear cache to reflect the status change
+      await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
     }
 
     res.status(200).json({
@@ -515,6 +524,257 @@ exports.getStats = async (req, res, next) => {
       data: stats[0] || {}
     });
   } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Generate AI suggested reply for interaction
+// @route   POST /api/inbox/:id/suggest-reply
+// @access  Private
+exports.suggestReply = async (req, res, next) => {
+  try {
+    const interaction = await Interaction.findById(req.params.id);
+
+    if (!interaction) {
+      return res.status(404).json({
+        success: false,
+        error: 'Interaction not found'
+      });
+    }
+
+    // Check organization access
+    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+
+    // Get organization for settings
+    const organization = await Organization.findById(req.user.organization._id);
+
+    // Generate AI response using knowledge base
+    try {
+      const aiResponse = await aiService.generateResponse(
+        interaction,
+        req.user.organization._id
+      );
+
+      if (!aiResponse) {
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to generate AI response'
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          suggestedReply: aiResponse.content,
+          confidence: aiResponse.confidence,
+          usedKnowledgeBase: aiResponse.usedKnowledgeBase,
+          knowledgeBaseCount: aiResponse.knowledgeBaseCount
+        },
+        message: 'AI reply generated successfully'
+      });
+    } catch (aiError) {
+      // Handle AI service errors with user-friendly messages
+      console.error('AI service error in suggestReply:', aiError.message);
+      
+      return res.status(500).json({
+        success: false,
+        error: aiError.message || 'Failed to generate AI response. Please check your OpenAI API configuration.'
+      });
+    }
+  } catch (error) {
+    console.error('Suggest reply error:', error);
+    next(error);
+  }
+};
+
+// @desc    Generate auto-replies for pending interactions
+// @route   POST /api/inbox/auto-reply/generate
+// @access  Private (Admin/Manager)
+exports.generateAutoReplies = async (req, res, next) => {
+  try {
+    const { interactionIds, autoSend = false } = req.body;
+
+    // Get organization settings
+    const organization = await Organization.findById(req.user.organization._id);
+
+    if (!organization.autoReplySettings.enabled) {
+      return res.status(400).json({
+        success: false,
+        error: 'Auto-reply is not enabled for your organization'
+      });
+    }
+
+    // Check daily limit
+    const today = new Date().toDateString();
+    const lastReset = organization.autoReplySettings.lastReplyResetDate 
+      ? new Date(organization.autoReplySettings.lastReplyResetDate).toDateString()
+      : null;
+
+    if (lastReset !== today) {
+      organization.autoReplySettings.repliesCountToday = 0;
+      organization.autoReplySettings.lastReplyResetDate = new Date();
+      await organization.save();
+    }
+
+    if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
+      return res.status(429).json({
+        success: false,
+        error: 'Daily auto-reply limit reached'
+      });
+    }
+
+    // Get interactions
+    const query = interactionIds && interactionIds.length > 0
+      ? { _id: { $in: interactionIds }, organization: req.user.organization._id }
+      : { 
+          organization: req.user.organization._id,
+          status: 'unread',
+          $or: [
+            { replies: { $size: 0 } },
+            { replies: { $exists: false } }
+          ]
+        };
+
+    const interactions = await Interaction.find(query)
+      .populate('platformConnection')
+      .limit(20); // Process max 20 at a time
+
+    const results = {
+      total: interactions.length,
+      generated: 0,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+      details: []
+    };
+
+    for (const interaction of interactions) {
+      try {
+        // Check daily limit
+        if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
+          results.skipped++;
+          results.details.push({
+            interactionId: interaction._id,
+            status: 'skipped',
+            reason: 'Daily limit reached'
+          });
+          continue;
+        }
+
+        // Generate auto-reply
+        const autoReply = await aiService.generateAutoReply(
+          interaction,
+          req.user.organization._id,
+          organization
+        );
+
+        if (!autoReply.eligible) {
+          results.skipped++;
+          results.details.push({
+            interactionId: interaction._id,
+            status: 'skipped',
+            reason: autoReply.reason
+          });
+          continue;
+        }
+
+        results.generated++;
+
+        // If autoSend is true and organization allows it, send the reply
+        if (autoSend && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+          try {
+            // Send reply to platform
+            let platformResponseId = null;
+            let replyStatus = 'sent';
+
+            if (interaction.platformConnection && interaction.platformConnection.status === 'connected') {
+              if (interaction.platform === 'youtube') {
+                const youtubeService = require('../integrations/google/youtubeService');
+                const result = await youtubeService.replyToComment(
+                  interaction.platformConnection,
+                  interaction.platformId,
+                  autoReply.response.content
+                );
+                
+                if (result.success && result.commentId) {
+                  platformResponseId = result.commentId;
+                  replyStatus = 'sent';
+                } else {
+                  replyStatus = 'failed';
+                }
+              }
+              // Add other platforms here
+            }
+
+            if (replyStatus === 'sent') {
+              // Add reply to database
+              await interaction.addReply(autoReply.response.content, req.user._id, platformResponseId, true);
+              interaction.respondedAt = new Date();
+              await interaction.save();
+
+              results.sent++;
+              organization.autoReplySettings.repliesCountToday++;
+
+              results.details.push({
+                interactionId: interaction._id,
+                status: 'sent',
+                reply: autoReply.response.content,
+                confidence: autoReply.response.confidence
+              });
+            } else {
+              results.failed++;
+              results.details.push({
+                interactionId: interaction._id,
+                status: 'failed',
+                reason: 'Failed to send to platform'
+              });
+            }
+          } catch (sendError) {
+            results.failed++;
+            results.details.push({
+              interactionId: interaction._id,
+              status: 'failed',
+              reason: sendError.message
+            });
+          }
+        } else {
+          // Save as suggested reply (not sent)
+          results.details.push({
+            interactionId: interaction._id,
+            status: 'generated',
+            suggestedReply: autoReply.response.content,
+            confidence: autoReply.response.confidence,
+            usedKnowledgeBase: autoReply.response.usedKnowledgeBase
+          });
+        }
+      } catch (error) {
+        results.failed++;
+        results.details.push({
+          interactionId: interaction._id,
+          status: 'error',
+          reason: error.message
+        });
+      }
+    }
+
+    // Save updated organization
+    await organization.save();
+
+    // Clear cache
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    res.status(200).json({
+      success: true,
+      data: results,
+      message: `Generated ${results.generated} replies, sent ${results.sent}, skipped ${results.skipped}, failed ${results.failed}`
+    });
+  } catch (error) {
+    console.error('Auto-reply generation error:', error);
     next(error);
   }
 };
