@@ -29,6 +29,13 @@ router.post(
   inboxController.generateAutoReplies
 );
 
+// Test/Debug endpoint - manually trigger scheduled auto-reply
+router.post(
+  '/auto-reply/test-trigger',
+  authorize('admin', 'manager'),
+  inboxController.testAutoReplyTrigger
+);
+
 // Assign interaction (Manager/Admin only)
 router.put(
   '/:id/assign',

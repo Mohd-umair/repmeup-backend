@@ -65,7 +65,18 @@ module.exports = async function processAutoReply(job) {
     // Clear cache
     await cacheService.delPattern(`interactions:${organizationId}*`);
 
-    console.log(`Auto-reply job completed: processed=${processedCount}, sent=${sentCount}, skipped=${skippedCount}`);
+    console.log(`\n📊 [Auto-Reply] Job completed: processed=${processedCount}, sent=${sentCount}, skipped=${skippedCount}`);
+    console.log(`📊 [Auto-Reply] Organization settings:`, {
+      enabled: organization.autoReplySettings.enabled,
+      autoSend: organization.autoReplySettings.autoSend,
+      requireApproval: organization.autoReplySettings.requireApproval,
+      triggerMode: organization.autoReplySettings.triggerMode,
+      enabledPlatforms: organization.autoReplySettings.enabledPlatforms,
+      enabledTypes: organization.autoReplySettings.enabledTypes,
+      minConfidence: organization.autoReplySettings.minConfidence,
+      repliesCountToday: organization.autoReplySettings.repliesCountToday,
+      maxRepliesPerDay: organization.autoReplySettings.maxRepliesPerDay
+    });
 
     return {
       success: true,
@@ -130,7 +141,8 @@ async function processBatchInteractions(organizationId, organization) {
   const results = {
     processed: 0,
     sent: 0,
-    skipped: 0
+    skipped: 0,
+    details: [] // Add details for debugging
   };
 
   try {
@@ -144,18 +156,27 @@ async function processBatchInteractions(organizationId, organization) {
       ]
     };
 
+    console.log(`🔍 [Auto-Reply] Searching for interactions with query:`, JSON.stringify(query));
+
     const interactions = await Interaction.find(query)
       .populate('platformConnection')
       .limit(20); // Process max 20 at a time
 
+    console.log(`🔍 [Auto-Reply] Found ${interactions.length} eligible interactions`);
+
     for (const interaction of interactions) {
+      console.log(`\n📝 [Auto-Reply] Processing interaction ${interaction._id} (${interaction.platform}/${interaction.type})`);
+      
       // Check daily limit
       if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
+        console.log(`❌ [Auto-Reply] Daily limit reached: ${organization.autoReplySettings.repliesCountToday}/${organization.autoReplySettings.maxRepliesPerDay}`);
         results.skipped++;
+        results.details.push({ id: interaction._id, reason: 'Daily limit reached' });
         continue;
       }
 
       // Generate auto-reply
+      console.log(`🤖 [Auto-Reply] Generating AI reply for interaction ${interaction._id}...`);
       const autoReply = await aiService.generateAutoReply(
         interaction,
         organizationId,
@@ -163,19 +184,31 @@ async function processBatchInteractions(organizationId, organization) {
       );
 
       if (!autoReply.eligible) {
+        console.log(`❌ [Auto-Reply] Not eligible: ${autoReply.reason}`);
         results.skipped++;
+        results.details.push({ id: interaction._id, reason: autoReply.reason });
         continue;
       }
 
+      console.log(`✅ [Auto-Reply] Generated reply with confidence: ${autoReply.response.confidence}`);
       results.processed++;
 
       // Send if autoSend is enabled
       if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+        console.log(`📤 [Auto-Reply] Attempting to send reply to platform...`);
         const sent = await sendReplyToPlatform(interaction, autoReply.response.content, organization);
         if (sent) {
+          console.log(`✅ [Auto-Reply] Reply sent successfully!`);
           results.sent++;
           organization.autoReplySettings.repliesCountToday++;
+          results.details.push({ id: interaction._id, status: 'sent' });
+        } else {
+          console.log(`❌ [Auto-Reply] Failed to send reply to platform`);
+          results.details.push({ id: interaction._id, status: 'failed to send' });
         }
+      } else {
+        console.log(`💾 [Auto-Reply] Reply generated but not sent (autoSend: ${organization.autoReplySettings.autoSend}, requireApproval: ${organization.autoReplySettings.requireApproval})`);
+        results.details.push({ id: interaction._id, status: 'generated only' });
       }
     }
 
