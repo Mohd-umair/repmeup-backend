@@ -779,3 +779,124 @@ exports.generateAutoReplies = async (req, res, next) => {
   }
 };
 
+// @desc    Test/trigger auto-reply manually (for debugging)
+// @route   POST /api/inbox/auto-reply/test-trigger
+// @access  Private (Admin/Manager)
+exports.testAutoReplyTrigger = async (req, res, next) => {
+  try {
+    console.log('\n🧪 [Test] Manual auto-reply trigger requested');
+    
+    const organizationId = req.user.organization._id;
+    const organization = await Organization.findById(organizationId);
+
+    if (!organization) {
+      return res.status(404).json({
+        success: false,
+        message: 'Organization not found'
+      });
+    }
+
+    console.log('📊 [Test] Organization settings:', {
+      enabled: organization.autoReplySettings.enabled,
+      triggerMode: organization.autoReplySettings.triggerMode,
+      scheduleEnabled: organization.autoReplySettings.scheduleEnabled,
+      autoSend: organization.autoReplySettings.autoSend,
+      requireApproval: organization.autoReplySettings.requireApproval,
+      enabledPlatforms: organization.autoReplySettings.enabledPlatforms,
+      enabledTypes: organization.autoReplySettings.enabledTypes,
+      minConfidence: organization.autoReplySettings.minConfidence,
+      repliesCountToday: organization.autoReplySettings.repliesCountToday,
+      maxRepliesPerDay: organization.autoReplySettings.maxRepliesPerDay
+    });
+
+    // Find unread interactions without replies
+    const query = {
+      organization: organizationId,
+      status: 'unread',
+      $or: [
+        { replies: { $size: 0 } },
+        { replies: { $exists: false } }
+      ]
+    };
+
+    console.log('🔍 [Test] Query:', JSON.stringify(query));
+
+    const interactions = await Interaction.find(query)
+      .populate('platformConnection')
+      .limit(20);
+
+    console.log(`📝 [Test] Found ${interactions.length} eligible interactions`);
+
+    if (interactions.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No eligible interactions found',
+        data: {
+          found: 0,
+          query: query,
+          settings: organization.autoReplySettings
+        }
+      });
+    }
+
+    const results = {
+      processed: 0,
+      sent: 0,
+      skipped: 0,
+      details: []
+    };
+
+    // Process each interaction
+    for (const interaction of interactions) {
+      console.log(`\n📝 [Test] Processing: ${interaction._id} (${interaction.platform}/${interaction.type})`);
+      console.log(`   Content: "${interaction.content.substring(0, 100)}..."`);
+      console.log(`   Sentiment: ${interaction.sentiment}`);
+      console.log(`   Status: ${interaction.status}`);
+      console.log(`   Replies: ${interaction.replies?.length || 0}`);
+
+      // Check eligibility
+      const autoReply = await aiService.generateAutoReply(
+        interaction,
+        organizationId,
+        organization
+      );
+
+      if (!autoReply.eligible) {
+        console.log(`❌ [Test] Not eligible: ${autoReply.reason}`);
+        results.skipped++;
+        results.details.push({
+          id: interaction._id,
+          platform: interaction.platform,
+          type: interaction.type,
+          status: 'skipped',
+          reason: autoReply.reason
+        });
+        continue;
+      }
+
+      console.log(`✅ [Test] Generated reply with confidence: ${autoReply.response.confidence}`);
+      results.processed++;
+      results.details.push({
+        id: interaction._id,
+        platform: interaction.platform,
+        type: interaction.type,
+        status: 'generated',
+        confidence: autoReply.response.confidence,
+        reply: autoReply.response.content
+      });
+    }
+
+    console.log(`\n📊 [Test] Results: processed=${results.processed}, sent=${results.sent}, skipped=${results.skipped}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Auto-reply test completed',
+      data: results
+    });
+
+  } catch (error) {
+    console.error('❌ [Test] Error:', error);
+    next(error);
+  }
+};
+

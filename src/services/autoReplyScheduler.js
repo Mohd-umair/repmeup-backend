@@ -11,23 +11,41 @@ class AutoReplyScheduler {
    */
   async initializeScheduledJobs() {
     try {
-      console.log('Initializing auto-reply scheduled jobs...');
+      console.log('\n🔄 [Scheduler] Initializing auto-reply scheduled jobs...');
 
-      const organizations = await Organization.find({
+      const query = {
         'autoReplySettings.enabled': true,
         'autoReplySettings.triggerMode': { $in: ['scheduled', 'hybrid'] },
         'autoReplySettings.scheduleEnabled': true
-      });
+      };
+      
+      console.log('🔍 [Scheduler] Query:', JSON.stringify(query));
 
-      console.log(`Found ${organizations.length} organizations with scheduled auto-reply enabled`);
+      const organizations = await Organization.find(query);
+
+      console.log(`📊 [Scheduler] Found ${organizations.length} organizations with scheduled auto-reply enabled`);
+
+      if (organizations.length === 0) {
+        console.log('⚠️  [Scheduler] No organizations found! Check your settings:');
+        console.log('   - autoReplySettings.enabled = true');
+        console.log('   - autoReplySettings.triggerMode = "scheduled" or "hybrid"');
+        console.log('   - autoReplySettings.scheduleEnabled = true');
+      }
 
       for (const org of organizations) {
+        console.log(`\n📝 [Scheduler] Processing organization: ${org._id}`);
+        console.log(`   Settings:`, {
+          enabled: org.autoReplySettings.enabled,
+          triggerMode: org.autoReplySettings.triggerMode,
+          scheduleEnabled: org.autoReplySettings.scheduleEnabled,
+          scheduleInterval: org.autoReplySettings.scheduleInterval
+        });
         await this.scheduleForOrganization(org);
       }
 
-      console.log('Auto-reply scheduler initialization complete');
+      console.log('\n✅ [Scheduler] Auto-reply scheduler initialization complete\n');
     } catch (error) {
-      console.error('Error initializing scheduled jobs:', error);
+      console.error('❌ [Scheduler] Error initializing scheduled jobs:', error);
     }
   }
 

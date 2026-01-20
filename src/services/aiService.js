@@ -3,9 +3,6 @@ const KnowledgeBase = require('../models/KnowledgeBase');
 
 class AIService {
   constructor() {
-    // Provider selection: 'ollama' for dev (Gemma3), 'openai' for production
-    this.provider = process.env.AI_PROVIDER || 'ollama';
-    
     // Ollama configuration (for development with Gemma3)
     this.ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
     this.ollamaModel = process.env.OLLAMA_MODEL || 'gemma3:270m';
@@ -14,6 +11,29 @@ class AIService {
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openaiApiUrl = 'https://api.openai.com/v1/chat/completions';
     this.openaiModel = process.env.OPENAI_MODEL || 'gpt-4';
+    
+    // Provider selection: Auto-detect based on availability
+    // Priority: 1. Explicit AI_PROVIDER env var, 2. OpenAI if key exists, 3. Ollama
+    const explicitProvider = process.env.AI_PROVIDER;
+    
+    if (explicitProvider) {
+      this.provider = explicitProvider.toLowerCase();
+    } else if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
+      // Auto-detect: Use OpenAI if API key is present
+      this.provider = 'openai';
+      console.log('✅ Auto-detected OpenAI provider (API key found)');
+    } else {
+      // Fallback to Ollama if no OpenAI key
+      this.provider = 'ollama';
+      console.log('⚠️  Using Ollama provider (no OpenAI API key found)');
+    }
+    
+    console.log(`🤖 AI Provider: ${this.provider.toUpperCase()}`);
+    if (this.provider === 'openai') {
+      console.log(`📝 OpenAI Model: ${this.openaiModel}`);
+    } else {
+      console.log(`📝 Ollama Model: ${this.ollamaModel}`);
+    }
   }
 
   /**
@@ -167,9 +187,18 @@ class AIService {
       if (!relevantKB && organizationId) {
         relevantKB = await this.searchKnowledgeBase(organizationId, interaction.content, 5);
         
-        // Increment usage count for used KB entries
+        // Increment usage count for used KB entries (with error handling)
         for (const kb of relevantKB) {
-          await kb.incrementUsage();
+          try {
+            // Ensure usageCount is valid before incrementing
+            if (typeof kb.usageCount !== 'number' || isNaN(kb.usageCount)) {
+              kb.usageCount = 0;
+            }
+            await kb.incrementUsage();
+          } catch (usageError) {
+            console.error('Error incrementing KB usage:', usageError);
+            // Continue processing even if usage increment fails
+          }
         }
       }
 
@@ -268,9 +297,18 @@ Generate a response that addresses the customer's message appropriately.`;
       if (!relevantKB && organizationId) {
         relevantKB = await this.searchKnowledgeBase(organizationId, interaction.content, 5);
         
-        // Increment usage count for used KB entries
+        // Increment usage count for used KB entries (with error handling)
         for (const kb of relevantKB) {
-          await kb.incrementUsage();
+          try {
+            // Ensure usageCount is valid before incrementing
+            if (typeof kb.usageCount !== 'number' || isNaN(kb.usageCount)) {
+              kb.usageCount = 0;
+            }
+            await kb.incrementUsage();
+          } catch (usageError) {
+            console.error('Error incrementing KB usage:', usageError);
+            // Continue processing even if usage increment fails
+          }
         }
       }
 

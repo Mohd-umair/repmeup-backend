@@ -181,3 +181,151 @@ exports.webhookHealth = async (req, res) => {
   });
 };
 
+/**
+ * Verify Facebook webhook
+ * GET /api/webhooks/facebook
+ */
+exports.verifyFacebookWebhook = (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log('Facebook webhook verification request:', { mode, token });
+
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    console.log('Facebook webhook verified successfully');
+    res.status(200).send(challenge);
+  } else {
+    console.error('Facebook webhook verification failed');
+    res.sendStatus(403);
+  }
+};
+
+/**
+ * Handle Facebook webhook events
+ * POST /api/webhooks/facebook
+ */
+exports.handleFacebookWebhook = async (req, res) => {
+  try {
+    const { webhookQueue } = require('../config/queue');
+    
+    console.log('Facebook webhook received:', JSON.stringify(req.body, null, 2));
+
+    // Acknowledge receipt immediately
+    res.sendStatus(200);
+
+    // Process webhook asynchronously
+    const entry = req.body.entry?.[0];
+    if (!entry) {
+      console.log('No entry in Facebook webhook payload');
+      return;
+    }
+
+    // Determine organization from page ID
+    const pageId = entry.id;
+    const PlatformConnection = require('../models/PlatformConnection');
+    const connection = await PlatformConnection.findOne({
+      platform: 'facebook',
+      platformPageId: pageId,
+      isActive: true
+    });
+
+    if (!connection) {
+      console.log(`No active Facebook connection found for page: ${pageId}`);
+      return;
+    }
+
+    // Queue webhook for processing
+    await webhookQueue.add({
+      platform: 'facebook',
+      payload: req.body,
+      organizationId: connection.organization.toString()
+    }, {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000
+      }
+    });
+
+    console.log('Facebook webhook queued for processing');
+  } catch (error) {
+    console.error('Facebook webhook handler error:', error);
+    // Don't send error response as we already sent 200
+  }
+};
+
+/**
+ * Verify Instagram webhook
+ * GET /api/webhooks/instagram
+ */
+exports.verifyInstagramWebhook = (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log('Instagram webhook verification request:', { mode, token });
+
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    console.log('Instagram webhook verified successfully');
+    res.status(200).send(challenge);
+  } else {
+    console.error('Instagram webhook verification failed');
+    res.sendStatus(403);
+  }
+};
+
+/**
+ * Handle Instagram webhook events
+ * POST /api/webhooks/instagram
+ */
+exports.handleInstagramWebhook = async (req, res) => {
+  try {
+    const { webhookQueue } = require('../config/queue');
+    
+    console.log('Instagram webhook received:', JSON.stringify(req.body, null, 2));
+
+    // Acknowledge receipt immediately
+    res.sendStatus(200);
+
+    // Process webhook asynchronously
+    const entry = req.body.entry?.[0];
+    if (!entry) {
+      console.log('No entry in Instagram webhook payload');
+      return;
+    }
+
+    // Determine organization from Instagram account ID
+    const instagramId = entry.id;
+    const PlatformConnection = require('../models/PlatformConnection');
+    const connection = await PlatformConnection.findOne({
+      platform: 'instagram',
+      platformUserId: instagramId,
+      isActive: true
+    });
+
+    if (!connection) {
+      console.log(`No active Instagram connection found for account: ${instagramId}`);
+      return;
+    }
+
+    // Queue webhook for processing
+    await webhookQueue.add({
+      platform: 'instagram',
+      payload: req.body,
+      organizationId: connection.organization.toString()
+    }, {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000
+      }
+    });
+
+    console.log('Instagram webhook queued for processing');
+  } catch (error) {
+    console.error('Instagram webhook handler error:', error);
+    // Don't send error response as we already sent 200
+  }
+};
+
