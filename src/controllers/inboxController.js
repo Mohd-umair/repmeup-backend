@@ -26,6 +26,10 @@ exports.getInteractions = async (req, res, next) => {
     // Build query
     const query = { organization: req.user.organization._id };
 
+    // Only show parent interactions (top-level comments/reviews), not replies
+    // Replies are shown in the detail view when clicking on a parent
+    // This filter will be added to $and array below
+
     if (platform) query.platform = platform;
     if (type) query.type = type;
     if (sentiment) query.sentiment = sentiment;
@@ -84,7 +88,19 @@ exports.getInteractions = async (req, res, next) => {
     } : null;
 
     // Combine all conditions using $and
-    const conditionsToAnd = [platformConnectionFilter];
+    // Note: We need to combine the parentId filter with other conditions
+    const conditionsToAnd = [
+      // Parent ID filter (only top-level interactions - no replies)
+      // Exclude any interaction that has a parentId set (replies have parentId)
+      {
+        $or: [
+          { parentId: { $exists: false } },
+          { parentId: null },
+          { parentId: '' }
+        ]
+      },
+      platformConnectionFilter
+    ];
     
     if (searchCondition) {
       conditionsToAnd.push(searchCondition);
@@ -94,12 +110,8 @@ exports.getInteractions = async (req, res, next) => {
       conditionsToAnd.push(agentCondition);
     }
 
-    // If we have multiple conditions, use $and, otherwise merge directly
-    if (conditionsToAnd.length > 1) {
-      query.$and = conditionsToAnd;
-    } else if (conditionsToAnd.length === 1) {
-      Object.assign(query, conditionsToAnd[0]);
-    }
+    // Use $and to combine all conditions
+    query.$and = conditionsToAnd;
 
     // Calculate pagination
     const skip = (page - 1) * limit;
@@ -206,9 +218,51 @@ exports.getInteraction = async (req, res, next) => {
       await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
     }
 
+    // Fetch child interactions (replies from the platform, e.g., YouTube user replies)
+    // These are separate Interaction documents with parentId pointing to this interaction
+    const childInteractions = await Interaction.find({
+      $or: [
+        { parentId: interaction._id.toString() },
+        { parentId: interaction.platformId } // Also check by platformId
+      ],
+      organization: req.user.organization._id
+    }).sort({ platformCreatedAt: 1 }); // Sort by creation time
+
+    // Convert to plain object for modification
+    const interactionObj = interaction.toObject();
+
+    // Merge child interactions with app replies for a complete thread
+    // Child interactions are replies from other users on the platform
+    if (childInteractions.length > 0) {
+      // Transform child interactions to match reply format
+      const platformReplies = childInteractions.map(child => ({
+        _id: child._id,
+        content: child.content,
+        sentBy: child.author.name, // From platform user (not app user)
+        sentAt: child.platformCreatedAt,
+        platform: child.platform,
+        platformId: child.platformId,
+        status: 'received', // These are received from platform, not sent
+        isPlatformReply: true, // Flag to distinguish from app replies
+        author: child.author, // Include full author info
+        sentiment: child.sentiment,
+        platformUrl: child.platformUrl
+      }));
+
+      // Merge app replies and platform replies, sort by date
+      const allReplies = [
+        ...(interactionObj.replies || []).map(r => ({ ...r, isPlatformReply: false })),
+        ...platformReplies
+      ].sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+
+      interactionObj.replies = allReplies;
+      interactionObj.totalReplies = allReplies.length;
+      interactionObj.platformRepliesCount = platformReplies.length;
+    }
+
     res.status(200).json({
       success: true,
-      data: interaction
+      data: interactionObj
     });
   } catch (error) {
     next(error);
@@ -281,15 +335,35 @@ exports.replyToInteraction = async (req, res, next) => {
           errorMessage = 'Failed to post reply to YouTube';
         }
       } else if (interaction.platform === 'instagram') {
-        // TODO: Implement Instagram reply
-        console.log('Instagram reply not yet implemented');
-        replyStatus = 'failed';
-        errorMessage = 'Instagram replies are not yet implemented';
+        const instagramService = require('../integrations/meta/instagramService');
+        const result = await instagramService.replyToComment(
+          interaction.platformId,
+          replyContent,
+          interaction.platformConnection.accessToken
+        );
+        
+        if (result.success && result.platformResponseId) {
+          platformResponseId = result.platformResponseId;
+          replyStatus = 'sent';
+        } else {
+          replyStatus = 'failed';
+          errorMessage = result.error || 'Failed to post reply to Instagram';
+        }
       } else if (interaction.platform === 'facebook') {
-        // TODO: Implement Facebook reply
-        console.log('Facebook reply not yet implemented');
-        replyStatus = 'failed';
-        errorMessage = 'Facebook replies are not yet implemented';
+        const facebookService = require('../integrations/meta/facebookService');
+        const result = await facebookService.replyToComment(
+          interaction.platformConnection,
+          interaction.platformId,
+          replyContent
+        );
+        
+        if (result.success && result.commentId) {
+          platformResponseId = result.commentId;
+          replyStatus = 'sent';
+        } else {
+          replyStatus = 'failed';
+          errorMessage = result.error || 'Failed to post reply to Facebook';
+        }
       } else {
         replyStatus = 'failed';
         errorMessage = `Replies for ${interaction.platform} are not yet implemented`;
@@ -784,8 +858,6 @@ exports.generateAutoReplies = async (req, res, next) => {
 // @access  Private (Admin/Manager)
 exports.testAutoReplyTrigger = async (req, res, next) => {
   try {
-    console.log('\n🧪 [Test] Manual auto-reply trigger requested');
-    
     const organizationId = req.user.organization._id;
     const organization = await Organization.findById(organizationId);
 
@@ -795,19 +867,6 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
         message: 'Organization not found'
       });
     }
-
-    console.log('📊 [Test] Organization settings:', {
-      enabled: organization.autoReplySettings.enabled,
-      triggerMode: organization.autoReplySettings.triggerMode,
-      scheduleEnabled: organization.autoReplySettings.scheduleEnabled,
-      autoSend: organization.autoReplySettings.autoSend,
-      requireApproval: organization.autoReplySettings.requireApproval,
-      enabledPlatforms: organization.autoReplySettings.enabledPlatforms,
-      enabledTypes: organization.autoReplySettings.enabledTypes,
-      minConfidence: organization.autoReplySettings.minConfidence,
-      repliesCountToday: organization.autoReplySettings.repliesCountToday,
-      maxRepliesPerDay: organization.autoReplySettings.maxRepliesPerDay
-    });
 
     // Find unread interactions without replies
     const query = {
@@ -819,13 +878,9 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
       ]
     };
 
-    console.log('🔍 [Test] Query:', JSON.stringify(query));
-
     const interactions = await Interaction.find(query)
       .populate('platformConnection')
       .limit(20);
-
-    console.log(`📝 [Test] Found ${interactions.length} eligible interactions`);
 
     if (interactions.length === 0) {
       return res.status(200).json({
@@ -848,12 +903,6 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
 
     // Process each interaction
     for (const interaction of interactions) {
-      console.log(`\n📝 [Test] Processing: ${interaction._id} (${interaction.platform}/${interaction.type})`);
-      console.log(`   Content: "${interaction.content.substring(0, 100)}..."`);
-      console.log(`   Sentiment: ${interaction.sentiment}`);
-      console.log(`   Status: ${interaction.status}`);
-      console.log(`   Replies: ${interaction.replies?.length || 0}`);
-
       // Check eligibility
       const autoReply = await aiService.generateAutoReply(
         interaction,
@@ -862,7 +911,6 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
       );
 
       if (!autoReply.eligible) {
-        console.log(`❌ [Test] Not eligible: ${autoReply.reason}`);
         results.skipped++;
         results.details.push({
           id: interaction._id,
@@ -874,7 +922,6 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
         continue;
       }
 
-      console.log(`✅ [Test] Generated reply with confidence: ${autoReply.response.confidence}`);
       results.processed++;
       results.details.push({
         id: interaction._id,
@@ -886,8 +933,6 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
       });
     }
 
-    console.log(`\n📊 [Test] Results: processed=${results.processed}, sent=${results.sent}, skipped=${results.skipped}`);
-
     res.status(200).json({
       success: true,
       message: 'Auto-reply test completed',
@@ -895,7 +940,7 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
     });
 
   } catch (error) {
-    console.error('❌ [Test] Error:', error);
+    console.error('Auto-reply test error:', error);
     next(error);
   }
 };

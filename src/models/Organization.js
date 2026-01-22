@@ -111,9 +111,15 @@ const organizationSchema = new mongoose.Schema({
       type: [String],
       default: ['comment', 'review']
     },
+    // Sentiment filter: control which sentiments to auto-reply to
+    sentimentFilter: {
+      type: String,
+      enum: ['all', 'negative_only', 'positive_only', 'neutral_only', 'positive_neutral'],
+      default: 'all' // Reply to all sentiments by default
+    },
     replyToNegative: {
       type: Boolean,
-      default: false // Don't auto-reply to negative sentiment by default
+      default: false // Don't auto-reply to negative sentiment by default (kept for backward compatibility)
     },
     replyToComplaints: {
       type: Boolean,

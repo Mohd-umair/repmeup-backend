@@ -245,6 +245,30 @@ async function sendReplyToPlatform(interaction, content, organization) {
         platformResponseId = result.commentId;
         replyStatus = 'sent';
       }
+    } else if (interaction.platform === 'instagram') {
+      const instagramService = require('../integrations/meta/instagramService');
+      const result = await instagramService.replyToComment(
+        interaction.platformId,
+        content,
+        interaction.platformConnection.accessToken
+      );
+      
+      if (result.success && result.platformResponseId) {
+        platformResponseId = result.platformResponseId;
+        replyStatus = 'sent';
+      }
+    } else if (interaction.platform === 'facebook') {
+      const facebookService = require('../integrations/meta/facebookService');
+      const result = await facebookService.replyToComment(
+        interaction.platformConnection,
+        interaction.platformId,
+        content
+      );
+      
+      if (result.success && result.commentId) {
+        platformResponseId = result.commentId;
+        replyStatus = 'sent';
+      }
     } else if (interaction.platform === 'google') {
       const googleService = require('../integrations/google/googleService');
       // TODO: Implement Google Business reply

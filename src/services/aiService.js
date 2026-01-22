@@ -6,16 +6,16 @@ class AIService {
     // Ollama configuration (for development with Gemma3)
     this.ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
     this.ollamaModel = process.env.OLLAMA_MODEL || 'gemma3:270m';
-    
+
     // OpenAI configuration (for production)
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openaiApiUrl = 'https://api.openai.com/v1/chat/completions';
     this.openaiModel = process.env.OPENAI_MODEL || 'gpt-4';
-    
+
     // Provider selection: Auto-detect based on availability
     // Priority: 1. Explicit AI_PROVIDER env var, 2. OpenAI if key exists, 3. Ollama
     const explicitProvider = process.env.AI_PROVIDER;
-    
+
     if (explicitProvider) {
       this.provider = explicitProvider.toLowerCase();
     } else if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
@@ -27,7 +27,7 @@ class AIService {
       this.provider = 'ollama';
       console.log('⚠️  Using Ollama provider (no OpenAI API key found)');
     }
-    
+
     console.log(`🤖 AI Provider: ${this.provider.toUpperCase()}`);
     if (this.provider === 'openai') {
       console.log(`📝 OpenAI Model: ${this.openaiModel}`);
@@ -47,14 +47,14 @@ class AIService {
         isActive: true,
         $text: { $search: query }
       })
-      .select('title content category priority keywords')
-      .sort({ score: { $meta: 'textScore' }, priority: -1 })
-      .limit(limit);
+        .select('title content category priority keywords')
+        .sort({ score: { $meta: 'textScore' }, priority: -1 })
+        .limit(limit);
 
       // If no results from text search, try keyword matching
       if (results.length === 0) {
         const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-        
+
         if (queryWords.length > 0) {
           const keywordResults = await KnowledgeBase.find({
             organization: organizationId,
@@ -64,9 +64,9 @@ class AIService {
               { title: { $regex: queryWords.join('|'), $options: 'i' } }
             ]
           })
-          .select('title content category priority keywords')
-          .sort({ priority: -1, usageCount: -1 })
-          .limit(limit);
+            .select('title content category priority keywords')
+            .sort({ priority: -1, usageCount: -1 })
+            .limit(limit);
 
           return keywordResults;
         }
@@ -80,10 +80,14 @@ class AIService {
   }
 
   /**
-   * Analyze sentiment of text
+   * Analyze sentiment of text using AI
+   * This is a centralized sentiment analysis function used across all platforms
+   * Supports both Ollama (local) and OpenAI (cloud)
    */
   async analyzeSentiment(content) {
     try {
+      console.log(`🔍 [AI] Analyzing sentiment for: "${content.substring(0, 50)}..."`);
+
       if (this.provider === 'ollama') {
         // Use Ollama (Gemma3) for sentiment analysis
         const response = await axios.post(
@@ -93,88 +97,234 @@ class AIService {
             messages: [
               {
                 role: 'system',
-                content: 'You are a sentiment analysis expert. Analyze the sentiment of the given text and respond with ONLY one word: "positive", "negative", or "neutral".'
+                content: `You are an expert sentiment analysis AI. Analyze the sentiment of customer interactions.
+
+RESPONSE FORMAT (return ONLY this JSON, nothing else):
+{
+  "sentiment": "positive" | "negative" | "neutral",
+  "score": number between -1 and 1,
+  "confidence": number between 0 and 1,
+  "reasoning": "brief explanation"
+}
+
+CLASSIFICATION RULES:
+- positive: Praise, gratitude, satisfaction, enthusiasm, love, excitement
+- negative: Complaints, anger, disappointment, frustration, hate, problems
+- neutral: Questions, information requests, factual statements, neutral observations
+
+SCORING:
+- Very positive: 0.7 to 1.0
+- Mildly positive: 0.3 to 0.7
+- Neutral: -0.3 to 0.3
+- Mildly negative: -0.7 to -0.3
+- Very negative: -1.0 to -0.7
+
+Consider: emojis, capitalization, punctuation, context, sarcasm`
               },
               {
                 role: 'user',
-                content: `Analyze the sentiment of this text: "${content}"`
+                content: `Analyze this text: "${content}"`
               }
             ],
             stream: false,
             options: {
-              temperature: 0.3,
-              num_predict: 10
+              temperature: 0.2, // Lower temperature for more consistent results
+              num_predict: 150
             }
           },
           { timeout: 30000 }
         );
 
-        const result = response.data.message.content.toLowerCase().trim();
-        
-        // Extract sentiment
-        let sentiment = 'neutral';
-        if (result.includes('positive')) sentiment = 'positive';
-        else if (result.includes('negative')) sentiment = 'negative';
-        
-        // Calculate score based on sentiment
-        const sentimentScore = sentiment === 'positive' ? 0.8 : sentiment === 'negative' ? -0.8 : 0;
-        
+        const result = response.data.message.content.trim();
+
+        // Try to parse JSON response
+        let parsedResult;
+        try {
+          // Extract JSON from response (sometimes AI adds extra text)
+          const jsonMatch = result.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            parsedResult = JSON.parse(jsonMatch[0]);
+          } else {
+            throw new Error('No JSON found in response');
+          }
+        } catch (parseError) {
+          // Fallback to text parsing
+          console.warn('Failed to parse JSON, using text parsing:', result);
+          const sentiment = result.includes('positive') ? 'positive' :
+            result.includes('negative') ? 'negative' : 'neutral';
+          parsedResult = {
+            sentiment,
+            score: sentiment === 'positive' ? 0.7 : sentiment === 'negative' ? -0.7 : 0,
+            confidence: 0.75,
+            reasoning: 'Fallback text parsing'
+          };
+        }
+
+        console.log(`✅ [AI] Sentiment: ${parsedResult.sentiment} (score: ${parsedResult.score}, confidence: ${parsedResult.confidence})`);
+
         return {
-          sentiment,
-          sentimentScore,
-          sentimentConfidence: 0.85
+          sentiment: parsedResult.sentiment,
+          sentimentScore: parsedResult.score,
+          sentimentConfidence: parsedResult.confidence,
+          sentimentReasoning: parsedResult.reasoning
         };
       } else {
         // Use OpenAI for sentiment analysis
-      const response = await axios.post(
-          this.openaiApiUrl,
-        {
-            model: this.openaiModel,
-          messages: [
+        try {
+          const response = await axios.post(
+            this.openaiApiUrl,
             {
-              role: 'system',
-              content: 'You are a sentiment analysis expert. Analyze the sentiment of the given text and respond with ONLY one word: "positive", "negative", or "neutral". Also provide a confidence score from 0 to 1.'
+              model: this.openaiModel,
+              messages: [
+                {
+                  role: 'system',
+                  content: `You are an expert sentiment analysis AI. Analyze customer interactions.
+
+Respond with ONLY this JSON structure (no other text):
+{
+  "sentiment": "positive" or "negative" or "neutral",
+  "score": number between -1 and 1,
+  "confidence": number between 0 and 1,
+  "reasoning": "brief explanation"
+}
+
+Rules:
+- positive: Praise, gratitude, satisfaction, enthusiasm
+- negative: Complaints, anger, disappointment, frustration
+- neutral: Questions, information requests, factual statements
+
+Scoring:
+- Very positive: 0.7 to 1.0
+- Neutral: -0.3 to 0.3
+- Very negative: -1.0 to -0.7`
+                },
+                {
+                  role: 'user',
+                  content: `Analyze: "${content}"`
+                }
+              ],
+              temperature: 0.2,
+              max_tokens: 150
             },
             {
-              role: 'user',
-              content: `Analyze the sentiment of this text: "${content}"`
+              headers: {
+                'Authorization': `Bearer ${this.openaiApiKey}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 30000
             }
-          ],
-          temperature: 0.3,
-          max_tokens: 50
-        },
-        {
-          headers: {
-              'Authorization': `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+          );
 
-      const result = response.data.choices[0].message.content.toLowerCase().trim();
-      
-      // Extract sentiment
-      let sentiment = 'neutral';
-      if (result.includes('positive')) sentiment = 'positive';
-      else if (result.includes('negative')) sentiment = 'negative';
-      
-      // Calculate score based on sentiment
-      const sentimentScore = sentiment === 'positive' ? 0.8 : sentiment === 'negative' ? -0.8 : 0;
-      
-      return {
-        sentiment,
-        sentimentScore,
-          sentimentConfidence: 0.85
-      };
+          const responseContent = response.data.choices[0].message.content.trim();
+
+          // Try to parse JSON response
+          let result;
+          try {
+            // Extract JSON from response (sometimes AI adds extra text)
+            const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              result = JSON.parse(jsonMatch[0]);
+            } else {
+              throw new Error('No JSON found in OpenAI response');
+            }
+          } catch (parseError) {
+            // Fallback to text parsing
+            console.warn('⚠️  [AI] Failed to parse OpenAI JSON, using text parsing');
+            const sentiment = responseContent.toLowerCase().includes('positive') ? 'positive' :
+              responseContent.toLowerCase().includes('negative') ? 'negative' : 'neutral';
+            result = {
+              sentiment,
+              score: sentiment === 'positive' ? 0.7 : sentiment === 'negative' ? -0.7 : 0,
+              confidence: 0.75,
+              reasoning: 'Fallback text parsing'
+            };
+          }
+
+          console.log(`✅ [AI] Sentiment: ${result.sentiment} (score: ${result.score}, confidence: ${result.confidence})`);
+
+          return {
+            sentiment: result.sentiment,
+            sentimentScore: result.score,
+            sentimentConfidence: result.confidence,
+            sentimentReasoning: result.reasoning
+          };
+        } catch (apiError) {
+          // Log detailed error for debugging
+          if (apiError.response) {
+            console.error('❌ [AI] OpenAI API Error:', {
+              status: apiError.response.status,
+              statusText: apiError.response.statusText,
+              data: apiError.response.data,
+              model: this.openaiModel
+            });
+          } else {
+            console.error('❌ [AI] OpenAI Request Error:', apiError.message);
+          }
+          throw apiError; // Re-throw to trigger fallback
+        }
       }
     } catch (error) {
-      console.error('Sentiment analysis error:', error.message);
-      return {
-        sentiment: 'neutral',
-        sentimentScore: 0,
-        sentimentConfidence: 0.5
-      };
+      console.error('❌ [AI] Sentiment analysis error:', error.message);
+
+      // Fallback to basic keyword analysis
+      return this.fallbackSentimentAnalysis(content);
     }
+  }
+
+  /**
+   * Fallback sentiment analysis using keywords (when AI fails)
+   */
+  fallbackSentimentAnalysis(content) {
+    const text = content.toLowerCase();
+
+    // Enhanced keyword lists with weights
+    const positiveWords = {
+      'love': 2, 'amazing': 2, 'awesome': 2, 'excellent': 2, 'perfect': 2,
+      'great': 1.5, 'good': 1.5, 'wonderful': 2, 'fantastic': 2, 'best': 2,
+      'nice': 1, 'thanks': 1.5, 'thank you': 2, 'appreciate': 1.5, 'helpful': 1.5,
+      '😍': 2, '❤️': 2, '🥰': 2, '😊': 1.5, '👍': 1.5, '🙏': 1.5, '⭐': 1
+    };
+
+    const negativeWords = {
+      'hate': 2, 'terrible': 2, 'awful': 2, 'worst': 2, 'horrible': 2,
+      'bad': 1.5, 'poor': 1.5, 'disappointed': 2, 'disappointing': 2,
+      'useless': 2, 'waste': 1.5, 'scam': 2, 'fraud': 2, 'never': 1,
+      'pathetic': 2, 'disgusting': 2, 'angry': 1.5, 'furious': 2,
+      '😡': 2, '😠': 2, '👎': 2, '😤': 1.5, '💔': 2
+    };
+
+    let positiveScore = 0;
+    let negativeScore = 0;
+
+    // Count weighted keywords
+    Object.entries(positiveWords).forEach(([word, weight]) => {
+      if (text.includes(word)) positiveScore += weight;
+    });
+
+    Object.entries(negativeWords).forEach(([word, weight]) => {
+      if (text.includes(word)) negativeScore += weight;
+    });
+
+    // Calculate sentiment
+    let sentiment = 'neutral';
+    let score = 0;
+
+    if (positiveScore > negativeScore && positiveScore > 0) {
+      sentiment = 'positive';
+      score = Math.min(0.8, 0.4 + (positiveScore * 0.1));
+    } else if (negativeScore > positiveScore && negativeScore > 0) {
+      sentiment = 'negative';
+      score = Math.max(-0.8, -0.4 - (negativeScore * 0.1));
+    }
+
+    console.log(`⚠️  [AI] Fallback sentiment: ${sentiment} (pos: ${positiveScore}, neg: ${negativeScore})`);
+
+    return {
+      sentiment,
+      sentimentScore: score,
+      sentimentConfidence: 0.6, // Lower confidence for keyword-based
+      sentimentReasoning: 'Fallback keyword analysis (AI unavailable)'
+    };
   }
 
   /**
@@ -186,7 +336,7 @@ class AIService {
       let relevantKB = knowledgeBase;
       if (!relevantKB && organizationId) {
         relevantKB = await this.searchKnowledgeBase(organizationId, interaction.content, 5);
-        
+
         // Increment usage count for used KB entries (with error handling)
         for (const kb of relevantKB) {
           try {
@@ -253,13 +403,13 @@ Generate a response that addresses the customer's message appropriately.`;
       );
 
       const generatedResponse = response.data.message.content.trim();
-      
+
       // Calculate confidence based on KB matches
       let confidence = 0.7; // Default confidence
       if (relevantKB && relevantKB.length > 0) {
         confidence = Math.min(0.95, 0.7 + (relevantKB.length * 0.05));
       }
-      
+
       return {
         content: generatedResponse,
         confidence: confidence,
@@ -296,7 +446,7 @@ Generate a response that addresses the customer's message appropriately.`;
       let relevantKB = knowledgeBase;
       if (!relevantKB && organizationId) {
         relevantKB = await this.searchKnowledgeBase(organizationId, interaction.content, 5);
-        
+
         // Increment usage count for used KB entries (with error handling)
         for (const kb of relevantKB) {
           try {
@@ -359,13 +509,13 @@ Generate a response that addresses the customer's message appropriately.`;
       );
 
       const generatedResponse = response.data.choices[0].message.content.trim();
-      
+
       // Calculate confidence based on KB matches
       let confidence = 0.7; // Default confidence
       if (relevantKB && relevantKB.length > 0) {
         confidence = Math.min(0.95, 0.7 + (relevantKB.length * 0.05));
       }
-      
+
       return {
         content: generatedResponse,
         confidence: confidence,
@@ -378,7 +528,7 @@ Generate a response that addresses the customer's message appropriately.`;
       if (error.response) {
         const status = error.response.status;
         const errorData = error.response.data;
-        
+
         if (status === 401) {
           console.error('OpenAI API authentication failed. Please check your API key.');
           throw new Error('OpenAI API key is invalid or expired. Please contact your administrator.');
@@ -396,7 +546,7 @@ Generate a response that addresses the customer's message appropriately.`;
         console.error('No response from OpenAI API:', error.message);
         throw new Error('Unable to connect to AI service. Please check your internet connection and try again.');
       } else {
-      console.error('AI response generation error:', error.message);
+        console.error('AI response generation error:', error.message);
         throw error;
       }
     }
@@ -445,39 +595,39 @@ Generate a response that addresses the customer's message appropriately.`;
 
         const intent = response.data.message.content.toLowerCase().trim();
         const validIntents = ['inquiry', 'complaint', 'praise', 'feedback', 'support'];
-        
+
         return validIntents.includes(intent) ? intent : 'other';
       } else {
         // Use OpenAI for intent detection
-      const response = await axios.post(
+        const response = await axios.post(
           this.openaiApiUrl,
-        {
+          {
             model: this.openaiModel,
-          messages: [
-            {
-              role: 'system',
-              content: 'Classify the intent of this message. Respond with ONLY one word: "inquiry", "complaint", "praise", "feedback", "support", or "other".'
-            },
-            {
-              role: 'user',
-              content: `Classify: "${content}"`
-            }
-          ],
-          temperature: 0.3,
-          max_tokens: 10
-        },
-        {
-          headers: {
+            messages: [
+              {
+                role: 'system',
+                content: 'Classify the intent of this message. Respond with ONLY one word: "inquiry", "complaint", "praise", "feedback", "support", or "other".'
+              },
+              {
+                role: 'user',
+                content: `Classify: "${content}"`
+              }
+            ],
+            temperature: 0.3,
+            max_tokens: 10
+          },
+          {
+            headers: {
               'Authorization': `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
+              'Content-Type': 'application/json'
+            }
           }
-        }
-      );
+        );
 
-      const intent = response.data.choices[0].message.content.toLowerCase().trim();
-      const validIntents = ['inquiry', 'complaint', 'praise', 'feedback', 'support'];
-      
-      return validIntents.includes(intent) ? intent : 'other';
+        const intent = response.data.choices[0].message.content.toLowerCase().trim();
+        const validIntents = ['inquiry', 'complaint', 'praise', 'feedback', 'support'];
+
+        return validIntents.includes(intent) ? intent : 'other';
       }
     } catch (error) {
       console.error('Intent detection error:', error.message);
@@ -519,33 +669,33 @@ Generate a response that addresses the customer's message appropriately.`;
         return topicsStr.split(',').map(t => t.trim()).filter(t => t);
       } else {
         // Use OpenAI for topic extraction
-      const response = await axios.post(
+        const response = await axios.post(
           this.openaiApiUrl,
-        {
+          {
             model: this.openaiModel,
-          messages: [
-            {
-              role: 'system',
-              content: 'Extract 2-3 main topics or keywords from the text. Return them as a comma-separated list.'
-            },
-            {
-              role: 'user',
-              content: `Extract topics: "${content}"`
-            }
-          ],
-          temperature: 0.3,
-          max_tokens: 50
-        },
-        {
-          headers: {
+            messages: [
+              {
+                role: 'system',
+                content: 'Extract 2-3 main topics or keywords from the text. Return them as a comma-separated list.'
+              },
+              {
+                role: 'user',
+                content: `Extract topics: "${content}"`
+              }
+            ],
+            temperature: 0.3,
+            max_tokens: 50
+          },
+          {
+            headers: {
               'Authorization': `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
+              'Content-Type': 'application/json'
+            }
           }
-        }
-      );
+        );
 
-      const topicsStr = response.data.choices[0].message.content.trim();
-      return topicsStr.split(',').map(t => t.trim()).filter(t => t);
+        const topicsStr = response.data.choices[0].message.content.trim();
+        return topicsStr.split(',').map(t => t.trim()).filter(t => t);
       }
     } catch (error) {
       console.error('Topic extraction error:', error.message);
@@ -569,7 +719,7 @@ Generate a response that addresses the customer's message appropriately.`;
 
     // Respect organization settings
     const settings = organizationSettings.autoReplySettings || {};
-    
+
     if (!settings.enabled) {
       return false;
     }
@@ -581,8 +731,38 @@ Generate a response that addresses the customer's message appropriately.`;
       }
     }
 
-    // Don't auto-reply to negative sentiment (unless explicitly enabled)
-    if (interaction.sentiment === 'negative' && !settings.replyToNegative) {
+    // Sentiment filter: control which sentiments to auto-reply to
+    const sentimentFilter = settings.sentimentFilter || 'all';
+    const sentiment = interaction.sentiment;
+
+    if (sentimentFilter !== 'all') {
+      switch (sentimentFilter) {
+        case 'negative_only':
+          if (sentiment !== 'negative') {
+            return false;
+          }
+          break;
+        case 'positive_only':
+          if (sentiment !== 'positive') {
+            return false;
+          }
+          break;
+        case 'neutral_only':
+          if (sentiment !== 'neutral') {
+            return false;
+          }
+          break;
+        case 'positive_neutral':
+          if (sentiment === 'negative') {
+            return false;
+          }
+          break;
+      }
+    }
+
+    // Legacy: Don't auto-reply to negative sentiment (unless explicitly enabled)
+    // This is kept for backward compatibility but sentimentFilter takes precedence
+    if (sentimentFilter === 'all' && interaction.sentiment === 'negative' && !settings.replyToNegative) {
       return false;
     }
 
@@ -599,7 +779,7 @@ Generate a response that addresses the customer's message appropriately.`;
     // Check interaction type filters
     if (settings.enabledTypes && settings.enabledTypes.length > 0) {
       if (!settings.enabledTypes.includes(interaction.type)) {
-      return false;
+        return false;
       }
     }
 
@@ -621,7 +801,7 @@ Generate a response that addresses the customer's message appropriately.`;
 
       // Generate response
       const response = await this.generateResponse(interaction, organizationId);
-      
+
       if (!response) {
         return {
           eligible: false,

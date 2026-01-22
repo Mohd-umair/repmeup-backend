@@ -60,7 +60,8 @@ class FacebookService {
                 postMessage: post.message || '',
                 parentComment: comment.parent?.id || null,
                 hasAttachment: !!comment.attachment
-              }
+              },
+              sentiment: null // Will be set by AI processing
             };
 
             interactions.push(interaction);

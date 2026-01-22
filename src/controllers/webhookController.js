@@ -11,6 +11,8 @@ const { processWebhook } = require('../jobs/processWebhook');
  */
 exports.handleGoogleWebhook = async (req, res, next) => {
   try {
+    const { webhookQueue } = require('../config/queue');
+    
     // Google webhooks use Pub/Sub format
     const { message } = req.body;
 
@@ -25,6 +27,8 @@ exports.handleGoogleWebhook = async (req, res, next) => {
     const messageData = JSON.parse(Buffer.from(message.data, 'base64').toString());
     const { eventType, locationId, reviewId } = messageData;
 
+    console.log('Google webhook received:', { eventType, locationId, reviewId });
+
     // Find platform connection by location ID
     const connection = await PlatformConnection.findOne({
       platform: 'google',
@@ -37,30 +41,36 @@ exports.handleGoogleWebhook = async (req, res, next) => {
       return res.status(200).json({ success: true, message: 'No connection found' });
     }
 
-    // Process webhook event
+    // Acknowledge receipt immediately
+    res.sendStatus(200);
+
+    // Process webhook event asynchronously
     if (eventType === 'NEW_REVIEW' || eventType === 'UPDATE_REVIEW') {
       try {
         // Fetch the specific review
         await googleService.fetchReviews(connection, locationId);
         
-        // Queue for AI processing
-        await processWebhook({
+        // Queue webhook for processing (this will trigger auto-reply)
+        await webhookQueue.add({
           platform: 'google',
-          type: 'review',
-          platformId: reviewId,
-          organizationId: connection.organization
+          payload: { eventType, locationId, reviewId },
+          organizationId: connection.organization.toString()
+        }, {
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 2000
+          }
         });
+
+        console.log('Google webhook queued for processing');
       } catch (error) {
         console.error('Error processing Google webhook:', error);
       }
     }
-
-    // Always return 200 to acknowledge receipt
-    res.status(200).json({ success: true });
   } catch (error) {
-    console.error('Google webhook error:', error);
-    // Still return 200 to prevent retries
-    res.status(200).json({ success: false, error: error.message });
+    console.error('Google webhook handler error:', error);
+    // Don't send error response if we already sent 200
   }
 };
 
@@ -71,6 +81,8 @@ exports.handleGoogleWebhook = async (req, res, next) => {
  */
 exports.handleYouTubeWebhook = async (req, res, next) => {
   try {
+    const { webhookQueue } = require('../config/queue');
+    
     // YouTube webhooks use Pub/Sub format
     const { message } = req.body;
 
@@ -85,6 +97,8 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
     const messageData = JSON.parse(Buffer.from(message.data, 'base64').toString());
     const { videoId, commentId, eventType } = messageData;
 
+    console.log('YouTube webhook received:', { videoId, commentId, eventType });
+
     // Find platform connection by channel
     const connection = await PlatformConnection.findOne({
       platform: 'youtube',
@@ -96,30 +110,36 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
       return res.status(200).json({ success: true, message: 'No connection found' });
     }
 
-    // Process webhook event
+    // Acknowledge receipt immediately
+    res.sendStatus(200);
+
+    // Process webhook event asynchronously
     if (eventType === 'NEW_COMMENT' || eventType === 'UPDATE_COMMENT') {
       try {
-        // Fetch comments for the video
+        // Fetch comments for the video to ensure we have the latest data
         await youtubeService.fetchVideoComments(connection, videoId);
         
-        // Queue for AI processing
-        await processWebhook({
+        // Queue webhook for processing (this will trigger auto-reply)
+        await webhookQueue.add({
           platform: 'youtube',
-          type: 'comment',
-          platformId: commentId,
-          organizationId: connection.organization
+          payload: { videoId, commentId, eventType },
+          organizationId: connection.organization.toString()
+        }, {
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 2000
+          }
         });
+
+        console.log('YouTube webhook queued for processing');
       } catch (error) {
         console.error('Error processing YouTube webhook:', error);
       }
     }
-
-    // Always return 200 to acknowledge receipt
-    res.status(200).json({ success: true });
   } catch (error) {
-    console.error('YouTube webhook error:', error);
-    // Still return 200 to prevent retries
-    res.status(200).json({ success: false, error: error.message });
+    console.error('YouTube webhook handler error:', error);
+    // Don't send error response if we already sent 200
   }
 };
 

@@ -124,18 +124,28 @@ class AutoReplyScheduler {
     try {
       const organization = await Organization.findById(organizationId);
       
-      if (!organization || !organization.autoReplySettings.enabled) {
+      if (!organization) {
+        console.log(`⚠️  [Auto-Reply Queue] Organization ${organizationId} not found`);
+        return false;
+      }
+
+      if (!organization.autoReplySettings.enabled) {
+        console.log(`⚠️  [Auto-Reply Queue] Auto-reply disabled for org ${organizationId}`);
         return false;
       }
 
       const settings = organization.autoReplySettings;
       
+      console.log(`📊 [Auto-Reply Queue] Checking trigger mode: ${settings.triggerMode}, webhookImmediate: ${settings.webhookImmediate}`);
+      
       // Check if webhook mode or hybrid mode is enabled
       if (settings.triggerMode !== 'webhook' && settings.triggerMode !== 'hybrid') {
+        console.log(`⚠️  [Auto-Reply Queue] Trigger mode is "${settings.triggerMode}" - webhook auto-reply not enabled`);
         return false;
       }
 
       if (!settings.webhookImmediate) {
+        console.log(`⚠️  [Auto-Reply Queue] webhookImmediate is false - webhook auto-reply disabled`);
         return false;
       }
 
@@ -161,11 +171,11 @@ class AutoReplyScheduler {
         }
       );
 
-      console.log(`Queued webhook auto-reply for interaction ${interactionId} with ${delay}min delay`);
+      console.log(`✅ [Auto-Reply Queue] Queued webhook auto-reply for interaction ${interactionId} with ${delay}min delay`);
       return true;
 
     } catch (error) {
-      console.error('Error queueing immediate auto-reply:', error);
+      console.error('❌ [Auto-Reply Queue] Error:', error);
       return false;
     }
   }

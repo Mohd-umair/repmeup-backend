@@ -54,6 +54,7 @@ app.use('/api/platforms', require('./routes/platforms'));
 app.use('/api/webhooks', require('./routes/webhooks'));
 app.use('/api/organizations', require('./routes/organizations'));
 app.use('/api/users', require('./routes/users'));
+app.use('/api/diagnostics', require('./routes/diagnostics'));
 // app.use('/api/labels', require('./routes/labels'));
 // app.use('/api/templates', require('./routes/templates'));
 // app.use('/api/analytics', require('./routes/analytics'));

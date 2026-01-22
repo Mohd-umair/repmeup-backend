@@ -241,16 +241,9 @@ class GoogleService {
             }
           };
 
-          // Determine sentiment based on rating
-          if (review.starRating) {
-            if (review.starRating >= 4) {
-              interaction.sentiment = 'positive';
-            } else if (review.starRating <= 2) {
-              interaction.sentiment = 'negative';
-            } else {
-              interaction.sentiment = 'neutral';
-            }
-          }
+          // Sentiment will be analyzed by AI processing job
+          // Star rating is stored in metadata for reference
+          interaction.sentiment = null;
 
           interactions.push(interaction);
         } catch (error) {
