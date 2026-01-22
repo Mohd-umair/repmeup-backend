@@ -564,6 +564,89 @@ Generate a response that addresses the customer's message appropriately.`;
   }
 
   /**
+   * Generate text from a prompt (generic method for any text generation task)
+   * Used for summarization, extraction, etc.
+   * @param {string} systemPrompt - System instructions
+   * @param {string} userPrompt - User input/prompt
+   * @param {Object} options - Generation options
+   * @returns {Promise<string>} Generated text
+   */
+  async generateText(systemPrompt, userPrompt, options = {}) {
+    const {
+      temperature = 0.7,
+      maxTokens = 1000,
+      model = null
+    } = options;
+
+    try {
+      console.log(`🤖 [AI] Generating text using provider: ${this.provider}`);
+      console.log(`📝 [AI] System prompt length: ${systemPrompt.length} chars`);
+      console.log(`📝 [AI] User prompt length: ${userPrompt.length} chars`);
+      
+      if (this.provider === 'ollama') {
+        console.log(`🦙 [AI] Using Ollama model: ${model || this.ollamaModel}`);
+        const response = await axios.post(
+          `${this.ollamaUrl}/api/chat`,
+          {
+            model: model || this.ollamaModel,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt }
+            ],
+            stream: false,
+            options: {
+              temperature: temperature,
+              num_predict: maxTokens
+            }
+          },
+          { timeout: 60000 }
+        );
+
+        const generatedText = response.data.message.content.trim();
+        console.log(`✅ [AI] Ollama response received: ${generatedText.length} characters`);
+        return generatedText;
+      } else {
+        // OpenAI
+        if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+          throw new Error('OpenAI API key is not configured');
+        }
+
+        console.log(`🔵 [AI] Using OpenAI model: ${model || this.openaiModel}`);
+        const response = await axios.post(
+          this.openaiApiUrl,
+          {
+            model: model || this.openaiModel,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt }
+            ],
+            temperature: temperature,
+            max_tokens: maxTokens || 4000 // Increased default for longer summaries
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${this.openaiApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 60000
+          }
+        );
+
+        const generatedText = response.data.choices[0].message.content.trim();
+        console.log(`✅ [AI] OpenAI response received: ${generatedText.length} characters`);
+        return generatedText;
+      }
+    } catch (error) {
+      console.error(`❌ [AI] Text generation error: ${error.message}`);
+      if (error.response) {
+        console.error(`❌ [AI] API response status: ${error.response.status}`);
+        console.error(`❌ [AI] API response data:`, error.response.data);
+      }
+      throw new Error(`Failed to generate text: ${error.message}`);
+    }
+  }
+
+  /**
    * Detect intent/category of interaction
    */
   async detectIntent(content) {

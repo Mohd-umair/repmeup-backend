@@ -51,11 +51,28 @@ class MetaAuthService {
    * Generate Facebook OAuth URL
    */
   getFacebookAuthURL(userId, organizationId) {
+    // Check for app ID - try multiple environment variable names
+    const appId = process.env.META_APP_ID || 
+                  process.env.FACEBOOK_APP_ID ||
+                  process.env.INSTAGRAM_APP_ID;
+    
+    if (!appId) {
+      throw new Error('Meta App ID not configured. Please set META_APP_ID, FACEBOOK_APP_ID, or INSTAGRAM_APP_ID in your environment variables.');
+    }
+
     const state = this.generateState(userId, organizationId, 'facebook');
     
+    const redirectUri = process.env.META_CALLBACK_URL || 
+                       process.env.FACEBOOK_CALLBACK_URL ||
+                       `${process.env.FRONTEND_URL}/api/auth/facebook/callback`;
+    
+    if (!redirectUri) {
+      throw new Error('Meta callback URL not configured. Please set META_CALLBACK_URL in your environment variables.');
+    }
+    
     const params = new URLSearchParams({
-      client_id: process.env.META_APP_ID,
-      redirect_uri: process.env.META_CALLBACK_URL,
+      client_id: appId,
+      redirect_uri: redirectUri,
       state: state,
       scope: [
         'pages_show_list',
@@ -74,11 +91,28 @@ class MetaAuthService {
    * Generate Instagram OAuth URL
    */
   getInstagramAuthURL(userId, organizationId) {
+    // Check for app ID - try multiple environment variable names
+    const appId = process.env.META_APP_ID || 
+                  process.env.INSTAGRAM_APP_ID || 
+                  process.env.FACEBOOK_APP_ID;
+    
+    if (!appId) {
+      throw new Error('Meta App ID not configured. Please set META_APP_ID, INSTAGRAM_APP_ID, or FACEBOOK_APP_ID in your environment variables.');
+    }
+
     const state = this.generateState(userId, organizationId, 'instagram');
     
+    const redirectUri = process.env.INSTAGRAM_CALLBACK_URL || 
+                       process.env.META_CALLBACK_URL ||
+                       `${process.env.FRONTEND_URL}/api/auth/instagram/callback`;
+    
+    if (!redirectUri) {
+      throw new Error('Instagram callback URL not configured. Please set INSTAGRAM_CALLBACK_URL or META_CALLBACK_URL in your environment variables.');
+    }
+    
     const params = new URLSearchParams({
-      client_id: process.env.META_APP_ID,
-      redirect_uri: process.env.INSTAGRAM_CALLBACK_URL || process.env.META_CALLBACK_URL,
+      client_id: appId,
+      redirect_uri: redirectUri,
       state: state,
       scope: [
         'instagram_basic',
@@ -90,6 +124,7 @@ class MetaAuthService {
       response_type: 'code'
     });
 
+    console.log(`🔗 [Instagram] Generating OAuth URL with App ID: ${appId.substring(0, 10)}...`);
     return `${this.facebookAuthURL}?${params.toString()}`;
   }
 
@@ -98,10 +133,21 @@ class MetaAuthService {
    */
   async exchangeCodeForToken(code, redirectUri) {
     try {
+      const appId = process.env.META_APP_ID || 
+                    process.env.INSTAGRAM_APP_ID || 
+                    process.env.FACEBOOK_APP_ID;
+      const appSecret = process.env.META_APP_SECRET || 
+                       process.env.INSTAGRAM_APP_SECRET || 
+                       process.env.FACEBOOK_APP_SECRET;
+      
+      if (!appId || !appSecret) {
+        throw new Error('Meta App ID or Secret not configured. Please check your environment variables.');
+      }
+
       const response = await axios.get(this.tokenURL, {
         params: {
-          client_id: process.env.META_APP_ID,
-          client_secret: process.env.META_APP_SECRET,
+          client_id: appId,
+          client_secret: appSecret,
           redirect_uri: redirectUri,
           code: code
         }
@@ -119,11 +165,22 @@ class MetaAuthService {
    */
   async getLongLivedToken(shortLivedToken) {
     try {
+      const appId = process.env.META_APP_ID || 
+                    process.env.INSTAGRAM_APP_ID || 
+                    process.env.FACEBOOK_APP_ID;
+      const appSecret = process.env.META_APP_SECRET || 
+                       process.env.INSTAGRAM_APP_SECRET || 
+                       process.env.FACEBOOK_APP_SECRET;
+      
+      if (!appId || !appSecret) {
+        throw new Error('Meta App ID or Secret not configured. Please check your environment variables.');
+      }
+
       const response = await axios.get(this.tokenURL, {
         params: {
           grant_type: 'fb_exchange_token',
-          client_id: process.env.META_APP_ID,
-          client_secret: process.env.META_APP_SECRET,
+          client_id: appId,
+          client_secret: appSecret,
           fb_exchange_token: shortLivedToken
         }
       });
@@ -181,10 +238,21 @@ class MetaAuthService {
    */
   async verifyAccessToken(accessToken) {
     try {
+      const appId = process.env.META_APP_ID || 
+                    process.env.INSTAGRAM_APP_ID || 
+                    process.env.FACEBOOK_APP_ID;
+      const appSecret = process.env.META_APP_SECRET || 
+                       process.env.INSTAGRAM_APP_SECRET || 
+                       process.env.FACEBOOK_APP_SECRET;
+      
+      if (!appId || !appSecret) {
+        throw new Error('Meta App ID or Secret not configured. Please check your environment variables.');
+      }
+
       const response = await axios.get(`${this.graphURL}/debug_token`, {
         params: {
           input_token: accessToken,
-          access_token: `${process.env.META_APP_ID}|${process.env.META_APP_SECRET}`
+          access_token: `${appId}|${appSecret}`
         }
       });
 
@@ -273,6 +341,13 @@ class MetaAuthService {
         existingConnection.status = 'connected';
         existingConnection.isActive = true;
         existingConnection.lastSyncAt = new Date();
+        // Ensure platformData is set
+        if (!existingConnection.platformData) {
+          existingConnection.platformData = {};
+        }
+        existingConnection.platformData.businessAccountId = instagramAccount.id;
+        existingConnection.platformData.pageId = pageData.id;
+        existingConnection.platformData.pageName = pageData.name;
         await existingConnection.save();
         return existingConnection;
       }
@@ -293,6 +368,11 @@ class MetaAuthService {
         scopes: ['instagram_basic', 'instagram_manage_comments', 'pages_show_list'],
         status: 'connected',
         isActive: true,
+        platformData: {
+          businessAccountId: instagramAccount.id, // Store for API calls
+          pageId: pageData.id, // Facebook Page ID
+          pageName: pageData.name
+        },
         metadata: {
           facebookPageId: pageData.id,
           facebookPageName: pageData.name,
