@@ -1,6 +1,7 @@
 const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const youtubeService = require('../integrations/google/youtubeService');
+const instagramService = require('../integrations/meta/instagramService');
 const crypto = require('crypto');
 
 /**
@@ -363,6 +364,27 @@ exports.syncPlatform = async (req, res, next) => {
           }
         });
       }
+    } else if (connection.platform === 'instagram') {
+      // Check sync settings
+      const syncComments = connection.settings?.syncComments !== false; // Default true
+      const syncDMs = connection.settings?.syncDMs !== false; // Default true
+
+      if (syncComments && syncDMs) {
+        // Fetch both comments and DMs
+        result = await instagramService.fetchAllInteractions(connection);
+      } else if (syncComments) {
+        // Only fetch comments
+        result = await instagramService.fetchComments(connection);
+      } else if (syncDMs) {
+        // Only fetch DMs
+        result = await instagramService.fetchMessages(connection);
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'Both comments and DMs sync are disabled for this connection'
+        });
+      }
+      console.log('📸 [Sync] Instagram sync result:', result);
     } else {
       return res.status(400).json({
         success: false,
