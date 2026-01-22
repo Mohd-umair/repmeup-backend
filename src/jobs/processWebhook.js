@@ -40,6 +40,11 @@ module.exports = async function processWebhook(job) {
     }
 
     if (interaction) {
+      console.log(`\n✅ [Webhook] Interaction created: ${interaction._id}`);
+      console.log(`   Platform: ${interaction.platform}`);
+      console.log(`   Type: ${interaction.type}`);
+      console.log(`   Content: "${interaction.content?.substring(0, 100)}..."`);
+      
       // Trigger AI processing
       await aiQueue.add({
         interactionId: interaction._id
@@ -48,14 +53,22 @@ module.exports = async function processWebhook(job) {
         backoff: 2000
       });
 
-      console.log(`Interaction created and queued for AI processing: ${interaction._id}`);
+      console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
 
       // Queue auto-reply if webhook mode is enabled
       const autoReplyScheduler = require('../services/autoReplyScheduler');
-      await autoReplyScheduler.queueImmediateAutoReply(
+      const queued = await autoReplyScheduler.queueImmediateAutoReply(
         interaction._id,
         organizationId
       );
+
+      if (queued) {
+        console.log(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
+      } else {
+        console.log(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
+      }
+    } else {
+      console.log(`⚠️  [Webhook] No interaction created from ${platform} webhook`);
     }
 
     return {

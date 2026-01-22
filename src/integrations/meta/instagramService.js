@@ -60,7 +60,8 @@ class InstagramService {
                 postUrl: media.permalink
               },
               platformCreatedAt: new Date(comment.timestamp),
-              status: 'unread'
+              status: 'unread',
+              sentiment: null // Will be set by AI processing
             };
 
             interactions.push(interaction);

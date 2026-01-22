@@ -137,19 +137,8 @@ class YouTubeService {
             continue;
           }
 
-          // Determine sentiment (basic - can be enhanced with AI)
-          let sentiment = 'neutral';
-          const text = topLevelComment.textDisplay.toLowerCase();
-          const positiveWords = ['great', 'awesome', 'love', 'amazing', 'excellent', 'good', 'nice', 'perfect'];
-          const negativeWords = ['bad', 'terrible', 'hate', 'awful', 'worst', 'disappointed', 'poor'];
-
-          if (positiveWords.some(word => text.includes(word))) {
-            sentiment = 'positive';
-          } else if (negativeWords.some(word => text.includes(word))) {
-            sentiment = 'negative';
-          }
-
           // Create interaction from comment
+          // Note: Sentiment will be analyzed by AI processing job
           const interaction = {
             organization: platformConnection.organization,
             platformConnection: platformConnection._id,
@@ -179,7 +168,7 @@ class YouTubeService {
             // Status
             status: 'unread',
             isRead: false,
-            sentiment: sentiment,
+            sentiment: null, // Will be set by AI processing
             
             // Platform timestamps
             platformCreatedAt: new Date(topLevelComment.publishedAt),
@@ -197,8 +186,44 @@ class YouTubeService {
           interactions.push(interaction);
 
           // Process replies if any
-          if (thread.replies && thread.replies.comments) {
-            for (const reply of thread.replies.comments) {
+          // Note: thread.replies.comments only contains first 5 replies
+          // If totalReplyCount > 5, we need to fetch all replies separately
+          const totalReplyCount = thread.snippet.totalReplyCount || 0;
+          
+          if (totalReplyCount > 0) {
+            let allReplies = [];
+            
+            // If replies are included in the thread response, use them
+            if (thread.replies && thread.replies.comments) {
+              allReplies = thread.replies.comments;
+            }
+            
+            // If there are more replies than what's included, fetch them all
+            if (totalReplyCount > allReplies.length) {
+              try {
+                const repliesResponse = await axios.get(`${this.apiUrl}/comments`, {
+                  params: {
+                    part: 'snippet',
+                    parentId: commentId, // Fetch all replies to this comment
+                    maxResults: 100, // Fetch up to 100 replies
+                    textFormat: 'plainText'
+                  },
+                  headers: {
+                    Authorization: `Bearer ${accessToken}`
+                  }
+                });
+                
+                if (repliesResponse.data.items) {
+                  allReplies = repliesResponse.data.items;
+                }
+              } catch (error) {
+                console.error(`Error fetching all replies for comment ${commentId}:`, error.message);
+                // Fall back to the replies we already have
+              }
+            }
+            
+            // Process all replies
+            for (const reply of allReplies) {
               try {
                 const replySnippet = reply.snippet;
 
@@ -240,7 +265,7 @@ class YouTubeService {
                   // Status
                   status: 'unread',
                   isRead: false,
-                  sentiment: 'neutral',
+                  sentiment: null, // Will be set by AI processing
                   
                   // Platform timestamps
                   platformCreatedAt: new Date(replySnippet.publishedAt),

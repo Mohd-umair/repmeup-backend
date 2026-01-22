@@ -342,21 +342,17 @@ exports.syncPlatform = async (req, res, next) => {
       });
     }
 
-    // Ensure token is valid
+    const organizationId = req.user.organization._id.toString();
+    let result = { count: 0, interactions: [] };
+
+    // Ensure token is valid and fetch data
     if (connection.platform === 'youtube') {
       await youtubeService.ensureValidToken(connection);
-      const result = await youtubeService.fetchAllChannelComments(connection);
-      
-      res.status(200).json({
-        success: true,
-        message: 'Sync completed',
-        data: {
-          interactionsAdded: result.count
-        }
-      });
+      result = await youtubeService.fetchAllChannelComments(connection);
+      console.log('🔍 [Sync] YouTube sync result:', result);
     } else if (connection.platform === 'google') {
       await googleService.ensureValidToken(connection);
-      const result = await googleService.fetchAllReviews(connection);
+      result = await googleService.fetchAllReviews(connection);
       
       if (!result.success && result.error) {
         return res.status(400).json({
@@ -367,20 +363,77 @@ exports.syncPlatform = async (req, res, next) => {
           }
         });
       }
-      
-      res.status(200).json({
-        success: true,
-        message: result.count > 0 ? `Sync completed. Found ${result.count} new reviews.` : 'Sync completed. No new reviews found.',
-        data: {
-          interactionsAdded: result.count
-        }
-      });
     } else {
       return res.status(400).json({
         success: false,
         error: 'Platform sync not implemented'
       });
     }
+
+    // Queue auto-reply ONLY for newly synced interactions (not all)
+    let autoReplyQueued = 0;
+    
+    if (result.count > 0 && result.interactions && result.interactions.length > 0) {
+      const autoReplyScheduler = require('../services/autoReplyScheduler');
+      const { aiQueue } = require('../config/queue');
+      const Interaction = require('../models/Interaction');
+      
+      // Get platform IDs from NEWLY synced interactions only
+      const platformIds = result.interactions.map(i => i.platformId);
+      
+      // Find the newly synced interactions that are unread and have no replies
+      const newInteractions = await Interaction.find({
+        platformId: { $in: platformIds },
+        organization: organizationId,
+        status: 'unread',
+        $or: [
+          { replies: { $size: 0 } },
+          { replies: { $exists: false } }
+        ]
+      });
+
+      console.log(`📊 [Sync] Found ${newInteractions.length} NEW interactions eligible for auto-reply`);
+      
+      for (const interaction of newInteractions) {
+        try {
+          // Queue AI processing for new interactions only
+          await aiQueue.add({
+            interactionId: interaction._id
+          }, {
+            attempts: 3,
+            backoff: 2000
+          });
+
+          // Queue auto-reply
+          const queued = await autoReplyScheduler.queueImmediateAutoReply(
+            interaction._id.toString(),
+            organizationId
+          );
+          
+          if (queued) {
+            autoReplyQueued++;
+            console.log(`🤖 [Sync] Auto-reply queued for: ${interaction._id} (${interaction.content?.substring(0, 50)}...)`);
+          } else {
+            console.log(`⚠️  [Sync] Auto-reply NOT queued for: ${interaction._id} - check settings`);
+          }
+        } catch (queueError) {
+          console.error(`Error queueing interaction ${interaction._id}:`, queueError);
+        }
+      }
+    }
+    
+    console.log(`📊 [Sync] Total: ${result.count} new interactions, ${autoReplyQueued} auto-replies queued`)
+      
+    res.status(200).json({
+      success: true,
+      message: result.count > 0 
+        ? `Sync completed. Found ${result.count} new interactions. ${autoReplyQueued} auto-replies queued.` 
+        : 'Sync completed. No new interactions found.',
+      data: {
+        interactionsAdded: result.count,
+        autoRepliesQueued: autoReplyQueued
+      }
+    });
   } catch (error) {
     next(error);
   }
