@@ -800,6 +800,17 @@ Generate a response that addresses the customer's message appropriately.`;
       return false;
     }
 
+    // IMPORTANT: Don't reply to replies that are replies to our own replies
+    // If this interaction has a parentId, check if the parent has a system reply
+    if (interaction.parentId) {
+      // This is a reply to another comment
+      // We should check if the parent comment already has a system reply
+      // If so, skip auto-replying to this reply
+      // Note: We'll handle this check in the auto-reply processor where we have access to the Interaction model
+      // For now, we'll add a flag to indicate this needs parent checking
+      interaction._needsParentCheck = true;
+    }
+
     // Respect organization settings
     const settings = organizationSettings.autoReplySettings || {};
 
