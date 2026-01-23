@@ -148,19 +148,39 @@ router.get('/instagram/callback', async (req, res) => {
     // Get user pages (Instagram accounts are linked to pages)
     const pages = await metaAuth.getUserPages(tokenData.accessToken);
     
+    console.log(`📊 [Instagram] Found ${pages.length} Facebook pages`);
+    if (pages.length > 0) {
+      pages.forEach((page, index) => {
+        console.log(`   Page ${index + 1}: ${page.name} (ID: ${page.id}) - Instagram: ${page.instagram_business_account ? '✅ Connected' : '❌ Not connected'}`);
+      });
+    }
+    
     // Filter pages that have Instagram accounts
     const pagesWithInstagram = pages.filter(page => page.instagram_business_account);
     
     if (pagesWithInstagram.length === 0) {
+      const pageNames = pages.length > 0 
+        ? pages.map(p => p.name).join(', ')
+        : 'No pages found';
+      
+      const errorMessage = pages.length === 0
+        ? 'No Facebook pages found. Please create a Facebook Page first, then connect it to your Instagram Business account.'
+        : `No Instagram Business accounts found. Your Facebook pages (${pageNames}) are not connected to Instagram Business accounts. Please link your Instagram Business account to a Facebook Page.`;
+      
+      console.error(`❌ [Instagram] ${errorMessage}`);
+      
       return res.redirect(
-        `${process.env.FRONTEND_URL}/app/settings?connection=instagram&status=error&message=No Instagram Business accounts found`
+        `${process.env.FRONTEND_URL}/app/settings?connection=instagram&status=error&message=${encodeURIComponent(errorMessage)}&pages=${pages.length}`
       );
     }
 
     // Save Instagram connections
     let savedCount = 0;
+    let saveErrors = [];
+    
     for (const page of pagesWithInstagram) {
       try {
+        console.log(`💾 [Instagram] Attempting to save Instagram account: ${page.instagram_business_account.username} (ID: ${page.instagram_business_account.id})`);
         await metaAuth.saveInstagramConnection(
           userId,
           organizationId,
@@ -168,9 +188,24 @@ router.get('/instagram/callback', async (req, res) => {
           page.access_token
         );
         savedCount++;
+        console.log(`✅ [Instagram] Saved connection for: ${page.instagram_business_account.username}`);
       } catch (error) {
-        console.error(`Failed to save Instagram account:`, error.message);
+        console.error(`❌ [Instagram] Failed to save Instagram account:`, error.message);
+        console.error(`❌ [Instagram] Full error:`, error);
+        console.error(`❌ [Instagram] Error stack:`, error.stack);
+        saveErrors.push(error.message || error.toString());
       }
+    }
+
+    // If no accounts were saved, treat as error with helpful message
+    if (savedCount === 0) {
+      const errorMessage = pagesWithInstagram.length > 0
+        ? `Failed to save Instagram accounts. ${saveErrors.length > 0 ? saveErrors.join('; ') : 'Please try again.'}`
+        : `No Instagram Business accounts found. Your Facebook pages are not connected to Instagram Business accounts. Please link your Instagram Business account to a Facebook Page.`;
+      
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/app/settings?connection=instagram&status=error&message=${encodeURIComponent(errorMessage)}&pages=${pages.length}&instagramPages=${pagesWithInstagram.length}`
+      );
     }
 
     res.redirect(

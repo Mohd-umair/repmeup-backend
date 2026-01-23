@@ -336,6 +336,7 @@ class MetaAuthService {
 
       if (existingConnection) {
         // Update existing connection
+        console.log(`🔄 [MetaAuth] Updating existing Instagram connection for: ${instagramAccount.username}`);
         existingConnection.accessToken = pageAccessToken;
         existingConnection.tokenExpiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
         existingConnection.status = 'connected';
@@ -349,10 +350,16 @@ class MetaAuthService {
         existingConnection.platformData.pageId = pageData.id;
         existingConnection.platformData.pageName = pageData.name;
         await existingConnection.save();
+        console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
         return existingConnection;
       }
 
       // Create new connection
+      console.log(`💾 [MetaAuth] Creating new Instagram connection for: ${instagramAccount.username}`);
+      console.log(`💾 [MetaAuth] User ID: ${userId}, Organization ID: ${organizationId}`);
+      console.log(`💾 [MetaAuth] Instagram Account ID: ${instagramAccount.id}`);
+      console.log(`💾 [MetaAuth] Facebook Page ID: ${pageData.id}`);
+      
       const connection = await PlatformConnection.create({
         user: userId,
         organization: organizationId,
@@ -380,10 +387,17 @@ class MetaAuthService {
         }
       });
 
-      console.log(`Instagram connection saved for account: ${instagramAccount.username}`);
+      console.log(`✅ [MetaAuth] Instagram connection saved for account: ${instagramAccount.username}`);
       return connection;
     } catch (error) {
-      console.error('Save Instagram connection error:', error);
+      console.error('❌ [MetaAuth] Save Instagram connection error:', error.message);
+      console.error('❌ [MetaAuth] Full error:', error);
+      if (error.name === 'ValidationError') {
+        console.error('❌ [MetaAuth] Validation errors:', error.errors);
+      }
+      if (error.code === 11000) {
+        console.error('❌ [MetaAuth] Duplicate key error - connection may already exist');
+      }
       throw error;
     }
   }
