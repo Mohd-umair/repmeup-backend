@@ -290,6 +290,7 @@ class MetaAuthService {
       const connection = await PlatformConnection.create({
         user: userId,
         organization: organizationId,
+        createdBy: userId, // Required field - set to the user creating the connection
         platform: 'facebook',
         platformUserId: pageData.id,
         platformUsername: pageData.name,
@@ -363,6 +364,7 @@ class MetaAuthService {
       const connection = await PlatformConnection.create({
         user: userId,
         organization: organizationId,
+        createdBy: userId, // Required field - set to the user creating the connection
         platform: 'instagram',
         platformUserId: instagramAccount.id,
         platformUsername: instagramAccount.username,
