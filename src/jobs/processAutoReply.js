@@ -112,11 +112,10 @@ async function processSingleInteraction(interactionId, organization) {
     // Check 1: If this interaction has a parentId, check if the parent has a system reply
     if (interaction.parentId) {
       // Find the parent interaction
+      // Note: parentId is a platform ID (e.g., YouTube comment ID), not a MongoDB ObjectId
+      // So we only search by platformId, not _id
       const parentInteraction = await Interaction.findOne({
-        $or: [
-          { _id: interaction.parentId },
-          { platformId: interaction.parentId }
-        ],
+        platformId: interaction.parentId,
         organization: organization._id
       });
 
@@ -242,11 +241,10 @@ async function processBatchInteractions(organizationId, organization) {
       // Check 1: If this interaction has a parentId, check if the parent has a system reply
       if (interaction.parentId) {
         // Find the parent interaction
+        // Note: parentId is a platform ID (e.g., YouTube comment ID), not a MongoDB ObjectId
+        // So we only search by platformId, not _id
         const parentInteraction = await Interaction.findOne({
-          $or: [
-            { _id: interaction.parentId },
-            { platformId: interaction.parentId }
-          ],
+          platformId: interaction.parentId,
           organization: organizationId
         });
 
