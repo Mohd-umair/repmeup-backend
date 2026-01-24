@@ -103,9 +103,16 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: 'Interaction not found' };
     }
 
-    // Check if already replied
+    // Check if already replied (IMPORTANT: This prevents duplicate auto-replies)
     if (interaction.replies && interaction.replies.length > 0) {
+      console.log(`⏭️  [Auto-Reply] Skipping interaction ${interaction._id} - already has ${interaction.replies.length} reply(ies)`);
       return { skipped: true, reason: 'Already has replies' };
+    }
+
+    // Check if status is already replied/resolved
+    if (interaction.status === 'replied' || interaction.status === 'resolved') {
+      console.log(`⏭️  [Auto-Reply] Skipping interaction ${interaction._id} - status is ${interaction.status}`);
+      return { skipped: true, reason: `Status is ${interaction.status}` };
     }
 
     // IMPORTANT: Don't reply to replies that are replies to our own replies
@@ -228,6 +235,22 @@ async function processBatchInteractions(organizationId, organization) {
 
     for (const interaction of interactions) {
       console.log(`\n📝 [Auto-Reply] Processing interaction ${interaction._id} (${interaction.platform}/${interaction.type})`);
+      
+      // IMPORTANT: Double-check if already replied (in case it was replied to between query and processing)
+      if (interaction.replies && interaction.replies.length > 0) {
+        console.log(`⏭️  [Auto-Reply] Skipping interaction ${interaction._id} - already has ${interaction.replies.length} reply(ies)`);
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: 'Already has replies' });
+        continue;
+      }
+
+      // Check if status is already replied/resolved
+      if (interaction.status === 'replied' || interaction.status === 'resolved') {
+        console.log(`⏭️  [Auto-Reply] Skipping interaction ${interaction._id} - status is ${interaction.status}`);
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: `Status is ${interaction.status}` });
+        continue;
+      }
       
       // Check daily limit
       if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
