@@ -423,12 +423,19 @@ exports.syncPlatform = async (req, res, next) => {
       
       for (const interaction of newInteractions) {
         try {
+          // Double-check: Skip if already has replies (safety check)
+          if (interaction.replies && interaction.replies.length > 0) {
+            console.log(`⏭️  [Sync] Skipping AI queue for ${interaction._id} - already has replies`);
+            continue;
+          }
+
           // Queue AI processing for new interactions only
           await aiQueue.add({
             interactionId: interaction._id
           }, {
             attempts: 3,
-            backoff: 2000
+            backoff: 2000,
+            jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
           });
 
           // Queue auto-reply

@@ -51,14 +51,15 @@ module.exports = async function processWebhook(job) {
       const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
       
       if (hasReplies || isAlreadyReplied) {
-        console.log(`⏭️  [Webhook] Skipping auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+        console.log(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
       } else {
-        // Trigger AI processing
+        // Trigger AI processing (only for new, unreplied interactions)
         await aiQueue.add({
           interactionId: interaction._id
         }, {
           attempts: 3,
-          backoff: 2000
+          backoff: 2000,
+          jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
         });
 
         console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
