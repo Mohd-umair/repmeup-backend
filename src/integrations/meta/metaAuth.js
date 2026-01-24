@@ -81,6 +81,21 @@ class MetaAuthService {
   }
 
   /**
+   * Get Facebook redirect URI (helper method to ensure consistency)
+   */
+  getFacebookRedirectURI() {
+    const redirectUri = process.env.META_CALLBACK_URL || 
+                       process.env.FACEBOOK_CALLBACK_URL ||
+                       `${process.env.FRONTEND_URL}/api/auth/facebook/callback`;
+    
+    if (!redirectUri) {
+      throw new Error('Meta callback URL not configured. Please set META_CALLBACK_URL, FACEBOOK_CALLBACK_URL, or FRONTEND_URL in your environment variables.');
+    }
+
+    return redirectUri;
+  }
+
+  /**
    * Generate Facebook OAuth URL
    */
   getFacebookAuthURL(userId, organizationId) {
@@ -101,14 +116,7 @@ class MetaAuthService {
       statePreview: state.substring(0, 20) + '...'
     });
     
-    const redirectUri = process.env.META_CALLBACK_URL || 
-                       process.env.FACEBOOK_CALLBACK_URL ||
-                       `${process.env.FRONTEND_URL}/api/auth/facebook/callback`;
-    
-    if (!redirectUri) {
-      throw new Error('Meta callback URL not configured. Please set META_CALLBACK_URL in your environment variables.');
-    }
-
+    const redirectUri = this.getFacebookRedirectURI();
     console.log('🔗 [Facebook] OAuth redirect URI:', redirectUri);
     
     const params = new URLSearchParams({
@@ -187,6 +195,12 @@ class MetaAuthService {
         throw new Error('Meta App ID or Secret not configured. Please check your environment variables.');
       }
 
+      console.log('🔄 [Token Exchange] Exchanging code for token:', {
+        redirectUri: redirectUri,
+        codeLength: code?.length || 0,
+        appIdPreview: appId?.substring(0, 10) + '...'
+      });
+
       const response = await axios.get(this.tokenURL, {
         params: {
           client_id: appId,
@@ -196,9 +210,18 @@ class MetaAuthService {
         }
       });
 
+      console.log('✅ [Token Exchange] Successfully exchanged code for token');
       return response.data.access_token;
     } catch (error) {
-      console.error('Token exchange error:', error.response?.data || error.message);
+      console.error('❌ [Token Exchange] Error:', error.response?.data || error.message);
+      if (error.response?.data?.error) {
+        console.error('❌ [Token Exchange] Error details:', {
+          message: error.response.data.error.message,
+          type: error.response.data.error.type,
+          code: error.response.data.error.code,
+          redirectUri: redirectUri
+        });
+      }
       throw new Error('Failed to exchange code for token');
     }
   }
