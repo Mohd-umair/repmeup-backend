@@ -117,9 +117,9 @@ class MetaAuthService {
       state: state,
       scope: [
         'pages_show_list',           // List user's pages
-        'pages_read_engagement',     // Read page comments and engagement
-        'pages_manage_engagement',   // Reply to comments and manage engagement
-        'pages_manage_metadata'      // Manage page metadata
+        'pages_read_engagement'      // Read page comments and engagement
+        // Note: Page access tokens (obtained when fetching pages) have permissions to reply to comments
+        // No additional user permissions needed for replying
       ].join(','),
       response_type: 'code'
     });
@@ -343,7 +343,7 @@ class MetaAuthService {
         accessToken: pageAccessToken,
         refreshToken: null,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000), // 60 days
-        scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_engagement', 'pages_manage_metadata'],
+        scopes: ['pages_show_list', 'pages_read_engagement'],
         status: 'connected',
         isActive: true,
         metadata: {
