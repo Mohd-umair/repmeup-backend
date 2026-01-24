@@ -415,6 +415,23 @@ exports.replyToInteraction = async (req, res, next) => {
       // Update respondedAt timestamp if successful
       interaction.respondedAt = new Date();
       await interaction.save();
+
+      // IMPORTANT: Remove any pending AI processing jobs for this interaction
+      // since it's already been replied to
+      try {
+        const { aiQueue } = require('../config/queue');
+        const jobs = await aiQueue.getJobs(['waiting', 'active', 'delayed']);
+        
+        for (const job of jobs) {
+          if (job.data.interactionId && job.data.interactionId.toString() === interaction._id.toString()) {
+            await job.remove();
+            console.log(`🗑️  [Reply] Removed pending AI job ${job.id} for interaction ${interaction._id} (already replied)`);
+          }
+        }
+      } catch (queueError) {
+        console.warn('Could not remove pending AI jobs:', queueError.message);
+        // Don't fail the reply if queue cleanup fails
+      }
     }
 
     // Clear cache

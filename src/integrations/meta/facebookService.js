@@ -24,51 +24,117 @@ class FacebookService {
 
       // Fetch posts with comments (paginated)
       let allComments = [];
+      let allPosts = [];
       let nextPage = `${this.baseURL}/${platformPageId}/feed`;
       let pageCount = 0;
       const maxPages = 10;
 
+      // Step 1: Fetch all posts
       while (nextPage && pageCount < maxPages) {
         try {
           const response = await axios.get(nextPage, {
             params: {
-              fields: 'id,message,created_time,comments{id,message,from,created_time,attachment,parent,permalink_url}',
+              fields: 'id,message,created_time',
               limit: 25,
               access_token: accessToken
             }
           });
 
           const posts = response.data.data || [];
-          
-          // Extract comments from posts
-          for (const post of posts) {
-            if (post.comments && post.comments.data) {
-              for (const comment of post.comments.data) {
+          allPosts = allPosts.concat(posts);
+
+          nextPage = response.data.paging?.next;
+          pageCount++;
+        } catch (error) {
+          console.error(`Error fetching posts page ${pageCount + 1}:`, error.message);
+          break;
+        }
+      }
+
+      console.log(`💬 [Facebook] Found ${allPosts.length} posts, now fetching comments...`);
+
+      // Step 2: Fetch comments for each post (with pagination and nested replies)
+      for (const post of allPosts) {
+        try {
+          let commentsNextPage = `${this.baseURL}/${post.id}/comments`;
+          let commentsPageCount = 0;
+          const maxCommentPages = 5; // Limit per post to avoid too many API calls
+
+          while (commentsNextPage && commentsPageCount < maxCommentPages) {
+            try {
+              const commentsResponse = await axios.get(commentsNextPage, {
+                params: {
+                  fields: 'id,message,from,created_time,attachment,parent,permalink_url,comment_count',
+                  limit: 100, // Facebook allows up to 100 comments per request
+                  access_token: accessToken
+                }
+              });
+
+              const comments = commentsResponse.data.data || [];
+              
+              // Add comments with post info
+              for (const comment of comments) {
                 allComments.push({
                   ...comment,
                   postId: post.id,
                   postMessage: post.message || '',
                   postCreatedTime: post.created_time
                 });
+
+                // If comment has replies, fetch them
+                if (comment.comment_count > 0) {
+                  try {
+                    const repliesResponse = await axios.get(
+                      `${this.baseURL}/${comment.id}/comments`,
+                      {
+                        params: {
+                          fields: 'id,message,from,created_time,attachment,parent,permalink_url',
+                          limit: 100,
+                          access_token: accessToken
+                        }
+                      }
+                    );
+
+                    const replies = repliesResponse.data.data || [];
+                    for (const reply of replies) {
+                      allComments.push({
+                        ...reply,
+                        postId: post.id,
+                        postMessage: post.message || '',
+                        postCreatedTime: post.created_time,
+                        parentCommentId: comment.id
+                      });
+                    }
+                  } catch (replyError) {
+                    console.warn(`Could not fetch replies for comment ${comment.id}:`, replyError.message);
+                    // Continue even if replies fail
+                  }
+                }
               }
+
+              commentsNextPage = commentsResponse.data.paging?.next;
+              commentsPageCount++;
+            } catch (error) {
+              console.error(`Error fetching comments for post ${post.id}, page ${commentsPageCount + 1}:`, error.message);
+              break;
             }
           }
-
-          nextPage = response.data.paging?.next;
-          pageCount++;
         } catch (error) {
-          console.error(`Error fetching comments page ${pageCount + 1}:`, error.message);
-          break;
+          console.error(`Error processing post ${post.id}:`, error.message);
+          continue; // Continue with next post
         }
       }
 
-      console.log(`💬 [Facebook] Found ${allComments.length} comments`);
+      console.log(`💬 [Facebook] Found ${allComments.length} total comments (including replies)`);
 
       // Transform to new Interaction schema
       const interactions = [];
       const interactionMap = new Map();
 
       for (const comment of allComments) {
+        // Determine parentId: use parentCommentId if it's a reply, otherwise use parent.id
+        const parentId = comment.parentCommentId || comment.parent?.id || null;
+
         const interaction = {
           organization: organization,
           platformConnection: platformConnection._id,
@@ -85,11 +151,12 @@ class FacebookService {
               ? `https://graph.facebook.com/${comment.from.id}/picture?type=small`
               : null
           },
-          parentId: comment.parent?.id || null, // For threaded comments
+          parentId: parentId, // For threaded comments (replies)
           metadata: {
             postId: comment.postId,
             postMessage: comment.postMessage,
-            hasAttachment: !!comment.attachment
+            hasAttachment: !!comment.attachment,
+            isReply: !!parentId // Flag to indicate if this is a reply
           },
           platformCreatedAt: new Date(comment.created_time),
           status: 'unread',
