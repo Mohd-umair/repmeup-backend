@@ -4,7 +4,7 @@ const Interaction = require('../../models/Interaction');
 
 /**
  * Facebook Service
- * Handles Facebook Page comments and posts
+ * Handles Facebook Page comments, posts, and interactions
  */
 class FacebookService {
   constructor() {
@@ -13,87 +13,119 @@ class FacebookService {
   }
 
   /**
-   * Fetch posts and comments from Facebook Page
+   * Fetch all posts and comments from Facebook Page
+   * Updated to match new Interaction schema (similar to Instagram)
    */
-  async fetchPosts(platformConnection) {
+  async fetchComments(platformConnection) {
     try {
-      const { accessToken, platformPageId } = platformConnection;
+      const { accessToken, platformPageId, organization } = platformConnection;
 
-      console.log(`Fetching posts for Facebook Page: ${platformPageId}`);
+      console.log(`💬 [Facebook] Fetching comments for page: ${platformPageId}`);
 
-      // Fetch posts with comments
-      const postsResponse = await axios.get(
-        `${this.baseURL}/${platformPageId}/feed`,
-        {
-          params: {
-            fields: 'id,message,created_time,comments{id,message,from,created_time,attachment,parent}',
-            limit: 50,
-            access_token: accessToken
+      // Fetch posts with comments (paginated)
+      let allComments = [];
+      let nextPage = `${this.baseURL}/${platformPageId}/feed`;
+      let pageCount = 0;
+      const maxPages = 10;
+
+      while (nextPage && pageCount < maxPages) {
+        try {
+          const response = await axios.get(nextPage, {
+            params: {
+              fields: 'id,message,created_time,comments{id,message,from,created_time,attachment,parent,permalink_url}',
+              limit: 25,
+              access_token: accessToken
+            }
+          });
+
+          const posts = response.data.data || [];
+          
+          // Extract comments from posts
+          for (const post of posts) {
+            if (post.comments && post.comments.data) {
+              for (const comment of post.comments.data) {
+                allComments.push({
+                  ...comment,
+                  postId: post.id,
+                  postMessage: post.message || '',
+                  postCreatedTime: post.created_time
+                });
+              }
+            }
           }
-        }
-      );
 
-      const posts = postsResponse.data.data || [];
-      const interactions = [];
-
-      for (const post of posts) {
-        if (post.comments && post.comments.data) {
-          for (const comment of post.comments.data) {
-            const interaction = {
-              platform: 'facebook',
-              platformConnection: platformConnection._id,
-              organization: platformConnection.organization,
-              type: 'comment',
-              platformId: comment.id,
-              content: comment.message || '',
-              customerName: comment.from?.name || 'Unknown User',
-              customerId: comment.from?.id || null,
-              customerEmail: null,
-              customerPhone: null,
-              customerAvatar: comment.from?.id 
-                ? `https://graph.facebook.com/${comment.from.id}/picture?type=small`
-                : null,
-              status: 'unread',
-              timestamp: new Date(comment.created_time),
-              metadata: {
-                postId: post.id,
-                postMessage: post.message || '',
-                parentComment: comment.parent?.id || null,
-                hasAttachment: !!comment.attachment
-              },
-              sentiment: null // Will be set by AI processing
-            };
-
-            interactions.push(interaction);
-          }
+          nextPage = response.data.paging?.next;
+          pageCount++;
+        } catch (error) {
+          console.error(`Error fetching comments page ${pageCount + 1}:`, error.message);
+          break;
         }
       }
 
-      // Bulk insert with upsert to avoid duplicates
+      console.log(`💬 [Facebook] Found ${allComments.length} comments`);
+
+      // Transform to new Interaction schema
+      const interactions = [];
+      const interactionMap = new Map();
+
+      for (const comment of allComments) {
+        const interaction = {
+          organization: organization,
+          platformConnection: platformConnection._id,
+          platform: 'facebook',
+          type: 'comment',
+          platformId: comment.id,
+          platformUrl: comment.permalink_url || `https://facebook.com/${comment.id}`,
+          content: comment.message || '',
+          author: {
+            platformId: comment.from?.id,
+            username: comment.from?.name || 'Unknown User',
+            name: comment.from?.name || 'Unknown User',
+            profilePicture: comment.from?.id 
+              ? `https://graph.facebook.com/${comment.from.id}/picture?type=small`
+              : null
+          },
+          parentId: comment.parent?.id || null, // For threaded comments
+          metadata: {
+            postId: comment.postId,
+            postMessage: comment.postMessage,
+            hasAttachment: !!comment.attachment
+          },
+          platformCreatedAt: new Date(comment.created_time),
+          status: 'unread',
+          sentiment: null // Will be set by AI processing
+        };
+
+        interactions.push(interaction);
+        interactionMap.set(comment.id, interaction);
+      }
+
+      console.log(`💬 [Facebook] Processed ${interactions.length} comments`);
+
+      // Bulk upsert interactions
       if (interactions.length > 0) {
         const bulkOps = interactions.map(interaction => ({
           updateOne: {
             filter: { platformId: interaction.platformId },
-            update: { $setOnInsert: interaction },
+            update: { $set: interaction },
             upsert: true
           }
         }));
 
-        await Interaction.bulkWrite(bulkOps, { ordered: false });
-        
-        // Update sync stats
-        await platformConnection.updateSyncStats(interactions.length, 0);
-        
-        console.log(`Fetched ${interactions.length} Facebook comments`);
+        await Interaction.bulkWrite(bulkOps);
+        console.log(`✅ [Facebook] Saved ${interactions.length} comments to database`);
       }
 
       return {
-        success: true,
-        count: interactions.length
+        count: interactions.length,
+        interactions: interactions
       };
     } catch (error) {
-      console.error('Facebook fetch posts error:', error.response?.data || error.message);
-      throw new Error(`Failed to fetch Facebook posts: ${error.message}`);
+      console.error('Facebook fetch comments error:', error.response?.data || error.message);
+      if (error.response) {
+        console.error('API Response:', error.response.data);
+      }
+      throw error;
     }
   }
 
@@ -102,15 +134,15 @@ class FacebookService {
    */
   async fetchReviews(platformConnection) {
     try {
-      const { accessToken, platformPageId } = platformConnection;
+      const { accessToken, platformPageId, organization } = platformConnection;
 
-      console.log(`Fetching reviews for Facebook Page: ${platformPageId}`);
+      console.log(`⭐ [Facebook] Fetching reviews for page: ${platformPageId}`);
 
       const reviewsResponse = await axios.get(
         `${this.baseURL}/${platformPageId}/ratings`,
         {
           params: {
-            fields: 'created_time,recommendation_type,review_text,reviewer,rating',
+            fields: 'created_time,recommendation_type,review_text,reviewer,rating,open_graph_story',
             limit: 50,
             access_token: accessToken
           }
@@ -120,59 +152,90 @@ class FacebookService {
       const reviews = reviewsResponse.data.data || [];
       const interactions = [];
 
+      console.log(`⭐ [Facebook] Found ${reviews.length} reviews`);
+
       for (const review of reviews) {
         const interaction = {
-          platform: 'facebook',
+          organization: organization,
           platformConnection: platformConnection._id,
-          organization: platformConnection.organization,
+          platform: 'facebook',
           type: 'review',
-          platformId: review.id || `review_${Date.now()}`,
+          platformId: review.open_graph_story?.id || `review_${review.reviewer?.id}_${Date.now()}`,
+          platformUrl: `https://facebook.com/${platformPageId}`,
           content: review.review_text || review.recommendation_type || '',
-          customerName: review.reviewer?.name || 'Unknown User',
-          customerId: review.reviewer?.id || null,
-          customerEmail: null,
-          customerPhone: null,
-          customerAvatar: review.reviewer?.id 
-            ? `https://graph.facebook.com/${review.reviewer.id}/picture?type=small`
-            : null,
+          author: {
+            platformId: review.reviewer?.id,
+            username: review.reviewer?.name || 'Unknown User',
+            name: review.reviewer?.name || 'Unknown User',
+            profilePicture: review.reviewer?.id 
+              ? `https://graph.facebook.com/${review.reviewer.id}/picture?type=small`
+              : null
+          },
           rating: review.rating || 0,
-          status: 'unread',
-          timestamp: new Date(review.created_time),
           metadata: {
-            recommendationType: review.recommendation_type
-          }
+            recommendationType: review.recommendation_type,
+            hasRecommendation: !!review.recommendation_type
+          },
+          platformCreatedAt: new Date(review.created_time),
+          status: 'unread',
+          sentiment: review.rating >= 4 ? 'positive' : review.rating === 3 ? 'neutral' : 'negative'
         };
 
         interactions.push(interaction);
       }
 
-      // Bulk insert with upsert
+      // Bulk upsert
       if (interactions.length > 0) {
         const bulkOps = interactions.map(interaction => ({
           updateOne: {
             filter: { platformId: interaction.platformId },
-            update: { $setOnInsert: interaction },
+            update: { $set: interaction },
             upsert: true
           }
         }));
 
-        await Interaction.bulkWrite(bulkOps, { ordered: false });
-        
-        console.log(`Fetched ${interactions.length} Facebook reviews`);
+        await Interaction.bulkWrite(bulkOps);
+        console.log(`✅ [Facebook] Saved ${interactions.length} reviews to database`);
       }
 
       return {
-        success: true,
-        count: interactions.length
+        count: interactions.length,
+        interactions: interactions
       };
     } catch (error) {
       console.error('Facebook fetch reviews error:', error.response?.data || error.message);
       // Reviews might not be available for all pages
       return {
-        success: false,
         count: 0,
+        interactions: [],
         error: error.message
       };
+    }
+  }
+
+  /**
+   * Fetch all Facebook interactions (comments + reviews)
+   */
+  async fetchAllInteractions(platformConnection) {
+    try {
+      const commentsResult = await this.fetchComments(platformConnection);
+      let reviewsResult = { count: 0, interactions: [] };
+
+      // Try to fetch reviews (may fail if not available)
+      try {
+        reviewsResult = await this.fetchReviews(platformConnection);
+      } catch (error) {
+        console.warn(`⚠️ [Facebook] Could not fetch reviews: ${error.message}`);
+        // Continue even if reviews fail
+      }
+
+      return {
+        count: commentsResult.count + reviewsResult.count,
+        interactions: [...commentsResult.interactions, ...reviewsResult.interactions]
+      };
+    } catch (error) {
+      console.error('Facebook fetch all interactions error:', error.message);
+      throw error;
     }
   }
 
@@ -183,7 +246,7 @@ class FacebookService {
     try {
       const { accessToken } = platformConnection;
 
-      console.log(`Replying to Facebook comment: ${commentId}`);
+      console.log(`📤 [Facebook] Replying to comment: ${commentId}`);
 
       const response = await axios.post(
         `${this.baseURL}/${commentId}/comments`,
@@ -298,4 +361,3 @@ class FacebookService {
 }
 
 module.exports = new FacebookService();
-

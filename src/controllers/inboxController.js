@@ -231,11 +231,31 @@ exports.getInteraction = async (req, res, next) => {
     // Convert to plain object for modification
     const interactionObj = interaction.toObject();
 
+    // Get all platformResponseIds from app replies to filter out our own replies
+    const appReplyPlatformIds = new Set(
+      (interactionObj.replies || [])
+        .map(reply => reply.platformResponseId)
+        .filter(id => id != null) // Filter out null/undefined
+    );
+
     // Merge child interactions with app replies for a complete thread
     // Child interactions are replies from other users on the platform
+    // IMPORTANT: Filter out child interactions that match our own platformResponseId
+    // (These are our own replies that came back from the platform during sync)
     if (childInteractions.length > 0) {
+      // Filter out child interactions that are our own replies
+      const externalReplies = childInteractions.filter(child => {
+        // If this child interaction's platformId matches any of our app replies' platformResponseId,
+        // it means this is our own reply that came back from the platform - skip it
+        if (appReplyPlatformIds.has(child.platformId)) {
+          console.log(`⏭️  [Inbox] Filtering out duplicate reply: ${child.platformId} (already in app replies)`);
+          return false;
+        }
+        return true;
+      });
+
       // Transform child interactions to match reply format
-      const platformReplies = childInteractions.map(child => ({
+      const platformReplies = externalReplies.map(child => ({
         _id: child._id,
         content: child.content,
         sentBy: child.author.name, // From platform user (not app user)

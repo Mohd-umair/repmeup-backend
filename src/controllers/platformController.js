@@ -2,6 +2,7 @@ const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const youtubeService = require('../integrations/google/youtubeService');
 const instagramService = require('../integrations/meta/instagramService');
+const facebookService = require('../integrations/meta/facebookService');
 const crypto = require('crypto');
 
 /**
@@ -385,6 +386,10 @@ exports.syncPlatform = async (req, res, next) => {
         });
       }
       console.log('📸 [Sync] Instagram sync result:', result);
+    } else if (connection.platform === 'facebook') {
+      // Fetch both comments and reviews
+      result = await facebookService.fetchAllInteractions(connection);
+      console.log('📘 [Sync] Facebook sync result:', result);
     } else {
       return res.status(400).json({
         success: false,

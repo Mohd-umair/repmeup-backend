@@ -45,27 +45,36 @@ module.exports = async function processWebhook(job) {
       console.log(`   Type: ${interaction.type}`);
       console.log(`   Content: "${interaction.content?.substring(0, 100)}..."`);
       
-      // Trigger AI processing
-      await aiQueue.add({
-        interactionId: interaction._id
-      }, {
-        attempts: 3,
-        backoff: 2000
-      });
-
-      console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
-
-      // Queue auto-reply if webhook mode is enabled
-      const autoReplyScheduler = require('../services/autoReplyScheduler');
-      const queued = await autoReplyScheduler.queueImmediateAutoReply(
-        interaction._id,
-        organizationId
-      );
-
-      if (queued) {
-        console.log(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
+      // IMPORTANT: Check if interaction already has replies
+      // If it does, skip auto-reply queueing (it's already been replied to)
+      const hasReplies = interaction.replies && interaction.replies.length > 0;
+      const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
+      
+      if (hasReplies || isAlreadyReplied) {
+        console.log(`⏭️  [Webhook] Skipping auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
       } else {
-        console.log(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
+        // Trigger AI processing
+        await aiQueue.add({
+          interactionId: interaction._id
+        }, {
+          attempts: 3,
+          backoff: 2000
+        });
+
+        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
+
+        // Queue auto-reply if webhook mode is enabled
+        const autoReplyScheduler = require('../services/autoReplyScheduler');
+        const queued = await autoReplyScheduler.queueImmediateAutoReply(
+          interaction._id,
+          organizationId
+        );
+
+        if (queued) {
+          console.log(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
+        } else {
+          console.log(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
+        }
       }
     } else {
       console.log(`⚠️  [Webhook] No interaction created from ${platform} webhook`);
