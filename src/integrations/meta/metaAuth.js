@@ -33,17 +33,50 @@ class MetaAuthService {
    */
   verifyState(state) {
     try {
-      const decoded = JSON.parse(Buffer.from(state, 'base64').toString());
-      
+      if (!state) {
+        console.error('❌ [MetaAuth] State parameter is missing');
+        throw new Error('State parameter is missing');
+      }
+
+      // Decode base64
+      let decoded;
+      try {
+        const decodedString = Buffer.from(state, 'base64').toString('utf-8');
+        decoded = JSON.parse(decodedString);
+      } catch (decodeError) {
+        console.error('❌ [MetaAuth] Failed to decode state:', decodeError.message);
+        console.error('❌ [MetaAuth] State value received:', state);
+        throw new Error('State parameter is not valid base64 or JSON');
+      }
+
+      // Validate required fields
+      if (!decoded.userId || !decoded.organizationId) {
+        console.error('❌ [MetaAuth] State missing required fields:', decoded);
+        throw new Error('State parameter missing required fields');
+      }
+
       // Check if state is not too old (5 minutes)
       const fiveMinutes = 5 * 60 * 1000;
       if (Date.now() - decoded.timestamp > fiveMinutes) {
-        throw new Error('State expired');
+        console.error('❌ [MetaAuth] State expired. Age:', Date.now() - decoded.timestamp, 'ms');
+        throw new Error('State expired. Please try connecting again.');
       }
+      
+      console.log('✅ [MetaAuth] State verified successfully:', {
+        userId: decoded.userId,
+        organizationId: decoded.organizationId,
+        platform: decoded.platform,
+        age: Date.now() - decoded.timestamp
+      });
       
       return decoded;
     } catch (error) {
-      throw new Error('Invalid state parameter');
+      // Re-throw with original message if it's already a specific error
+      if (error.message && error.message !== 'Invalid state parameter') {
+        throw error;
+      }
+      console.error('❌ [MetaAuth] State verification failed:', error.message);
+      throw new Error(`Invalid state parameter: ${error.message}`);
     }
   }
 
@@ -61,6 +94,12 @@ class MetaAuthService {
     }
 
     const state = this.generateState(userId, organizationId, 'facebook');
+    console.log('🔗 [Facebook] Generated state for OAuth:', {
+      userId,
+      organizationId,
+      stateLength: state.length,
+      statePreview: state.substring(0, 20) + '...'
+    });
     
     const redirectUri = process.env.META_CALLBACK_URL || 
                        process.env.FACEBOOK_CALLBACK_URL ||
@@ -69,22 +108,26 @@ class MetaAuthService {
     if (!redirectUri) {
       throw new Error('Meta callback URL not configured. Please set META_CALLBACK_URL in your environment variables.');
     }
+
+    console.log('🔗 [Facebook] OAuth redirect URI:', redirectUri);
     
     const params = new URLSearchParams({
       client_id: appId,
       redirect_uri: redirectUri,
       state: state,
       scope: [
-        'pages_show_list',
-        'pages_read_engagement',
-        'pages_manage_posts',
-        'pages_manage_metadata',
-        'pages_read_user_content'
+        'pages_show_list',           // List user's pages
+        'pages_read_engagement',     // Read page comments and engagement
+        'pages_manage_engagement',   // Reply to comments and manage engagement
+        'pages_manage_metadata'      // Manage page metadata
       ].join(','),
       response_type: 'code'
     });
 
-    return `${this.facebookAuthURL}?${params.toString()}`;
+    const authUrl = `${this.facebookAuthURL}?${params.toString()}`;
+    console.log('🔗 [Facebook] Generated OAuth URL (length):', authUrl.length);
+    
+    return authUrl;
   }
 
   /**
@@ -300,7 +343,7 @@ class MetaAuthService {
         accessToken: pageAccessToken,
         refreshToken: null,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000), // 60 days
-        scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'],
+        scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_engagement', 'pages_manage_metadata'],
         status: 'connected',
         isActive: true,
         metadata: {

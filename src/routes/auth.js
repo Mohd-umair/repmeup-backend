@@ -46,17 +46,62 @@ router.get('/facebook/callback', async (req, res) => {
   try {
     const { code, state, error, error_description } = req.query;
 
+    console.log('📥 [Facebook Callback] Received callback:', {
+      hasCode: !!code,
+      hasState: !!state,
+      hasError: !!error,
+      error: error,
+      errorDescription: error_description
+    });
+
     // Handle OAuth errors
     if (error) {
-      console.error('Facebook OAuth error:', error, error_description);
+      console.error('❌ [Facebook Callback] OAuth error:', error, error_description);
       return res.redirect(
         `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent(error_description || error)}`
       );
     }
 
+    // Check for required parameters
+    if (!code) {
+      console.error('❌ [Facebook Callback] Missing authorization code');
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent('Missing authorization code')}`
+      );
+    }
+
+    if (!state) {
+      console.error('❌ [Facebook Callback] Missing state parameter');
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent('Missing state parameter. Please try connecting again.')}`
+      );
+    }
+
+    // Decode state if it's URL-encoded (Express should do this automatically, but just in case)
+    let decodedState = state;
+    try {
+      // Try URL decoding if needed
+      if (state.includes('%')) {
+        decodedState = decodeURIComponent(state);
+        console.log('🔓 [Facebook Callback] URL-decoded state parameter');
+      }
+    } catch (decodeError) {
+      console.warn('⚠️ [Facebook Callback] Could not URL-decode state, using as-is:', decodeError.message);
+    }
+
     // Verify state
-    const stateData = metaAuth.verifyState(state);
+    let stateData;
+    try {
+      stateData = metaAuth.verifyState(decodedState);
+    } catch (stateError) {
+      console.error('❌ [Facebook Callback] State verification failed:', stateError.message);
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent(stateError.message || 'Invalid state parameter. Please try connecting again.')}`
+      );
+    }
+
     const { userId, organizationId } = stateData;
+    console.log('✅ [Facebook Callback] State verified, proceeding with token exchange...');
 
     // Exchange code for token
     const shortToken = await metaAuth.exchangeCodeForToken(
