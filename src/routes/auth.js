@@ -44,21 +44,30 @@ router.get('/facebook', protect, async (req, res, next) => {
 
 router.get('/facebook/callback', async (req, res) => {
   try {
-    const { code, state, error, error_description } = req.query;
+    const { code, state, error, error_description, error_code, error_message } = req.query;
 
     console.log('📥 [Facebook Callback] Received callback:', {
       hasCode: !!code,
       hasState: !!state,
       hasError: !!error,
+      hasErrorCode: !!error_code,
       error: error,
-      errorDescription: error_description
+      errorDescription: error_description,
+      errorCode: error_code,
+      errorMessage: error_message
     });
 
-    // Handle OAuth errors
-    if (error) {
-      console.error('❌ [Facebook Callback] OAuth error:', error, error_description);
+    // Handle OAuth errors (Facebook can send error in multiple formats)
+    if (error || error_code) {
+      const errorMsg = error_message || error_description || error || 'Unknown OAuth error';
+      console.error('❌ [Facebook Callback] OAuth error:', {
+        error,
+        error_code,
+        error_description,
+        error_message
+      });
       return res.redirect(
-        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent(error_description || error)}`
+        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent(errorMsg)}`
       );
     }
 
