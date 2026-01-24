@@ -112,10 +112,15 @@ router.get('/facebook/callback', async (req, res) => {
     const { userId, organizationId } = stateData;
     console.log('✅ [Facebook Callback] State verified, proceeding with token exchange...');
 
+    // Get redirect URI using the same logic as OAuth URL generation
+    // This MUST match exactly what was used in the OAuth request
+    const redirectUri = metaAuth.getFacebookRedirectURI();
+    console.log('🔗 [Facebook Callback] Using redirect URI for token exchange:', redirectUri);
+
     // Exchange code for token
     const shortToken = await metaAuth.exchangeCodeForToken(
       code,
-      process.env.META_CALLBACK_URL
+      redirectUri
     );
     
     // Get long-lived token
