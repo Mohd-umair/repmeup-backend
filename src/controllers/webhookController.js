@@ -352,46 +352,63 @@ exports.handleInstagramWebhook = async (req, res) => {
 /**
  * Verify LinkedIn webhook
  * GET /api/webhooks/linkedin
+ * 
+ * LinkedIn uses HMACSHA256 challenge-response validation:
+ * 1. LinkedIn sends challengeCode (UUID) as query parameter
+ * 2. We compute: challengeResponse = Hex(HMACSHA256(challengeCode, clientSecret))
+ * 3. Return JSON: { challengeCode, challengeResponse }
+ * 
+ * Reference: https://learn.microsoft.com/en-us/linkedin/shared/api-guide/webhook-validation
  */
 exports.verifyLinkedInWebhook = (req, res) => {
   try {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
+    const crypto = require('crypto');
+    const challengeCode = req.query['challengeCode'];
+    const applicationId = req.query['applicationId']; // For parent-child apps
 
     console.log('💼 [LinkedIn Webhook] Verification request:', { 
-      mode, 
-      token: token ? '***' : 'missing',
-      challenge: challenge ? 'present' : 'missing',
-      verifyTokenSet: !!process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN
+      challengeCode: challengeCode ? 'present' : 'missing',
+      applicationId: applicationId || 'none',
+      clientSecretSet: !!process.env.LINKEDIN_CLIENT_SECRET
     });
 
-    // Check if verify token is configured
-    if (!process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN) {
-      console.error('❌ [LinkedIn Webhook] LINKEDIN_WEBHOOK_VERIFY_TOKEN not set in environment');
+    // Check if client secret is configured
+    if (!process.env.LINKEDIN_CLIENT_SECRET) {
+      console.error('❌ [LinkedIn Webhook] LINKEDIN_CLIENT_SECRET not set in environment');
       return res.status(500).json({
-        error: 'Webhook verification token not configured',
-        message: 'Please set LINKEDIN_WEBHOOK_VERIFY_TOKEN in your .env file'
+        error: 'LinkedIn client secret not configured',
+        message: 'Please set LINKEDIN_CLIENT_SECRET in your .env file'
       });
     }
 
-    // LinkedIn sends verification request with these parameters
-    if (mode === 'subscribe' && token === process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN) {
-      console.log('✅ [LinkedIn Webhook] Verified successfully');
-      // Return the challenge string to complete verification
-      res.status(200).send(challenge || 'verified');
-    } else {
-      console.error('❌ [LinkedIn Webhook] Verification failed', {
-        modeMatch: mode === 'subscribe',
-        tokenMatch: token === process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN,
-        receivedToken: token ? '***' : 'missing',
-        expectedToken: process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN ? 'set' : 'missing'
-      });
-      res.status(403).json({
-        error: 'Verification failed',
-        message: 'Invalid verify token or mode'
+    // Check if challenge code is provided
+    if (!challengeCode) {
+      console.error('❌ [LinkedIn Webhook] No challengeCode provided');
+      return res.status(400).json({
+        error: 'Missing challenge code',
+        message: 'LinkedIn must provide challengeCode query parameter'
       });
     }
+
+    // Compute challenge response using HMACSHA256
+    // challengeResponse = Hex-encoded(HMACSHA256(challengeCode, clientSecret))
+    const clientSecret = process.env.LINKEDIN_CLIENT_SECRET;
+    const challengeResponse = crypto
+      .createHmac('sha256', clientSecret)
+      .update(challengeCode)
+      .digest('hex');
+
+    console.log('✅ [LinkedIn Webhook] Challenge response computed');
+
+    // Return JSON response with both challengeCode and challengeResponse
+    // Must respond within 3 seconds with 200 OK and content-type: application/json
+    res.setHeader('Content-Type', 'application/json');
+    res.status(200).json({
+      challengeCode: challengeCode,
+      challengeResponse: challengeResponse
+    });
+
+    console.log('✅ [LinkedIn Webhook] Verification response sent');
   } catch (error) {
     console.error('❌ [LinkedIn Webhook] Verification error:', error);
     res.status(500).json({
@@ -419,17 +436,37 @@ exports.handleLinkedInWebhook = async (req, res) => {
     console.log('💼 [LinkedIn Webhook] Received:', JSON.stringify(req.body, null, 2));
 
     // Verify webhook signature for security
-    const signature = req.headers['x-linkedin-signature'];
-    if (signature && process.env.LINKEDIN_WEBHOOK_SECRET) {
+    // LinkedIn uses X-LI-Signature header with format: hmacsha256=<hash>
+    // The hash is computed on the JSON body prefixed by "hmacsha256="
+    const signatureHeader = req.headers['x-li-signature'];
+    
+    if (signatureHeader) {
+      if (!process.env.LINKEDIN_CLIENT_SECRET) {
+        console.error('❌ [LinkedIn Webhook] LINKEDIN_CLIENT_SECRET not set for signature verification');
+        return res.sendStatus(500);
+      }
+
+      // Extract the hash from "hmacsha256=<hash>" format
+      const signature = signatureHeader.replace('hmacsha256=', '');
+      
+      // Compute expected signature: HMACSHA256("hmacsha256=" + JSON body, clientSecret)
+      const bodyString = JSON.stringify(req.body);
       const expectedSignature = crypto
-        .createHmac('sha256', process.env.LINKEDIN_WEBHOOK_SECRET)
-        .update(JSON.stringify(req.body))
+        .createHmac('sha256', process.env.LINKEDIN_CLIENT_SECRET)
+        .update('hmacsha256=' + bodyString)
         .digest('hex');
       
       if (signature !== expectedSignature) {
-        console.error('❌ [LinkedIn Webhook] Invalid signature');
+        console.error('❌ [LinkedIn Webhook] Invalid signature', {
+          received: signature.substring(0, 10) + '...',
+          expected: expectedSignature.substring(0, 10) + '...'
+        });
         return res.sendStatus(403);
       }
+      
+      console.log('✅ [LinkedIn Webhook] Signature verified');
+    } else {
+      console.warn('⚠️  [LinkedIn Webhook] No X-LI-Signature header present');
     }
 
     // Acknowledge receipt immediately
