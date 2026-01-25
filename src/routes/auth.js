@@ -25,6 +25,9 @@ router.post(
 // Meta (Facebook/Instagram) OAuth routes
 const metaAuth = require('../integrations/meta/metaAuth');
 
+// LinkedIn OAuth routes
+const linkedinAuth = require('../integrations/linkedin/linkedinAuth');
+
 // Facebook OAuth
 router.get('/facebook', protect, async (req, res, next) => {
   try {
@@ -274,6 +277,102 @@ router.get('/instagram/callback', async (req, res) => {
     console.error('Instagram callback error:', error);
     res.redirect(
       `${process.env.FRONTEND_URL}/app/settings?connection=instagram&status=error&message=${encodeURIComponent(error.message)}`
+    );
+  }
+});
+
+// LinkedIn OAuth
+router.get('/linkedin', protect, async (req, res, next) => {
+  try {
+    const state = linkedinAuth.generateState(
+      req.user.id,
+      req.user.organization._id || req.user.organization
+    );
+    
+    const authURL = linkedinAuth.getAuthURL(state);
+    
+    res.json({ 
+      success: true, 
+      authUrl: authURL 
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/linkedin/callback', async (req, res) => {
+  try {
+    const { code, state, error, error_description } = req.query;
+
+    console.log('📥 [LinkedIn Callback] Received callback:', {
+      hasCode: !!code,
+      hasState: !!state,
+      error: error
+    });
+
+    // Handle OAuth errors
+    if (error) {
+      console.error('❌ [LinkedIn] OAuth error:', error, error_description);
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/app/settings?connection=linkedin&status=error&message=${encodeURIComponent(error_description || error)}`
+      );
+    }
+
+    if (!code || !state) {
+      console.error('❌ [LinkedIn] Missing code or state');
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/app/settings?connection=linkedin&status=error&message=Missing authorization code or state`
+      );
+    }
+
+    // Verify state
+    let stateData;
+    try {
+      stateData = linkedinAuth.verifyState(state);
+      console.log('✅ [LinkedIn] State verified:', stateData);
+    } catch (error) {
+      console.error('❌ [LinkedIn] State verification failed:', error.message);
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/app/settings?connection=linkedin&status=error&message=Invalid state parameter`
+      );
+    }
+
+    const { userId, organizationId } = stateData;
+
+    // Exchange code for token
+    const tokenData = await linkedinAuth.exchangeCodeForToken(code);
+    console.log('✅ [LinkedIn] Token obtained');
+
+    // Get user profile
+    const profile = await linkedinAuth.getUserProfile(tokenData.accessToken);
+    console.log('✅ [LinkedIn] Profile obtained:', profile.name);
+
+    // Get user's organizations
+    const orgData = await linkedinAuth.getUserOrganizations(tokenData.accessToken);
+    console.log('✅ [LinkedIn] Organizations obtained:', orgData.organizations.length);
+
+    // Save connections
+    const connections = await linkedinAuth.saveLinkedInConnection(
+      userId,
+      organizationId,
+      tokenData.accessToken,
+      tokenData.refreshToken,
+      tokenData.expiresIn,
+      profile,
+      orgData
+    );
+
+    const savedCount = connections.length;
+    console.log(`✅ [LinkedIn] Saved ${savedCount} connection(s)`);
+
+    // Redirect to frontend with success
+    res.redirect(
+      `${process.env.FRONTEND_URL}/app/settings?connection=linkedin&status=success&accounts=${savedCount}&organizations=${orgData.organizations.length}`
+    );
+  } catch (error) {
+    console.error('❌ [LinkedIn] Callback error:', error);
+    res.redirect(
+      `${process.env.FRONTEND_URL}/app/settings?connection=linkedin&status=error&message=${encodeURIComponent(error.message)}`
     );
   }
 });

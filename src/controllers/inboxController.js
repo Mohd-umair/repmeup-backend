@@ -384,6 +384,21 @@ exports.replyToInteraction = async (req, res, next) => {
           replyStatus = 'failed';
           errorMessage = result.error || 'Failed to post reply to Facebook';
         }
+      } else if (interaction.platform === 'linkedin') {
+        const linkedinService = require('../integrations/linkedin/linkedinService');
+        const result = await linkedinService.replyToComment(
+          interaction.platformConnection,
+          interaction._id,
+          replyContent
+        );
+        
+        if (result.status === 'sent' && result.platformResponseId) {
+          platformResponseId = result.platformResponseId;
+          replyStatus = 'sent';
+        } else {
+          replyStatus = 'failed';
+          errorMessage = result.error || 'Failed to post reply to LinkedIn';
+        }
       } else {
         replyStatus = 'failed';
         errorMessage = `Replies for ${interaction.platform} are not yet implemented`;

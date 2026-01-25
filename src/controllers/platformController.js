@@ -3,6 +3,7 @@ const googleService = require('../integrations/google/googleService');
 const youtubeService = require('../integrations/google/youtubeService');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
+const linkedinService = require('../integrations/linkedin/linkedinService');
 const crypto = require('crypto');
 
 /**
@@ -390,6 +391,10 @@ exports.syncPlatform = async (req, res, next) => {
       // Fetch both comments and reviews
       result = await facebookService.fetchAllInteractions(connection);
       console.log('📘 [Sync] Facebook sync result:', result);
+    } else if (connection.platform === 'linkedin') {
+      // Fetch LinkedIn posts and comments
+      result = await linkedinService.fetchAllInteractions(connection);
+      console.log('💼 [Sync] LinkedIn sync result:', result);
     } else {
       return res.status(400).json({
         success: false,

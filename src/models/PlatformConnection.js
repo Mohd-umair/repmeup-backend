@@ -9,7 +9,7 @@ const platformConnectionSchema = new mongoose.Schema({
   
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp'],
+    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin'],
     required: true
   },
   
@@ -48,7 +48,13 @@ const platformConnectionSchema = new mongoose.Schema({
     phoneNumberId: String,
     phoneNumber: String,
     displayPhoneNumber: String,
-    businessAccountId: String
+    businessAccountId: String,
+    
+    // For LinkedIn
+    organizationId: String,
+    organizationName: String,
+    organizationUrn: String,
+    personUrn: String
   },
   
   // Connection status
