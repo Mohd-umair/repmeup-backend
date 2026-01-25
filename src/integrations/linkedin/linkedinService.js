@@ -76,8 +76,29 @@ class LinkedInService {
       };
     } catch (error) {
       console.error('❌ [LinkedIn] Sync error:', error.message);
-      await connection.logError(error);
-      throw error;
+      console.error('❌ [LinkedIn] Error details:', error.response?.data || error);
+      
+      // Log error to connection
+      if (connection && connection.logError) {
+        await connection.logError(error);
+      }
+      
+      // Return error details instead of throwing
+      const errorMessage = error.response?.data?.message || 
+                          error.response?.data?.error_description ||
+                          error.message || 
+                          'Failed to sync LinkedIn';
+      
+      // Check for specific LinkedIn API errors
+      if (error.response?.status === 403) {
+        throw new Error('LinkedIn API access denied. Please ensure "Share on LinkedIn" product is approved and r_organization_social scope is enabled.');
+      } else if (error.response?.status === 401) {
+        throw new Error('LinkedIn access token expired. Please reconnect your LinkedIn account.');
+      } else if (error.response?.status === 404) {
+        throw new Error('LinkedIn organization not found. Please verify you are an admin of the Company Page.');
+      }
+      
+      throw new Error(`LinkedIn sync failed: ${errorMessage}`);
     }
   }
 
