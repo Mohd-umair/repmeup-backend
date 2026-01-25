@@ -392,9 +392,20 @@ exports.syncPlatform = async (req, res, next) => {
       result = await facebookService.fetchAllInteractions(connection);
       console.log('📘 [Sync] Facebook sync result:', result);
     } else if (connection.platform === 'linkedin') {
-      // Fetch LinkedIn posts and comments
-      result = await linkedinService.fetchAllInteractions(connection);
-      console.log('💼 [Sync] LinkedIn sync result:', result);
+      try {
+        // Fetch LinkedIn posts and comments
+        result = await linkedinService.fetchAllInteractions(connection);
+        console.log('💼 [Sync] LinkedIn sync result:', result);
+      } catch (linkedinError) {
+        console.error('❌ [Sync] LinkedIn sync error:', linkedinError.message);
+        return res.status(400).json({
+          success: false,
+          error: linkedinError.message || 'LinkedIn sync failed',
+          data: {
+            interactionsAdded: 0
+          }
+        });
+      }
     } else {
       return res.status(400).json({
         success: false,

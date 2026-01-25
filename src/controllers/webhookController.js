@@ -402,13 +402,18 @@ exports.verifyLinkedInWebhook = (req, res) => {
 
     // Return JSON response with both challengeCode and challengeResponse
     // Must respond within 3 seconds with 200 OK and content-type: application/json
-    res.setHeader('Content-Type', 'application/json');
-    res.status(200).json({
+    const response = {
       challengeCode: challengeCode,
       challengeResponse: challengeResponse
-    });
+    };
 
-    console.log('✅ [LinkedIn Webhook] Verification response sent');
+    res.setHeader('Content-Type', 'application/json');
+    res.status(200).json(response);
+
+    console.log('✅ [LinkedIn Webhook] Verification response sent', {
+      challengeCode: challengeCode.substring(0, 8) + '...',
+      responseLength: JSON.stringify(response).length
+    });
   } catch (error) {
     console.error('❌ [LinkedIn Webhook] Verification error:', error);
     res.status(500).json({
