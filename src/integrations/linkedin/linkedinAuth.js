@@ -14,15 +14,27 @@ class LinkedInAuthService {
    * Generate OAuth URL for LinkedIn
    */
   getAuthURL(state) {
-    const scopes = [
+    // Start with basic scopes that are auto-approved
+    const basicScopes = [
       'openid',
       'profile',
-      'email',
-      'w_member_social',
-      'r_organization_social',
-      'w_organization_social',
-      'rw_organization_admin'
+      'email'
     ];
+
+    // Advanced scopes that require LinkedIn approval
+    // Only include if explicitly enabled via environment variable
+    const advancedScopes = [];
+    
+    if (process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true') {
+      advancedScopes.push(
+        'w_member_social',        // Post on behalf of user (requires approval)
+        'r_organization_social',   // Read organization posts (requires approval)
+        'w_organization_social',  // Post on behalf of organization (requires approval)
+        'rw_organization_admin'   // Manage organization (requires approval)
+      );
+    }
+
+    const scopes = [...basicScopes, ...advancedScopes];
 
     const params = new URLSearchParams({
       response_type: 'code',
@@ -38,6 +50,7 @@ class LinkedInAuthService {
     console.log('🔗 [LinkedIn] Client ID:', this.clientId?.substring(0, 10) + '...');
     console.log('🔗 [LinkedIn] Redirect URI:', this.redirectUri);
     console.log('🔗 [LinkedIn] Scopes:', scopes.join(', '));
+    console.log('🔗 [LinkedIn] Advanced scopes enabled:', process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true');
     
     return authURL;
   }
@@ -110,12 +123,13 @@ class LinkedInAuthService {
 
   /**
    * Get user's organizations (company pages they can manage)
+   * Note: This requires r_organization_social scope which needs LinkedIn approval
    */
   async getUserOrganizations(accessToken) {
     try {
       console.log('🏢 [LinkedIn] Fetching user organizations...');
       
-      // First, get the person URN
+      // First, get the person URN using basic profile endpoint
       const meResponse = await axios.get(`${this.apiURL}/me`, {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -126,45 +140,61 @@ class LinkedInAuthService {
       const personUrn = `urn:li:person:${meResponse.data.id}`;
       console.log('👤 [LinkedIn] Person URN:', personUrn);
 
-      // Get organization access control info
-      const orgsResponse = await axios.get(
-        `${this.apiURL}/organizationAcls`,
-        {
-          params: {
-            q: 'roleAssignee',
-            role: 'ADMINISTRATOR',
-            projection: '(elements*(organization~(localizedName,logoV2)))'
-          },
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'X-Restli-Protocol-Version': '2.0.0'
+      // Try to get organization access control info
+      // This requires r_organization_social scope
+      try {
+        const orgsResponse = await axios.get(
+          `${this.apiURL}/organizationAcls`,
+          {
+            params: {
+              q: 'roleAssignee',
+              role: 'ADMINISTRATOR',
+              projection: '(elements*(organization~(localizedName,logoV2)))'
+            },
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'X-Restli-Protocol-Version': '2.0.0'
+            }
           }
-        }
-      );
+        );
 
-      const organizations = orgsResponse.data.elements?.map(element => {
-        const org = element['organization~'];
+        const organizations = orgsResponse.data.elements?.map(element => {
+          const org = element['organization~'];
+          return {
+            id: element.organization.split(':').pop(),
+            urn: element.organization,
+            name: org.localizedName,
+            logo: org.logoV2?.original || null,
+            role: element.role
+          };
+        }) || [];
+
+        console.log(`✅ [LinkedIn] Found ${organizations.length} organization(s)`);
+        organizations.forEach(org => {
+          console.log(`   - ${org.name} (${org.role})`);
+        });
+
         return {
-          id: element.organization.split(':').pop(),
-          urn: element.organization,
-          name: org.localizedName,
-          logo: org.logoV2?.original || null,
-          role: element.role
+          personUrn,
+          organizations
         };
-      }) || [];
-
-      console.log(`✅ [LinkedIn] Found ${organizations.length} organization(s)`);
-      organizations.forEach(org => {
-        console.log(`   - ${org.name} (${org.role})`);
-      });
-
-      return {
-        personUrn,
-        organizations
-      };
+      } catch (orgError) {
+        // If organization API fails, it means advanced scopes aren't approved
+        console.warn('⚠️  [LinkedIn] Cannot fetch organizations - advanced scopes not approved');
+        console.warn('⚠️  [LinkedIn] Error:', orgError.response?.data || orgError.message);
+        console.warn('⚠️  [LinkedIn] To enable organization features, request approval for:');
+        console.warn('⚠️  [LinkedIn] - r_organization_social (read organization posts)');
+        console.warn('⚠️  [LinkedIn] - w_organization_social (post on behalf of organization)');
+        
+        // Return empty organizations but still save personal profile
+        return {
+          personUrn,
+          organizations: []
+        };
+      }
     } catch (error) {
-      console.error('❌ [LinkedIn] Failed to fetch organizations:', error.response?.data || error.message);
-      // Return empty if no organizations or error
+      console.error('❌ [LinkedIn] Failed to fetch user info:', error.response?.data || error.message);
+      // Return empty if error
       return {
         personUrn: null,
         organizations: []

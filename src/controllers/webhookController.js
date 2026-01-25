@@ -349,3 +349,113 @@ exports.handleInstagramWebhook = async (req, res) => {
   }
 };
 
+/**
+ * Verify LinkedIn webhook
+ * GET /api/webhooks/linkedin
+ */
+exports.verifyLinkedInWebhook = (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log('💼 [LinkedIn Webhook] Verification request:', { mode, token });
+
+  if (mode === 'subscribe' && token === process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN) {
+    console.log('✅ [LinkedIn Webhook] Verified successfully');
+    res.status(200).send(challenge);
+  } else {
+    console.error('❌ [LinkedIn Webhook] Verification failed');
+    res.sendStatus(403);
+  }
+};
+
+/**
+ * Handle LinkedIn webhook events
+ * POST /api/webhooks/linkedin
+ * 
+ * LinkedIn webhook events include:
+ * - SHARE_CREATED: When a new post is created
+ * - SHARE_COMMENT_CREATED: When someone comments on a post
+ * - SHARE_COMMENT_UPDATED: When a comment is edited
+ * - SHARE_LIKE_CREATED: When someone likes a post
+ */
+exports.handleLinkedInWebhook = async (req, res) => {
+  try {
+    const { webhookQueue } = require('../config/queue');
+    const crypto = require('crypto');
+    
+    console.log('💼 [LinkedIn Webhook] Received:', JSON.stringify(req.body, null, 2));
+
+    // Verify webhook signature for security
+    const signature = req.headers['x-linkedin-signature'];
+    if (signature && process.env.LINKEDIN_WEBHOOK_SECRET) {
+      const expectedSignature = crypto
+        .createHmac('sha256', process.env.LINKEDIN_WEBHOOK_SECRET)
+        .update(JSON.stringify(req.body))
+        .digest('hex');
+      
+      if (signature !== expectedSignature) {
+        console.error('❌ [LinkedIn Webhook] Invalid signature');
+        return res.sendStatus(403);
+      }
+    }
+
+    // Acknowledge receipt immediately
+    res.sendStatus(200);
+
+    // Process webhook asynchronously
+    const { eventType, organizationUrn, data } = req.body;
+    
+    if (!eventType || !data) {
+      console.log('⚠️  [LinkedIn Webhook] Invalid payload structure');
+      return;
+    }
+
+    // Extract organization ID from URN (format: urn:li:organization:12345)
+    const orgId = organizationUrn?.split(':').pop();
+    
+    if (!orgId) {
+      console.log('⚠️  [LinkedIn Webhook] No organization ID in payload');
+      return;
+    }
+
+    // Find platform connection by organization URN or platform page ID
+    const connection = await PlatformConnection.findOne({
+      platform: 'linkedin',
+      $or: [
+        { 'platformData.organizationUrn': organizationUrn },
+        { 'platformData.organizationId': orgId },
+        { platformPageId: orgId }
+      ],
+      isActive: true
+    });
+
+    if (!connection) {
+      console.log(`⚠️  [LinkedIn Webhook] No active connection found for org: ${orgId}`);
+      return;
+    }
+
+    console.log(`✅ [LinkedIn Webhook] Found connection for org: ${connection.platformName}`);
+
+    // Queue webhook for processing based on event type
+    await webhookQueue.add({
+      platform: 'linkedin',
+      eventType,
+      payload: req.body,
+      organizationId: connection.organization.toString(),
+      connectionId: connection._id.toString()
+    }, {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000
+      }
+    });
+
+    console.log(`✅ [LinkedIn Webhook] Queued ${eventType} for processing`);
+  } catch (error) {
+    console.error('❌ [LinkedIn Webhook] Handler error:', error);
+    // Don't send error response as we already sent 200
+  }
+};
+

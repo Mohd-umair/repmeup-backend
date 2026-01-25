@@ -21,6 +21,10 @@ router.post('/facebook', webhookController.handleFacebookWebhook);
 router.get('/instagram', webhookController.verifyInstagramWebhook);
 router.post('/instagram', webhookController.handleInstagramWebhook);
 
+// LinkedIn webhooks
+router.get('/linkedin', webhookController.verifyLinkedInWebhook);
+router.post('/linkedin', webhookController.handleLinkedInWebhook);
+
 // Health check
 router.get('/health', webhookController.webhookHealth);
 
