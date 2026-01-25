@@ -354,18 +354,50 @@ exports.handleInstagramWebhook = async (req, res) => {
  * GET /api/webhooks/linkedin
  */
 exports.verifyLinkedInWebhook = (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+  try {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
 
-  console.log('💼 [LinkedIn Webhook] Verification request:', { mode, token });
+    console.log('💼 [LinkedIn Webhook] Verification request:', { 
+      mode, 
+      token: token ? '***' : 'missing',
+      challenge: challenge ? 'present' : 'missing',
+      verifyTokenSet: !!process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN
+    });
 
-  if (mode === 'subscribe' && token === process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN) {
-    console.log('✅ [LinkedIn Webhook] Verified successfully');
-    res.status(200).send(challenge);
-  } else {
-    console.error('❌ [LinkedIn Webhook] Verification failed');
-    res.sendStatus(403);
+    // Check if verify token is configured
+    if (!process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN) {
+      console.error('❌ [LinkedIn Webhook] LINKEDIN_WEBHOOK_VERIFY_TOKEN not set in environment');
+      return res.status(500).json({
+        error: 'Webhook verification token not configured',
+        message: 'Please set LINKEDIN_WEBHOOK_VERIFY_TOKEN in your .env file'
+      });
+    }
+
+    // LinkedIn sends verification request with these parameters
+    if (mode === 'subscribe' && token === process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN) {
+      console.log('✅ [LinkedIn Webhook] Verified successfully');
+      // Return the challenge string to complete verification
+      res.status(200).send(challenge || 'verified');
+    } else {
+      console.error('❌ [LinkedIn Webhook] Verification failed', {
+        modeMatch: mode === 'subscribe',
+        tokenMatch: token === process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN,
+        receivedToken: token ? '***' : 'missing',
+        expectedToken: process.env.LINKEDIN_WEBHOOK_VERIFY_TOKEN ? 'set' : 'missing'
+      });
+      res.status(403).json({
+        error: 'Verification failed',
+        message: 'Invalid verify token or mode'
+      });
+    }
+  } catch (error) {
+    console.error('❌ [LinkedIn Webhook] Verification error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 };
 
