@@ -175,6 +175,144 @@ const organizationSchema = new mongoose.Schema({
     lastScheduledRun: Date // Track last scheduled run time
   },
   
+  // Human agent escalation settings
+  escalationSettings: {
+    enabled: {
+      type: Boolean,
+      default: true
+    },
+    maxAutoReplies: {
+      type: Number,
+      default: 3, // Max auto-replies before escalation
+      min: 1,
+      max: 10
+    },
+    escalateOnNegative: {
+      type: Boolean,
+      default: true // Escalate when negative sentiment detected
+    },
+    negativeThreshold: {
+      type: Number,
+      default: 2, // Number of negative sentiments before escalation
+      min: 1,
+      max: 5
+    },
+    escalationKeywords: {
+      type: [String],
+      default: [
+        'refund', 'complaint', 'lawyer', 'sue', 'legal', 
+        'terrible', 'worst', 'horrible', 'unacceptable',
+        'manager', 'supervisor', 'corporate', 'headquarters',
+        'scam', 'fraud', 'cheat', 'lie', 'liar'
+      ]
+    },
+    lowConfidenceThreshold: {
+      type: Number,
+      default: 0.7, // Escalate if AI confidence < 70%
+      min: 0,
+      max: 1
+    },
+    lowConfidenceCount: {
+      type: Number,
+      default: 2, // Number of low-confidence replies before escalation
+      min: 1,
+      max: 5
+    },
+    assignmentMethod: {
+      type: String,
+      enum: ['round_robin', 'least_busy', 'skill_based', 'manual'],
+      default: 'round_robin'
+    },
+    autoAssign: {
+      type: Boolean,
+      default: true // Automatically assign to agent or wait for manual assignment
+    },
+    notifyAgents: {
+      type: Boolean,
+      default: true // Send notification to agents when assigned
+    },
+    notificationChannels: {
+      type: [String],
+      enum: ['email', 'push', 'sms', 'slack'],
+      default: ['email']
+    },
+    priorityLevels: {
+      urgent: {
+        keywords: {
+          type: [String],
+          default: ['urgent', 'emergency', 'asap', 'immediately', 'critical']
+        },
+        assignTo: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User' // Specific user for urgent cases
+        }
+      },
+      high: {
+        keywords: {
+          type: [String],
+          default: ['important', 'serious', 'problem', 'issue']
+        }
+      }
+    },
+    // Round-robin state
+    lastAssignedAgentIndex: {
+      type: Number,
+      default: -1
+    },
+    availableAgents: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }],
+    // Business hours (for escalation timing)
+    businessHours: {
+      enabled: {
+        type: Boolean,
+        default: false
+      },
+      timezone: {
+        type: String,
+        default: 'Asia/Kolkata'
+      },
+      schedule: {
+        monday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        tuesday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        wednesday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        thursday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        friday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        saturday: {
+          start: { type: String, default: '10:00' },
+          end: { type: String, default: '16:00' },
+          enabled: { type: Boolean, default: false }
+        },
+        sunday: {
+          start: { type: String, default: '10:00' },
+          end: { type: String, default: '16:00' },
+          enabled: { type: Boolean, default: false }
+        }
+      }
+    }
+  },
+  
   owner: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

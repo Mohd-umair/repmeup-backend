@@ -4,6 +4,8 @@ const ResponseTemplate = require('../models/ResponseTemplate');
 const cacheService = require('../services/cacheService');
 const aiService = require('../services/aiService');
 const Organization = require('../models/Organization');
+const escalationService = require('../services/escalationService');
+const User = require('../models/User');
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
@@ -398,6 +400,20 @@ exports.replyToInteraction = async (req, res, next) => {
         } else {
           replyStatus = 'failed';
           errorMessage = result.error || 'Failed to post reply to LinkedIn';
+        }
+      } else if (interaction.platform === 'whatsapp') {
+        const whatsappService = require('../integrations/whatsapp/whatsappService');
+        const result = await whatsappService.sendTextMessage(
+          interaction.author.platformId,
+          replyContent
+        );
+        
+        if (result.success && result.messageId) {
+          platformResponseId = result.messageId;
+          replyStatus = 'sent';
+        } else {
+          replyStatus = 'failed';
+          errorMessage = 'Failed to send WhatsApp message';
         }
       } else {
         replyStatus = 'failed';
@@ -993,6 +1009,241 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
 
   } catch (error) {
     console.error('Auto-reply test error:', error);
+    next(error);
+  }
+};
+
+// @desc    Get escalated interactions requiring human response
+// @route   GET /api/inbox/escalated
+// @access  Private
+exports.getEscalatedInteractions = async (req, res, next) => {
+  try {
+    const { page = 1, limit = 20, assignedToMe, unassigned } = req.query;
+    const skip = (page - 1) * limit;
+
+    const query = {
+      organization: req.user.organization._id,
+      requiresHumanResponse: true,
+      status: { $ne: 'resolved' }
+    };
+
+    // Filter by assignment
+    if (assignedToMe === 'true') {
+      query.assignedTo = req.user._id;
+    } else if (unassigned === 'true') {
+      query.assignedTo = { $exists: false };
+    }
+
+    const [interactions, total] = await Promise.all([
+      Interaction.find(query)
+        .populate('assignedTo', 'firstName lastName email')
+        .populate('platformConnection', 'platform')
+        .sort({ escalatedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      Interaction.countDocuments(query)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: interactions,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Get escalated interactions error:', error);
+    next(error);
+  }
+};
+
+// @desc    Get available agents for assignment
+// @route   GET /api/inbox/agents
+// @access  Private (Manager/Admin)
+exports.getAvailableAgents = async (req, res, next) => {
+  try {
+    const organization = await Organization.findById(req.user.organization._id);
+    
+    let agents;
+    const availableAgentIds = organization.escalationSettings?.availableAgents || [];
+    
+    if (availableAgentIds.length > 0) {
+      // Get configured agents
+      agents = await User.find({
+        _id: { $in: availableAgentIds },
+        isActive: true
+      }).select('firstName lastName email role');
+    } else {
+      // Fallback: Get all admins and managers
+      agents = await User.find({
+        organization: req.user.organization._id,
+        role: { $in: ['admin', 'manager'] },
+        isActive: true
+      }).select('firstName lastName email role');
+    }
+
+    // Get workload for each agent
+    const agentsWithWorkload = await Promise.all(
+      agents.map(async (agent) => {
+        const assignedCount = await Interaction.countDocuments({
+          assignedTo: agent._id,
+          status: 'assigned',
+          requiresHumanResponse: true
+        });
+
+        return {
+          _id: agent._id,
+          firstName: agent.firstName,
+          lastName: agent.lastName,
+          email: agent.email,
+          role: agent.role,
+          currentWorkload: assignedCount
+        };
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      data: agentsWithWorkload
+    });
+  } catch (error) {
+    console.error('Get available agents error:', error);
+    next(error);
+  }
+};
+
+// @desc    Bulk assign interactions to agent
+// @route   POST /api/inbox/assign-bulk
+// @access  Private (Manager/Admin)
+exports.bulkAssignInteractions = async (req, res, next) => {
+  try {
+    const { interactionIds, userId } = req.body;
+
+    if (!interactionIds || !Array.isArray(interactionIds) || interactionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'interactionIds array is required'
+      });
+    }
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required'
+      });
+    }
+
+    // Verify agent exists
+    const agent = await User.findById(userId);
+    if (!agent) {
+      return res.status(404).json({
+        success: false,
+        error: 'Agent not found'
+      });
+    }
+
+    // Update all interactions
+    const result = await Interaction.updateMany(
+      {
+        _id: { $in: interactionIds },
+        organization: req.user.organization._id
+      },
+      {
+        $set: {
+          assignedTo: userId,
+          assignedBy: req.user._id,
+          assignedAt: new Date(),
+          assignmentReason: 'manual',
+          status: 'assigned'
+        }
+      }
+    );
+
+    // Clear cache
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        updated: result.modifiedCount
+      },
+      message: `Successfully assigned ${result.modifiedCount} interaction(s) to ${agent.firstName} ${agent.lastName}`
+    });
+  } catch (error) {
+    console.error('Bulk assign error:', error);
+    next(error);
+  }
+};
+
+// @desc    Get escalation statistics
+// @route   GET /api/inbox/escalation-stats
+// @access  Private (Manager/Admin)
+exports.getEscalationStats = async (req, res, next) => {
+  try {
+    const { range = 'today' } = req.query;
+    
+    const stats = await escalationService.getEscalationStats(
+      req.user.organization._id,
+      range
+    );
+
+    res.status(200).json({
+      success: true,
+      data: stats
+    });
+  } catch (error) {
+    console.error('Get escalation stats error:', error);
+    next(error);
+  }
+};
+
+// @desc    Manually escalate interaction to human agent
+// @route   POST /api/inbox/:id/escalate
+// @access  Private
+exports.escalateInteractionManually = async (req, res, next) => {
+  try {
+    const { reason } = req.body;
+
+    const interaction = await Interaction.findById(req.params.id);
+
+    if (!interaction) {
+      return res.status(404).json({
+        success: false,
+        error: 'Interaction not found'
+      });
+    }
+
+    if (interaction.requiresHumanResponse) {
+      return res.status(400).json({
+        success: false,
+        error: 'Interaction is already escalated'
+      });
+    }
+
+    const organization = await Organization.findById(req.user.organization._id);
+
+    const reasons = reason ? [reason] : ['Manually escalated by user'];
+
+    await escalationService.escalateInteraction(
+      interaction,
+      organization,
+      reasons,
+      'manual'
+    );
+
+    // Clear cache
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    res.status(200).json({
+      success: true,
+      data: interaction,
+      message: 'Interaction escalated to human agent successfully'
+    });
+  } catch (error) {
+    console.error('Manual escalation error:', error);
     next(error);
   }
 };

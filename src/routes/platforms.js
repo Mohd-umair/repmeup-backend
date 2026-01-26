@@ -12,6 +12,11 @@ router.use(protect);
 // Google OAuth flow
 router.get('/google/connect', platformController.initiateGoogleConnection);
 
+// WhatsApp Business API
+router.post('/whatsapp/connect', platformController.connectWhatsApp);
+router.delete('/whatsapp/disconnect', platformController.disconnectWhatsApp);
+router.get('/whatsapp/status', platformController.getWhatsAppStatus);
+
 // Platform management
 router.get('/', platformController.getPlatformConnections);
 router.get('/:id', platformController.getPlatformConnection);

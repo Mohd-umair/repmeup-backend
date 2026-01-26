@@ -52,5 +52,33 @@ router.post('/:id/notes', inboxController.addNote);
 // Update status
 router.put('/:id/status', inboxController.updateStatus);
 
+// Escalation routes
+// Get escalated interactions requiring human response
+router.get('/escalated', inboxController.getEscalatedInteractions);
+
+// Get available agents for assignment (Manager/Admin only)
+router.get(
+  '/agents',
+  authorize('admin', 'manager'),
+  inboxController.getAvailableAgents
+);
+
+// Bulk assign interactions (Manager/Admin only)
+router.post(
+  '/assign-bulk',
+  authorize('admin', 'manager'),
+  inboxController.bulkAssignInteractions
+);
+
+// Get escalation statistics (Manager/Admin only)
+router.get(
+  '/escalation-stats',
+  authorize('admin', 'manager'),
+  inboxController.getEscalationStats
+);
+
+// Manually escalate interaction to human agent
+router.post('/:id/escalate', inboxController.escalateInteractionManually);
+
 module.exports = router;
 
