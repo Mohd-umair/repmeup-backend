@@ -4,6 +4,7 @@ const youtubeService = require('../integrations/google/youtubeService');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
+const whatsappService = require('../integrations/whatsapp/whatsappService');
 const crypto = require('crypto');
 
 /**
@@ -485,6 +486,164 @@ exports.syncPlatform = async (req, res, next) => {
       }
     });
   } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Connect WhatsApp Business API
+ * @route   POST /api/platforms/whatsapp/connect
+ * @access  Private
+ */
+exports.connectWhatsApp = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id;
+
+    // Verify WhatsApp connection
+    const verificationResult = await whatsappService.verifyConnection();
+
+    if (!verificationResult.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Failed to verify WhatsApp connection',
+        message: 'Please check your WhatsApp credentials in environment variables'
+      });
+    }
+
+    // Check if already connected
+    const existingConnection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'whatsapp',
+      isActive: true
+    });
+
+    if (existingConnection) {
+      return res.status(400).json({
+        success: false,
+        error: 'WhatsApp already connected',
+        message: 'This organization already has an active WhatsApp connection'
+      });
+    }
+
+    // Get business profile
+    const profileResult = await whatsappService.getBusinessProfile();
+
+    // Create platform connection
+    const connection = await PlatformConnection.create({
+      organization: organizationId,
+      platform: 'whatsapp',
+      platformUserId: whatsappService.phoneNumberId,
+      platformData: {
+        phoneNumberId: whatsappService.phoneNumberId,
+        businessAccountId: whatsappService.businessAccountId,
+        displayPhoneNumber: verificationResult.phoneNumber,
+        verifiedName: verificationResult.verifiedName,
+        qualityRating: verificationResult.qualityRating,
+        codeVerificationStatus: verificationResult.codeVerificationStatus,
+        businessProfile: profileResult.profile
+      },
+      status: 'connected',
+      isActive: true,
+      credentials: {
+        accessToken: whatsappService.accessToken // Encrypted in production
+      }
+    });
+
+    console.log('✅ [WhatsApp] Connection created:', connection._id);
+
+    res.status(200).json({
+      success: true,
+      data: connection,
+      message: 'WhatsApp connected successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ [WhatsApp] Connection error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Disconnect WhatsApp
+ * @route   DELETE /api/platforms/whatsapp/disconnect
+ * @access  Private
+ */
+exports.disconnectWhatsApp = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id;
+
+    const connection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'whatsapp',
+      isActive: true
+    });
+
+    if (!connection) {
+      return res.status(404).json({
+        success: false,
+        error: 'WhatsApp connection not found'
+      });
+    }
+
+    // Deactivate connection
+    connection.isActive = false;
+    connection.status = 'disconnected';
+    await connection.save();
+
+    console.log('✅ [WhatsApp] Connection disconnected:', connection._id);
+
+    res.status(200).json({
+      success: true,
+      message: 'WhatsApp disconnected successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ [WhatsApp] Disconnect error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Get WhatsApp connection status
+ * @route   GET /api/platforms/whatsapp/status
+ * @access  Private
+ */
+exports.getWhatsAppStatus = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id;
+
+    const connection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'whatsapp',
+      isActive: true
+    });
+
+    if (!connection) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          isConnected: false,
+          connection: null
+        }
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        isConnected: true,
+        connection: {
+          id: connection._id,
+          displayPhoneNumber: connection.platformData.displayPhoneNumber,
+          verifiedName: connection.platformData.verifiedName,
+          qualityRating: connection.platformData.qualityRating,
+          status: connection.status
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [WhatsApp] Status check error:', error);
     next(error);
   }
 };

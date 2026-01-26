@@ -2,6 +2,7 @@ const Interaction = require('../models/Interaction');
 const Organization = require('../models/Organization');
 const aiService = require('../services/aiService');
 const cacheService = require('../services/cacheService');
+const escalationService = require('../services/escalationService');
 
 /**
  * Process auto-reply job
@@ -177,6 +178,29 @@ async function processSingleInteraction(interactionId, organization) {
       }
     }
 
+    // CHECK ESCALATION RULES BEFORE GENERATING AUTO-REPLY
+    const escalationCheck = await escalationService.shouldEscalate(
+      interaction,
+      organization
+    );
+
+    if (escalationCheck.shouldEscalate) {
+      console.log(`🚨 [Auto-Reply] Escalating interaction ${interaction._id} to human agent`);
+      console.log(`   Reasons: ${escalationCheck.reasons.join(', ')}`);
+      console.log(`   Score: ${escalationCheck.score}`);
+      console.log(`   Type: ${escalationCheck.type}`);
+      
+      await escalationService.escalateInteraction(
+        interaction,
+        organization,
+        escalationCheck.reasons,
+        escalationCheck.type,
+        escalationCheck.metadata
+      );
+
+      return { skipped: true, reason: 'Escalated to human agent' };
+    }
+
     // Generate auto-reply
     const autoReply = await aiService.generateAutoReply(
       interaction,
@@ -186,6 +210,29 @@ async function processSingleInteraction(interactionId, organization) {
 
     if (!autoReply.eligible) {
       return { skipped: true, reason: autoReply.reason };
+    }
+
+    // Check escalation after generating reply (to check AI confidence)
+    const postReplyEscalationCheck = await escalationService.shouldEscalate(
+      interaction,
+      organization,
+      autoReply.response // Pass AI response with confidence
+    );
+
+    if (postReplyEscalationCheck.shouldEscalate) {
+      console.log(`🚨 [Auto-Reply] Escalating interaction ${interaction._id} after AI generation`);
+      console.log(`   Reasons: ${postReplyEscalationCheck.reasons.join(', ')}`);
+      console.log(`   Score: ${postReplyEscalationCheck.score}`);
+      
+      await escalationService.escalateInteraction(
+        interaction,
+        organization,
+        postReplyEscalationCheck.reasons,
+        'ai_confidence',
+        postReplyEscalationCheck.metadata
+      );
+
+      return { skipped: true, reason: 'Escalated due to low AI confidence' };
     }
 
     // Send if autoSend is enabled and no approval required

@@ -533,3 +533,177 @@ exports.handleLinkedInWebhook = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Verify WhatsApp webhook
+ * @route   GET /api/webhooks/whatsapp
+ * @access  Public (called by Meta)
+ */
+exports.verifyWhatsAppWebhook = (req, res) => {
+  try {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    console.log('💬 [WhatsApp Webhook] Verification request:', { 
+      mode, 
+      tokenProvided: !!token,
+      challengeProvided: !!challenge 
+    });
+
+    // Verify the token and mode
+    if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+      console.log('✅ [WhatsApp Webhook] Verification successful');
+      res.status(200).send(challenge);
+    } else {
+      console.error('❌ [WhatsApp Webhook] Verification failed');
+      res.sendStatus(403);
+    }
+  } catch (error) {
+    console.error('❌ [WhatsApp Webhook] Verification error:', error);
+    res.sendStatus(500);
+  }
+};
+
+/**
+ * @desc    Handle WhatsApp webhook
+ * @route   POST /api/webhooks/whatsapp
+ * @access  Public (called by Meta)
+ */
+exports.handleWhatsAppWebhook = async (req, res) => {
+  try {
+    const { webhookQueue } = require('../config/queue');
+    const whatsappService = require('../integrations/whatsapp/whatsappService');
+
+    console.log('💬 [WhatsApp Webhook] Received event');
+
+    // Verify webhook signature (Meta signature verification)
+    const signature = req.headers['x-hub-signature-256'];
+    if (signature && process.env.META_APP_SECRET) {
+      const crypto = require('crypto');
+      const expectedSignature = 'sha256=' + crypto
+        .createHmac('sha256', process.env.META_APP_SECRET)
+        .update(JSON.stringify(req.body))
+        .digest('hex');
+
+      if (signature !== expectedSignature) {
+        console.error('❌ [WhatsApp Webhook] Invalid signature');
+        return res.sendStatus(403);
+      }
+      console.log('✅ [WhatsApp Webhook] Signature verified');
+    }
+
+    // Acknowledge receipt immediately
+    res.sendStatus(200);
+
+    // Check if it's a WhatsApp Business Account event
+    if (req.body.object !== 'whatsapp_business_account') {
+      console.log('⏭️  [WhatsApp Webhook] Not a WhatsApp business account event');
+      return;
+    }
+
+    // Check if there are entries
+    if (!req.body.entry || req.body.entry.length === 0) {
+      console.log('⏭️  [WhatsApp Webhook] No entries in webhook');
+      return;
+    }
+
+    // Process each entry
+    for (const entry of req.body.entry) {
+      if (!entry.changes || entry.changes.length === 0) {
+        continue;
+      }
+
+      for (const change of entry.changes) {
+        const value = change.value;
+        
+        // Check if it's a message event
+        if (change.field === 'messages' && value.messages && value.messages.length > 0) {
+          const message = value.messages[0];
+          const phoneNumberId = value.metadata.phone_number_id;
+
+          console.log(`💬 [WhatsApp Webhook] New message from ${message.from}`);
+
+          // Find platform connection by phone number ID
+          const connection = await PlatformConnection.findOne({
+            platform: 'whatsapp',
+            'platformData.phoneNumberId': phoneNumberId,
+            isActive: true
+          }).populate('organization');
+
+          if (!connection) {
+            console.log(`⚠️  [WhatsApp Webhook] No active connection found for phone: ${phoneNumberId}`);
+            continue;
+          }
+
+          console.log(`✅ [WhatsApp Webhook] Found connection for: ${connection.platformData.verifiedName}`);
+
+          // Process the message
+          const messageData = await whatsappService.processWebhookMessage(req.body);
+
+          if (messageData.success && !messageData.skipped) {
+            // Transform to interaction
+            const interaction = await whatsappService.transformToInteraction(
+              messageData.messageData,
+              connection,
+              connection.organization
+            );
+
+            // Save interaction
+            const savedInteraction = await Interaction.create(interaction);
+            console.log(`✅ [WhatsApp] Interaction saved: ${savedInteraction._id}`);
+
+            // Mark message as read (optional)
+            try {
+              await whatsappService.markAsRead(message.id);
+            } catch (readError) {
+              console.error('❌ [WhatsApp] Failed to mark as read:', readError.message);
+            }
+
+            // Queue for auto-reply processing
+            const organization = connection.organization;
+            if (organization.autoReplySettings && organization.autoReplySettings.enabled) {
+              try {
+                const { autoReplyQueue } = require('../config/queue');
+                await autoReplyQueue.add({
+                  interactionId: savedInteraction._id.toString(),
+                  organizationId: connection.organization._id.toString(),
+                  platform: 'whatsapp'
+                }, {
+                  attempts: 3,
+                  backoff: {
+                    type: 'exponential',
+                    delay: 2000
+                  }
+                });
+                console.log(`✅ [WhatsApp] Queued for auto-reply: ${savedInteraction._id}`);
+              } catch (queueError) {
+                console.error('❌ [WhatsApp] Failed to queue auto-reply:', queueError.message);
+              }
+            }
+          }
+        } 
+        // Handle message status updates (optional)
+        else if (change.field === 'messages' && value.statuses && value.statuses.length > 0) {
+          const status = value.statuses[0];
+          console.log(`📊 [WhatsApp Webhook] Message status update: ${status.status} for ${status.id}`);
+          
+          // Update interaction status in database
+          await Interaction.updateOne(
+            { platformId: status.id, platform: 'whatsapp' },
+            { 
+              $set: { 
+                'metadata.deliveryStatus': status.status,
+                'metadata.statusTimestamp': new Date(parseInt(status.timestamp) * 1000)
+              } 
+            }
+          );
+        }
+      }
+    }
+
+  } catch (error) {
+    console.error('❌ [WhatsApp Webhook] Handler error:', error);
+    // Don't send error response as we already sent 200
+  }
+};
+
