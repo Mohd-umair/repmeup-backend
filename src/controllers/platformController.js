@@ -533,6 +533,9 @@ exports.connectWhatsApp = async (req, res, next) => {
       organization: organizationId,
       platform: 'whatsapp',
       platformUserId: whatsappService.phoneNumberId,
+      platformDisplayName: verificationResult.verifiedName,
+      accessToken: whatsappService.accessToken, // Required field
+      createdBy: req.user._id, // Required field
       platformData: {
         phoneNumberId: whatsappService.phoneNumberId,
         businessAccountId: whatsappService.businessAccountId,
@@ -543,10 +546,7 @@ exports.connectWhatsApp = async (req, res, next) => {
         businessProfile: profileResult.profile
       },
       status: 'connected',
-      isActive: true,
-      credentials: {
-        accessToken: whatsappService.accessToken // Encrypted in production
-      }
+      isActive: true
     });
 
     console.log('✅ [WhatsApp] Connection created:', connection._id);
