@@ -23,6 +23,7 @@ CORS_ORIGIN=http://localhost:4200
 # Meta/Facebook/Instagram/WhatsApp
 META_APP_ID=your_meta_app_id
 META_APP_SECRET=your_meta_app_secret
+FACEBOOK_APP_SECRET=your_meta_app_secret  # Same as META_APP_SECRET, used for data deletion
 META_REDIRECT_URI=http://localhost:3000/api/platforms/meta/callback
 META_WEBHOOK_VERIFY_TOKEN=your_webhook_verify_token
 
