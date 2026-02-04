@@ -234,9 +234,57 @@ exports.getScheduledPosts = async (req, res) => {
     .sort({ scheduledFor: 1 })
     .limit(50);
 
-    res.status(200).json({ posts });
+    // Format posts to match frontend expectations
+    const formattedPosts = posts.map(post => ({
+      _id: post._id,
+      platforms: [post.platform],
+      content: post.content,
+      mediaUrls: post.mediaUrl ? [post.mediaUrl] : [],
+      status: post.status,
+      scheduledFor: post.scheduledFor,
+      publishedAt: post.publishedAt
+    }));
+
+    res.status(200).json({ posts: formattedPosts });
   } catch (error) {
     console.error('Get scheduled posts error:', error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * @desc    Get all published posts
+ * @route   GET /api/posts/published
+ * @access  Private
+ */
+exports.getPublishedPosts = async (req, res) => {
+  try {
+    const organizationId = req.user.organization;
+
+    const posts = await ScheduledPost.find({
+      organization: organizationId,
+      status: 'published'
+    })
+    .populate('platformConnection', 'platform platformUsername')
+    .sort({ publishedAt: -1 })
+    .limit(100);
+
+    // Format posts to match frontend expectations
+    const formattedPosts = posts.map(post => ({
+      _id: post._id,
+      platforms: [post.platform],
+      content: post.content,
+      mediaUrls: post.mediaUrl ? [post.mediaUrl] : [],
+      status: post.status,
+      publishedAt: post.publishedAt,
+      platformPostId: post.platformPostId,
+      platformPostUrl: post.platformPostUrl,
+      scheduledFor: post.scheduledFor
+    }));
+
+    res.status(200).json({ posts: formattedPosts });
+  } catch (error) {
+    console.error('Get published posts error:', error);
     res.status(500).json({ message: error.message });
   }
 };
