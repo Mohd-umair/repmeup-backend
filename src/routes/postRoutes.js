@@ -47,6 +47,11 @@ router.post('/schedule', protect, postController.schedulePost);
 // @access  Private
 router.get('/scheduled', protect, postController.getScheduledPosts);
 
+// @route   GET /api/posts/published
+// @desc    Get all published posts
+// @access  Private
+router.get('/published', protect, postController.getPublishedPosts);
+
 // @route   DELETE /api/posts/scheduled/:id
 // @desc    Delete scheduled post
 // @access  Private
