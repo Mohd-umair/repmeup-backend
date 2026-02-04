@@ -111,7 +111,7 @@ exports.publishPost = async (req, res) => {
         // Publish to platform
         switch (platform.toLowerCase()) {
           case 'instagram':
-            result = await publishToInstagram(connection, post);
+            result = await publishToInstagram(connection, post, req);
             break;
           case 'facebook':
             result = await publishToFacebook(connection, post);
@@ -284,14 +284,24 @@ exports.deleteScheduledPost = async (req, res) => {
 };
 
 /**
- * Helper: Get public URL for media file
+ * Helper: Get public URL for media file (must be reachable by Instagram)
  */
-function getPublicMediaUrl(filePath) {
-  // Get the filename from the full path
+function getPublicMediaUrl(filePath, req) {
   const filename = path.basename(filePath);
   
-  // Generate public URL using the server's base URL
-  const baseUrl = process.env.BASE_URL || process.env.API_URL || 'http://localhost:3000';
+  let baseUrl = process.env.BASE_URL || process.env.API_URL;
+  
+  // When behind nginx/reverse proxy, derive from request so Instagram gets the real public URL
+  if (!baseUrl && req && req.get && req.get('host')) {
+    const protocol = req.protocol || 'https';
+    const host = req.get('host');
+    baseUrl = `${protocol}://${host}`;
+  }
+  
+  if (!baseUrl) {
+    baseUrl = 'http://localhost:3000';
+  }
+  
   const publicUrl = `${baseUrl}/api/posts/media/${filename}`;
   
   console.log(`📎 [Media] Generated public URL: ${publicUrl}`);
@@ -302,15 +312,15 @@ function getPublicMediaUrl(filePath) {
 /**
  * Helper: Publish to Instagram
  */
-async function publishToInstagram(connection, post) {
+async function publishToInstagram(connection, post, req) {
   const { content, mediaStoragePath, mediaType } = post;
 
   if (!mediaStoragePath) {
     throw new Error('Instagram posts require an image or video');
   }
 
-  // Convert local file path to publicly accessible URL
-  const mediaUrl = getPublicMediaUrl(mediaStoragePath);
+  // Convert local file path to publicly accessible URL (use req so behind-proxy URL is correct)
+  const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
   
   console.log(`📸 [Instagram] Publishing post with media: ${mediaUrl}`);
 

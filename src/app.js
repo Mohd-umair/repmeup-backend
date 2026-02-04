@@ -7,6 +7,9 @@ const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
+// Trust proxy (required when behind nginx/reverse proxy for rate-limit and correct client IP)
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet());
 
