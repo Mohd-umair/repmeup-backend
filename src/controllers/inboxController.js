@@ -6,6 +6,8 @@ const aiService = require('../services/aiService');
 const Organization = require('../models/Organization');
 const escalationService = require('../services/escalationService');
 const User = require('../models/User');
+const PlatformConnection = require('../models/PlatformConnection');
+const axios = require('axios');
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
@@ -1245,6 +1247,63 @@ exports.escalateInteractionManually = async (req, res, next) => {
   } catch (error) {
     console.error('Manual escalation error:', error);
     next(error);
+  }
+};
+
+// @desc    Get author avatar (profile picture) - proxy for Instagram/Facebook to avoid CORS
+// @route   GET /api/inbox/avatar/:platform/:userId
+// @access  Private
+exports.getAuthorAvatar = async (req, res, next) => {
+  try {
+    const { platform, userId } = req.params;
+    if (!platform || !userId) {
+      return res.status(400).json({ success: false, error: 'platform and userId required' });
+    }
+    const orgId = req.user.organization._id;
+    const connection = await PlatformConnection.findOne({
+      organization: orgId,
+      platform: platform.toLowerCase(),
+      isActive: true,
+      status: 'connected'
+    });
+    if (!connection || !connection.accessToken) {
+      return res.status(404).json({ success: false, error: 'Platform connection not found' });
+    }
+    const token = connection.accessToken;
+    const apiVersion = 'v18.0';
+
+    if (platform.toLowerCase() === 'instagram') {
+      const profileRes = await axios.get(
+        `https://graph.instagram.com/${apiVersion}/${userId}`,
+        { params: { fields: 'profile_pic', access_token: token }, timeout: 8000 }
+      );
+      const picUrl = profileRes.data?.profile_pic;
+      if (!picUrl) {
+        return res.status(404).json({ success: false, error: 'No profile picture' });
+      }
+      const imgRes = await axios.get(picUrl, { responseType: 'arraybuffer', timeout: 8000 });
+      res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
+      res.set('Cache-Control', 'private, max-age=3600');
+      res.send(Buffer.from(imgRes.data));
+      return;
+    }
+
+    if (platform.toLowerCase() === 'facebook') {
+      const picUrl = `https://graph.facebook.com/${apiVersion}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`;
+      const imgRes = await axios.get(picUrl, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 8000 });
+      res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
+      res.set('Cache-Control', 'private, max-age=3600');
+      res.send(Buffer.from(imgRes.data));
+      return;
+    }
+
+    return res.status(400).json({ success: false, error: 'Unsupported platform' });
+  } catch (error) {
+    if (error.response?.status === 404) {
+      return res.status(404).json({ success: false, error: 'Avatar not found' });
+    }
+    console.error('getAuthorAvatar error:', error.message);
+    res.status(502).json({ success: false, error: 'Failed to load avatar' });
   }
 };
 

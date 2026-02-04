@@ -5,6 +5,33 @@ class InstagramService {
   constructor() {
     this.apiVersion = 'v18.0';
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
+    this.instagramGraphUrl = `https://graph.instagram.com/${this.apiVersion}`;
+  }
+
+  /**
+   * Fetch Instagram user profile (name, profile_pic) for a user who messaged the business.
+   * Uses Instagram User Profile API (graph.instagram.com). Returns null on error.
+   */
+  async _fetchInstagramUserProfile(accessToken, userId) {
+    if (!userId) return null;
+    try {
+      const response = await axios.get(
+        `${this.instagramGraphUrl}/${userId}`,
+        {
+          params: {
+            fields: 'name,username,profile_pic',
+            access_token: accessToken,
+          },
+          timeout: 5000,
+        }
+      );
+      return response.data || null;
+    } catch (err) {
+      if (err.response?.status !== 400 && err.response?.status !== 404) {
+        console.warn(`[Instagram] Could not fetch profile for user ${userId}:`, err.message);
+      }
+      return null;
+    }
   }
 
   /**
@@ -107,7 +134,10 @@ class InstagramService {
               author: {
                 platformId: comment.from?.id,
                 username: comment.username || comment.from?.username || 'unknown',
-                name: comment.from?.username || comment.username || 'Unknown User'
+                name: comment.from?.username || comment.username || 'Unknown User',
+                avatarUrl: comment.from?.id
+                  ? `${this.baseUrl}/${comment.from.id}/picture?type=normal`
+                  : undefined
               },
               metadata: {
                 postId: media.id,
@@ -241,6 +271,7 @@ class InstagramService {
 
       const interactions = [];
       const interactionMap = new Map();
+      const profileCache = new Map();
 
       // For each conversation, get messages
       for (const conversation of allConversations) {
@@ -277,6 +308,22 @@ class InstagramService {
                             message.from?.id === platformConnection.platformPageId;
 
             if (!isFromUs && message.message) {
+              let authorName = message.from?.name || message.from?.username || 'Unknown User';
+              let avatarUrl = undefined;
+              if (message.from?.id) {
+                if (!profileCache.has(message.from.id)) {
+                  const profile = await this._fetchInstagramUserProfile(accessToken, message.from.id);
+                  profileCache.set(message.from.id, profile);
+                }
+                const profile = profileCache.get(message.from.id);
+                if (profile) {
+                  if (profile.profile_pic) avatarUrl = profile.profile_pic;
+                  if (profile.name) authorName = profile.name;
+                }
+                if (!avatarUrl) {
+                  avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
+                }
+              }
               const interaction = {
                 organization: platformConnection.organization,
                 platformConnection: platformConnection._id,
@@ -289,7 +336,8 @@ class InstagramService {
                 author: {
                   platformId: message.from?.id,
                   username: message.from?.username || 'unknown',
-                  name: message.from?.name || message.from?.username || 'Unknown User'
+                  name: authorName,
+                  avatarUrl
                 },
                 metadata: {
                   conversationId: conversation.id,
@@ -425,6 +473,240 @@ class InstagramService {
         console.error('API Response:', error.response.data);
       }
       throw error;
+    }
+  }
+  /**
+   * Create Instagram Media Container
+   * Step 1 of publishing process
+   */
+  async createMediaContainer(platformConnection, { caption, mediaUrl, mediaType }) {
+    try {
+      const { accessToken } = platformConnection;
+      const businessAccountId = this._getBusinessAccountId(platformConnection);
+
+      if (!businessAccountId) {
+        throw new Error('Instagram Business Account ID not found');
+      }
+
+      console.log(`📸 [Instagram] Creating media container for account: ${businessAccountId}`);
+
+      const params = {
+        access_token: accessToken,
+        caption: caption || ''
+      };
+
+      // Add media based on type
+      if (mediaType === 'image') {
+        params.image_url = mediaUrl;
+      } else if (mediaType === 'video') {
+        params.media_type = 'VIDEO';
+        params.video_url = mediaUrl;
+      } else {
+        throw new Error('Invalid media type. Must be "image" or "video"');
+      }
+
+      const response = await axios.post(
+        `${this.baseUrl}/${businessAccountId}/media`,
+        null,
+        { params }
+      );
+
+      console.log(`✅ [Instagram] Media container created:`, response.data.id);
+
+      return {
+        containerId: response.data.id,
+        mediaType
+      };
+    } catch (error) {
+      console.error('❌ [Instagram] Create container error:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to create media container');
+    }
+  }
+
+  /**
+   * Check Media Container Status
+   * Required for videos to ensure processing is complete
+   */
+  async checkContainerStatus(accessToken, containerId, maxAttempts = 30) {
+    console.log(`⏳ [Instagram] Checking container status: ${containerId}`);
+
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const response = await axios.get(
+          `${this.baseUrl}/${containerId}`,
+          {
+            params: {
+              access_token: accessToken,
+              fields: 'status_code'
+            }
+          }
+        );
+
+        const statusCode = response.data.status_code;
+        console.log(`📊 [Instagram] Container status (attempt ${i + 1}): ${statusCode}`);
+
+        if (statusCode === 'FINISHED') {
+          console.log(`✅ [Instagram] Container ready for publishing`);
+          return true;
+        } else if (statusCode === 'ERROR') {
+          throw new Error('Video processing failed');
+        } else if (statusCode === 'EXPIRED') {
+          throw new Error('Container expired');
+        }
+
+        // Wait 2 seconds before next check
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } catch (error) {
+        if (error.message.includes('processing') || error.message.includes('expired')) {
+          throw error;
+        }
+        console.error(`⚠️ [Instagram] Status check error (attempt ${i + 1}):`, error.message);
+      }
+    }
+
+    throw new Error('Video processing timeout - container not ready after 60 seconds');
+  }
+
+  /**
+   * Publish Media Container
+   * Step 2 of publishing process
+   */
+  async publishMediaContainer(platformConnection, containerId) {
+    try {
+      const { accessToken } = platformConnection;
+      const businessAccountId = this._getBusinessAccountId(platformConnection);
+
+      console.log(`📤 [Instagram] Publishing container: ${containerId}`);
+
+      const response = await axios.post(
+        `${this.baseUrl}/${businessAccountId}/media_publish`,
+        null,
+        {
+          params: {
+            access_token: accessToken,
+            creation_id: containerId
+          }
+        }
+      );
+
+      const postId = response.data.id;
+      console.log(`✅ [Instagram] Post published successfully: ${postId}`);
+
+      return {
+        postId,
+        postUrl: `https://www.instagram.com/p/${postId}/`
+      };
+    } catch (error) {
+      console.error('❌ [Instagram] Publish error:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to publish media');
+    }
+  }
+
+  /**
+   * Create and Publish Instagram Post (Complete Flow)
+   * Handles both images and videos
+   */
+  async createPost(platformConnection, { caption, mediaUrl, mediaType }) {
+    try {
+      if (!mediaUrl) {
+        throw new Error('Media URL is required for Instagram posts');
+      }
+
+      console.log(`🚀 [Instagram] Starting post creation flow`);
+
+      // Step 1: Create media container
+      const { containerId } = await this.createMediaContainer(platformConnection, {
+        caption,
+        mediaUrl,
+        mediaType
+      });
+
+      // Step 2: For videos, wait for processing to complete
+      if (mediaType === 'video') {
+        await this.checkContainerStatus(platformConnection.accessToken, containerId);
+      }
+
+      // Step 3: Publish the container
+      const result = await this.publishMediaContainer(platformConnection, containerId);
+
+      console.log(`🎉 [Instagram] Post creation complete!`);
+
+      return result;
+    } catch (error) {
+      console.error('❌ [Instagram] Post creation failed:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Create Carousel Post (Multiple Media)
+   */
+  async createCarouselPost(platformConnection, { caption, mediaUrls }) {
+    try {
+      const { accessToken } = platformConnection;
+      const businessAccountId = this._getBusinessAccountId(platformConnection);
+
+      if (!mediaUrls || mediaUrls.length === 0) {
+        throw new Error('At least one media URL is required for carousel posts');
+      }
+
+      if (mediaUrls.length > 10) {
+        throw new Error('Maximum 10 media items allowed in carousel');
+      }
+
+      console.log(`📸 [Instagram] Creating carousel with ${mediaUrls.length} items`);
+
+      // Step 1: Create containers for each media item
+      const containerIds = [];
+      for (const mediaItem of mediaUrls) {
+        const params = {
+          access_token: accessToken,
+          is_carousel_item: true
+        };
+
+        if (mediaItem.type === 'image') {
+          params.image_url = mediaItem.url;
+        } else if (mediaItem.type === 'video') {
+          params.media_type = 'VIDEO';
+          params.video_url = mediaItem.url;
+        }
+
+        const response = await axios.post(
+          `${this.baseUrl}/${businessAccountId}/media`,
+          null,
+          { params }
+        );
+
+        containerIds.push(response.data.id);
+        console.log(`✅ [Instagram] Carousel item ${containerIds.length} created`);
+      }
+
+      // Step 2: Create carousel container
+      const carouselResponse = await axios.post(
+        `${this.baseUrl}/${businessAccountId}/media`,
+        null,
+        {
+          params: {
+            access_token: accessToken,
+            media_type: 'CAROUSEL',
+            caption: caption || '',
+            children: containerIds.join(',')
+          }
+        }
+      );
+
+      const carouselContainerId = carouselResponse.data.id;
+      console.log(`✅ [Instagram] Carousel container created: ${carouselContainerId}`);
+
+      // Step 3: Publish carousel
+      const result = await this.publishMediaContainer(platformConnection, carouselContainerId);
+
+      console.log(`🎉 [Instagram] Carousel post published!`);
+
+      return result;
+    } catch (error) {
+      console.error('❌ [Instagram] Carousel creation failed:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to create carousel post');
     }
   }
 }

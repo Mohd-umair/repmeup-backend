@@ -19,6 +19,7 @@ router.get('/whatsapp/status', platformController.getWhatsAppStatus);
 
 // Platform management
 router.get('/', platformController.getPlatformConnections);
+router.get('/connections', platformController.getPlatformConnections); // Alias for frontend
 router.get('/:id', platformController.getPlatformConnection);
 router.delete('/:id', platformController.disconnectPlatform);
 router.post('/:id/sync', platformController.syncPlatform);

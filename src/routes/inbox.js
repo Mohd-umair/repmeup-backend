@@ -13,6 +13,9 @@ router.get('/stats', inboxController.getStats);
 // Get all interactions
 router.get('/', inboxController.getInteractions);
 
+// Get author avatar (must be before /:id)
+router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
+
 // Get single interaction
 router.get('/:id', inboxController.getInteraction);
 

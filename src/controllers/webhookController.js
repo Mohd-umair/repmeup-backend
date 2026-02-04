@@ -573,8 +573,15 @@ exports.handleWhatsAppWebhook = async (req, res) => {
   try {
     const { webhookQueue } = require('../config/queue');
     const whatsappService = require('../integrations/whatsapp/whatsappService');
+    const PlatformConnection = require('../models/PlatformConnection');
+    const Interaction = require('../models/Interaction');
 
     console.log('💬 [WhatsApp Webhook] Received event');
+    console.log('📦 [WhatsApp Webhook] Request body:', JSON.stringify(req.body, null, 2));
+    console.log('📋 [WhatsApp Webhook] Headers:', {
+      'x-hub-signature-256': req.headers['x-hub-signature-256'] ? 'present' : 'missing',
+      'content-type': req.headers['content-type']
+    });
 
     // Verify webhook signature (Meta signature verification)
     const signature = req.headers['x-hub-signature-256'];
@@ -587,9 +594,13 @@ exports.handleWhatsAppWebhook = async (req, res) => {
 
       if (signature !== expectedSignature) {
         console.error('❌ [WhatsApp Webhook] Invalid signature');
+        console.error('   Expected:', expectedSignature);
+        console.error('   Received:', signature);
         return res.sendStatus(403);
       }
       console.log('✅ [WhatsApp Webhook] Signature verified');
+    } else {
+      console.log('⚠️  [WhatsApp Webhook] Signature verification skipped (no signature or META_APP_SECRET)');
     }
 
     // Acknowledge receipt immediately
@@ -598,14 +609,19 @@ exports.handleWhatsAppWebhook = async (req, res) => {
     // Check if it's a WhatsApp Business Account event
     if (req.body.object !== 'whatsapp_business_account') {
       console.log('⏭️  [WhatsApp Webhook] Not a WhatsApp business account event');
+      console.log('   Object type:', req.body.object);
+      console.log('   Expected: whatsapp_business_account');
       return;
     }
 
     // Check if there are entries
     if (!req.body.entry || req.body.entry.length === 0) {
       console.log('⏭️  [WhatsApp Webhook] No entries in webhook');
+      console.log('   Entry count:', req.body.entry ? req.body.entry.length : 0);
       return;
     }
+
+    console.log(`📥 [WhatsApp Webhook] Processing ${req.body.entry.length} entry/entries`);
 
     // Process each entry
     for (const entry of req.body.entry) {
@@ -624,6 +640,8 @@ exports.handleWhatsAppWebhook = async (req, res) => {
           console.log(`💬 [WhatsApp Webhook] New message from ${message.from}`);
 
           // Find platform connection by phone number ID
+          console.log(`🔍 [WhatsApp Webhook] Looking for connection with phoneNumberId: ${phoneNumberId}`);
+          
           const connection = await PlatformConnection.findOne({
             platform: 'whatsapp',
             'platformData.phoneNumberId': phoneNumberId,
@@ -632,6 +650,15 @@ exports.handleWhatsAppWebhook = async (req, res) => {
 
           if (!connection) {
             console.log(`⚠️  [WhatsApp Webhook] No active connection found for phone: ${phoneNumberId}`);
+            console.log(`   Checking all WhatsApp connections...`);
+            
+            // Debug: List all WhatsApp connections
+            const allConnections = await PlatformConnection.find({ platform: 'whatsapp' });
+            console.log(`   Found ${allConnections.length} WhatsApp connection(s) in database:`);
+            allConnections.forEach((conn, idx) => {
+              console.log(`   [${idx + 1}] ID: ${conn._id}, PhoneNumberId: ${conn.platformData?.phoneNumberId}, Active: ${conn.isActive}`);
+            });
+            
             continue;
           }
 

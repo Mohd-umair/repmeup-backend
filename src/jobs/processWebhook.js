@@ -123,7 +123,10 @@ async function handleInstagramWebhook(payload, organizationId) {
             author: {
               platformId: comment.from?.id,
               username: comment.from?.username,
-              name: comment.from?.username
+              name: comment.from?.username,
+              avatarUrl: comment.from?.id
+                ? `https://graph.facebook.com/v18.0/${comment.from.id}/picture?type=normal`
+                : undefined
             },
             metadata: {
               postId: comment.media?.id,
@@ -152,7 +155,11 @@ async function handleInstagramWebhook(payload, organizationId) {
             content: message.message?.text || message.text,
             author: {
               platformId: message.from.id,
-              username: message.from.username
+              username: message.from.username,
+              name: message.from.name || message.from.username,
+              avatarUrl: message.from.id
+                ? `https://graph.facebook.com/v18.0/${message.from.id}/picture?type=normal`
+                : undefined
             },
             threadId: message.conversation_id,
             platformCreatedAt: new Date(message.timestamp),
