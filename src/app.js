@@ -57,6 +57,7 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/diagnostics', require('./routes/diagnostics'));
 app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/data-delete', require('./routes/dataDelete'));
+app.use('/api/posts', require('./routes/postRoutes'));
 // app.use('/api/labels', require('./routes/labels'));
 // app.use('/api/templates', require('./routes/templates'));
 
