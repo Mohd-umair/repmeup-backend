@@ -20,6 +20,18 @@ class FacebookService {
     try {
       const { accessToken, platformPageId, organization } = platformConnection;
 
+      // Validate platformPageId
+      if (!platformPageId) {
+        console.error('❌ [Facebook] platformPageId is missing! Cannot fetch comments.');
+        console.error('Connection details:', {
+          platform: platformConnection.platform,
+          platformUsername: platformConnection.platformUsername,
+          platformUserId: platformConnection.platformUserId,
+          platformPageId: platformConnection.platformPageId
+        });
+        throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
+      }
+
       console.log(`💬 [Facebook] Fetching comments for page: ${platformPageId}`);
 
       // Fetch posts with comments (paginated)
@@ -46,7 +58,10 @@ class FacebookService {
           nextPage = response.data.paging?.next;
           pageCount++;
         } catch (error) {
-          console.error(`Error fetching posts page ${pageCount + 1}:`, error.message);
+          console.error(`❌ [Facebook] Error fetching posts page ${pageCount + 1}:`, error.message);
+          if (error.response?.data?.error) {
+            console.error('API Error Details:', error.response.data.error);
+          }
           break;
         }
       }
