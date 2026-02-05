@@ -169,6 +169,7 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
+        'instagram_content_publish',  // Create and publish posts to Instagram
         'pages_show_list',
         'pages_read_engagement'
       ].join(','),

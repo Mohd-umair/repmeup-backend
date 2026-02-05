@@ -12,9 +12,22 @@ const userSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: [true, 'Password is required'],
+    // Password not required for OAuth users
+    required: function() {
+      return !this.oauth || !this.oauth.provider;
+    },
     minlength: 6,
     select: false
+  },
+  oauth: {
+    provider: {
+      type: String,
+      enum: ['google', 'facebook', 'linkedin', null]
+    },
+    providerId: String,
+    accessToken: String,
+    refreshToken: String,
+    profile: mongoose.Schema.Types.Mixed
   },
   firstName: {
     type: String,
@@ -90,9 +103,9 @@ const userSchema = new mongoose.Schema({
 // Note: email index is automatically created by unique: true
 userSchema.index({ organization: 1, role: 1 });
 
-// Hash password before saving
+// Hash password before saving (skip for OAuth users without password)
 userSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) {
+  if (!this.isModified('password') || !this.password) {
     return next();
   }
   

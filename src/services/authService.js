@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { generateToken, generateRefreshToken } = require('../middlewares/auth');
+const googleAuthService = require('../integrations/google/googleAuthService');
 
 class AuthService {
   /**
@@ -214,6 +215,86 @@ class AuthService {
         tempPassword // In production, this should be emailed, not returned
       };
     } catch (error) {
+      throw error;
+    }
+  }
+  /**
+   * Google OAuth Login/Signup
+   */
+  async googleAuth(googleProfile) {
+    try {
+      const { email, id: providerId, firstName, lastName, picture } = googleProfile;
+
+      // Check if user exists
+      let user = await User.findOne({ email }).populate('organization');
+
+      if (user) {
+        // User exists - update OAuth info and login
+        user.oauth = {
+          provider: 'google',
+          providerId,
+          profile: googleProfile
+        };
+        user.lastLogin = new Date();
+        
+        if (!user.avatar && picture) {
+          user.avatar = picture;
+        }
+        
+        await user.save();
+      } else {
+        // Create new user and organization
+        const organizationName = `${firstName}'s Organization`;
+        
+        const organization = await Organization.create({
+          name: organizationName,
+          owner: null,
+          subscription: {
+            plan: 'free',
+            status: 'trial',
+            startDate: new Date()
+          }
+        });
+
+        user = await User.create({
+          email,
+          firstName,
+          lastName,
+          role: 'admin',
+          organization: organization._id,
+          avatar: picture,
+          isEmailVerified: true, // Google emails are verified
+          oauth: {
+            provider: 'google',
+            providerId,
+            profile: googleProfile
+          },
+          metadata: {
+            signupSource: 'google_oauth'
+          }
+        });
+
+        // Update organization owner
+        organization.owner = user._id;
+        organization.usage.currentUsers = 1;
+        await organization.save();
+
+        // Populate organization for response
+        user = await User.findById(user._id).populate('organization');
+      }
+
+      // Generate tokens
+      const token = generateToken(user._id);
+      const refreshToken = generateRefreshToken(user._id);
+
+      return {
+        user: user.toJSON(),
+        token,
+        refreshToken,
+        isNewUser: !user.lastLogin || user.createdAt.getTime() === user.updatedAt.getTime()
+      };
+    } catch (error) {
+      console.error('Google auth error:', error);
       throw error;
     }
   }

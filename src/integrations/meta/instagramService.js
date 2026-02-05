@@ -519,7 +519,22 @@ class InstagramService {
       };
     } catch (error) {
       console.error('❌ [Instagram] Create container error:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to create media container');
+      
+      // Extract detailed error info from Instagram API
+      const apiError = error.response?.data?.error;
+      if (apiError) {
+        const detailedError = new Error(apiError.message || 'Failed to create media container');
+        detailedError.platformError = {
+          title: apiError.error_user_title || 'Instagram Error',
+          message: apiError.error_user_msg || apiError.message,
+          code: apiError.code,
+          subcode: apiError.error_subcode,
+          type: apiError.type
+        };
+        throw detailedError;
+      }
+      
+      throw new Error('Failed to create media container');
     }
   }
 
@@ -592,13 +607,49 @@ class InstagramService {
       const postId = response.data.id;
       console.log(`✅ [Instagram] Post published successfully: ${postId}`);
 
+      // Fetch the permalink (correct URL with shortcode)
+      let postUrl = `https://www.instagram.com/p/${postId}/`; // Fallback
+      try {
+        const mediaResponse = await axios.get(
+          `${this.baseUrl}/${postId}`,
+          {
+            params: {
+              access_token: accessToken,
+              fields: 'permalink'
+            }
+          }
+        );
+        
+        if (mediaResponse.data.permalink) {
+          postUrl = mediaResponse.data.permalink;
+          console.log(`✅ [Instagram] Fetched permalink: ${postUrl}`);
+        }
+      } catch (err) {
+        console.warn(`⚠️ [Instagram] Could not fetch permalink, using fallback URL`);
+      }
+
       return {
         postId,
-        postUrl: `https://www.instagram.com/p/${postId}/`
+        postUrl
       };
     } catch (error) {
       console.error('❌ [Instagram] Publish error:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to publish media');
+      
+      // Extract detailed error info from Instagram API
+      const apiError = error.response?.data?.error;
+      if (apiError) {
+        const detailedError = new Error(apiError.message || 'Failed to publish media');
+        detailedError.platformError = {
+          title: apiError.error_user_title || 'Instagram Error',
+          message: apiError.error_user_msg || apiError.message,
+          code: apiError.code,
+          subcode: apiError.error_subcode,
+          type: apiError.type
+        };
+        throw detailedError;
+      }
+      
+      throw new Error('Failed to publish media');
     }
   }
 
@@ -634,7 +685,11 @@ class InstagramService {
       return result;
     } catch (error) {
       console.error('❌ [Instagram] Post creation failed:', error.message);
-      throw error;
+      // Preserve platformError if it exists
+      if (error.platformError) {
+        throw error;
+      }
+      throw new Error(error.message || 'Failed to create Instagram post');
     }
   }
 
@@ -706,7 +761,22 @@ class InstagramService {
       return result;
     } catch (error) {
       console.error('❌ [Instagram] Carousel creation failed:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to create carousel post');
+      
+      // Extract detailed error info from Instagram API
+      const apiError = error.response?.data?.error;
+      if (apiError) {
+        const detailedError = new Error(apiError.message || 'Failed to create carousel post');
+        detailedError.platformError = {
+          title: apiError.error_user_title || 'Instagram Error',
+          message: apiError.error_user_msg || apiError.message,
+          code: apiError.code,
+          subcode: apiError.error_subcode,
+          type: apiError.type
+        };
+        throw detailedError;
+      }
+      
+      throw new Error('Failed to create carousel post');
     }
   }
 }
