@@ -144,7 +144,7 @@ router.get('/facebook/callback', async (req, res) => {
       // Continue anyway - page connections can still work
     }
     
-    // Get user pages
+    // Get user pages to verify access
     const pages = await metaAuth.getUserPages(tokenData.accessToken);
     
     if (pages.length === 0) {
@@ -153,24 +153,11 @@ router.get('/facebook/callback', async (req, res) => {
       );
     }
 
-    // Save connections for all pages
-    let savedCount = 0;
-    for (const page of pages) {
-      try {
-        await metaAuth.saveFacebookConnection(
-          userId,
-          organizationId,
-          page,
-          page.access_token
-        );
-        savedCount++;
-      } catch (error) {
-        console.error(`Failed to save page ${page.name}:`, error.message);
-      }
-    }
+    console.log(`✅ [Facebook] User has access to ${pages.length} pages. They can connect individual pages via Page Manager.`);
 
+    // Redirect to success - users will connect specific pages via Page Manager
     res.redirect(
-      `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=success&pages=${savedCount}`
+      `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=success&pages=${pages.length}&message=${encodeURIComponent('Facebook connected! Go to Page Manager to connect specific pages.')}`
     );
   } catch (error) {
     console.error('Facebook callback error:', error);
@@ -263,42 +250,10 @@ router.get('/instagram/callback', async (req, res) => {
       );
     }
 
-    // Save Instagram connections
-    let savedCount = 0;
-    let saveErrors = [];
-    
-    for (const page of pagesWithInstagram) {
-      try {
-        console.log(`💾 [Instagram] Attempting to save Instagram account: ${page.instagram_business_account.username} (ID: ${page.instagram_business_account.id})`);
-        await metaAuth.saveInstagramConnection(
-          userId,
-          organizationId,
-          page,
-          page.access_token
-        );
-        savedCount++;
-        console.log(`✅ [Instagram] Saved connection for: ${page.instagram_business_account.username}`);
-      } catch (error) {
-        console.error(`❌ [Instagram] Failed to save Instagram account:`, error.message);
-        console.error(`❌ [Instagram] Full error:`, error);
-        console.error(`❌ [Instagram] Error stack:`, error.stack);
-        saveErrors.push(error.message || error.toString());
-      }
-    }
-
-    // If no accounts were saved, treat as error with helpful message
-    if (savedCount === 0) {
-      const errorMessage = pagesWithInstagram.length > 0
-        ? `Failed to save Instagram accounts. ${saveErrors.length > 0 ? saveErrors.join('; ') : 'Please try again.'}`
-        : `No Instagram Business accounts found. Your Facebook pages are not connected to Instagram Business accounts. Please link your Instagram Business account to a Facebook Page.`;
-      
-      return res.redirect(
-        `${process.env.FRONTEND_URL}/app/settings?connection=instagram&status=error&message=${encodeURIComponent(errorMessage)}&pages=${pages.length}&instagramPages=${pagesWithInstagram.length}`
-      );
-    }
+    console.log(`✅ [Instagram] User has access to ${pagesWithInstagram.length} Instagram accounts. They can connect individual accounts via Page Manager.`);
 
     res.redirect(
-      `${process.env.FRONTEND_URL}/app/settings?connection=instagram&status=success&accounts=${savedCount}`
+      `${process.env.FRONTEND_URL}/app/settings?connection=instagram&status=success&accounts=${pagesWithInstagram.length}&message=${encodeURIComponent('Instagram connected! Use Page Manager to connect specific accounts.')}`
     );
   } catch (error) {
     console.error('Instagram callback error:', error);

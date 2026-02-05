@@ -222,7 +222,15 @@ exports.getPlatformConnections = async (req, res, next) => {
   try {
     const connections = await PlatformConnection.find({
       organization: req.user.organization._id,
-      isActive: true
+      isActive: true,
+      // Exclude user-level connections (used only for Page Manager)
+      // User-level connections have platformPageId: null AND metadata.type: 'user_token'
+      $or: [
+        { platformPageId: { $ne: null } }, // Regular page/account connections
+        { platformPageId: { $exists: false } }, // Legacy connections without platformPageId field
+        { 'metadata.type': { $ne: 'user_token' } }, // Not a user token
+        { platform: { $nin: ['facebook', 'instagram'] } } // Non-Meta platforms don't have this concept
+      ]
     }).select('-accessToken -refreshToken'); // Don't send tokens to frontend
 
     res.status(200).json({
