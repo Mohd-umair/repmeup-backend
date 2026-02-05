@@ -258,11 +258,34 @@ class InstagramService {
           nextPage = response.data.paging?.next;
           pageCount++;
         } catch (error) {
-          console.error(`Error fetching conversations page ${pageCount + 1}:`, error.message);
-          if (error.response?.data?.error?.code === 10) {
-            // Permission denied - Instagram Messaging not enabled
-            throw new Error('Instagram Messaging API not enabled. Please add Instagram Messaging product to your Meta app.');
+          console.error(`❌ [Instagram] Error fetching conversations page ${pageCount + 1}:`, error.message);
+          
+          // Log detailed error info
+          if (error.response?.data?.error) {
+            const apiError = error.response.data.error;
+            console.error('API Error Details:', {
+              message: apiError.message,
+              type: apiError.type,
+              code: apiError.code,
+              error_subcode: apiError.error_subcode,
+              fbtrace_id: apiError.fbtrace_id
+            });
+            
+            // Check for specific permission errors
+            if (apiError.code === 10 || apiError.code === 200) {
+              console.warn('⚠️ [Instagram] Instagram Messaging API requires:');
+              console.warn('   1. instagram_manage_messages permission (approved by Meta)');
+              console.warn('   2. Instagram Messaging product added to your Meta app');
+              console.warn('   3. App must be in Live mode (not Development)');
+              console.warn('   → Skipping DMs for now. Comments will still work.');
+            }
+            
+            if (apiError.code === 100) {
+              console.error('❌ [Instagram] Invalid access token or permissions issue');
+            }
           }
+          
+          // Don't throw error - just skip DMs and continue with comments
           break;
         }
       }
