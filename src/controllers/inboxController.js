@@ -1273,19 +1273,32 @@ exports.getAuthorAvatar = async (req, res, next) => {
     const apiVersion = 'v18.0';
 
     if (platform.toLowerCase() === 'instagram') {
-      const profileRes = await axios.get(
-        `https://graph.instagram.com/${apiVersion}/${userId}`,
-        { params: { fields: 'profile_pic', access_token: token }, timeout: 8000 }
-      );
-      const picUrl = profileRes.data?.profile_pic;
-      if (!picUrl) {
-        return res.status(404).json({ success: false, error: 'No profile picture' });
+      // For Instagram, try to get profile picture via Facebook Graph API
+      // Note: Instagram user profile pics via graph.instagram.com require different permissions
+      // and only work for users who've used Instagram Login, not commenters/messengers
+      try {
+        // Try Facebook Graph API endpoint (works for some Instagram user IDs)
+        const picUrl = `https://graph.facebook.com/${apiVersion}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`;
+        const imgRes = await axios.get(picUrl, { 
+          responseType: 'arraybuffer', 
+          maxRedirects: 5, 
+          timeout: 8000,
+          validateStatus: (status) => status === 200
+        });
+        
+        res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
+        res.set('Cache-Control', 'private, max-age=3600');
+        res.send(Buffer.from(imgRes.data));
+        return;
+      } catch (apiError) {
+        // If API fails, return a default Instagram avatar placeholder
+        // This is common when the user ID can't be accessed via Graph API
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Avatar not available',
+          useDefault: true 
+        });
       }
-      const imgRes = await axios.get(picUrl, { responseType: 'arraybuffer', timeout: 8000 });
-      res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
-      res.set('Cache-Control', 'private, max-age=3600');
-      res.send(Buffer.from(imgRes.data));
-      return;
     }
 
     if (platform.toLowerCase() === 'facebook') {
@@ -1299,11 +1312,35 @@ exports.getAuthorAvatar = async (req, res, next) => {
 
     return res.status(400).json({ success: false, error: 'Unsupported platform' });
   } catch (error) {
+    // Handle avatar fetch errors gracefully
     if (error.response?.status === 404) {
-      return res.status(404).json({ success: false, error: 'Avatar not found' });
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Avatar not found',
+        useDefault: true 
+      });
     }
-    console.error('getAuthorAvatar error:', error.message);
-    res.status(502).json({ success: false, error: 'Failed to load avatar' });
+    
+    if (error.response?.status === 400) {
+      // 400 errors are common for Instagram user IDs that can't be accessed
+      // Return 404 with useDefault flag instead of logging as error
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Avatar not available',
+        useDefault: true 
+      });
+    }
+    
+    // Only log unexpected errors
+    if (error.code !== 'ECONNABORTED' && error.response?.status !== 400) {
+      console.error('getAuthorAvatar error:', error.message);
+    }
+    
+    res.status(404).json({ 
+      success: false, 
+      error: 'Avatar not available',
+      useDefault: true 
+    });
   }
 };
 
