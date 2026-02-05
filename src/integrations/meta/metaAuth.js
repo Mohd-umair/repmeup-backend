@@ -267,6 +267,8 @@ class MetaAuthService {
    */
   async getUserPages(accessToken) {
     try {
+      console.log('📄 [Meta] Fetching user pages from Facebook API...');
+      
       const response = await axios.get(`${this.graphURL}/me/accounts`, {
         params: {
           access_token: accessToken,
@@ -274,10 +276,22 @@ class MetaAuthService {
         }
       });
 
-      return response.data.data || [];
+      const pages = response.data.data || [];
+      console.log(`📄 [Meta] Found ${pages.length} pages`);
+      
+      return pages;
     } catch (error) {
-      console.error('Get pages error:', error.response?.data || error.message);
-      throw new Error('Failed to get user pages');
+      console.error('❌ [Meta] Get pages error:', error.response?.data || error.message);
+      
+      // Return detailed error message
+      const apiError = error.response?.data?.error;
+      if (apiError) {
+        const errorMsg = `Facebook API Error: ${apiError.message} (Code: ${apiError.code}, Type: ${apiError.type})`;
+        console.error('API Error Details:', apiError);
+        throw new Error(errorMsg);
+      }
+      
+      throw new Error(`Failed to get user pages: ${error.message}`);
     }
   }
 
@@ -331,7 +345,58 @@ class MetaAuthService {
   }
 
   /**
-   * Save Facebook connection to database
+   * Save Facebook user-level connection (for accessing /me/accounts)
+   */
+  async saveFacebookUserConnection(userId, organizationId, userAccessToken, userInfo) {
+    try {
+      // Save or update a special "user-level" connection
+      const existingConnection = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'facebook',
+        platformUserId: userInfo.id,
+        platformPageId: null // User-level connection has no pageId
+      });
+
+      if (existingConnection) {
+        existingConnection.accessToken = userAccessToken;
+        existingConnection.tokenExpiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
+        existingConnection.status = 'connected';
+        existingConnection.isActive = true;
+        await existingConnection.save();
+        console.log(`✅ [Meta] Updated Facebook user-level connection for: ${userInfo.name}`);
+        return existingConnection;
+      }
+
+      const connection = await PlatformConnection.create({
+        organization: organizationId,
+        createdBy: userId,
+        platform: 'facebook',
+        platformUserId: userInfo.id,
+        platformUsername: userInfo.name,
+        platformDisplayName: userInfo.name,
+        platformEmail: userInfo.email,
+        platformPageId: null, // User-level connection
+        accessToken: userAccessToken,
+        tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
+        scopes: ['pages_show_list', 'pages_read_engagement'],
+        status: 'connected',
+        isActive: true,
+        metadata: {
+          type: 'user_token', // Mark this as a user-level token
+          purpose: 'page_management'
+        }
+      });
+
+      console.log(`✅ [Meta] Created Facebook user-level connection for: ${userInfo.name}`);
+      return connection;
+    } catch (error) {
+      console.error('❌ [Meta] Save Facebook user connection error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Save Facebook page connection to database
    */
   async saveFacebookConnection(userId, organizationId, pageData, pageAccessToken) {
     try {
