@@ -28,6 +28,9 @@ const metaAuth = require('../integrations/meta/metaAuth');
 // LinkedIn OAuth routes
 const linkedinAuth = require('../integrations/linkedin/linkedinAuth');
 
+// Google OAuth for authentication (login/signup)
+const googleAuthService = require('../integrations/google/googleAuthService');
+
 // Facebook OAuth
 router.get('/facebook', protect, async (req, res, next) => {
   try {
@@ -373,6 +376,78 @@ router.get('/linkedin/callback', async (req, res) => {
     console.error('❌ [LinkedIn] Callback error:', error);
     res.redirect(
       `${process.env.FRONTEND_URL}/app/settings?connection=linkedin&status=error&message=${encodeURIComponent(error.message)}`
+    );
+  }
+});
+
+// Google OAuth for Login/Signup (not platform connection)
+router.get('/google', async (req, res, next) => {
+  try {
+    const authURL = googleAuthService.getAuthURL();
+    
+    res.json({ 
+      success: true, 
+      authUrl: authURL 
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/google/callback', async (req, res) => {
+  try {
+    const { code, state, error, error_description } = req.query;
+
+    console.log('📥 [Google Auth Callback] Received callback:', {
+      hasCode: !!code,
+      hasState: !!state,
+      error: error
+    });
+
+    // Handle OAuth errors
+    if (error) {
+      console.error('❌ [Google Auth] OAuth error:', error, error_description);
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/login?status=error&message=${encodeURIComponent(error_description || error)}`
+      );
+    }
+
+    if (!code) {
+      console.error('❌ [Google Auth] Missing authorization code');
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/login?status=error&message=Missing authorization code`
+      );
+    }
+
+    // Verify state
+    try {
+      googleAuthService.verifyState(state);
+    } catch (error) {
+      console.error('❌ [Google Auth] State verification failed:', error.message);
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/login?status=error&message=Invalid state parameter`
+      );
+    }
+
+    // Exchange code for tokens
+    const tokens = await googleAuthService.getTokens(code);
+    console.log('✅ [Google Auth] Tokens obtained');
+
+    // Get user profile
+    const profile = await googleAuthService.getUserProfile(tokens.access_token);
+    console.log('✅ [Google Auth] Profile obtained:', profile.email);
+
+    // Login or signup user
+    const result = await authController.googleAuth(profile);
+
+    // Redirect to frontend with token
+    const redirectUrl = `${process.env.FRONTEND_URL}/auth/google-callback?token=${result.token}&refreshToken=${result.refreshToken}&isNewUser=${result.isNewUser}`;
+    
+    res.redirect(redirectUrl);
+  } catch (error) {
+    console.error('❌ [Google Auth] Callback error:', error);
+    res.redirect(
+      `${process.env.FRONTEND_URL}/login?status=error&message=${encodeURIComponent(error.message || 'Authentication failed')}`
     );
   }
 });

@@ -57,7 +57,7 @@ exports.publishPost = async (req, res) => {
     try {
       const { platform, content, scheduledFor } = req.body;
       const userId = req.user.id;
-      const organizationId = req.user.organization;
+      const organizationId = req.user.organization?._id || req.user.organization;
 
       if (!platform || !content) {
         return res.status(400).json({ message: 'Platform and content are required' });
@@ -93,9 +93,9 @@ exports.publishPost = async (req, res) => {
       if (scheduledFor) {
         postData.scheduledFor = new Date(scheduledFor);
         postData.status = 'scheduled';
-        
+
         const scheduledPost = await ScheduledPost.create(postData);
-        
+
         return res.status(201).json({
           message: 'Post scheduled successfully',
           post: scheduledPost
@@ -114,7 +114,7 @@ exports.publishPost = async (req, res) => {
             result = await publishToInstagram(connection, post, req);
             break;
           case 'facebook':
-            result = await publishToFacebook(connection, post);
+            result = await publishToFacebook(connection, post, req);
             break;
           default:
             throw new Error(`Publishing to ${platform} not yet implemented`);
@@ -137,11 +137,18 @@ exports.publishPost = async (req, res) => {
         post.status = 'failed';
         post.error = error.message;
         await post.save();
-        
-        res.status(500).json({ 
+
+        // Return detailed platform error if available
+        const errorResponse = {
           message: 'Failed to publish post',
-          error: error.message 
-        });
+          error: error.message
+        };
+
+        if (error.platformError) {
+          errorResponse.platformError = error.platformError;
+        }
+
+        res.status(500).json(errorResponse);
       }
     } catch (error) {
       console.error('Publish post error:', error);
@@ -165,19 +172,12 @@ exports.schedulePost = async (req, res) => {
     try {
       const { platform, content, scheduledFor } = req.body;
       const userId = req.user.id;
-      const organizationId = req.user.organization;
+      const organizationId = req.user.organization?._id || req.user.organization;
 
       if (!platform || !content || !scheduledFor) {
         return res.status(400).json({ message: 'Platform, content, and scheduledFor are required' });
       }
 
-      // Validate scheduled time is in the future
-      const scheduleDate = new Date(scheduledFor);
-      if (scheduleDate <= new Date()) {
-        return res.status(400).json({ message: 'Scheduled time must be in the future' });
-      }
-
-      // Get platform connection
       const connection = await PlatformConnection.findOne({
         organization: organizationId,
         platform: platform.toLowerCase(),
@@ -188,14 +188,13 @@ exports.schedulePost = async (req, res) => {
         return res.status(404).json({ message: `No active ${platform} connection found` });
       }
 
-      // Create scheduled post
       const postData = {
         organization: organizationId,
         user: userId,
         platform: platform.toLowerCase(),
         platformConnection: connection._id,
         content: content.trim(),
-        scheduledFor: scheduleDate,
+        scheduledFor: new Date(scheduledFor),
         status: 'scheduled'
       };
 
@@ -224,28 +223,17 @@ exports.schedulePost = async (req, res) => {
  */
 exports.getScheduledPosts = async (req, res) => {
   try {
-    const organizationId = req.user.organization;
+    const organizationId = req.user.organization?._id || req.user.organization;
 
     const posts = await ScheduledPost.find({
       organization: organizationId,
-      status: { $in: ['draft', 'scheduled', 'publishing'] }
+      status: 'scheduled'
     })
-    .populate('platformConnection', 'platform platformUsername')
-    .sort({ scheduledFor: 1 })
-    .limit(50);
+      .sort({ scheduledFor: 1 })
+      .populate('platformConnection', 'platform platformPageId platformUsername')
+      .lean();
 
-    // Format posts to match frontend expectations
-    const formattedPosts = posts.map(post => ({
-      _id: post._id,
-      platforms: [post.platform],
-      content: post.content,
-      mediaUrls: post.mediaUrl ? [post.mediaUrl] : [],
-      status: post.status,
-      scheduledFor: post.scheduledFor,
-      publishedAt: post.publishedAt
-    }));
-
-    res.status(200).json({ posts: formattedPosts });
+    res.status(200).json({ posts });
   } catch (error) {
     console.error('Get scheduled posts error:', error);
     res.status(500).json({ message: error.message });
@@ -259,30 +247,17 @@ exports.getScheduledPosts = async (req, res) => {
  */
 exports.getPublishedPosts = async (req, res) => {
   try {
-    const organizationId = req.user.organization;
+    const organizationId = req.user.organization?._id || req.user.organization;
 
     const posts = await ScheduledPost.find({
       organization: organizationId,
       status: 'published'
     })
-    .populate('platformConnection', 'platform platformUsername')
-    .sort({ publishedAt: -1 })
-    .limit(100);
+      .sort({ publishedAt: -1 })
+      .populate('platformConnection', 'platform platformPageId platformUsername')
+      .lean();
 
-    // Format posts to match frontend expectations
-    const formattedPosts = posts.map(post => ({
-      _id: post._id,
-      platforms: [post.platform],
-      content: post.content,
-      mediaUrls: post.mediaUrl ? [post.mediaUrl] : [],
-      status: post.status,
-      publishedAt: post.publishedAt,
-      platformPostId: post.platformPostId,
-      platformPostUrl: post.platformPostUrl,
-      scheduledFor: post.scheduledFor
-    }));
-
-    res.status(200).json({ posts: formattedPosts });
+    res.status(200).json({ posts });
   } catch (error) {
     console.error('Get published posts error:', error);
     res.status(500).json({ message: error.message });
@@ -296,21 +271,15 @@ exports.getPublishedPosts = async (req, res) => {
  */
 exports.deleteScheduledPost = async (req, res) => {
   try {
-    const postId = req.params.id;
-    const organizationId = req.user.organization;
-
+    const organizationId = req.user.organization?._id || req.user.organization;
     const post = await ScheduledPost.findOne({
-      _id: postId,
-      organization: organizationId
+      _id: req.params.id,
+      organization: organizationId,
+      status: 'scheduled'
     });
 
     if (!post) {
       return res.status(404).json({ message: 'Scheduled post not found' });
-    }
-
-    // Don't allow deleting already published posts
-    if (post.status === 'published') {
-      return res.status(400).json({ message: 'Cannot delete published posts' });
     }
 
     // Delete media file if exists
@@ -322,9 +291,8 @@ exports.deleteScheduledPost = async (req, res) => {
       }
     }
 
-    await post.deleteOne();
-
-    res.status(200).json({ message: 'Scheduled post deleted successfully' });
+    await ScheduledPost.findByIdAndDelete(post._id);
+    res.status(200).json({ message: 'Scheduled post deleted' });
   } catch (error) {
     console.error('Delete scheduled post error:', error);
     res.status(500).json({ message: error.message });
@@ -332,28 +300,25 @@ exports.deleteScheduledPost = async (req, res) => {
 };
 
 /**
- * Helper: Get public URL for media file (must be reachable by Instagram)
+ * Helper: Get public URL for media file (must be reachable by Instagram/Facebook)
  */
 function getPublicMediaUrl(filePath, req) {
   const filename = path.basename(filePath);
-  
+
   let baseUrl = process.env.BASE_URL || process.env.API_URL;
-  
-  // When behind nginx/reverse proxy, derive from request so Instagram gets the real public URL
+
   if (!baseUrl && req && req.get && req.get('host')) {
     const protocol = req.protocol || 'https';
     const host = req.get('host');
     baseUrl = `${protocol}://${host}`;
   }
-  
+
   if (!baseUrl) {
     baseUrl = 'http://localhost:3000';
   }
-  
+
   const publicUrl = `${baseUrl}/api/posts/media/${filename}`;
-  
   console.log(`📎 [Media] Generated public URL: ${publicUrl}`);
-  
   return publicUrl;
 }
 
@@ -367,44 +332,32 @@ async function publishToInstagram(connection, post, req) {
     throw new Error('Instagram posts require an image or video');
   }
 
-  // Convert local file path to publicly accessible URL (use req so behind-proxy URL is correct)
   const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
-  
   console.log(`📸 [Instagram] Publishing post with media: ${mediaUrl}`);
 
-  try {
-    // Create and publish post
-    const result = await instagramService.createPost(connection, {
-      caption: content,
-      mediaUrl: mediaUrl,
-      mediaType: mediaType
-    });
+  const result = await instagramService.createPost(connection, {
+    caption: content,
+    mediaUrl: mediaUrl,
+    mediaType: mediaType
+  });
 
-    return {
-      postId: result.postId,
-      postUrl: result.postUrl
-    };
-  } catch (error) {
-    console.error('❌ [Instagram] Publishing error:', error.message);
-    throw error;
-  }
+  return {
+    postId: result.postId,
+    postUrl: result.postUrl
+  };
 }
 
 /**
- * Helper: Publish to Facebook
+ * Helper: Publish to Facebook (pages_manage_posts)
  */
-async function publishToFacebook(connection, post) {
+async function publishToFacebook(connection, post, req) {
   const { content, mediaStoragePath, mediaType } = post;
-  const pageId = connection.platformPageId;
+  const payload = { message: content || ' ' };
 
-  // TODO: Implement Facebook Page Post API
-  // Real implementation requires adding pages_manage_posts to scope
-  
-  throw new Error('Facebook publishing coming soon - requires pages_manage_posts permission');
-  
-  // Real implementation will be:
-  // const result = await facebookService.createPost(connection, { message: content, mediaUrl: ... });
-  // return { postId: result.id, postUrl: `https://facebook.com/${result.id}` };
+  if (mediaStoragePath && mediaType === 'image') {
+    payload.url = getPublicMediaUrl(mediaStoragePath, req);
+  }
+
+  const result = await facebookService.createPost(connection, payload);
+  return { postId: result.postId, postUrl: result.postUrl };
 }
-
-module.exports = exports;
