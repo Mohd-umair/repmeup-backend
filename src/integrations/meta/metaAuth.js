@@ -335,11 +335,11 @@ class MetaAuthService {
    */
   async saveFacebookConnection(userId, organizationId, pageData, pageAccessToken) {
     try {
-      // Check if connection already exists
+      // Check if connection already exists (using platformUserId to match unique index)
       const existingConnection = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'facebook',
-        platformPageId: pageData.id
+        platformUserId: pageData.id
       });
 
       if (existingConnection) {
@@ -349,6 +349,7 @@ class MetaAuthService {
         existingConnection.status = 'connected';
         existingConnection.isActive = true;
         existingConnection.lastSyncAt = new Date();
+        existingConnection.platformPageId = pageData.id; // Ensure platformPageId is set
         await existingConnection.save();
         return existingConnection;
       }
