@@ -19,6 +19,7 @@ const platformConnectionSchema = new mongoose.Schema({
   platformDisplayName: String,
   platformProfilePicture: String,
   platformEmail: String,
+  platformPageId: String, // For Facebook Pages (required for fetching comments)
   
   // OAuth tokens (should be encrypted in production)
   accessToken: {
