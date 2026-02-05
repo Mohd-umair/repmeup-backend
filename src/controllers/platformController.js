@@ -474,6 +474,14 @@ exports.syncPlatform = async (req, res, next) => {
     }
     
     console.log(`📊 [Sync] Total: ${result.count} new interactions, ${autoReplyQueued} auto-replies queued`)
+    
+    // Invalidate interactions cache so frontend sees new data immediately
+    if (result.count > 0) {
+      const cacheService = require('../services/cacheService');
+      const cachePattern = `interactions:${organizationId}:*`;
+      await cacheService.delPattern(cachePattern);
+      console.log(`🗑️  [Cache] Invalidated interaction cache: ${cachePattern}`);
+    }
       
     res.status(200).json({
       success: true,

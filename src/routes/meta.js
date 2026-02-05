@@ -16,12 +16,15 @@ const metaAuth = require('../integrations/meta/metaAuth');
  */
 router.get('/pages', protect, async (req, res) => {
   try {
-    // Find user's Facebook connection (contains user access token)
+    // Find user-level Facebook connection (contains user access token for /me/accounts)
+    // User-level connections have platformPageId: null
     const fbConnection = await PlatformConnection.findOne({
-      user: req.user._id,
+      organization: req.user.organization._id,
       platform: 'facebook',
-      status: 'connected'
-    });
+      platformPageId: null, // User-level connection
+      status: 'connected',
+      isActive: true
+    }).sort({ createdAt: -1 }); // Get most recent
 
     if (!fbConnection) {
       return res.status(404).json({ 
@@ -41,12 +44,12 @@ router.get('/pages', protect, async (req, res) => {
       });
     }
 
-    // Get all connected pages/Instagram accounts for this user
+    // Get all connected pages/Instagram accounts for this organization
     const connectedAccounts = await PlatformConnection.find({
-      user: req.user._id,
-      organization: req.user.organization,
+      organization: req.user.organization._id,
       platform: { $in: ['facebook', 'instagram'] },
-      status: 'connected'
+      status: 'connected',
+      isActive: true
     });
 
     // Create a map for quick lookup
@@ -206,7 +209,7 @@ router.delete('/connections/:connectionId', protect, async (req, res) => {
     // Find and verify ownership
     const connection = await PlatformConnection.findOne({
       _id: connectionId,
-      user: req.user._id
+      organization: req.user.organization._id
     });
 
     if (!connection) {
@@ -245,10 +248,10 @@ router.delete('/connections/:connectionId', protect, async (req, res) => {
 router.get('/connections', protect, async (req, res) => {
   try {
     const connections = await PlatformConnection.find({
-      user: req.user._id,
-      organization: req.user.organization,
+      organization: req.user.organization._id,
       platform: { $in: ['facebook', 'instagram'] },
-      status: 'connected'
+      status: 'connected',
+      isActive: true
     }).sort({ createdAt: -1 });
 
     res.json({ 

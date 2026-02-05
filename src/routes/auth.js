@@ -210,6 +210,18 @@ router.get('/instagram/callback', async (req, res) => {
     // Get long-lived token
     const tokenData = await metaAuth.getLongLivedToken(shortToken);
     
+    // Get user info first
+    const userInfo = await metaAuth.getUserInfo(tokenData.accessToken);
+    
+    // Save user-level Facebook connection (needed for /me/accounts API calls)
+    try {
+      await metaAuth.saveFacebookUserConnection(userId, organizationId, tokenData.accessToken, userInfo);
+      console.log(`✅ [Meta] Saved Facebook user-level connection for page management`);
+    } catch (error) {
+      console.error(`⚠️  [Meta] Failed to save user-level connection:`, error.message);
+      // Continue anyway - page connections can still work
+    }
+    
     // Get user pages (Instagram accounts are linked to pages)
     const pages = await metaAuth.getUserPages(tokenData.accessToken);
     
