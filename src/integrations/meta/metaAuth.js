@@ -124,10 +124,10 @@ class MetaAuthService {
       redirect_uri: redirectUri,
       state: state,
       scope: [
-        'pages_show_list',           // List user's pages
-        'pages_read_engagement'      // Read page comments and engagement
-        // Note: Page access tokens (obtained when fetching pages) have permissions to reply to comments
-        // No additional user permissions needed for replying
+        'pages_show_list',             // List user's pages (required for pages_read_engagement)
+        'pages_read_engagement',      // Read page feed and comments
+        'pages_read_user_content',     // Required by Meta to use pages_manage_engagement
+        'pages_manage_engagement'       // Reply, delete, hide comments from Inbox
       ].join(','),
       response_type: 'code'
     });
@@ -442,6 +442,10 @@ class MetaAuthService {
         }
       });
 
+      // Increment usage counter (SOLID: Dependency Inversion - depend on service, not direct model manipulation)
+      const platformConnectionService = require('../../services/platformConnectionService');
+      await platformConnectionService.incrementConnectionCount(organizationId);
+
       console.log(`Facebook connection saved for page: ${pageData.name}`);
       return connection;
     } catch (error) {
@@ -521,6 +525,10 @@ class MetaAuthService {
           profilePicture: instagramAccount.profile_picture_url
         }
       });
+
+      // Increment usage counter (SOLID: Dependency Inversion)
+      const platformConnectionService = require('../../services/platformConnectionService');
+      await platformConnectionService.incrementConnectionCount(organizationId);
 
       console.log(`✅ [MetaAuth] Instagram connection saved for account: ${instagramAccount.username}`);
       return connection;
