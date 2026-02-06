@@ -18,13 +18,36 @@ exports.getUserPages = async (req, res, next) => {
     const organizationId = req.user.organization._id || req.user.organization;
 
     // Find user-level Facebook connection (needed to get pages)
-    const userConnection = await PlatformConnection.findOne({
+    // Try with metadata.type first, fallback to just platformPageId: null
+    let userConnection = await PlatformConnection.findOne({
       organization: organizationId,
       platform: 'facebook',
       platformPageId: null, // User-level connection
       'metadata.type': 'user_token',
       isActive: true
     });
+
+    // Fallback: If not found, try without metadata.type (for older connections)
+    if (!userConnection) {
+      console.log('⚠️ [Meta Pages] User connection not found with metadata.type, trying fallback query...');
+      userConnection = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'facebook',
+        platformPageId: null, // User-level connection
+        isActive: true
+      }).sort({ updatedAt: -1 }); // Get most recent
+      
+      // If found, update it with proper metadata
+      if (userConnection && !userConnection.metadata?.type) {
+        userConnection.metadata = {
+          ...userConnection.metadata,
+          type: 'user_token',
+          purpose: 'page_management'
+        };
+        await userConnection.save();
+        console.log('✅ [Meta Pages] Updated connection with metadata.type');
+      }
+    }
 
     if (!userConnection) {
       return res.status(404).json({
@@ -36,6 +59,7 @@ exports.getUserPages = async (req, res, next) => {
 
     // Fetch pages from Facebook API
     const pages = await metaAuth.getUserPages(userConnection.accessToken);
+    console.log(`📊 [Meta Pages] Fetched ${pages.length} pages from Facebook API`);
 
     // Get already connected pages for this organization
     const connectedPages = await PlatformConnection.find({
@@ -58,6 +82,7 @@ exports.getUserPages = async (req, res, next) => {
 
     // Get remaining slots for this organization
     const remainingSlots = await platformConnectionService.getRemainingSlots(organizationId);
+    console.log(`📊 [Meta Pages] Remaining slots: ${remainingSlots}, Connected pages: ${connectedPages.length}`);
 
     // Map pages with connection status
     const pagesWithStatus = pages.map(page => ({
@@ -78,7 +103,7 @@ exports.getUserPages = async (req, res, next) => {
       canConnect: remainingSlots > 0 || connectedPageIds.has(page.id) // Can reconnect already connected
     }));
 
-    res.json({
+    const responseData = {
       success: true,
       data: {
         pages: pagesWithStatus,
@@ -86,7 +111,16 @@ exports.getUserPages = async (req, res, next) => {
         totalPages: pagesWithStatus.length,
         connectedCount: connectedPages.length
       }
+    };
+    
+    console.log(`✅ [Meta Pages] Sending response:`, {
+      totalPages: pagesWithStatus.length,
+      remainingSlots,
+      connectedCount: connectedPages.length,
+      pageNames: pagesWithStatus.map(p => p.name)
     });
+    
+    res.json(responseData);
   } catch (error) {
     console.error('❌ [Meta Pages] Error fetching pages:', error);
     next(error);
