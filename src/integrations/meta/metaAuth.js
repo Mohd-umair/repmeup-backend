@@ -124,10 +124,10 @@ class MetaAuthService {
       redirect_uri: redirectUri,
       state: state,
       scope: [
-        'pages_show_list',           // List user's pages
-        'pages_read_engagement'      // Read page comments and engagement
-        // Note: Page access tokens (obtained when fetching pages) have permissions to reply to comments
-        // No additional user permissions needed for replying
+        'pages_show_list',             // List user's pages (required for pages_read_engagement)
+        'pages_read_engagement',      // Read page feed and comments
+        'pages_read_user_content',     // Required by Meta to use pages_manage_engagement
+        'pages_manage_engagement'       // Reply, delete, hide comments from Inbox
       ].join(','),
       response_type: 'code'
     });

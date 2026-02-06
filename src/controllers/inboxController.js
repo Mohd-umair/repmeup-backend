@@ -7,6 +7,7 @@ const Organization = require('../models/Organization');
 const escalationService = require('../services/escalationService');
 const User = require('../models/User');
 const PlatformConnection = require('../models/PlatformConnection');
+const googleService = require('../integrations/google/googleService');
 const axios = require('axios');
 
 // @desc    Get all interactions (inbox)
@@ -416,6 +417,28 @@ exports.replyToInteraction = async (req, res, next) => {
         } else {
           replyStatus = 'failed';
           errorMessage = 'Failed to send WhatsApp message';
+        }
+      } else if (interaction.platform === 'google' && interaction.type === 'review') {
+        const locationId = interaction.metadata?.locationId;
+        const reviewId = interaction.metadata?.reviewId || interaction.platformId;
+        if (!locationId || !reviewId) {
+          replyStatus = 'failed';
+          errorMessage = 'Missing location or review ID for Google review reply.';
+        } else {
+          try {
+            await googleService.ensureValidToken(interaction.platformConnection);
+            await googleService.replyToReview(
+              interaction.platformConnection,
+              locationId,
+              reviewId,
+              replyContent
+            );
+            platformResponseId = `google-review-${reviewId}`;
+            replyStatus = 'sent';
+          } catch (err) {
+            replyStatus = 'failed';
+            errorMessage = err.message || 'Failed to post reply to Google review';
+          }
         }
       } else {
         replyStatus = 'failed';
