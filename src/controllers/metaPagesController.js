@@ -147,7 +147,7 @@ exports.connectSelectedPages = async (req, res, next) => {
     }
 
     // Find user-level connection for access token
-    const userConnection = await PlatformConnection.findOne({
+    let userConnection = await PlatformConnection.findOne({
       organization: organizationId,
       platform: 'facebook',
       platformPageId: null,
@@ -155,13 +155,38 @@ exports.connectSelectedPages = async (req, res, next) => {
       isActive: true
     });
 
+    // Fallback: If not found, try without metadata.type (for older connections)
     if (!userConnection) {
+      console.log('⚠️ [Meta Pages Connect] User connection not found with metadata.type, trying fallback query...');
+      userConnection = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'facebook',
+        platformPageId: null, // User-level connection
+        isActive: true
+      }).sort({ updatedAt: -1 }); // Get most recent
+      
+      // If found, update it with proper metadata
+      if (userConnection && !userConnection.metadata?.type) {
+        userConnection.metadata = {
+          ...userConnection.metadata,
+          type: 'user_token',
+          purpose: 'page_management'
+        };
+        await userConnection.save();
+        console.log('✅ [Meta Pages Connect] Updated connection with metadata.type');
+      }
+    }
+
+    if (!userConnection) {
+      console.error('❌ [Meta Pages Connect] No Facebook user connection found for org:', organizationId);
       return res.status(404).json({
         success: false,
         error: 'User connection not found',
         code: 'USER_CONNECTION_NOT_FOUND'
       });
     }
+
+    console.log('✅ [Meta Pages Connect] Found user connection, fetching pages...');
 
     // Fetch pages from Facebook API to get tokens
     const pages = await metaAuth.getUserPages(userConnection.accessToken);
