@@ -362,6 +362,12 @@ class MetaAuthService {
         existingConnection.tokenExpiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
         existingConnection.status = 'connected';
         existingConnection.isActive = true;
+        // Ensure metadata is set (might be missing on old connections)
+        existingConnection.metadata = {
+          ...existingConnection.metadata,
+          type: 'user_token',
+          purpose: 'page_management'
+        };
         await existingConnection.save();
         console.log(`✅ [Meta] Updated Facebook user-level connection for: ${userInfo.name}`);
         return existingConnection;
