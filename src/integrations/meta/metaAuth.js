@@ -442,6 +442,10 @@ class MetaAuthService {
         }
       });
 
+      // Increment usage counter (SOLID: Dependency Inversion - depend on service, not direct model manipulation)
+      const platformConnectionService = require('../../services/platformConnectionService');
+      await platformConnectionService.incrementConnectionCount(organizationId);
+
       console.log(`Facebook connection saved for page: ${pageData.name}`);
       return connection;
     } catch (error) {
@@ -521,6 +525,10 @@ class MetaAuthService {
           profilePicture: instagramAccount.profile_picture_url
         }
       });
+
+      // Increment usage counter (SOLID: Dependency Inversion)
+      const platformConnectionService = require('../../services/platformConnectionService');
+      await platformConnectionService.incrementConnectionCount(organizationId);
 
       console.log(`✅ [MetaAuth] Instagram connection saved for account: ${instagramAccount.username}`);
       return connection;

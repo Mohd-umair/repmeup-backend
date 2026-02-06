@@ -158,6 +158,8 @@ exports.handleGoogleCallback = async (req, res, next) => {
         platformUserId: userInfo.platformUserId
       });
 
+      const isNewConnection = !platformConnection;
+
       if (platformConnection) {
         // Update existing connection
         platformConnection.accessToken = tokens.accessToken;
@@ -190,6 +192,12 @@ exports.handleGoogleCallback = async (req, res, next) => {
 
       await platformConnection.save();
 
+      // Increment usage counter for new connections (SOLID: Dependency Inversion)
+      if (isNewConnection) {
+        const platformConnectionService = require('../services/platformConnectionService');
+        await platformConnectionService.incrementConnectionCount(organizationId);
+      }
+
       // Trigger initial sync
       try {
         if (platform === 'youtube') {
@@ -214,28 +222,25 @@ exports.handleGoogleCallback = async (req, res, next) => {
 };
 
 /**
- * @desc    Get all platform connections for organization
+ * @desc    Get all platform connections for organization with usage/limit info
  * @route   GET /api/platforms
  * @access  Private
  */
 exports.getPlatformConnections = async (req, res, next) => {
   try {
-    const connections = await PlatformConnection.find({
-      organization: req.user.organization._id,
-      isActive: true,
-      // Exclude user-level connections (used only for Page Manager)
-      // User-level connections have platformPageId: null AND metadata.type: 'user_token'
-      $or: [
-        { platformPageId: { $ne: null } }, // Regular page/account connections
-        { platformPageId: { $exists: false } }, // Legacy connections without platformPageId field
-        { 'metadata.type': { $ne: 'user_token' } }, // Not a user token
-        { platform: { $nin: ['facebook', 'instagram'] } } // Non-Meta platforms don't have this concept
-      ]
-    }).select('-accessToken -refreshToken'); // Don't send tokens to frontend
+    const platformConnectionService = require('../services/platformConnectionService');
+    
+    // Use the service to get connections with limits (follows Single Responsibility)
+    const result = await platformConnectionService.getConnectionsWithLimits(
+      req.user.organization._id
+    );
 
     res.status(200).json({
       success: true,
-      data: connections
+      data: result.connections,
+      // Include usage and limits so frontend can show "X of Y" and disable "Add account"
+      usage: result.usage,
+      limits: result.limits
     });
   } catch (error) {
     next(error);
@@ -297,11 +302,23 @@ exports.disconnectPlatform = async (req, res, next) => {
       });
     }
 
+    // Check if this connection was counted toward the limit
+    const platformConnectionService = require('../services/platformConnectionService');
+    const wasCounted = platformConnectionService.shouldCountConnection({
+      platform: connection.platform,
+      metadata: connection.metadata
+    });
+
     // Mark as disconnected
     const platformType = connection.platform; // Store before saving
     connection.isActive = false;
     connection.status = 'disconnected';
     await connection.save();
+
+    // Decrement usage counter if this connection was counted (Dependency Inversion)
+    if (wasCounted) {
+      await platformConnectionService.decrementConnectionCount(req.user.organization._id);
+    }
 
     // Clear all cache for this organization's interactions
     // This is important because the inbox query now filters by active connections
