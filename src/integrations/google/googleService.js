@@ -314,7 +314,17 @@ class GoogleService {
           success: false, 
           count: 0, 
           interactions: [],
-          error: 'No Google Business Profile locations found. Please ensure your account has locations set up.'
+          error: 'No Google Business Profile locations found.',
+          errorDetails: {
+            code: 'NO_LOCATIONS',
+            message: 'Your Google account is connected, but no business locations were found.',
+            resolution: [
+              '1. Visit https://business.google.com/',
+              '2. Create or claim your business location',
+              '3. Verify your business',
+              '4. Click "Refresh Locations" in settings to retry'
+            ]
+          }
         };
       }
 

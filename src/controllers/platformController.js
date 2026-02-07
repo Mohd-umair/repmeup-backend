@@ -524,6 +524,106 @@ exports.syncPlatform = async (req, res, next) => {
 };
 
 /**
+ * @desc    Refresh Google Business Profile locations
+ * @route   POST /api/platforms/:id/refresh-locations
+ * @access  Private
+ */
+exports.refreshGoogleLocations = async (req, res, next) => {
+  try {
+    const connection = await PlatformConnection.findOne({
+      _id: req.params.id,
+      organization: req.user.organization._id,
+      platform: 'google',
+      isActive: true
+    });
+
+    if (!connection) {
+      return res.status(404).json({
+        success: false,
+        error: 'Google connection not found'
+      });
+    }
+
+    const googleService = require('../integrations/google/googleService');
+
+    // Ensure token is valid
+    await googleService.ensureValidToken(connection);
+
+    // Fetch accounts and locations
+    try {
+      const accounts = await googleService.getAccounts(connection.accessToken);
+      
+      if (!accounts || accounts.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'No Google Business Profile accounts found',
+          message: 'Please set up a Google Business Profile at https://business.google.com/',
+          code: 'NO_ACCOUNTS'
+        });
+      }
+
+      const account = accounts[0];
+      const locations = await googleService.getLocations(connection.accessToken, account.name);
+      
+      if (!locations || locations.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'No business locations found',
+          message: 'Your Google Business Profile account exists but has no locations. Please add a business location at https://business.google.com/',
+          code: 'NO_LOCATIONS',
+          accountName: account.accountName || account.name
+        });
+      }
+
+      // Update connection with location IDs
+      const locationIds = locations.map(loc => loc.name.split('/').pop());
+      connection.platformData = {
+        ...connection.platformData,
+        accountId: account.name,
+        accountName: account.accountName || account.name,
+        locationIds: locationIds,
+        lastLocationRefresh: new Date()
+      };
+      await connection.save();
+
+      console.log(`✅ [Google] Refreshed locations for connection ${connection._id}: Found ${locationIds.length} location(s)`);
+
+      res.json({
+        success: true,
+        message: `Found ${locations.length} business location${locations.length !== 1 ? 's' : ''}`,
+        data: {
+          locationsCount: locations.length,
+          locationNames: locations.map(loc => loc.title || loc.name),
+          accountName: account.accountName || account.name
+        }
+      });
+    } catch (apiError) {
+      console.error('❌ [Google] Location refresh API error:', apiError.message);
+      
+      // Handle specific API errors
+      if (apiError.message.includes('403')) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access denied to Google Business Profile API',
+          message: 'Please ensure you have a Google Business Profile and granted all permissions during OAuth.',
+          code: 'API_ACCESS_DENIED'
+        });
+      }
+
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to fetch locations',
+        message: apiError.message,
+        code: 'API_ERROR'
+      });
+    }
+  } catch (error) {
+    console.error('❌ [Google] Refresh locations error:', error);
+    next(error);
+  }
+};
+
+/**
  * @desc    Connect WhatsApp Business API
  * @route   POST /api/platforms/whatsapp/connect
  * @access  Private
