@@ -14,7 +14,8 @@ router.get('/stats', inboxController.getStats);
 router.get('/', inboxController.getInteractions);
 
 // Get author avatar (must be before /:id)
-router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
+// Avatar proxy endpoint removed - no longer needed (avatars are stored in interaction.author.avatarUrl)
+// router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
 
 // Get single interaction
 router.get('/:id', inboxController.getInteraction);
