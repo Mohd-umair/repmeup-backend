@@ -66,6 +66,10 @@ const subscriptionSchema = new mongoose.Schema({
       type: Number,
       default: 0
     },
+    aiCreditsThisMonth: {
+      type: Number,
+      default: 0
+    },
     lastResetAt: {
       type: Date,
       default: Date.now

@@ -32,6 +32,7 @@ const defaultPlans = [
       maxUsers: 1,
       maxPostsPerMonth: 10,
       maxAutoRepliesPerMonth: 50,
+      maxAICreditsPerMonth: 100,
       maxStorageGB: 1,
       maxAPICallsPerDay: 100
     },
@@ -57,6 +58,7 @@ const defaultPlans = [
       maxUsers: 2,
       maxPostsPerMonth: 100,
       maxAutoRepliesPerMonth: 500,
+      maxAICreditsPerMonth: 500,
       maxStorageGB: 5,
       maxAPICallsPerDay: 1000
     },
@@ -85,6 +87,7 @@ const defaultPlans = [
       maxUsers: 5,
       maxPostsPerMonth: 500,
       maxAutoRepliesPerMonth: 2000,
+      maxAICreditsPerMonth: 2000,
       maxStorageGB: 20,
       maxAPICallsPerDay: 5000
     },
@@ -119,6 +122,7 @@ const defaultPlans = [
       maxUsers: 20,
       maxPostsPerMonth: 2000,
       maxAutoRepliesPerMonth: 10000,
+      maxAICreditsPerMonth: 10000,
       maxStorageGB: 100,
       maxAPICallsPerDay: 20000
     },
@@ -154,6 +158,7 @@ const defaultPlans = [
       maxUsers: -1,
       maxPostsPerMonth: -1,
       maxAutoRepliesPerMonth: -1,
+      maxAICreditsPerMonth: -1,
       maxStorageGB: -1,
       maxAPICallsPerDay: -1
     },

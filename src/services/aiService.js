@@ -1,5 +1,6 @@
 const axios = require('axios');
 const KnowledgeBase = require('../models/KnowledgeBase');
+const aiCreditService = require('./aiCreditService');
 
 class AIService {
   constructor() {
@@ -893,6 +894,20 @@ Generate a response that addresses the customer's message appropriately.`;
         };
       }
 
+      // Check AI credits before generating (auto-reply = 1 credit)
+      const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+
+      if (!creditCheck.allowed) {
+        console.warn(`❌ [Auto-Reply] AI credit limit reached for org ${organizationId}`);
+        return {
+          eligible: false,
+          reason: creditCheck.error || 'Insufficient AI credits for auto-reply',
+          code: creditCheck.code || 'AI_CREDITS_EXCEEDED',
+          creditsNeeded: 1,
+          creditsRemaining: creditCheck.remaining
+        };
+      }
+
       // Generate response
       const response = await this.generateResponse(interaction, organizationId);
 
@@ -913,9 +928,17 @@ Generate a response that addresses the customer's message appropriately.`;
         };
       }
 
+      // Deduct AI credits after successful generation
+      await aiCreditService.deductCredits(organizationId, 1, {
+        operation: 'auto_reply',
+        interactionId: interaction._id.toString(),
+        platform: interaction.platform
+      });
+
       return {
         eligible: true,
-        response: response
+        response: response,
+        creditsUsed: 1
       };
     } catch (error) {
       console.error('Auto-reply generation error:', error.message);

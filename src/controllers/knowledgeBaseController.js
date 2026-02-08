@@ -7,6 +7,7 @@ const fs = require('fs').promises;
 // Services (Dependency Injection - SOLID Principle)
 const webScraperService = require('../services/webScraperService');
 const contentSummarizerService = require('../services/contentSummarizerService');
+const aiCreditService = require('../services/aiCreditService');
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -215,7 +216,7 @@ exports.createPDFKnowledgeBase = async (req, res) => {
  */
 exports.createURLKnowledgeBase = async (req, res) => {
   try {
-    const { url, title, category, tags, priority, focus = 'overview' } = req.body;
+    const { url, title, category, tags, priority, focus = 'overview', targetWordCount, targetTagCount } = req.body;
 
     if (!url) {
       return res.status(400).json({
@@ -224,7 +225,36 @@ exports.createURLKnowledgeBase = async (req, res) => {
       });
     }
 
-    // Step 1: Scrape the website (WebScraperService - Single Responsibility)
+    // Step 1: Estimate and check AI credits
+    const estimatedCredits = aiCreditService.calculateCreditsFromWordCount(
+      targetWordCount || 2000,
+      targetTagCount || 10
+    );
+
+    console.log(`💰 [KB] Estimated credits: ${estimatedCredits}`);
+
+    const creditCheck = await aiCreditService.checkCredits(
+      req.user.organization._id || req.user.organization,
+      estimatedCredits
+    );
+
+    if (!creditCheck.allowed) {
+      console.warn(`❌ [KB] AI credit limit reached for org ${req.user.organization._id || req.user.organization}`);
+      return res.status(403).json({
+        success: false,
+        error: creditCheck.error || 'Insufficient AI credits',
+        code: creditCheck.code || 'AI_CREDITS_EXCEEDED',
+        data: {
+          current: creditCheck.current,
+          limit: creditCheck.limit,
+          remaining: creditCheck.remaining,
+          needed: estimatedCredits,
+          exceededBy: creditCheck.exceededBy
+        }
+      });
+    }
+
+    // Step 2: Scrape the website (WebScraperService - Single Responsibility)
     console.log(`🔍 [KB] Scraping URL: ${url}`);
     const scrapedData = await webScraperService.scrape(url);
     console.log(`✅ [KB] Scraped content length: ${scrapedData.content.length} characters`);
@@ -236,7 +266,9 @@ exports.createURLKnowledgeBase = async (req, res) => {
       {
         title: title || scrapedData.title,
         url: url,
-        focus: focus // 'overview', 'key_points', or 'detailed'
+        focus: focus,
+        targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
+        targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
       }
     );
     console.log(`✅ [KB] Summary generated: ${summaryData.summaryLength} characters (${summaryData.compressionRatio} of original)`);
@@ -271,6 +303,24 @@ exports.createURLKnowledgeBase = async (req, res) => {
 
     await knowledgeBase.save();
 
+    // Step 5: Deduct actual AI credits used
+    const actualWordCount = summaryData.summary.trim().split(/\s+/).length;
+    const actualCost = aiCreditService.calculateCreditsFromWordCount(
+      actualWordCount,
+      summaryData.tags.length
+    );
+
+    await aiCreditService.deductCredits(
+      req.user.organization._id || req.user.organization,
+      actualCost,
+      {
+        operation: 'knowledge_base_from_url',
+        url: url,
+        wordCount: actualWordCount,
+        tagCount: summaryData.tags.length
+      }
+    );
+
     res.status(201).json({
       success: true,
       data: {
@@ -281,7 +331,8 @@ exports.createURLKnowledgeBase = async (req, res) => {
           compressionRatio: summaryData.compressionRatio,
           keyPointsCount: summaryData.keyPoints.length,
           tagsCount: summaryData.tags.length
-        }
+        },
+        creditsUsed: actualCost
       },
       message: 'Knowledge base created from URL with AI summary successfully'
     });

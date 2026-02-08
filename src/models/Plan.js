@@ -67,6 +67,12 @@ const planSchema = new mongoose.Schema({
       required: true,
       // -1 = unlimited
     },
+    maxAICreditsPerMonth: {
+      type: Number,
+      required: true,
+      default: 500,
+      // -1 = unlimited
+    },
     maxStorageGB: {
       type: Number,
       default: 5,
