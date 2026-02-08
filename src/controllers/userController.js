@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const Organization = require('../models/Organization');
+const Subscription = require('../models/Subscription');
 const Interaction = require('../models/Interaction');
 
 // @desc    Get all users in organization
@@ -142,12 +143,20 @@ exports.createUser = async (req, res, next) => {
       });
     }
 
-    // Check organization limits
+    // Check user limits: prefer Subscription (plan from DB) when present, else Organization limits
     const organization = await Organization.findById(organizationId);
-    if (organization.usage.currentUsers >= organization.limits.maxUsers) {
+    const subscription = await Subscription.findOne({ organization: organizationId });
+    const currentUserCount = await User.countDocuments({ organization: organizationId, isActive: true });
+
+    const maxUsers = subscription
+      ? subscription.limits.maxUsers
+      : (organization.limits?.maxUsers ?? 3);
+    const isUnlimited = maxUsers === -1;
+
+    if (!isUnlimited && currentUserCount >= maxUsers) {
       return res.status(400).json({
         success: false,
-        error: `User limit reached. Your plan allows ${organization.limits.maxUsers} users.`
+        error: `User limit reached. Your plan allows ${maxUsers} users. Upgrade to add more team members.`
       });
     }
 
@@ -162,10 +171,15 @@ exports.createUser = async (req, res, next) => {
       isActive: true
     });
 
-    // Update organization user count
+    // Update organization and subscription user counts
     await Organization.findByIdAndUpdate(organizationId, {
       $inc: { 'usage.currentUsers': 1 }
     });
+    if (subscription) {
+      await Subscription.findByIdAndUpdate(subscription._id, {
+        $inc: { 'usage.activeUsers': 1 }
+      });
+    }
 
     // Return user without password
     const userResponse = await User.findById(user._id).select('-password');
@@ -317,10 +331,18 @@ exports.deleteUser = async (req, res, next) => {
       { $unset: { assignedTo: '', assignedAt: '' } }
     );
 
-    // Update organization user count
+    // Update organization and subscription user counts
     await Organization.findByIdAndUpdate(req.user.organization._id, {
       $inc: { 'usage.currentUsers': -1 }
     });
+    const subscription = await Subscription.findOne({
+      organization: req.user.organization._id
+    });
+    if (subscription) {
+      await Subscription.findByIdAndUpdate(subscription._id, {
+        $inc: { 'usage.activeUsers': -1 }
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -479,6 +501,8 @@ exports.getAvailableAgents = async (req, res, next) => {
 
         return {
           _id: agent._id,
+          firstName: agent.firstName,
+          lastName: agent.lastName,
           name: `${agent.firstName} ${agent.lastName}`,
           email: agent.email,
           role: agent.role,

@@ -195,6 +195,28 @@ const interactionSchema = new mongoose.Schema({
     enum: ['manual', 'auto_rule', 'escalation', 'ai_unable']
   },
   
+  // Assignment History (tracks all assignments over time)
+  assignmentHistory: [{
+    assignedTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null  // Can be null for unassignment events
+    },
+    assignedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
+    assignedAt: {
+      type: Date,
+      default: Date.now
+    },
+    reason: {
+      type: String,
+      enum: ['manual', 'auto_rule', 'escalation', 'ai_unable', 'reassignment', 'unassignment']
+    }
+  }],
+  
   // Labels & categorization
   labels: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -378,6 +400,18 @@ interactionSchema.methods.assignTo = function(userId, assignedBy, reason = 'manu
   this.assignedAt = new Date();
   this.assignmentReason = reason;
   this.status = 'assigned';
+  
+  // Add to assignment history
+  if (!this.assignmentHistory) {
+    this.assignmentHistory = [];
+  }
+  this.assignmentHistory.push({
+    assignedTo: userId,
+    assignedBy: assignedBy,
+    assignedAt: new Date(),
+    reason: reason
+  });
+  
   return this.save();
 };
 
