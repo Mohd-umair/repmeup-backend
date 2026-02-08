@@ -362,6 +362,7 @@ class MetaAuthService {
         existingConnection.tokenExpiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
         existingConnection.status = 'connected';
         existingConnection.isActive = true;
+        existingConnection.usesAccountSlot = false; // User-level token does not count toward plan limit
         // Ensure metadata is set (might be missing on old connections)
         existingConnection.metadata = {
           ...existingConnection.metadata,
@@ -387,6 +388,7 @@ class MetaAuthService {
         scopes: ['pages_show_list', 'pages_read_engagement'],
         status: 'connected',
         isActive: true,
+        usesAccountSlot: false, // User-level token does not count toward plan limit
         metadata: {
           type: 'user_token', // Mark this as a user-level token
           purpose: 'page_management'
