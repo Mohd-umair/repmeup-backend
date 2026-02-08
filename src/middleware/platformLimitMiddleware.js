@@ -25,8 +25,8 @@ exports.checkConnectionLimit = async (req, res, next) => {
     if (!result.canConnect) {
       return res.status(403).json({
         success: false,
-        error: result.reason === 'PLATFORM_LIMIT_REACHED' 
-          ? `You've reached your plan limit of ${result.limit} connected accounts. Please upgrade your plan or disconnect an existing account to add a new one.`
+        error: result.reason === 'PLATFORM_LIMIT_REACHED'
+          ? `Your plan allows ${result.limit} social account${result.limit !== 1 ? 's' : ''}. You have ${result.current} connected. Please upgrade your plan or disconnect an account to add another.`
           : result.reason,
         code: result.reason,
         data: {

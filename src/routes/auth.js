@@ -24,6 +24,7 @@ router.post(
 
 // Meta (Facebook/Instagram) OAuth routes
 const metaAuth = require('../integrations/meta/metaAuth');
+const { checkConnectionLimit } = require('../middleware/platformLimitMiddleware');
 
 // LinkedIn OAuth routes
 const linkedinAuth = require('../integrations/linkedin/linkedinAuth');
@@ -31,8 +32,8 @@ const linkedinAuth = require('../integrations/linkedin/linkedinAuth');
 // Google OAuth for authentication (login/signup)
 const googleAuthService = require('../integrations/google/googleAuthService');
 
-// Facebook OAuth
-router.get('/facebook', protect, async (req, res, next) => {
+// Facebook OAuth - check plan limit before starting OAuth
+router.get('/facebook', protect, checkConnectionLimit, async (req, res, next) => {
   try {
     const authURL = metaAuth.getFacebookAuthURL(
       req.user.id,
@@ -167,8 +168,8 @@ router.get('/facebook/callback', async (req, res) => {
   }
 });
 
-// Instagram OAuth
-router.get('/instagram', protect, async (req, res, next) => {
+// Instagram OAuth - check plan limit before starting OAuth
+router.get('/instagram', protect, checkConnectionLimit, async (req, res, next) => {
   try {
     const authURL = metaAuth.getInstagramAuthURL(
       req.user.id,
