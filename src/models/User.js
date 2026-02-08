@@ -44,6 +44,9 @@ const userSchema = new mongoose.Schema({
     enum: ['admin', 'manager', 'agent', 'viewer'],
     default: 'agent'
   },
+  permissions: [{
+    type: String
+  }],
   organization: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Organization',

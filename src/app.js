@@ -62,6 +62,11 @@ app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/data-delete', require('./routes/dataDelete'));
 app.use('/api/posts', require('./routes/postRoutes'));
 app.use('/api/meta', require('./routes/meta'));
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/menus', require('./routes/menus'));
+app.use('/api/subscription', require('./routes/subscription'));
+app.use('/api/social-accounts', require('./routes/socialAccounts'));
+app.use('/api/plans', require('./routes/plans'));
 // app.use('/api/labels', require('./routes/labels'));
 // app.use('/api/templates', require('./routes/templates'));
 

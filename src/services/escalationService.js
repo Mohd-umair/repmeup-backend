@@ -420,22 +420,36 @@ class EscalationService {
    */
   async notifyAgent(agent, interaction, organization) {
     try {
-      // TODO: Implement actual notifications
-      // For now, just log
-      console.log(`📧 [Escalation] Notification sent to ${agent.email}`);
+      console.log(`📧 [Escalation] Sending notification to ${agent.email}`);
       console.log(`   Interaction: ${interaction._id}`);
       console.log(`   Platform: ${interaction.platform}`);
       console.log(`   Type: ${interaction.type}`);
-      console.log(`   Content: ${interaction.content.substring(0, 100)}...`);
 
-      // Future implementation:
-      // - Send email via SendGrid
-      // - Send push notification
-      // - Send Slack message
-      // - Send SMS via Twilio
+      // Create in-app notification
+      const Notification = require('../models/Notification');
+      await Notification.create({
+        user: agent._id,
+        organization: organization._id,
+        type: 'escalation',
+        title: 'Interaction Escalated to You',
+        message: `A ${interaction.type} from ${interaction.platform} requires your attention.`,
+        relatedTo: {
+          model: 'Interaction',
+          id: interaction._id
+        },
+        actionUrl: `/app/inbox/${interaction._id}`,
+        deliveryMethod: ['in_app', 'email']
+      });
+      console.log(`🔔 [Escalation] In-app notification created`);
+
+      // Send email notification
+      const emailService = require('../services/emailService');
+      await emailService.sendAssignmentNotification(agent, interaction);
+      console.log(`✅ [Escalation] Email sent to ${agent.email}`);
 
     } catch (error) {
       console.error('❌ [Escalation] Error sending notification:', error);
+      // Don't fail escalation if notification fails
     }
   }
 

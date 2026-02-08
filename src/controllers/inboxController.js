@@ -149,6 +149,9 @@ exports.getInteractions = async (req, res, next) => {
     // Execute query
     const interactions = await Interaction.find(query)
       .populate('assignedTo', 'firstName lastName email avatar')
+      .populate('assignedBy', 'firstName lastName email')
+      .populate('assignmentHistory.assignedTo', 'firstName lastName email')
+      .populate('assignmentHistory.assignedBy', 'firstName lastName email')
       .populate('labels', 'name color icon')
       .populate('replies.sentBy', 'firstName lastName')
       .populate('platformConnection', 'platform isActive status') // Populate to verify
@@ -189,6 +192,9 @@ exports.getInteraction = async (req, res, next) => {
   try {
     const interaction = await Interaction.findById(req.params.id)
       .populate('assignedTo', 'firstName lastName email avatar')
+      .populate('assignedBy', 'firstName lastName email')
+      .populate('assignmentHistory.assignedTo', 'firstName lastName email')
+      .populate('assignmentHistory.assignedBy', 'firstName lastName email')
       .populate('labels')
       .populate('replies.sentBy', 'firstName lastName avatar')
       .populate('internalNotes.addedBy', 'firstName lastName avatar');
@@ -514,7 +520,7 @@ exports.replyToInteraction = async (req, res, next) => {
   }
 };
 
-// @desc    Assign interaction to agent
+// @desc    Assign interaction to agent (or unassign if userId is empty)
 // @route   PUT /api/inbox/:id/assign
 // @access  Private (Manager/Admin)
 exports.assignInteraction = async (req, res, next) => {
@@ -530,9 +536,81 @@ exports.assignInteraction = async (req, res, next) => {
       });
     }
 
+    // Handle unassignment (empty userId)
+    if (!userId || userId === '') {
+      // Track unassignment in history (with null assignedTo)
+      if (!interaction.assignmentHistory) {
+        interaction.assignmentHistory = [];
+      }
+      interaction.assignmentHistory.push({
+        assignedTo: null,
+        assignedBy: req.user._id,
+        assignedAt: new Date(),
+        reason: 'unassignment'
+      });
+
+      interaction.assignedTo = undefined;
+      interaction.assignedBy = undefined;
+      interaction.assignedAt = undefined;
+      interaction.assignmentReason = undefined;
+      interaction.status = 'pending';
+      await interaction.save();
+
+      // Clear cache
+      await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+      return res.status(200).json({
+        success: true,
+        data: interaction,
+        message: 'Interaction unassigned successfully'
+      });
+    }
+
+    // Verify agent exists
+    const agent = await User.findById(userId);
+    if (!agent) {
+      return res.status(404).json({
+        success: false,
+        error: 'Agent not found'
+      });
+    }
+
     await interaction.assignTo(userId, req.user._id, reason || 'manual');
 
-    // TODO: Send notification to assigned user
+    // Populate assignedTo and assignedBy for response
+    await interaction.populate('assignedTo', 'firstName lastName email');
+    await interaction.populate('assignedBy', 'firstName lastName email');
+
+    // Create in-app notification
+    const Notification = require('../models/Notification');
+    try {
+      await Notification.create({
+        user: userId,
+        organization: req.user.organization._id,
+        type: 'assignment',
+        title: 'New Interaction Assigned',
+        message: `A ${interaction.type} from ${interaction.platform} has been assigned to you.`,
+        relatedTo: {
+          model: 'Interaction',
+          id: interaction._id
+        },
+        actionUrl: `/app/inbox/${interaction._id}`,
+        deliveryMethod: ['in_app', 'email']
+      });
+      console.log(`🔔 [Assignment] In-app notification created for ${agent.email}`);
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError);
+    }
+
+    // Send email notification
+    const emailService = require('../services/emailService');
+    try {
+      await emailService.sendAssignmentNotification(agent, interaction);
+      console.log(`📧 [Assignment] Email sent to ${agent.email}`);
+    } catch (emailError) {
+      console.error('Failed to send assignment email:', emailError);
+      // Don't fail the assignment if email fails
+    }
 
     // Clear cache
     await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
@@ -540,7 +618,7 @@ exports.assignInteraction = async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: interaction,
-      message: 'Interaction assigned successfully'
+      message: `Interaction assigned to ${agent.firstName} ${agent.lastName} successfully`
     });
   } catch (error) {
     next(error);
@@ -1062,6 +1140,7 @@ exports.getEscalatedInteractions = async (req, res, next) => {
     const [interactions, total] = await Promise.all([
       Interaction.find(query)
         .populate('assignedTo', 'firstName lastName email')
+        .populate('assignedBy', 'firstName lastName email')
         .populate('platformConnection', 'platform')
         .sort({ escalatedAt: -1, createdAt: -1 })
         .skip(skip)
