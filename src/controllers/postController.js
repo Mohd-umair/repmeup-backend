@@ -345,11 +345,16 @@ function getPublicMediaUrl(filePath, req) {
   }
 
   if (!baseUrl) {
-    baseUrl = 'http://localhost:3000';
+    // Default to production URL if available, otherwise localhost
+    baseUrl = 'https://repmeup.in';
   }
+
+  // Ensure baseUrl doesn't have /api at the end
+  baseUrl = baseUrl.replace(/\/api\/?$/, '');
 
   const publicUrl = `${baseUrl}/api/posts/media/${filename}`;
   console.log(`📎 [Media] Generated public URL: ${publicUrl}`);
+  console.log(`📎 [Media] Base URL: ${baseUrl}, Protocol: ${req?.protocol}, Host: ${req?.get?.('host')}`);
   return publicUrl;
 }
 
@@ -383,12 +388,33 @@ async function publishToInstagram(connection, post, req) {
  */
 async function publishToFacebook(connection, post, req) {
   const { content, mediaStoragePath, mediaType } = post;
-  const payload = { message: content || ' ' };
-
+  
+  // If there's media, try to post with image first
   if (mediaStoragePath && mediaType === 'image') {
-    payload.url = getPublicMediaUrl(mediaStoragePath, req);
+    try {
+      const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
+      console.log(`📸 [Facebook] Attempting to publish with image: ${mediaUrl}`);
+      
+      const payload = { 
+        message: content || ' ',
+        url: mediaUrl 
+      };
+      
+      const result = await facebookService.createPost(connection, payload);
+      return { postId: result.postId, postUrl: result.postUrl };
+    } catch (imageError) {
+      console.warn(`⚠️ [Facebook] Image post failed, falling back to text-only post:`, imageError.message);
+      
+      // Fallback: Post as text-only to feed
+      const textPayload = { message: content || 'Posted from RepMeUp' };
+      const result = await facebookService.createPost(connection, textPayload);
+      return { postId: result.postId, postUrl: result.postUrl };
+    }
   }
-
+  
+  // Text-only post
+  console.log(`📝 [Facebook] Publishing text-only post`);
+  const payload = { message: content || 'Posted from RepMeUp' };
   const result = await facebookService.createPost(connection, payload);
   return { postId: result.postId, postUrl: result.postUrl };
 }
