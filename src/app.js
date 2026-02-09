@@ -7,6 +7,9 @@ const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
+// Trust proxy (required when behind nginx/reverse proxy for rate-limit and correct client IP)
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet());
 
@@ -52,9 +55,20 @@ app.use('/api/inbox', require('./routes/inbox'));
 app.use('/api/knowledge-base', require('./routes/knowledgeBase'));
 app.use('/api/platforms', require('./routes/platforms'));
 app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/organizations', require('./routes/organizations'));
+app.use('/api/users', require('./routes/users'));
+app.use('/api/diagnostics', require('./routes/diagnostics'));
+app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/data-delete', require('./routes/dataDelete'));
+app.use('/api/posts', require('./routes/postRoutes'));
+app.use('/api/meta', require('./routes/meta'));
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/menus', require('./routes/menus'));
+app.use('/api/subscription', require('./routes/subscription'));
+app.use('/api/social-accounts', require('./routes/socialAccounts'));
+app.use('/api/plans', require('./routes/plans'));
 // app.use('/api/labels', require('./routes/labels'));
 // app.use('/api/templates', require('./routes/templates'));
-// app.use('/api/analytics', require('./routes/analytics'));
 
 // 404 handler
 app.use((req, res) => {

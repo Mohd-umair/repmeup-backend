@@ -53,6 +53,38 @@ async function startServer() {
     await connectRedis();
     console.log('✅ Redis connected successfully');
 
+    // Initialize queue processors
+    const { webhookQueue, aiQueue, autoReplyQueue, syncQueue } = require('./config/queue');
+    const processWebhook = require('./jobs/processWebhook');
+    const processAI = require('./jobs/processAI');
+    const processAutoReply = require('./jobs/processAutoReply');
+
+    // Start webhook queue processor
+    webhookQueue.process(async (job) => {
+      console.log(`\n📥 [Queue] Processing webhook job ${job.id}`);
+      return await processWebhook(job);
+    });
+    console.log('✅ Webhook queue processor started');
+
+    // Start AI queue processor
+    aiQueue.process(async (job) => {
+      console.log(`\n🤖 [Queue] Processing AI job ${job.id}`);
+      return await processAI(job);
+    });
+    console.log('✅ AI queue processor started');
+
+    // Start auto-reply queue processor
+    autoReplyQueue.process(async (job) => {
+      console.log(`\n💬 [Queue] Processing auto-reply job ${job.id}`);
+      return await processAutoReply(job);
+    });
+    console.log('✅ Auto-reply queue processor started');
+
+    // Initialize auto-reply scheduler
+    const autoReplyScheduler = require('./services/autoReplyScheduler');
+    await autoReplyScheduler.initializeScheduledJobs();
+    console.log('✅ Auto-reply scheduler initialized');
+
     // Start listening
     server.listen(PORT, () => {
       console.log(`

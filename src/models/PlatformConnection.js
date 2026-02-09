@@ -9,7 +9,7 @@ const platformConnectionSchema = new mongoose.Schema({
   
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp'],
+    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin'],
     required: true
   },
   
@@ -19,6 +19,7 @@ const platformConnectionSchema = new mongoose.Schema({
   platformDisplayName: String,
   platformProfilePicture: String,
   platformEmail: String,
+  platformPageId: String, // For Facebook Pages (required for fetching comments)
   
   // OAuth tokens (should be encrypted in production)
   accessToken: {
@@ -48,7 +49,41 @@ const platformConnectionSchema = new mongoose.Schema({
     phoneNumberId: String,
     phoneNumber: String,
     displayPhoneNumber: String,
-    businessAccountId: String
+    businessAccountId: String,
+    
+    // For LinkedIn
+    organizationId: String,
+    organizationName: String,
+    organizationUrn: String,
+    personUrn: String
+  },
+  
+  // Metadata for connection relationships
+  metadata: {
+    type: {
+      type: String,
+      enum: ['user_token', 'account_token', 'page_token'],
+      default: 'account_token'
+    },
+    purpose: {
+      type: String,
+      enum: ['page_management', 'publishing', 'analytics'],
+      default: 'publishing'
+    },
+    // Link Instagram to parent Facebook Page
+    parentConnection: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PlatformConnection',
+      default: null
+    },
+    accountType: {
+      type: String,
+      enum: ['business', 'personal', 'creator'],
+      default: 'business'
+    },
+    profilePicture: String,
+    followerCount: Number,
+    isVerified: Boolean
   },
   
   // Connection status
@@ -58,9 +93,19 @@ const platformConnectionSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['connected', 'disconnected', 'error', 'token_expired'],
-    default: 'connected'
+    enum: ['available', 'connected', 'disconnected', 'error', 'token_expired'],
+    default: 'available'
   },
+  
+  // Plan enforcement - does this connection count toward account limit?
+  usesAccountSlot: {
+    type: Boolean,
+    default: true
+  },
+  
+  // When the user explicitly connected this account
+  connectedAt: Date,
+  disconnectedAt: Date,
   lastSyncAt: Date,
   lastError: {
     message: String,

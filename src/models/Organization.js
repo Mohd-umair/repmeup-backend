@@ -97,6 +97,222 @@ const organizationSchema = new mongoose.Schema({
     customLogo: String
   },
   
+  // Auto-reply settings
+  autoReplySettings: {
+    enabled: {
+      type: Boolean,
+      default: false
+    },
+    enabledPlatforms: {
+      type: [String],
+      default: ['youtube', 'instagram', 'facebook', 'google']
+    },
+    enabledTypes: {
+      type: [String],
+      default: ['comment', 'review']
+    },
+    // Sentiment filter: control which sentiments to auto-reply to
+    sentimentFilter: {
+      type: String,
+      enum: ['all', 'negative_only', 'positive_only', 'neutral_only', 'positive_neutral'],
+      default: 'all' // Reply to all sentiments by default
+    },
+    replyToNegative: {
+      type: Boolean,
+      default: false // Don't auto-reply to negative sentiment by default (kept for backward compatibility)
+    },
+    replyToComplaints: {
+      type: Boolean,
+      default: false // Don't auto-reply to complaints by default
+    },
+    minConfidence: {
+      type: Number,
+      default: 0.75, // Minimum AI confidence to auto-reply
+      min: 0,
+      max: 1
+    },
+    autoSend: {
+      type: Boolean,
+      default: false // If true, automatically send; if false, save as draft
+    },
+    requireApproval: {
+      type: Boolean,
+      default: true // Require human approval before sending
+    },
+    maxRepliesPerDay: {
+      type: Number,
+      default: 50 // Limit auto-replies per day
+    },
+    repliesCountToday: {
+      type: Number,
+      default: 0
+    },
+    lastReplyResetDate: Date,
+    
+    // Scheduling settings
+    triggerMode: {
+      type: String,
+      enum: ['webhook', 'scheduled', 'manual', 'hybrid'],
+      default: 'hybrid' // Hybrid: webhook + scheduled fallback
+    },
+    webhookImmediate: {
+      type: Boolean,
+      default: true // Process webhook-triggered auto-replies immediately
+    },
+    webhookDelay: {
+      type: Number,
+      default: 5 // Delay in minutes before processing webhook auto-reply
+    },
+    scheduleInterval: {
+      type: String,
+      enum: ['15min', '30min', '1hour', '6hours', '12hours', '24hours'],
+      default: '24hours' // Default: check every 24 hours
+    },
+    scheduleEnabled: {
+      type: Boolean,
+      default: true // Enable scheduled processing
+    },
+    lastScheduledRun: Date // Track last scheduled run time
+  },
+  
+  // Human agent escalation settings
+  escalationSettings: {
+    enabled: {
+      type: Boolean,
+      default: true
+    },
+    maxAutoReplies: {
+      type: Number,
+      default: 3, // Max auto-replies before escalation
+      min: 1,
+      max: 10
+    },
+    escalateOnNegative: {
+      type: Boolean,
+      default: true // Escalate when negative sentiment detected
+    },
+    negativeThreshold: {
+      type: Number,
+      default: 2, // Number of negative sentiments before escalation
+      min: 1,
+      max: 5
+    },
+    escalationKeywords: {
+      type: [String],
+      default: [
+        'refund', 'complaint', 'lawyer', 'sue', 'legal', 
+        'terrible', 'worst', 'horrible', 'unacceptable',
+        'manager', 'supervisor', 'corporate', 'headquarters',
+        'scam', 'fraud', 'cheat', 'lie', 'liar'
+      ]
+    },
+    lowConfidenceThreshold: {
+      type: Number,
+      default: 0.7, // Escalate if AI confidence < 70%
+      min: 0,
+      max: 1
+    },
+    lowConfidenceCount: {
+      type: Number,
+      default: 2, // Number of low-confidence replies before escalation
+      min: 1,
+      max: 5
+    },
+    assignmentMethod: {
+      type: String,
+      enum: ['round_robin', 'least_busy', 'skill_based', 'manual'],
+      default: 'round_robin'
+    },
+    autoAssign: {
+      type: Boolean,
+      default: true // Automatically assign to agent or wait for manual assignment
+    },
+    notifyAgents: {
+      type: Boolean,
+      default: true // Send notification to agents when assigned
+    },
+    notificationChannels: {
+      type: [String],
+      enum: ['email', 'push', 'sms', 'slack'],
+      default: ['email']
+    },
+    priorityLevels: {
+      urgent: {
+        keywords: {
+          type: [String],
+          default: ['urgent', 'emergency', 'asap', 'immediately', 'critical']
+        },
+        assignTo: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User' // Specific user for urgent cases
+        }
+      },
+      high: {
+        keywords: {
+          type: [String],
+          default: ['important', 'serious', 'problem', 'issue']
+        }
+      }
+    },
+    // Round-robin state
+    lastAssignedAgentIndex: {
+      type: Number,
+      default: -1
+    },
+    availableAgents: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }],
+    // Business hours (for escalation timing)
+    businessHours: {
+      enabled: {
+        type: Boolean,
+        default: false
+      },
+      timezone: {
+        type: String,
+        default: 'Asia/Kolkata'
+      },
+      schedule: {
+        monday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        tuesday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        wednesday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        thursday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        friday: {
+          start: { type: String, default: '09:00' },
+          end: { type: String, default: '18:00' },
+          enabled: { type: Boolean, default: true }
+        },
+        saturday: {
+          start: { type: String, default: '10:00' },
+          end: { type: String, default: '16:00' },
+          enabled: { type: Boolean, default: false }
+        },
+        sunday: {
+          start: { type: String, default: '10:00' },
+          end: { type: String, default: '16:00' },
+          enabled: { type: Boolean, default: false }
+        }
+      }
+    }
+  },
+  
   owner: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -111,7 +327,7 @@ const organizationSchema = new mongoose.Schema({
 });
 
 // Indexes
-organizationSchema.index({ slug: 1 });
+// Note: slug index is automatically created by unique: true
 organizationSchema.index({ owner: 1 });
 
 // Generate slug from name before saving

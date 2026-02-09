@@ -35,20 +35,54 @@ module.exports = async function processWebhook(job) {
         interaction = await handleYouTubeWebhook(payload, organizationId);
         break;
       
+      case 'linkedin':
+        interaction = await handleLinkedInWebhook(payload, organizationId);
+        break;
+      
       default:
         console.log(`Unknown platform: ${platform}`);
     }
 
     if (interaction) {
-      // Trigger AI processing
-      await aiQueue.add({
-        interactionId: interaction._id
-      }, {
-        attempts: 3,
-        backoff: 2000
-      });
+      console.log(`\n✅ [Webhook] Interaction created: ${interaction._id}`);
+      console.log(`   Platform: ${interaction.platform}`);
+      console.log(`   Type: ${interaction.type}`);
+      console.log(`   Content: "${interaction.content?.substring(0, 100)}..."`);
+      
+      // IMPORTANT: Check if interaction already has replies
+      // If it does, skip auto-reply queueing (it's already been replied to)
+      const hasReplies = interaction.replies && interaction.replies.length > 0;
+      const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
+      
+      if (hasReplies || isAlreadyReplied) {
+        console.log(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+      } else {
+        // Trigger AI processing (only for new, unreplied interactions)
+        await aiQueue.add({
+          interactionId: interaction._id
+        }, {
+          attempts: 3,
+          backoff: 2000,
+          jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
+        });
 
-      console.log(`Interaction created and queued for AI processing: ${interaction._id}`);
+        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
+
+        // Queue auto-reply if webhook mode is enabled
+        const autoReplyScheduler = require('../services/autoReplyScheduler');
+        const queued = await autoReplyScheduler.queueImmediateAutoReply(
+          interaction._id,
+          organizationId
+        );
+
+        if (queued) {
+          console.log(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
+        } else {
+          console.log(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
+        }
+      }
+    } else {
+      console.log(`⚠️  [Webhook] No interaction created from ${platform} webhook`);
     }
 
     return {
@@ -89,7 +123,10 @@ async function handleInstagramWebhook(payload, organizationId) {
             author: {
               platformId: comment.from?.id,
               username: comment.from?.username,
-              name: comment.from?.username
+              name: comment.from?.username,
+              avatarUrl: comment.from?.id
+                ? `https://graph.facebook.com/v18.0/${comment.from.id}/picture?type=normal`
+                : undefined
             },
             metadata: {
               postId: comment.media?.id,
@@ -118,7 +155,11 @@ async function handleInstagramWebhook(payload, organizationId) {
             content: message.message?.text || message.text,
             author: {
               platformId: message.from.id,
-              username: message.from.username
+              username: message.from.username,
+              name: message.from.name || message.from.username,
+              avatarUrl: message.from.id
+                ? `https://graph.facebook.com/v18.0/${message.from.id}/picture?type=normal`
+                : undefined
             },
             threadId: message.conversation_id,
             platformCreatedAt: new Date(message.timestamp),
@@ -305,6 +346,130 @@ async function handleYouTubeWebhook(payload, organizationId) {
     return null;
   } catch (error) {
     console.error('YouTube webhook handler error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Handle LinkedIn webhook
+ * 
+ * LinkedIn webhook event types:
+ * - SHARE_COMMENT_CREATED: New comment on organization post
+ * - SHARE_COMMENT_UPDATED: Comment edited
+ * - SHARE_CREATED: New post created
+ * - SHARE_LIKE_CREATED: Post liked
+ */
+async function handleLinkedInWebhook(payload, organizationId) {
+  try {
+    console.log('💼 [LinkedIn Webhook] Processing payload:', JSON.stringify(payload, null, 2));
+    
+    const { eventType, data } = payload;
+
+    if (!eventType || !data) {
+      console.log('⚠️  [LinkedIn Webhook] Missing eventType or data');
+      return null;
+    }
+
+    // Handle different LinkedIn event types
+    switch (eventType) {
+      case 'SHARE_COMMENT_CREATED':
+      case 'SHARE_COMMENT_UPDATED':
+        return await handleLinkedInComment(data, organizationId);
+      
+      case 'SHARE_CREATED':
+        console.log('💼 [LinkedIn Webhook] New share created (informational only)');
+        return null; // We don't create interactions for our own posts
+      
+      case 'SHARE_LIKE_CREATED':
+        console.log('💼 [LinkedIn Webhook] Post liked (informational only)');
+        return null; // We might want to track likes in the future
+      
+      default:
+        console.log(`⚠️  [LinkedIn Webhook] Unknown event type: ${eventType}`);
+        return null;
+    }
+
+  } catch (error) {
+    console.error('❌ [LinkedIn Webhook] Handler error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Handle LinkedIn comment webhook data
+ */
+async function handleLinkedInComment(data, organizationId) {
+  try {
+    const {
+      commentUrn,        // URN of the comment (e.g., urn:li:comment:12345)
+      commentText,       // Text content of the comment
+      authorUrn,         // URN of the comment author
+      authorName,        // Display name of the author
+      shareUrn,          // URN of the post being commented on
+      shareUrl,          // URL to the LinkedIn post
+      createdAt,         // Timestamp
+      parentCommentUrn   // If it's a reply to another comment
+    } = data;
+
+    // Extract comment ID from URN
+    const commentId = commentUrn?.split(':').pop();
+    const shareId = shareUrn?.split(':').pop();
+    const authorId = authorUrn?.split(':').pop();
+
+    if (!commentId || !commentText) {
+      console.log('⚠️  [LinkedIn Webhook] Missing required comment data');
+      return null;
+    }
+
+    console.log(`💼 [LinkedIn Webhook] Processing comment: ${commentId}`);
+
+    // Find the platform connection
+    const connection = await PlatformConnection.findOne({
+      platform: 'linkedin',
+      organization: organizationId,
+      isActive: true
+    });
+
+    if (!connection) {
+      console.log('⚠️  [LinkedIn Webhook] No active LinkedIn connection found');
+      return null;
+    }
+
+    // Create or update the interaction
+    const interaction = await Interaction.findOneAndUpdate(
+      { platformId: commentId },
+      {
+        organization: organizationId,
+        platform: 'linkedin',
+        platformConnection: connection._id,
+        type: 'comment',
+        platformId: commentId,
+        content: commentText,
+        author: {
+          platformId: authorId,
+          name: authorName || 'LinkedIn User',
+          username: authorName
+        },
+        metadata: {
+          postId: shareId,
+          postUrl: shareUrl || `https://www.linkedin.com/feed/update/${shareUrn}`,
+          shareUrn,
+          commentUrn,
+          parentCommentUrn,
+          isReply: !!parentCommentUrn
+        },
+        threadId: parentCommentUrn || shareUrn, // Group comments by parent or post
+        platformCreatedAt: createdAt ? new Date(createdAt) : new Date(),
+        status: 'unread'
+      },
+      { upsert: true, new: true }
+    );
+
+    console.log(`✅ [LinkedIn Webhook] Interaction created/updated: ${interaction._id}`);
+
+    return interaction;
+  } catch (error) {
+    console.error('❌ [LinkedIn Comment] Processing error:', error);
     throw error;
   }
 }

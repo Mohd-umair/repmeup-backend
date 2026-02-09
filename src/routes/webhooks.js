@@ -13,6 +13,22 @@ router.post('/google', webhookController.handleGoogleWebhook);
 router.get('/youtube', webhookController.verifyYouTubeWebhook);
 router.post('/youtube', webhookController.handleYouTubeWebhook);
 
+// Facebook webhooks
+router.get('/facebook', webhookController.verifyFacebookWebhook);
+router.post('/facebook', webhookController.handleFacebookWebhook);
+
+// Instagram webhooks
+router.get('/instagram', webhookController.verifyInstagramWebhook);
+router.post('/instagram', webhookController.handleInstagramWebhook);
+
+// LinkedIn webhooks
+router.get('/linkedin', webhookController.verifyLinkedInWebhook);
+router.post('/linkedin', webhookController.handleLinkedInWebhook);
+
+// WhatsApp webhooks
+router.get('/whatsapp', webhookController.verifyWhatsAppWebhook);
+router.post('/whatsapp', webhookController.handleWhatsAppWebhook);
+
 // Health check
 router.get('/health', webhookController.webhookHealth);
 

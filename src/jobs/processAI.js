@@ -19,7 +19,20 @@ module.exports = async function processAI(job) {
       .populate('organization');
 
     if (!interaction) {
-      throw new Error(`Interaction ${interactionId} not found`);
+      console.log(`⏭️  [AI] Interaction ${interactionId} not found - skipping`);
+      return { skipped: true, reason: 'Interaction not found' };
+    }
+
+    // IMPORTANT: Skip if interaction already has replies (already been replied to)
+    if (interaction.replies && interaction.replies.length > 0) {
+      console.log(`⏭️  [AI] Skipping AI processing - interaction ${interactionId} already has ${interaction.replies.length} reply(ies)`);
+      return { skipped: true, reason: 'Already has replies' };
+    }
+
+    // Skip if already replied/resolved
+    if (interaction.status === 'replied' || interaction.status === 'resolved') {
+      console.log(`⏭️  [AI] Skipping AI processing - interaction ${interactionId} status is ${interaction.status}`);
+      return { skipped: true, reason: `Status is ${interaction.status}` };
     }
 
     // Step 1: Analyze sentiment

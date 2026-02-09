@@ -1,0 +1,191 @@
+const Subscription = require('../models/Subscription');
+const Plan = require('../models/Plan');
+
+/**
+ * AI Credit Service - Single Responsibility Principle
+ * Manages AI credit limits and usage tracking
+ */
+class AICreditService {
+  /**
+   * Check if organization has enough AI credits for an operation
+   * @param {String} organizationId
+   * @param {Number} estimatedCost - Estimated credits needed
+   * @returns {Promise<Object>} { allowed: Boolean, current?, limit?, remaining?, needed? }
+   */
+  async checkCredits(organizationId, estimatedCost = 1) {
+    try {
+      const subscription = await Subscription.findOne({ organization: organizationId });
+
+      if (!subscription) {
+        // No subscription yet - create free plan or deny
+        const freePlan = await Plan.getByPlanId('free');
+        if (!freePlan) {
+          return {
+            allowed: false,
+            error: 'No subscription found. Please contact support.',
+            code: 'NO_SUBSCRIPTION'
+          };
+        }
+
+        return {
+          allowed: true,
+          current: 0,
+          limit: freePlan.limits.maxAICreditsPerMonth,
+          remaining: freePlan.limits.maxAICreditsPerMonth,
+          isUnlimited: freePlan.limits.maxAICreditsPerMonth === -1
+        };
+      }
+
+      const currentUsage = subscription.usage.aiCreditsThisMonth || 0;
+      const limit = subscription.limits.maxAICreditsPerMonth || 0;
+      const isUnlimited = limit === -1;
+
+      if (isUnlimited) {
+        return {
+          allowed: true,
+          current: currentUsage,
+          limit: -1,
+          remaining: Infinity,
+          isUnlimited: true
+        };
+      }
+
+      const remaining = Math.max(0, limit - currentUsage);
+      const allowed = currentUsage + estimatedCost <= limit;
+
+      if (!allowed) {
+        return {
+          allowed: false,
+          current: currentUsage,
+          limit: limit,
+          remaining: remaining,
+          needed: estimatedCost,
+          exceededBy: (currentUsage + estimatedCost) - limit,
+          code: 'AI_CREDITS_EXCEEDED',
+          error: `Insufficient AI credits. You need ${estimatedCost} credits but have ${remaining} remaining this month.`
+        };
+      }
+
+      return {
+        allowed: true,
+        current: currentUsage,
+        limit: limit,
+        remaining: remaining,
+        needed: estimatedCost
+      };
+    } catch (error) {
+      console.error('Check AI credits error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Deduct AI credits after successful operation
+   * @param {String} organizationId
+   * @param {Number} actualCost - Actual credits used
+   * @param {Object} metadata - Optional metadata (operation type, details)
+   * @returns {Promise<Object>} Updated usage
+   */
+  async deductCredits(organizationId, actualCost = 1, metadata = {}) {
+    try {
+      const result = await Subscription.findOneAndUpdate(
+        { organization: organizationId },
+        { 
+          $inc: { 'usage.aiCreditsThisMonth': actualCost },
+          $set: { 'usage.lastAIUsage': new Date() }
+        },
+        { new: true }
+      );
+
+      if (!result) {
+        console.warn(`⚠️ [AI Credits] No subscription found for org ${organizationId} when deducting credits`);
+        return { success: false };
+      }
+
+      console.log(`💰 [AI Credits] Deducted ${actualCost} credits for org ${organizationId}. New total: ${result.usage.aiCreditsThisMonth}/${result.limits.maxAICreditsPerMonth}`);
+
+      return {
+        success: true,
+        current: result.usage.aiCreditsThisMonth,
+        limit: result.limits.maxAICreditsPerMonth,
+        remaining: result.limits.maxAICreditsPerMonth === -1 
+          ? Infinity 
+          : Math.max(0, result.limits.maxAICreditsPerMonth - result.usage.aiCreditsThisMonth),
+        deducted: actualCost,
+        metadata
+      };
+    } catch (error) {
+      console.error('Deduct AI credits error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Calculate actual credits used based on tokens or words
+   * @param {Number} inputTokens
+   * @param {Number} outputTokens
+   * @param {Number} baseCredits - Base credits for the operation (default 1)
+   * @returns {Number} Actual credits to deduct
+   */
+  calculateCreditsFromTokens(inputTokens = 0, outputTokens = 0, baseCredits = 1) {
+    const totalTokens = inputTokens + outputTokens;
+    // 1 credit per 500 tokens, min baseCredits, max 10 per operation
+    const fromTokens = Math.ceil(totalTokens / 500);
+    return Math.max(baseCredits, Math.min(10, fromTokens));
+  }
+
+  /**
+   * Calculate credits from word count and tag count (for knowledge base)
+   * @param {Number} wordCount
+   * @param {Number} tagCount
+   * @returns {Number} Estimated credits
+   */
+  calculateCreditsFromWordCount(wordCount = 0, tagCount = 0) {
+    const fromWords = Math.ceil(wordCount / 500);
+    const fromTags = Math.ceil(tagCount / 5);
+    const total = Math.max(1, fromWords + fromTags);
+    return Math.min(10, total);
+  }
+
+  /**
+   * Get AI credit usage for organization
+   * @param {String} organizationId
+   * @returns {Promise<Object>} Usage stats
+   */
+  async getUsage(organizationId) {
+    try {
+      const subscription = await Subscription.findOne({ organization: organizationId });
+
+      if (!subscription) {
+        return {
+          current: 0,
+          limit: 0,
+          remaining: 0,
+          percentage: 0,
+          isUnlimited: false
+        };
+      }
+
+      const current = subscription.usage.aiCreditsThisMonth || 0;
+      const limit = subscription.limits.maxAICreditsPerMonth || 0;
+      const isUnlimited = limit === -1;
+      const remaining = isUnlimited ? Infinity : Math.max(0, limit - current);
+      const percentage = isUnlimited ? 0 : (current / limit) * 100;
+
+      return {
+        current,
+        limit,
+        remaining,
+        percentage: Math.round(percentage),
+        isUnlimited,
+        isNearLimit: percentage >= 90 && !isUnlimited,
+        isAtLimit: current >= limit && !isUnlimited
+      };
+    } catch (error) {
+      console.error('Get AI credit usage error:', error);
+      throw error;
+    }
+  }
+}
+
+module.exports = new AICreditService();

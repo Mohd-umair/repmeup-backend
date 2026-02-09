@@ -159,3 +159,15 @@ exports.createTeamMember = async (req, res, next) => {
   }
 };
 
+// @desc    Google OAuth Login/Signup
+// @route   Called from Google callback route
+// @access  Public
+exports.googleAuth = async (googleProfile) => {
+  try {
+    const result = await authService.googleAuth(googleProfile);
+    return result;
+  } catch (error) {
+    throw error;
+  }
+};
+

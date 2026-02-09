@@ -1,10 +1,13 @@
 const KnowledgeBase = require('../models/KnowledgeBase');
 const pdf = require('pdf-parse');
-const axios = require('axios');
-const cheerio = require('cheerio');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
+
+// Services (Dependency Injection - SOLID Principle)
+const webScraperService = require('../services/webScraperService');
+const contentSummarizerService = require('../services/contentSummarizerService');
+const aiCreditService = require('../services/aiCreditService');
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -208,10 +211,12 @@ exports.createPDFKnowledgeBase = async (req, res) => {
 /**
  * Create knowledge base from website URL
  * POST /api/knowledge-base/url
+ * 
+ * Uses WebScraperService and ContentSummarizerService (SOLID principles)
  */
 exports.createURLKnowledgeBase = async (req, res) => {
   try {
-    const { url, title, category, tags, priority } = req.body;
+    const { url, title, category, tags, priority, focus = 'overview', targetWordCount, targetTagCount } = req.body;
 
     if (!url) {
       return res.status(400).json({
@@ -220,41 +225,77 @@ exports.createURLKnowledgeBase = async (req, res) => {
       });
     }
 
-    // Fetch and parse website
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; ORM-Bot/1.0)'
-      },
-      timeout: 10000
-    });
+    // Step 1: Estimate and check AI credits
+    const estimatedCredits = aiCreditService.calculateCreditsFromWordCount(
+      targetWordCount || 2000,
+      targetTagCount || 10
+    );
 
-    const $ = cheerio.load(response.data);
+    console.log(`💰 [KB] Estimated credits: ${estimatedCredits}`);
 
-    // Extract title if not provided
-    const pageTitle = title || $('title').text() || url;
+    const creditCheck = await aiCreditService.checkCredits(
+      req.user.organization._id || req.user.organization,
+      estimatedCredits
+    );
 
-    // Remove script and style tags
-    $('script, style, nav, footer, header').remove();
+    if (!creditCheck.allowed) {
+      console.warn(`❌ [KB] AI credit limit reached for org ${req.user.organization._id || req.user.organization}`);
+      return res.status(403).json({
+        success: false,
+        error: creditCheck.error || 'Insufficient AI credits',
+        code: creditCheck.code || 'AI_CREDITS_EXCEEDED',
+        data: {
+          current: creditCheck.current,
+          limit: creditCheck.limit,
+          remaining: creditCheck.remaining,
+          needed: estimatedCredits,
+          exceededBy: creditCheck.exceededBy
+        }
+      });
+    }
 
-    // Extract main content
-    const content = $('body').text().replace(/\s+/g, ' ').trim();
+    // Step 2: Scrape the website (WebScraperService - Single Responsibility)
+    console.log(`🔍 [KB] Scraping URL: ${url}`);
+    const scrapedData = await webScraperService.scrape(url);
+    console.log(`✅ [KB] Scraped content length: ${scrapedData.content.length} characters`);
 
-    // Extract metadata
-    const description = $('meta[name="description"]').attr('content') || '';
-    const keywords = $('meta[name="keywords"]').attr('content') || '';
+    // Step 2: Generate AI summary (ContentSummarizerService - Single Responsibility)
+    console.log(`🤖 [KB] Generating AI summary...`);
+    const summaryData = await contentSummarizerService.summarize(
+      scrapedData.content,
+      {
+        title: title || scrapedData.title,
+        url: url,
+        focus: focus,
+        targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
+        targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
+      }
+    );
+    console.log(`✅ [KB] Summary generated: ${summaryData.summaryLength} characters (${summaryData.compressionRatio} of original)`);
 
+    // Step 3: Get content statistics
+    const contentStats = webScraperService.getContentStats(scrapedData.content);
+
+    // Step 4: Create knowledge base entry with AI summary
     const knowledgeBase = new KnowledgeBase({
-      title: pageTitle,
-      content: content,
+      title: title || scrapedData.title || url,
+      content: summaryData.summary, // Store AI summary, not raw dump
       category: category || 'website',
-      tags: tags || [],
+      tags: tags || summaryData.tags || [],
+      keywords: summaryData.tags || [],
       priority: priority || 1,
       source: 'url',
       metadata: {
         url: url,
-        scrapedAt: new Date(),
-        description: description,
-        keywords: keywords
+        scrapedAt: scrapedData.scrapedAt,
+        description: scrapedData.description,
+        originalContentLength: contentStats.charCount,
+        originalWordCount: contentStats.wordCount,
+        summaryLength: summaryData.summaryLength,
+        compressionRatio: summaryData.compressionRatio,
+        keyPoints: summaryData.keyPoints,
+        headings: scrapedData.metadata.headings,
+        ...scrapedData.metadata
       },
       organization: req.user.organization,
       createdBy: req.user.id
@@ -262,16 +303,61 @@ exports.createURLKnowledgeBase = async (req, res) => {
 
     await knowledgeBase.save();
 
+    // Step 5: Deduct actual AI credits used
+    const actualWordCount = summaryData.summary.trim().split(/\s+/).length;
+    const actualCost = aiCreditService.calculateCreditsFromWordCount(
+      actualWordCount,
+      summaryData.tags.length
+    );
+
+    await aiCreditService.deductCredits(
+      req.user.organization._id || req.user.organization,
+      actualCost,
+      {
+        operation: 'knowledge_base_from_url',
+        url: url,
+        wordCount: actualWordCount,
+        tagCount: summaryData.tags.length
+      }
+    );
+
     res.status(201).json({
       success: true,
-      data: knowledgeBase,
-      message: 'Knowledge base created from URL successfully'
+      data: {
+        ...knowledgeBase.toObject(),
+        summaryStats: {
+          originalLength: contentStats.charCount,
+          summaryLength: summaryData.summaryLength,
+          compressionRatio: summaryData.compressionRatio,
+          keyPointsCount: summaryData.keyPoints.length,
+          tagsCount: summaryData.tags.length
+        },
+        creditsUsed: actualCost
+      },
+      message: 'Knowledge base created from URL with AI summary successfully'
     });
   } catch (error) {
     console.error('Create URL knowledge base error:', error);
+    
+    // Provide more specific error messages
+    let errorMessage = 'Failed to process URL. Please check the URL and try again.';
+    
+    if (error.message.includes('timeout')) {
+      errorMessage = 'The website took too long to respond. Please try again or use a different URL.';
+    } else if (error.message.includes('not found') || error.message.includes('404')) {
+      errorMessage = 'URL not found. Please check the URL and try again.';
+    } else if (error.message.includes('whitelist') || error.message.includes('localhost')) {
+      errorMessage = 'Invalid URL. Localhost and private IPs are not allowed.';
+    } else if (error.message.includes('Insufficient content')) {
+      errorMessage = 'The website has insufficient content to summarize. It may require JavaScript to render.';
+    } else if (error.message.includes('Failed to summarize')) {
+      errorMessage = 'Failed to generate summary. Please try again.';
+    }
+
     res.status(500).json({
       success: false,
-      error: 'Failed to scrape website. Please check the URL and try again.'
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };

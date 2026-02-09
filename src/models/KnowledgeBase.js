@@ -73,7 +73,14 @@ const knowledgeBaseSchema = new mongoose.Schema({
   // Usage tracking
   usageCount: {
     type: Number,
-    default: 0
+    default: 0,
+    min: 0,
+    validate: {
+      validator: function(v) {
+        return !isNaN(v) && isFinite(v);
+      },
+      message: 'usageCount must be a valid number'
+    }
   },
   lastUsedAt: Date,
   
@@ -103,6 +110,10 @@ knowledgeBaseSchema.index({ title: 'text', content: 'text', keywords: 'text' });
 
 // Increment usage
 knowledgeBaseSchema.methods.incrementUsage = function() {
+  // Ensure usageCount is a valid number
+  if (typeof this.usageCount !== 'number' || isNaN(this.usageCount)) {
+    this.usageCount = 0;
+  }
   this.usageCount += 1;
   this.lastUsedAt = new Date();
   return this.save();
