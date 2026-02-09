@@ -19,8 +19,13 @@ const scheduledPostSchema = new mongoose.Schema({
   platform: {
     type: String,
     required: true,
-    enum: ['instagram', 'facebook', 'youtube', 'linkedin', 'google'],
+    enum: ['instagram', 'facebook', 'linkedin', 'google', 'whatsapp'],
     index: true
+  },
+  postType: {
+    type: String,
+    enum: ['post', 'story', 'reel', 'short'],
+    default: 'post'
   },
   platformConnection: {
     type: mongoose.Schema.Types.ObjectId,

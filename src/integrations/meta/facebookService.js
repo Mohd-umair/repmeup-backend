@@ -440,6 +440,85 @@ class FacebookService {
       throw error;
     }
   }
+
+  /**
+   * Create a post on Facebook Page
+   * @param {Object} platformConnection - Platform connection object
+   * @param {Object} postData - Post data
+   * @param {string} postData.message - Post caption/message
+   * @param {string} [postData.url] - Image URL (for photo posts)
+   * @param {string} [postData.link] - Link URL (for link posts)
+   * @returns {Object} - Created post details
+   */
+  async createPost(platformConnection, postData) {
+    try {
+      const { accessToken, platformPageId } = platformConnection;
+      const { message, url, link } = postData;
+
+      if (!platformPageId) {
+        throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
+      }
+
+      console.log(`📝 [Facebook] Creating post on page: ${platformPageId}`);
+
+      let endpoint;
+      let params = {
+        access_token: accessToken
+      };
+
+      // Determine post type and endpoint
+      if (url) {
+        // Photo post
+        endpoint = `${this.baseURL}/${platformPageId}/photos`;
+        params.url = url;
+        if (message) {
+          params.caption = message;
+        }
+      } else if (link) {
+        // Link post
+        endpoint = `${this.baseURL}/${platformPageId}/feed`;
+        params.message = message || '';
+        params.link = link;
+      } else {
+        // Text post
+        endpoint = `${this.baseURL}/${platformPageId}/feed`;
+        params.message = message || ' '; // Facebook requires at least some content
+      }
+
+      console.log(`📤 [Facebook] Posting to endpoint: ${endpoint}`);
+      console.log(`📦 [Facebook] Post params:`, { ...params, access_token: '[REDACTED]' });
+
+      const response = await axios.post(endpoint, null, { params });
+
+      console.log(`✅ [Facebook] Post created successfully:`, response.data);
+
+      // Construct post URL
+      const postId = response.data.id || response.data.post_id;
+      let postUrl = `https://www.facebook.com/${postId}`;
+
+      return {
+        postId: postId,
+        postUrl: postUrl,
+        success: true
+      };
+    } catch (error) {
+      console.error('❌ [Facebook] Create post error:', error.response?.data || error.message);
+      
+      // Enhanced error handling
+      const errorMessage = error.response?.data?.error?.message || error.message;
+      const errorCode = error.response?.data?.error?.code;
+      
+      throw {
+        message: errorMessage,
+        code: errorCode,
+        platformError: {
+          title: 'Facebook Posting Failed',
+          message: errorMessage,
+          code: errorCode
+        }
+      };
+    }
+  }
 }
 
 module.exports = new FacebookService();

@@ -55,7 +55,7 @@ exports.publishPost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor } = req.body;
+      const { platform, content, scheduledFor, postType } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -80,7 +80,8 @@ exports.publishPost = async (req, res) => {
         user: userId,
         platform: platform.toLowerCase(),
         platformConnection: connection._id,
-        content: content.trim()
+        content: content.trim(),
+        postType: postType || 'post'
       };
 
       // Handle media if uploaded
@@ -170,7 +171,7 @@ exports.schedulePost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor } = req.body;
+      const { platform, content, scheduledFor, postType } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -195,7 +196,8 @@ exports.schedulePost = async (req, res) => {
         platformConnection: connection._id,
         content: content.trim(),
         scheduledFor: new Date(scheduledFor),
-        status: 'scheduled'
+        status: 'scheduled',
+        postType: postType || 'post'
       };
 
       if (req.file) {

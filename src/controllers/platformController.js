@@ -441,11 +441,13 @@ exports.syncPlatform = async (req, res, next) => {
 
     // Queue auto-reply ONLY for newly synced interactions (not all)
     let autoReplyQueued = 0;
+    let sentimentAnalyzed = 0;
     
     if (result.count > 0 && result.interactions && result.interactions.length > 0) {
       const autoReplyScheduler = require('../services/autoReplyScheduler');
       const { aiQueue } = require('../config/queue');
       const Interaction = require('../models/Interaction');
+      const aiService = require('../services/aiService');
       
       // Get platform IDs from NEWLY synced interactions only
       const platformIds = result.interactions.map(i => i.platformId);
@@ -462,6 +464,23 @@ exports.syncPlatform = async (req, res, next) => {
       });
 
       console.log(`📊 [Sync] Found ${newInteractions.length} NEW interactions eligible for auto-reply`);
+      
+      // AUTOMATIC SENTIMENT ANALYSIS: Analyze sentiment for new interactions immediately
+      for (const interaction of newInteractions) {
+        // Only analyze if sentiment is missing
+        if (!interaction.sentiment && interaction.content) {
+          try {
+            const sentimentResult = aiService.fallbackSentimentAnalysis(interaction.content);
+            interaction.sentiment = sentimentResult.sentiment;
+            interaction.sentimentScore = sentimentResult.sentimentScore;
+            interaction.sentimentConfidence = sentimentResult.sentimentConfidence;
+            await interaction.save();
+            sentimentAnalyzed++;
+          } catch (sentimentError) {
+            console.error(`⚠️ [Sync] Sentiment analysis failed for ${interaction._id}:`, sentimentError.message);
+          }
+        }
+      }
       
       for (const interaction of newInteractions) {
         try {
@@ -498,7 +517,7 @@ exports.syncPlatform = async (req, res, next) => {
       }
     }
     
-    console.log(`📊 [Sync] Total: ${result.count} new interactions, ${autoReplyQueued} auto-replies queued`)
+    console.log(`📊 [Sync] Total: ${result.count} new interactions, ${sentimentAnalyzed} sentiments analyzed, ${autoReplyQueued} auto-replies queued`)
     
     // Invalidate interactions cache so frontend sees new data immediately
     if (result.count > 0) {
