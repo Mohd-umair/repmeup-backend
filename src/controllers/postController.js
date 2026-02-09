@@ -64,13 +64,27 @@ exports.publishPost = async (req, res) => {
       }
 
       // Get platform connection
-      const connection = await PlatformConnection.findOne({
+      // For Facebook, we need a page-level connection with platformPageId
+      let query = {
         organization: organizationId,
         platform: platform.toLowerCase(),
         isActive: true
-      });
+      };
+
+      // For Facebook, specifically look for page connections (with platformPageId)
+      if (platform.toLowerCase() === 'facebook') {
+        query.platformPageId = { $exists: true, $ne: null };
+        query.usesAccountSlot = true; // Page connections use account slots
+      }
+
+      const connection = await PlatformConnection.findOne(query);
 
       if (!connection) {
+        if (platform.toLowerCase() === 'facebook') {
+          return res.status(404).json({ 
+            message: 'No Facebook page connection found. Please connect a Facebook page from Settings.' 
+          });
+        }
         return res.status(404).json({ message: `No active ${platform} connection found` });
       }
 
@@ -179,13 +193,28 @@ exports.schedulePost = async (req, res) => {
         return res.status(400).json({ message: 'Platform, content, and scheduledFor are required' });
       }
 
-      const connection = await PlatformConnection.findOne({
+      // Get platform connection
+      // For Facebook, we need a page-level connection with platformPageId
+      let query = {
         organization: organizationId,
         platform: platform.toLowerCase(),
         isActive: true
-      });
+      };
+
+      // For Facebook, specifically look for page connections (with platformPageId)
+      if (platform.toLowerCase() === 'facebook') {
+        query.platformPageId = { $exists: true, $ne: null };
+        query.usesAccountSlot = true; // Page connections use account slots
+      }
+
+      const connection = await PlatformConnection.findOne(query);
 
       if (!connection) {
+        if (platform.toLowerCase() === 'facebook') {
+          return res.status(404).json({ 
+            message: 'No Facebook page connection found. Please connect a Facebook page from Settings.' 
+          });
+        }
         return res.status(404).json({ message: `No active ${platform} connection found` });
       }
 
