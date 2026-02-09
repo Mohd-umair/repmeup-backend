@@ -14,7 +14,7 @@ class ContentSummarizerService {
   constructor() {
     this.maxInputLength = 15000; // ~3000 words (AI context limit)
     this.minSummaryLength = 200; // Minimum summary length
-    this.maxSummaryLength = 10000; // Maximum summary length (increased for detailed summaries)
+    this.maxSummaryLength = 40000; // Maximum summary length (supports up to ~8000 words)
   }
 
   /**
@@ -42,7 +42,7 @@ class ContentSummarizerService {
       const keyPoints = await this._extractKeyPoints(truncatedContent, summary);
 
       // Generate tags/keywords
-      const tags = await this._extractTags(truncatedContent, summary);
+      const tags = await this._extractTags(truncatedContent, summary, options);
 
       return {
         summary: summary.trim(),
@@ -64,77 +64,88 @@ class ContentSummarizerService {
    * @private
    */
   async _generateSummary(content, options) {
-    const { title, url, focus = 'overview' } = options;
+    const { title, url, focus = 'overview', targetWordCount } = options;
 
-    // Build prompt based on focus
+    // Adjust style and maxTokens based on target word count
+    const requestedWords = targetWordCount ? parseInt(targetWordCount, 10) : 500;
+    const isShortSummary = requestedWords <= 1000;
+    const isMediumSummary = requestedWords > 1000 && requestedWords <= 2500;
+    const isLongSummary = requestedWords > 2500;
+
+    // Calculate maxTokens: roughly 1.3 tokens per word + buffer
+    const calculatedMaxTokens = Math.ceil(requestedWords * 1.3) + 500;
+    const maxTokens = Math.min(Math.max(1000, calculatedMaxTokens), 8000);
+
+    // Build prompt based on focus and length
     let promptInstruction = '';
+    if (isShortSummary) {
+      promptInstruction = 'Create a concise summary that captures the key information.';
+    } else if (isMediumSummary) {
+      promptInstruction = 'Create a comprehensive summary with important details and context.';
+    } else {
+      promptInstruction = 'Create an extensive, detailed summary that thoroughly covers all aspects of the content.';
+    }
+
     switch (focus) {
       case 'key_points':
-        promptInstruction = 'Focus on extracting the most important key points and facts.';
+        promptInstruction += ' Focus on extracting the most important key points and facts.';
         break;
       case 'detailed':
-        promptInstruction = 'Provide a comprehensive summary with important details.';
+        promptInstruction += ' Include all important details, examples, and explanations.';
         break;
       case 'overview':
       default:
-        promptInstruction = 'Provide a clear, concise overview of the main topics and information.';
+        promptInstruction += ' Provide a clear overview of the main topics and information.';
     }
 
-    const systemPrompt = `You are an expert content summarizer. Your task is to create a clear, concise, and informative summary of web content.
+    const lengthGuidance = targetWordCount
+      ? `- Your summary MUST be approximately ${targetWordCount} words (this is critical - do not make it shorter).
+- If the content is shorter than ${targetWordCount} words, elaborate on key points and provide additional context to reach the target.
+- Count your words and ensure you meet the target length requirement.`
+      : `- Aim for a comprehensive summary (preferably between ${this.minSummaryLength} and ${this.maxSummaryLength} characters)`;
 
-REQUIREMENTS:
-- Create a well-structured summary that captures the essence of the content
+    const systemPrompt = `You are an expert content writer and summarizer. Your task is to process web content and create a ${targetWordCount ? targetWordCount + '-word' : 'comprehensive'} summary.
+
+CRITICAL REQUIREMENTS:
+${lengthGuidance}
 - ${promptInstruction}
 - Use clear, professional language
 - Maintain important facts, numbers, and key information
-- Aim for a comprehensive summary (preferably between ${this.minSummaryLength} and ${this.maxSummaryLength} characters, but can be longer if needed for completeness)
 - Complete all sentences and thoughts - do not cut off mid-sentence
-- Organize information logically
+- Organize information logically with proper structure
 - Do not include personal opinions or interpretations
 - Focus on factual information and main topics
 
 FORMAT:
-- Write in paragraph form
+- Write in paragraph form (use multiple paragraphs for better readability)
 - Use proper grammar and punctuation
-- Make it easy to read and understand`;
+- Make it easy to read and understand
+- For longer summaries (2000+ words), organize into sections if appropriate`;
 
-    const userPrompt = `Summarize the following content${title ? ` from "${title}"` : ''}${url ? ` (Source: ${url})` : ''}:
+    const userPrompt = `Create a ${targetWordCount || 500}-word summary of the following content${title ? ` from "${title}"` : ''}${url ? ` (Source: ${url})` : ''}:
 
-${content}`;
+${content}
+
+Remember: Your summary MUST be approximately ${targetWordCount || 500} words. This is a strict requirement.`;
 
     try {
-      console.log(`🤖 [Summarizer] Calling AI service to generate summary...`);
+      console.log(`🤖 [Summarizer] Calling AI service (target: ${requestedWords} words, maxTokens: ${maxTokens})...`);
       let summary = await aiService.generateText(systemPrompt, userPrompt, {
         temperature: 0.3,
-        maxTokens: 4000 // Increased to allow longer, complete summaries
+        maxTokens: maxTokens
       });
-      console.log(`✅ [Summarizer] AI summary received: ${summary.length} characters`);
+      const wordCount = summary.trim().split(/\s+/).length;
+      console.log(`✅ [Summarizer] AI summary received: ${summary.length} characters, ~${wordCount} words (target: ${requestedWords} words)`);
 
-      // Validate summary length
+      // Validate minimum length only (no upper truncation when user requested specific length)
       if (summary.length < this.minSummaryLength) {
-        console.warn(`⚠️ [Summarizer] Summary too short (${summary.length} chars). Minimum: ${this.minSummaryLength}`);
-        throw new Error(`Summary too short (${summary.length} chars). Minimum: ${this.minSummaryLength}`);
+        console.warn(`⚠️ [Summarizer] Summary too short (${summary.length} chars, ${wordCount} words). Minimum: ${this.minSummaryLength} chars`);
+        throw new Error(`Summary too short (${summary.length} chars, ${wordCount} words). Minimum: ${this.minSummaryLength} chars`);
       }
 
-      // Only truncate if significantly over limit (allow some flexibility)
-      // This prevents cutting off mid-sentence for summaries that are slightly over
-      if (summary.length > this.maxSummaryLength * 1.1) {
-        console.log(`✂️ [Summarizer] Summary too long (${summary.length} chars). Truncating to ${this.maxSummaryLength} characters`);
-        // Try to truncate at sentence boundary
-        const truncated = summary.substring(0, this.maxSummaryLength);
-        const lastSentence = truncated.lastIndexOf('.');
-        const lastParagraph = truncated.lastIndexOf('\n\n');
-        
-        // Prefer paragraph break, then sentence break
-        if (lastParagraph > this.maxSummaryLength * 0.8) {
-          summary = truncated.substring(0, lastParagraph);
-        } else if (lastSentence > this.maxSummaryLength * 0.8) {
-          summary = truncated.substring(0, lastSentence + 1);
-        } else {
-          summary = truncated + '...';
-        }
-      } else if (summary.length > this.maxSummaryLength) {
-        console.log(`ℹ️ [Summarizer] Summary slightly over limit (${summary.length} chars, limit: ${this.maxSummaryLength}). Keeping full summary.`);
+      // Warn if very long but don't truncate (user requested this length)
+      if (summary.length > this.maxSummaryLength) {
+        console.warn(`⚠️ [Summarizer] Summary is very long: ${summary.length} characters (~${wordCount} words). This is fine if user requested it.`);
       }
 
       return summary;
@@ -188,9 +199,11 @@ Format: ["Point 1", "Point 2", "Point 3"]`;
    * Extract tags/keywords from content
    * @private
    */
-  async _extractTags(content, summary) {
+  async _extractTags(content, summary, options = {}) {
+    const { targetTagCount } = options;
+    const tagLimit = targetTagCount ? Math.min(Math.max(1, parseInt(targetTagCount, 10)), 30) : 10;
     try {
-      const prompt = `Extract 5-10 relevant tags/keywords from this content. Return ONLY a JSON array of strings, no other text:
+      const prompt = `Extract up to ${tagLimit} relevant tags/keywords from this content. Return ONLY a JSON array of strings, no other text:
 
 Content: ${summary}
 

@@ -75,8 +75,14 @@ exports.getLimits = async (req, res, next) => {
         planId: subscription.planId,
         tier: subscription.tier,
         status: subscription.status,
-        limits: subscription.limits,
-        usage: subscription.usage,
+        limits: {
+          ...subscription.limits,
+          maxAICreditsPerMonth: subscription.limits.maxAICreditsPerMonth || 500
+        },
+        usage: {
+          ...subscription.usage,
+          aiCreditsThisMonth: subscription.usage.aiCreditsThisMonth || 0
+        },
         canConnectMore,
         remaining,
         nextTier: nextTier ? {

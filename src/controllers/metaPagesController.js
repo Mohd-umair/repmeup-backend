@@ -146,6 +146,25 @@ exports.connectSelectedPages = async (req, res, next) => {
       });
     }
 
+    // CRITICAL: Check if user can add the requested number of accounts BEFORE starting
+    const remainingSlotsCheck = await platformConnectionService.getRemainingSlots(organizationId);
+    const requestedAccountsCount = includeInstagram 
+      ? pageIds.length * 2  // Each page + Instagram
+      : pageIds.length;     // Just Facebook pages
+    
+    if (remainingSlotsCheck < requestedAccountsCount) {
+      console.warn(`⚠️ [Meta Pages] User trying to connect ${requestedAccountsCount} accounts but only ${remainingSlotsCheck} slots remaining`);
+      return res.status(403).json({
+        success: false,
+        error: `Your plan allows ${requestedAccountsCount > 1 ? 'only' : ''} ${remainingSlotsCheck} more account${remainingSlotsCheck !== 1 ? 's' : ''}. You're trying to connect ${requestedAccountsCount}. Please upgrade your plan or select fewer accounts.`,
+        code: 'PLAN_LIMIT_EXCEEDED',
+        data: {
+          requested: requestedAccountsCount,
+          remaining: remainingSlotsCheck
+        }
+      });
+    }
+
     // Find user-level connection for access token
     let userConnection = await PlatformConnection.findOne({
       organization: organizationId,
@@ -198,9 +217,7 @@ exports.connectSelectedPages = async (req, res, next) => {
       skipped: []
     };
 
-    // Check remaining slots before starting
-    let remainingSlots = await platformConnectionService.getRemainingSlots(organizationId);
-
+    // Process each page
     for (const pageId of pageIds) {
       const pageData = pagesMap.get(pageId);
       
@@ -228,12 +245,15 @@ exports.connectSelectedPages = async (req, res, next) => {
           platform: 'facebook'
         });
       } else {
-        // Check if we have remaining slots
-        if (remainingSlots <= 0) {
+        // CRITICAL: Check fresh limit before each connection
+        const limitCheck = await platformConnectionService.canAddConnection(organizationId);
+        
+        if (!limitCheck.canConnect) {
+          console.warn(`⚠️ [Meta Pages] Cannot add page ${pageData.name} - limit reached (${limitCheck.current}/${limitCheck.limit})`);
           results.failed.push({
             pageId,
             pageName: pageData.name,
-            reason: 'Plan limit reached',
+            reason: 'Plan limit reached. Please upgrade your plan or disconnect an account.',
             platform: 'facebook'
           });
           continue;
@@ -252,9 +272,9 @@ exports.connectSelectedPages = async (req, res, next) => {
             pageName: pageData.name,
             platform: 'facebook'
           });
-          remainingSlots--;
+          console.log(`✅ [Meta Pages] Connected Facebook page: ${pageData.name}`);
         } catch (error) {
-          console.error(`Failed to connect Facebook page ${pageId}:`, error);
+          console.error(`❌ [Meta Pages] Failed to connect Facebook page ${pageId}:`, error);
           results.failed.push({
             pageId,
             pageName: pageData.name,
@@ -283,12 +303,15 @@ exports.connectSelectedPages = async (req, res, next) => {
             platform: 'instagram'
           });
         } else {
-          // Check limit again
-          if (remainingSlots <= 0) {
+          // CRITICAL: Check fresh limit before Instagram connection
+          const limitCheck = await platformConnectionService.canAddConnection(organizationId);
+          
+          if (!limitCheck.canConnect) {
+            console.warn(`⚠️ [Meta Pages] Cannot add Instagram ${pageData.instagram_business_account.username} - limit reached (${limitCheck.current}/${limitCheck.limit})`);
             results.failed.push({
               pageId: instagramId,
               pageName: pageData.instagram_business_account.username,
-              reason: 'Plan limit reached',
+              reason: 'Plan limit reached. Please upgrade your plan or disconnect an account.',
               platform: 'instagram'
             });
             continue;
@@ -306,9 +329,9 @@ exports.connectSelectedPages = async (req, res, next) => {
               pageName: pageData.instagram_business_account.username,
               platform: 'instagram'
             });
-            remainingSlots--;
+            console.log(`✅ [Meta Pages] Connected Instagram: ${pageData.instagram_business_account.username}`);
           } catch (error) {
-            console.error(`Failed to connect Instagram ${instagramId}:`, error);
+            console.error(`❌ [Meta Pages] Failed to connect Instagram ${instagramId}:`, error);
             results.failed.push({
               pageId: instagramId,
               pageName: pageData.instagram_business_account.username,
@@ -318,6 +341,17 @@ exports.connectSelectedPages = async (req, res, next) => {
           }
         }
       }
+    }
+
+    // If all connections failed due to limit, return 403 status
+    if (results.connected.length === 0 && results.failed.length > 0 && 
+        results.failed.every(f => f.reason.includes('Plan limit'))) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unable to connect any accounts - plan limit reached',
+        code: 'PLAN_LIMIT_EXCEEDED',
+        data: results
+      });
     }
 
     res.json({

@@ -45,6 +45,10 @@ const subscriptionSchema = new mongoose.Schema({
     maxAutoRepliesPerMonth: {
       type: Number,
       default: 50
+    },
+    maxAICreditsPerMonth: {
+      type: Number,
+      default: 100
     }
   },
   
@@ -63,6 +67,10 @@ const subscriptionSchema = new mongoose.Schema({
       default: 0
     },
     autoRepliesThisMonth: {
+      type: Number,
+      default: 0
+    },
+    aiCreditsThisMonth: {
       type: Number,
       default: 0
     },
