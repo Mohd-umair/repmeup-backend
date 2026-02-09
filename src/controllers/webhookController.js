@@ -679,6 +679,21 @@ exports.handleWhatsAppWebhook = async (req, res) => {
             const savedInteraction = await Interaction.create(interaction);
             console.log(`✅ [WhatsApp] Interaction saved: ${savedInteraction._id}`);
 
+            // AUTOMATIC SENTIMENT ANALYSIS: Analyze immediately for real-time filtering
+            if (savedInteraction.content && !savedInteraction.sentiment) {
+              try {
+                const aiService = require('../services/aiService');
+                const sentimentResult = aiService.fallbackSentimentAnalysis(savedInteraction.content);
+                savedInteraction.sentiment = sentimentResult.sentiment;
+                savedInteraction.sentimentScore = sentimentResult.sentimentScore;
+                savedInteraction.sentimentConfidence = sentimentResult.sentimentConfidence;
+                await savedInteraction.save();
+                console.log(`🎭 [WhatsApp] Sentiment analyzed: ${sentimentResult.sentiment} for ${savedInteraction._id}`);
+              } catch (sentError) {
+                console.error(`⚠️ [WhatsApp] Sentiment analysis failed:`, sentError.message);
+              }
+            }
+
             // Mark message as read (optional)
             try {
               await whatsappService.markAsRead(message.id);

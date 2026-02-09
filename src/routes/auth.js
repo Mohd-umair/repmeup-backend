@@ -67,12 +67,7 @@ router.get('/facebook/callback', async (req, res) => {
     // Handle OAuth errors (Facebook can send error in multiple formats)
     if (error || error_code) {
       const errorMsg = error_message || error_description || error || 'Unknown OAuth error';
-      console.error('❌ [Facebook Callback] OAuth error:', {
-        error,
-        error_code,
-        error_description,
-        error_message
-      });
+    
       return res.redirect(
         `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent(errorMsg)}`
       );

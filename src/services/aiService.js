@@ -287,11 +287,19 @@ Scoring:
     };
 
     const negativeWords = {
+      // Negative words
       'hate': 2, 'terrible': 2, 'awful': 2, 'worst': 2, 'horrible': 2,
       'bad': 1.5, 'poor': 1.5, 'disappointed': 2, 'disappointing': 2,
-      'useless': 2, 'waste': 1.5, 'scam': 2, 'fraud': 2, 'never': 1,
-      'pathetic': 2, 'disgusting': 2, 'angry': 1.5, 'furious': 2,
-      '😡': 2, '😠': 2, '👎': 2, '😤': 1.5, '💔': 2
+      'useless': 2, 'waste': 1.5, 'scam': 2, 'fraud': 2, 'pathetic': 2, 
+      'disgusting': 2, 'angry': 1.5, 'furious': 2, 'annoying': 1.5, 'annoyed': 1.5,
+      'upset': 1.5, 'sad': 1.5, 'unhappy': 1.5, 'dislike': 1.5, 'sucks': 2,
+      'stupid': 2, 'dumb': 1.5, 'ridiculous': 1.5, 'joke': 1, 'broken': 1.5,
+      'fail': 1.5, 'failed': 1.5, 'failure': 2, 'problem': 1, 'issue': 1,
+      'bug': 1, 'error': 1, 'wrong': 1, 'not working': 1.5, 'doesn\'t work': 1.5,
+      // Negative emojis
+      '😡': 2, '😠': 2, '👎': 2, '😤': 1.5, '💔': 2, '😢': 1.5, '😭': 2,
+      '😞': 1.5, '😔': 1.5, '😟': 1.5, '😕': 1, '🙁': 1.5, '☹️': 1.5,
+      '😩': 1.5, '😫': 1.5, '😖': 1.5, '💀': 1, '🤬': 2, '🖕': 2
     };
 
     let positiveScore = 0;
