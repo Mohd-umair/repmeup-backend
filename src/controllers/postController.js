@@ -6,6 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 const crypto = require('crypto');
+const { validateMedia, getRequirementsText } = require('../config/platformMediaRequirements');
 
 // Configure multer for media uploads
 const storage = multer.diskStorage({
@@ -100,8 +101,41 @@ exports.publishPost = async (req, res) => {
 
       // Handle media if uploaded
       if (req.file) {
+        const mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
+        const fileExtension = path.extname(req.file.originalname);
+        
+        // Validate media against platform requirements
+        const validation = validateMedia(
+          platform.toLowerCase(),
+          mediaType,
+          req.file.size,
+          fileExtension,
+          postType
+        );
+
+        if (!validation.valid) {
+          // Delete uploaded file
+          try {
+            await fs.unlink(req.file.path);
+          } catch (err) {
+            console.error('Error deleting invalid file:', err);
+          }
+          
+          return res.status(400).json({
+            success: false,
+            message: 'Media validation failed',
+            errors: validation.errors,
+            warnings: validation.warnings
+          });
+        }
+
+        // Log warnings if any
+        if (validation.warnings.length > 0) {
+          console.warn('⚠️ Media warnings:', validation.warnings);
+        }
+
         postData.mediaStoragePath = req.file.path;
-        postData.mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
+        postData.mediaType = mediaType;
       }
 
       // If scheduled for later, save and return
@@ -230,8 +264,41 @@ exports.schedulePost = async (req, res) => {
       };
 
       if (req.file) {
+        const mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
+        const fileExtension = path.extname(req.file.originalname);
+        
+        // Validate media against platform requirements
+        const validation = validateMedia(
+          platform.toLowerCase(),
+          mediaType,
+          req.file.size,
+          fileExtension,
+          postType
+        );
+
+        if (!validation.valid) {
+          // Delete uploaded file
+          try {
+            await fs.unlink(req.file.path);
+          } catch (err) {
+            console.error('Error deleting invalid file:', err);
+          }
+          
+          return res.status(400).json({
+            success: false,
+            message: 'Media validation failed',
+            errors: validation.errors,
+            warnings: validation.warnings
+          });
+        }
+
+        // Log warnings if any
+        if (validation.warnings.length > 0) {
+          console.warn('⚠️ Media warnings:', validation.warnings);
+        }
+
         postData.mediaStoragePath = req.file.path;
-        postData.mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
+        postData.mediaType = mediaType;
       }
 
       const scheduledPost = await ScheduledPost.create(postData);
@@ -331,6 +398,49 @@ exports.deleteScheduledPost = async (req, res) => {
 };
 
 /**
+ * @desc    Get media requirements for platforms
+ * @route   GET /api/posts/media-requirements
+ * @access  Public
+ */
+exports.getMediaRequirements = (req, res) => {
+  try {
+    const { platform, postType } = req.query;
+
+    if (platform) {
+      const requirements = getRequirementsText(platform, postType || 'post');
+      if (!requirements) {
+        return res.status(404).json({
+          success: false,
+          message: `Requirements for platform ${platform} not found`
+        });
+      }
+      return res.status(200).json({
+        success: true,
+        data: requirements
+      });
+    }
+
+    // Return all platforms
+    const allRequirements = {
+      facebook: getRequirementsText('facebook', postType || 'post'),
+      instagram: getRequirementsText('instagram', postType || 'post'),
+      linkedin: getRequirementsText('linkedin', postType || 'post')
+    };
+
+    res.status(200).json({
+      success: true,
+      data: allRequirements
+    });
+  } catch (error) {
+    console.error('Get media requirements error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+/**
  * Helper: Get public URL for media file (must be reachable by Instagram/Facebook)
  */
 function getPublicMediaUrl(filePath, req) {
@@ -362,20 +472,48 @@ function getPublicMediaUrl(filePath, req) {
  * Helper: Publish to Instagram
  */
 async function publishToInstagram(connection, post, req) {
-  const { content, mediaStoragePath, mediaType } = post;
+  const { content, mediaStoragePath, mediaType, postType } = post;
 
   if (!mediaStoragePath) {
     throw new Error('Instagram posts require an image or video');
   }
 
   const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
-  console.log(`📸 [Instagram] Publishing post with media: ${mediaUrl}`);
+  console.log(`📸 [Instagram] Publishing ${postType || 'post'} with media: ${mediaUrl}`);
 
-  const result = await instagramService.createPost(connection, {
-    caption: content,
-    mediaUrl: mediaUrl,
-    mediaType: mediaType
-  });
+  let result;
+
+  // Route to appropriate method based on post type
+  switch (postType) {
+    case 'story':
+      console.log(`📖 [Instagram] Creating story`);
+      result = await instagramService.createStory(connection, {
+        mediaUrl: mediaUrl,
+        mediaType: mediaType
+      });
+      break;
+
+    case 'reel':
+      if (mediaType !== 'video') {
+        throw new Error('Instagram Reels require a video file');
+      }
+      console.log(`🎬 [Instagram] Creating reel`);
+      result = await instagramService.createReel(connection, {
+        caption: content,
+        mediaUrl: mediaUrl
+      });
+      break;
+
+    case 'post':
+    default:
+      console.log(`📸 [Instagram] Creating regular post`);
+      result = await instagramService.createPost(connection, {
+        caption: content,
+        mediaUrl: mediaUrl,
+        mediaType: mediaType
+      });
+      break;
+  }
 
   return {
     postId: result.postId,
@@ -387,34 +525,97 @@ async function publishToInstagram(connection, post, req) {
  * Helper: Publish to Facebook (pages_manage_posts)
  */
 async function publishToFacebook(connection, post, req) {
-  const { content, mediaStoragePath, mediaType } = post;
+  const { content, mediaStoragePath, mediaType, postType } = post;
   
-  // If there's media, try to post with image first
-  if (mediaStoragePath && mediaType === 'image') {
-    try {
-      const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
-      console.log(`📸 [Facebook] Attempting to publish with image: ${mediaUrl}`);
+  console.log(`📘 [Facebook] Publishing ${postType || 'post'} with media: ${mediaStoragePath ? 'yes' : 'no'}`);
+
+  let result;
+
+  // Route to appropriate method based on post type
+  switch (postType) {
+    case 'story':
+      // Facebook Stories
+      if (!mediaStoragePath) {
+        throw new Error('Facebook stories require an image or video');
+      }
       
-      const payload = { 
-        message: content || ' ',
-        url: mediaUrl 
-      };
+      console.log(`📖 [Facebook] Creating story`);
       
-      const result = await facebookService.createPost(connection, payload);
-      return { postId: result.postId, postUrl: result.postUrl };
-    } catch (imageError) {
-      console.warn(`⚠️ [Facebook] Image post failed, falling back to text-only post:`, imageError.message);
+      if (mediaType === 'image') {
+        const imageBuffer = await fs.readFile(mediaStoragePath);
+        result = await facebookService.createStory(connection, {
+          imageBuffer: imageBuffer
+        });
+      } else if (mediaType === 'video') {
+        const videoUrl = getPublicMediaUrl(mediaStoragePath, req);
+        result = await facebookService.createStory(connection, {
+          videoUrl: videoUrl
+        });
+      } else {
+        throw new Error('Invalid media type for story');
+      }
+      break;
+
+    case 'reel':
+    case 'short':
+      // Facebook Reels (also called Shorts)
+      if (!mediaStoragePath || mediaType !== 'video') {
+        throw new Error('Facebook Reels require a video file');
+      }
       
-      // Fallback: Post as text-only to feed
-      const textPayload = { message: content || 'Posted from RepMeUp' };
-      const result = await facebookService.createPost(connection, textPayload);
-      return { postId: result.postId, postUrl: result.postUrl };
-    }
+      console.log(`🎬 [Facebook] Creating reel/short`);
+      const reelVideoUrl = getPublicMediaUrl(mediaStoragePath, req);
+      
+      result = await facebookService.createReel(connection, {
+        videoUrl: reelVideoUrl,
+        description: content,
+        title: content ? content.substring(0, 50) : 'Reel'
+      });
+      break;
+
+    case 'post':
+    default:
+      // Regular Facebook Post
+      if (mediaStoragePath && mediaType === 'image') {
+        try {
+          console.log(`📸 [Facebook] Reading image file: ${mediaStoragePath}`);
+          
+          // Read the image file as a buffer
+          const imageBuffer = await fs.readFile(mediaStoragePath);
+          
+          console.log(`📤 [Facebook] Uploading image directly (${imageBuffer.length} bytes)`);
+          
+          const payload = { 
+            message: content || ' ',
+            imageBuffer: imageBuffer
+          };
+          
+          result = await facebookService.createPost(connection, payload);
+        } catch (imageError) {
+          console.warn(`⚠️ [Facebook] Direct image upload failed, falling back to text-only:`, imageError.message);
+          
+          // Fallback: Post as text-only to feed
+          const textPayload = { message: content || 'Posted from RepMeUp' };
+          result = await facebookService.createPost(connection, textPayload);
+        }
+      } else if (mediaStoragePath && mediaType === 'video') {
+        // Video post
+        const videoUrl = getPublicMediaUrl(mediaStoragePath, req);
+        result = await facebookService.createVideoPost(connection, {
+          videoUrl: videoUrl,
+          description: content
+        });
+      } else {
+        // Text-only post
+        console.log(`📝 [Facebook] Publishing text-only post`);
+        const payload = { message: content || 'Posted from RepMeUp' };
+        result = await facebookService.createPost(connection, payload);
+      }
+      break;
   }
-  
-  // Text-only post
-  console.log(`📝 [Facebook] Publishing text-only post`);
-  const payload = { message: content || 'Posted from RepMeUp' };
-  const result = await facebookService.createPost(connection, payload);
-  return { postId: result.postId, postUrl: result.postUrl };
+
+  return {
+    postId: result.postId,
+    postUrl: result.postUrl
+  };
 }
