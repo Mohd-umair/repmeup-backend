@@ -9,6 +9,11 @@ const path = require('path');
  * @route /api/posts
  */
 
+// @route   GET /api/posts/media-requirements
+// @desc    Get media requirements for platforms
+// @access  Public (no rate limit - static data)
+router.get('/media-requirements', postController.getMediaRequirements);
+
 // @route   GET /api/posts/media/:filename
 // @desc    Serve uploaded media files (public for Instagram API)
 // @access  Public (needed for Instagram to access the media)

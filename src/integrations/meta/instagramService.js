@@ -263,25 +263,46 @@ class InstagramService {
           // Log detailed error info
           if (error.response?.data?.error) {
             const apiError = error.response.data.error;
-            console.error('API Error Details:', {
-              message: apiError.message,
-              type: apiError.type,
-              code: apiError.code,
-              error_subcode: apiError.error_subcode,
-              fbtrace_id: apiError.fbtrace_id
-            });
+            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.error('❌ [Instagram DM] API Error Details:');
+            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.error('  Message:', apiError.message);
+            console.error('  Type:', apiError.type);
+            console.error('  Code:', apiError.code);
+            console.error('  Subcode:', apiError.error_subcode);
+            console.error('  Trace ID:', apiError.fbtrace_id);
+            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
             // Check for specific permission errors
-            if (apiError.code === 10 || apiError.code === 200) {
-              console.warn('⚠️ [Instagram] Instagram Messaging API requires:');
-              console.warn('   1. instagram_manage_messages permission (approved by Meta)');
-              console.warn('   2. Instagram Messaging product added to your Meta app');
-              console.warn('   3. App must be in Live mode (not Development)');
-              console.warn('   → Skipping DMs for now. Comments will still work.');
+            if (apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
+              console.warn('');
+              console.warn('⚠️  [Instagram DM] PERMISSION ERROR DETECTED');
+              console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              console.warn('📋 Instagram DMs require additional setup:');
+              console.warn('');
+              console.warn('   1. Add "Instagram Messaging" product to your Meta app');
+              console.warn('      → https://developers.facebook.com/apps/1241029857870706/products/');
+              console.warn('');
+              console.warn('   2. Request "instagram_manage_messages" permission');
+              console.warn('      → App Review → Permissions and Features');
+              console.warn('');
+              console.warn('   3. Complete Business Verification');
+              console.warn('      → Settings → Basic → Business Verification');
+              console.warn('');
+              console.warn('   4. Switch app to Live mode (not Development)');
+              console.warn('      → Settings → Basic → App Mode');
+              console.warn('');
+              console.warn('   5. After approval, reconnect Instagram in app settings');
+              console.warn('');
+              console.warn('📖 See: backend/docs/INSTAGRAM_DM_SETUP.md for full guide');
+              console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              console.warn('✅ Comments will continue to work normally');
+              console.warn('');
             }
             
             if (apiError.code === 100) {
               console.error('❌ [Instagram] Invalid access token or permissions issue');
+              console.error('   → Try disconnecting and reconnecting Instagram');
             }
           }
           
@@ -290,7 +311,13 @@ class InstagramService {
         }
       }
 
-      console.log(`💬 [Instagram] Found ${allConversations.length} conversations`);
+      if (allConversations.length > 0) {
+        console.log(`✅ [Instagram] Found ${allConversations.length} conversations - DMs are working!`);
+      } else if (pageCount === 0) {
+        console.warn(`⚠️  [Instagram] No conversations found - DMs likely not enabled (see error above)`);
+      } else {
+        console.log(`📭 [Instagram] No active conversations found (DMs are enabled but no messages)`);
+      }
 
       const interactions = [];
       const interactionMap = new Map();
@@ -382,7 +409,11 @@ class InstagramService {
         }
       }
 
-      console.log(`💬 [Instagram] Found ${interactions.length} incoming DMs`);
+      if (interactions.length > 0) {
+        console.log(`💬 [Instagram] Found ${interactions.length} incoming DMs`);
+      } else if (allConversations.length > 0) {
+        console.log(`📭 [Instagram] No new incoming DMs (all messages from you or already synced)`);
+      }
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
@@ -713,6 +744,188 @@ class InstagramService {
         throw error;
       }
       throw new Error(error.message || 'Failed to create Instagram post');
+    }
+  }
+
+  /**
+   * Create and Publish Instagram Story
+   * Stories are 24-hour temporary content
+   */
+  async createStory(platformConnection, { mediaUrl, mediaType }) {
+    try {
+      if (!mediaUrl) {
+        throw new Error('Media URL is required for Instagram stories');
+      }
+
+      const { accessToken } = platformConnection;
+      const businessAccountId = this._getBusinessAccountId(platformConnection);
+
+      console.log(`📖 [Instagram] Starting story creation for account: ${businessAccountId}`);
+
+      // Step 1: Create story container
+      const params = {
+        access_token: accessToken,
+        media_type: 'STORIES' // This tells Instagram it's a story
+      };
+
+      if (mediaType === 'image') {
+        params.image_url = mediaUrl;
+      } else if (mediaType === 'video') {
+        params.video_url = mediaUrl;
+      } else {
+        throw new Error('Invalid media type. Must be "image" or "video"');
+      }
+
+      console.log(`📸 [Instagram] Creating story container`);
+      const containerResponse = await axios.post(
+        `${this.baseUrl}/${businessAccountId}/media`,
+        null,
+        { params }
+      );
+
+      const containerId = containerResponse.data.id;
+      console.log(`✅ [Instagram] Story container created: ${containerId}`);
+
+      // Step 2: For videos, wait for processing
+      if (mediaType === 'video') {
+        await this.checkContainerStatus(accessToken, containerId);
+      }
+
+      // Step 3: Publish the story
+      console.log(`📤 [Instagram] Publishing story container: ${containerId}`);
+      const publishResponse = await axios.post(
+        `${this.baseUrl}/${businessAccountId}/media_publish`,
+        null,
+        {
+          params: {
+            access_token: accessToken,
+            creation_id: containerId
+          }
+        }
+      );
+
+      const storyId = publishResponse.data.id;
+      console.log(`✅ [Instagram] Story published successfully: ${storyId}`);
+
+      return {
+        postId: storyId,
+        postUrl: `https://www.instagram.com/stories/${businessAccountId}/${storyId}`
+      };
+    } catch (error) {
+      console.error('❌ [Instagram] Story creation failed:', error.response?.data || error.message);
+      
+      const apiError = error.response?.data?.error;
+      if (apiError) {
+        const detailedError = new Error(apiError.message || 'Failed to create story');
+        detailedError.platformError = {
+          title: apiError.error_user_title || 'Instagram Story Error',
+          message: apiError.error_user_msg || apiError.message,
+          code: apiError.code,
+          subcode: apiError.error_subcode,
+          type: apiError.type
+        };
+        throw detailedError;
+      }
+      
+      throw new Error(error.message || 'Failed to create Instagram story');
+    }
+  }
+
+  /**
+   * Create and Publish Instagram Reel
+   * Reels are short-form video content optimized for discovery
+   */
+  async createReel(platformConnection, { caption, mediaUrl }) {
+    try {
+      if (!mediaUrl) {
+        throw new Error('Video URL is required for Instagram reels');
+      }
+
+      const { accessToken } = platformConnection;
+      const businessAccountId = this._getBusinessAccountId(platformConnection);
+
+      console.log(`🎬 [Instagram] Starting reel creation for account: ${businessAccountId}`);
+
+      // Step 1: Create reel container
+      const params = {
+        access_token: accessToken,
+        media_type: 'REELS', // This tells Instagram it's a reel
+        video_url: mediaUrl,
+        caption: caption || '',
+        share_to_feed: true // Also share to main feed
+      };
+
+      console.log(`📹 [Instagram] Creating reel container`);
+      const containerResponse = await axios.post(
+        `${this.baseUrl}/${businessAccountId}/media`,
+        null,
+        { params }
+      );
+
+      const containerId = containerResponse.data.id;
+      console.log(`✅ [Instagram] Reel container created: ${containerId}`);
+
+      // Step 2: Wait for video processing
+      await this.checkContainerStatus(accessToken, containerId);
+
+      // Step 3: Publish the reel
+      console.log(`📤 [Instagram] Publishing reel container: ${containerId}`);
+      const publishResponse = await axios.post(
+        `${this.baseUrl}/${businessAccountId}/media_publish`,
+        null,
+        {
+          params: {
+            access_token: accessToken,
+            creation_id: containerId
+          }
+        }
+      );
+
+      const reelId = publishResponse.data.id;
+      console.log(`✅ [Instagram] Reel published successfully: ${reelId}`);
+
+      // Try to fetch the permalink
+      let reelUrl = `https://www.instagram.com/reel/${reelId}/`;
+      try {
+        const mediaResponse = await axios.get(
+          `${this.baseUrl}/${reelId}`,
+          {
+            params: {
+              access_token: accessToken,
+              fields: 'permalink'
+            }
+          }
+        );
+        
+        if (mediaResponse.data.permalink) {
+          reelUrl = mediaResponse.data.permalink;
+          console.log(`✅ [Instagram] Fetched reel permalink: ${reelUrl}`);
+        }
+      } catch (err) {
+        console.warn(`⚠️ [Instagram] Could not fetch reel permalink, using fallback URL`);
+      }
+
+      return {
+        postId: reelId,
+        postUrl: reelUrl
+      };
+    } catch (error) {
+      console.error('❌ [Instagram] Reel creation failed:', error.response?.data || error.message);
+      
+      const apiError = error.response?.data?.error;
+      if (apiError) {
+        const detailedError = new Error(apiError.message || 'Failed to create reel');
+        detailedError.platformError = {
+          title: apiError.error_user_title || 'Instagram Reel Error',
+          message: apiError.error_user_msg || apiError.message,
+          code: apiError.code,
+          subcode: apiError.error_subcode,
+          type: apiError.type
+        };
+        throw detailedError;
+      }
+      
+      throw new Error(error.message || 'Failed to create Instagram reel');
     }
   }
 
