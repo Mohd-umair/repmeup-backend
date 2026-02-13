@@ -37,6 +37,11 @@ router.get('/media/:filename', (req, res) => {
   }
 });
 
+// @route   POST /api/posts/generate
+// @desc    Generate post content with AI
+// @access  Private
+router.post('/generate', protect, postController.generatePostWithAI);
+
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately
 // @access  Private

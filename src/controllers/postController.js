@@ -2,6 +2,8 @@ const ScheduledPost = require('../models/ScheduledPost');
 const PlatformConnection = require('../models/PlatformConnection');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
+const aiService = require('../services/aiService');
+const aiCreditService = require('../services/aiCreditService');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
@@ -42,6 +44,86 @@ const upload = multer({
     }
   }
 }).single('media');
+
+/**
+ * @desc    Generate post content with AI
+ * @route   POST /api/posts/generate
+ * @access  Private
+ */
+exports.generatePostWithAI = async (req, res) => {
+  try {
+    const { prompt, platforms, mode, postType } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    // Validation
+    if (!prompt || !platforms || platforms.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Prompt and platforms are required'
+      });
+    }
+
+    if (!['same', 'custom'].includes(mode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mode must be "same" or "custom"'
+      });
+    }
+
+    // Calculate credits needed
+    const creditsNeeded = mode === 'same' ? 1 : platforms.length;
+
+    // Check credits
+    const creditCheck = await aiCreditService.checkCredits(organizationId, creditsNeeded);
+
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        message: creditCheck.error || 'Insufficient AI credits',
+        credits: {
+          current: creditCheck.current,
+          limit: creditCheck.limit,
+          remaining: creditCheck.remaining,
+          needed: creditsNeeded
+        }
+      });
+    }
+
+    // Generate posts
+    const result = await aiService.generatePost(prompt, platforms, mode, postType);
+
+    // Deduct credits
+    await aiCreditService.deductCredits(organizationId, result.creditsUsed, {
+      operation: 'post_generation',
+      userId: req.user._id,
+      prompt: prompt.substring(0, 100),
+      platforms: platforms,
+      mode: mode,
+      postType: postType
+    });
+
+    // Get updated credit balance
+    const updatedCredits = await aiCreditService.getUsage(organizationId);
+
+    res.status(200).json({
+      success: true,
+      data: result,
+      credits: {
+        used: result.creditsUsed,
+        current: updatedCredits.current,
+        limit: updatedCredits.limit,
+        remaining: updatedCredits.remaining,
+        isUnlimited: updatedCredits.isUnlimited
+      }
+    });
+  } catch (error) {
+    console.error('Generate post with AI error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to generate post'
+    });
+  }
+};
 
 /**
  * @desc    Publish post immediately
@@ -331,10 +413,17 @@ exports.getScheduledPosts = async (req, res) => {
       .populate('platformConnection', 'platform platformPageId platformUsername')
       .lean();
 
-    res.status(200).json({ posts });
+    res.status(200).json({ 
+      success: true,
+      data: posts,
+      count: posts.length
+    });
   } catch (error) {
     console.error('Get scheduled posts error:', error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
   }
 };
 

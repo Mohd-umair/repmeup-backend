@@ -795,6 +795,25 @@ exports.suggestReply = async (req, res, next) => {
       });
     }
 
+    const organizationId = req.user.organization._id.toString();
+
+    // Check AI credits before generating
+    const aiCreditService = require('../services/aiCreditService');
+    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: creditCheck.error || 'Insufficient AI credits',
+        code: creditCheck.code || 'INSUFFICIENT_CREDITS',
+        credits: {
+          current: creditCheck.current,
+          limit: creditCheck.limit,
+          remaining: creditCheck.remaining
+        }
+      });
+    }
+
     // Get organization for settings
     const organization = await Organization.findById(req.user.organization._id);
 
@@ -812,6 +831,18 @@ exports.suggestReply = async (req, res, next) => {
         });
       }
 
+      // Deduct credits after successful generation
+      await aiCreditService.deductCredits(organizationId, 1, {
+        operation: 'ai_response',
+        userId: req.user._id,
+        interactionId: interaction._id.toString(),
+        platform: interaction.platform,
+        messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
+      });
+
+      // Get updated credit balance
+      const updatedCredits = await aiCreditService.getUsage(organizationId);
+
       res.status(200).json({
         success: true,
         data: {
@@ -820,6 +851,7 @@ exports.suggestReply = async (req, res, next) => {
           usedKnowledgeBase: aiResponse.usedKnowledgeBase,
           knowledgeBaseCount: aiResponse.knowledgeBaseCount
         },
+        credits: updatedCredits,
         message: 'AI reply generated successfully'
       });
     } catch (aiError) {
@@ -898,6 +930,9 @@ exports.generateAutoReplies = async (req, res, next) => {
       details: []
     };
 
+    const organizationId = req.user.organization._id.toString();
+    const aiCreditService = require('../services/aiCreditService');
+
     for (const interaction of interactions) {
       try {
         // Check daily limit
@@ -907,6 +942,18 @@ exports.generateAutoReplies = async (req, res, next) => {
             interactionId: interaction._id,
             status: 'skipped',
             reason: 'Daily limit reached'
+          });
+          continue;
+        }
+
+        // Check AI credits before generating
+        const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+        if (!creditCheck.allowed) {
+          results.skipped++;
+          results.details.push({
+            interactionId: interaction._id,
+            status: 'skipped',
+            reason: 'Insufficient AI credits'
           });
           continue;
         }
@@ -929,6 +976,16 @@ exports.generateAutoReplies = async (req, res, next) => {
         }
 
         results.generated++;
+
+        // Deduct credits after successful generation
+        await aiCreditService.deductCredits(organizationId, 1, {
+          operation: 'ai_response',
+          userId: req.user._id,
+          interactionId: interaction._id.toString(),
+          platform: interaction.platform,
+          isAutoReply: true,
+          messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
+        });
 
         // If autoSend is true and organization allows it, send the reply
         if (autoSend && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
@@ -1072,8 +1129,24 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
       details: []
     };
 
+    const aiCreditService = require('../services/aiCreditService');
+
     // Process each interaction
     for (const interaction of interactions) {
+      // Check AI credits before generating
+      const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+      if (!creditCheck.allowed) {
+        results.skipped++;
+        results.details.push({
+          id: interaction._id,
+          platform: interaction.platform,
+          type: interaction.type,
+          status: 'skipped',
+          reason: 'Insufficient AI credits'
+        });
+        continue;
+      }
+
       // Check eligibility
       const autoReply = await aiService.generateAutoReply(
         interaction,
@@ -1094,6 +1167,17 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
       }
 
       results.processed++;
+
+      // Deduct credits after successful generation
+      await aiCreditService.deductCredits(organizationId, 1, {
+        operation: 'ai_response',
+        userId: req.user._id,
+        interactionId: interaction._id.toString(),
+        platform: interaction.platform,
+        isAutoReplyTest: true,
+        messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
+      });
+
       results.details.push({
         id: interaction._id,
         platform: interaction.platform,
