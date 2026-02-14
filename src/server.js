@@ -52,6 +52,11 @@ async function startServer() {
     // Connect to Redis
     await connectRedis();
     console.log('✅ Redis connected successfully');
+    
+    // Upgrade rate limiting to Redis-backed after connection
+    if (app.upgradeRateLimiting) {
+      app.upgradeRateLimiting();
+    }
 
     // Initialize queue processors (unless DISABLE_WORKERS is set)
     if (process.env.DISABLE_WORKERS !== 'true') {
