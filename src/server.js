@@ -53,32 +53,46 @@ async function startServer() {
     await connectRedis();
     console.log('✅ Redis connected successfully');
 
-    // Initialize queue processors
-    const { webhookQueue, aiQueue, autoReplyQueue, syncQueue } = require('./config/queue');
-    const processWebhook = require('./jobs/processWebhook');
-    const processAI = require('./jobs/processAI');
-    const processAutoReply = require('./jobs/processAutoReply');
+    // Initialize queue processors (unless DISABLE_WORKERS is set)
+    if (process.env.DISABLE_WORKERS !== 'true') {
+      const { webhookQueue, aiQueue, autoReplyQueue, syncQueue } = require('./config/queue');
+      const processWebhook = require('./jobs/processWebhook');
+      const processAI = require('./jobs/processAI');
+      const processAutoReply = require('./jobs/processAutoReply');
 
-    // Start webhook queue processor
-    webhookQueue.process(async (job) => {
-      console.log(`\n📥 [Queue] Processing webhook job ${job.id}`);
-      return await processWebhook(job);
-    });
-    console.log('✅ Webhook queue processor started');
+      // Queue concurrency from environment or defaults
+      const WEBHOOK_CONCURRENCY = parseInt(process.env.WEBHOOK_CONCURRENCY) || 10;
+      const AI_CONCURRENCY = parseInt(process.env.AI_CONCURRENCY) || 10;
+      const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
 
-    // Start AI queue processor
-    aiQueue.process(async (job) => {
-      console.log(`\n🤖 [Queue] Processing AI job ${job.id}`);
-      return await processAI(job);
-    });
-    console.log('✅ AI queue processor started');
+      console.log('🔧 Queue Concurrency Configuration:');
+      console.log(`   Webhook: ${WEBHOOK_CONCURRENCY} concurrent jobs`);
+      console.log(`   AI: ${AI_CONCURRENCY} concurrent jobs`);
+      console.log(`   Auto-reply: ${AUTOREPLY_CONCURRENCY} concurrent jobs`);
 
-    // Start auto-reply queue processor
-    autoReplyQueue.process(async (job) => {
-      console.log(`\n💬 [Queue] Processing auto-reply job ${job.id}`);
-      return await processAutoReply(job);
-    });
-    console.log('✅ Auto-reply queue processor started');
+      // Start webhook queue processor
+      webhookQueue.process(WEBHOOK_CONCURRENCY, async (job) => {
+        console.log(`\n📥 [Queue] Processing webhook job ${job.id}`);
+        return await processWebhook(job);
+      });
+      console.log('✅ Webhook queue processor started');
+
+      // Start AI queue processor
+      aiQueue.process(AI_CONCURRENCY, async (job) => {
+        console.log(`\n🤖 [Queue] Processing AI job ${job.id}`);
+        return await processAI(job);
+      });
+      console.log('✅ AI queue processor started');
+
+      // Start auto-reply queue processor
+      autoReplyQueue.process(AUTOREPLY_CONCURRENCY, async (job) => {
+        console.log(`\n💬 [Queue] Processing auto-reply job ${job.id}`);
+        return await processAutoReply(job);
+      });
+      console.log('✅ Auto-reply queue processor started');
+    } else {
+      console.log('⚠️  Queue processors disabled (DISABLE_WORKERS=true). Workers should run separately.');
+    }
 
     // Initialize auto-reply scheduler
     const autoReplyScheduler = require('./services/autoReplyScheduler');

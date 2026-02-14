@@ -7,11 +7,32 @@ const { validateReply } = require('../middlewares/validation');
 // All inbox routes require authentication
 router.use(protect);
 
-// Get inbox stats
-router.get('/stats', inboxController.getStats);
 
 // Get all interactions
 router.get('/', inboxController.getInteractions);
+
+// Get inbox stats (must be before /:id)
+router.get('/stats', inboxController.getStats);
+
+// Get org labels (must be before /:id)
+router.get('/labels', inboxController.getLabels);
+
+// Get available agents for assignment (Manager/Admin only) (must be before /:id)
+router.get(
+  '/agents',
+  authorize('admin', 'manager'),
+  inboxController.getAvailableAgents
+);
+
+// Get escalated interactions requiring human response (must be before /:id)
+router.get('/escalated', inboxController.getEscalatedInteractions);
+
+// Get escalation statistics (Manager/Admin only) (must be before /:id)
+router.get(
+  '/escalation-stats',
+  authorize('admin', 'manager'),
+  inboxController.getEscalationStats
+);
 
 // Get author avatar (must be before /:id)
 // Avatar proxy endpoint removed - no longer needed (avatars are stored in interaction.author.avatarUrl)
@@ -56,16 +77,6 @@ router.post('/:id/notes', inboxController.addNote);
 // Update status
 router.put('/:id/status', inboxController.updateStatus);
 
-// Escalation routes
-// Get escalated interactions requiring human response
-router.get('/escalated', inboxController.getEscalatedInteractions);
-
-// Get available agents for assignment (Manager/Admin only)
-router.get(
-  '/agents',
-  authorize('admin', 'manager'),
-  inboxController.getAvailableAgents
-);
 
 // Bulk assign interactions (Manager/Admin only)
 router.post(
@@ -74,12 +85,12 @@ router.post(
   inboxController.bulkAssignInteractions
 );
 
-// Get escalation statistics (Manager/Admin only)
-router.get(
-  '/escalation-stats',
-  authorize('admin', 'manager'),
-  inboxController.getEscalationStats
-);
+// Bulk update status
+router.post('/status-bulk', inboxController.bulkUpdateStatus);
+
+// Bulk add label
+router.post('/labels-bulk', inboxController.bulkAddLabel);
+
 
 // Manually escalate interaction to human agent
 router.post('/:id/escalate', inboxController.escalateInteractionManually);
