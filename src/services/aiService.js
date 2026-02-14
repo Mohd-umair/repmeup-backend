@@ -464,8 +464,6 @@ Scoring:
       score = Math.max(-0.8, -0.4 - (negativeScore * 0.1));
     }
 
-    console.log(`⚠️  [AI] Fallback sentiment: ${sentiment} (pos: ${positiveScore}, neg: ${negativeScore})`);
-
     return {
       sentiment,
       sentimentScore: score,
