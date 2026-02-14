@@ -3,6 +3,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const RedisStore = require('rate-limit-redis');
+const { getRedisClient } = require('./config/redis');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -30,11 +32,19 @@ if (process.env.NODE_ENV === 'development') {
   app.use(morgan('combined'));
 }
 
-// Rate limiting
+// Redis-backed rate limiting
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-  message: 'Too many requests from this IP, please try again later.'
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  store: new RedisStore({
+    // Use the existing Redis client from config
+    // @ts-expect-error - rate-limit-redis expects Redis v4 client
+    client: getRedisClient(),
+    prefix: 'rl:', // Rate limit key prefix in Redis
+  }),
+  message: { success: false, error: 'Too many requests from this IP, please try again later' }
 });
 
 app.use('/api/', limiter);
@@ -48,6 +58,10 @@ app.get('/health', (req, res) => {
     environment: process.env.NODE_ENV
   });
 });
+
+// Bull Board monitoring UI
+const bullBoardAdapter = require('./config/bullBoard');
+app.use('/admin/queues', bullBoardAdapter.getRouter());
 
 // API routes
 app.use('/api/auth', require('./routes/auth'));
