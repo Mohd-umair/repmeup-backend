@@ -1073,8 +1073,20 @@ Generate a response that addresses the customer's message appropriately.`;
       }
 
       // Deduct AI credits after successful generation
+      // Try to find a user to attribute this to (assigned user or an admin)
+      const User = require('../models/User');
+      let userId = interaction.assignedTo;
+      if (!userId) {
+        const adminUser = await User.findOne({ 
+          organization: organizationId, 
+          role: { $in: ['admin', 'manager'] } 
+        }).select('_id');
+        userId = adminUser?._id;
+      }
+      
       await aiCreditService.deductCredits(organizationId, 1, {
         operation: 'auto_reply',
+        userId: userId,
         interactionId: interaction._id.toString(),
         platform: interaction.platform
       });
