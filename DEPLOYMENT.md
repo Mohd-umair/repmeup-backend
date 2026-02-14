@@ -4,6 +4,31 @@
 
 This guide covers deploying the ORM Backend with PM2 clustering, Redis-backed rate limiting, MongoDB connection pooling, and separate worker processes for optimal performance and scalability.
 
+## Server Requirements
+
+Choose the configuration based on your server size:
+
+### Small Server (1GB RAM, 1-2 CPU cores)
+- **Cost**: ~$5-10/month
+- **Use**: `ecosystem.config.small.js`
+- **Capacity**: ~500-1,000 msgs/hour
+- **Setup**: 1 API process, no separate workers
+- **Memory**: ~400MB per process
+
+### Medium Server (2GB RAM, 2-4 CPU cores) - RECOMMENDED
+- **Cost**: ~$15-25/month
+- **Use**: `ecosystem.config.medium.js` or `ecosystem.config.js`
+- **Capacity**: ~5,000-10,000 msgs/hour
+- **Setup**: 2 API + 1 worker process
+- **Memory**: ~512MB per process
+
+### Large Server (4GB+ RAM, 4+ CPU cores)
+- **Cost**: ~$40-80/month
+- **Use**: `ecosystem.config.large.js`
+- **Capacity**: ~15,000-25,000 msgs/hour
+- **Setup**: 4 API + 2 worker processes
+- **Memory**: ~1GB per process
+
 ## Prerequisites
 
 - Node.js >= 18.0.0
@@ -54,11 +79,19 @@ Access Bull Board monitoring at: `http://localhost:3000/admin/queues`
 npm install --production
 ```
 
-### 2. Start with PM2
+### 2. Start with PM2 (Choose Your Server Size)
 
 ```bash
-# Start all processes (4 API + 2 Workers)
+# SMALL SERVER (1GB RAM)
+pm2 start ecosystem.config.small.js --env production
+
+# MEDIUM SERVER (2GB RAM) - RECOMMENDED
+pm2 start ecosystem.config.medium.js --env production
+# OR use default
 pm2 start ecosystem.config.js --env production
+
+# LARGE SERVER (4GB+ RAM)
+pm2 start ecosystem.config.large.js --env production
 
 # Or start individually
 pm2 start ecosystem.config.js --only orm-api --env production
@@ -141,15 +174,16 @@ pm2 startup
 - Process auto-reply jobs (5 concurrent)
 - Dedicated CPU for background tasks
 
-## Performance Expectations
+## Performance Expectations by Server Size
 
-| Metric | Before | After Phase 1 | After Phase 2 |
-|--------|--------|---------------|---------------|
-| **Throughput** | 12-30 msgs/min | 120-300 msgs/min | 150-400 msgs/min |
-| **Max load** | ~500 msgs/hour | ~10,000 msgs/hour | ~15,000 msgs/hour |
-| **Instances** | 1 process | 4 API processes | 4 API + 2 workers |
-| **Concurrency** | 1 job/queue | 10-10-5 jobs/queue | Same + isolated workers |
-| **Rate limiting** | In-memory | Redis-backed | Redis-backed |
+| Metric | Small (1GB) | Medium (2GB) | Large (4GB+) |
+|--------|-------------|--------------|--------------|
+| **Throughput** | 10-20 msgs/min | 50-100 msgs/min | 150-250 msgs/min |
+| **Max load** | 500-1,000 msgs/hour | 5,000-10,000 msgs/hour | 15,000-25,000 msgs/hour |
+| **Instances** | 1 API | 2 API + 1 worker | 4 API + 2 workers |
+| **Concurrency** | 3-3-2 jobs/queue | 5-5-3 jobs/queue | 10-10-5 jobs/queue |
+| **Memory** | ~400MB total | ~1.5GB total | ~3-4GB total |
+| **Rate limiting** | Redis-backed | Redis-backed | Redis-backed |
 
 ## Scaling Recommendations
 
@@ -164,6 +198,43 @@ pm2 startup
 - Use shared Redis cluster
 - Use MongoDB replica set
 
+## Memory Optimization
+
+### Monitor Memory Usage
+```bash
+# Check memory per process
+pm2 status
+
+# Detailed memory monitoring
+pm2 monit
+
+# Check system memory
+free -h
+```
+
+### If Memory is High
+1. **Switch to smaller config:**
+   ```bash
+   pm2 delete all
+   pm2 start ecosystem.config.small.js --env production
+   ```
+
+2. **Reduce concurrency in .env:**
+   ```env
+   WEBHOOK_CONCURRENCY=2
+   AI_CONCURRENCY=2
+   AUTOREPLY_CONCURRENCY=1
+   MONGODB_POOL_MAX=10
+   MONGODB_POOL_MIN=3
+   ```
+
+3. **Enable log rotation:**
+   ```bash
+   pm2 install pm2-logrotate
+   pm2 set pm2-logrotate:max_size 10M
+   pm2 set pm2-logrotate:retain 7
+   ```
+
 ## Troubleshooting
 
 ### High Memory Usage
@@ -174,7 +245,8 @@ pm2 status
 # Restart process with high memory
 pm2 restart <process-name>
 
-# Lower max_memory_restart in ecosystem.config.js
+# Clear logs
+pm2 flush
 ```
 
 ### Queue Backlog

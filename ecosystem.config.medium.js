@@ -1,9 +1,10 @@
+// PM2 Configuration for MEDIUM servers (2GB RAM, 2-4 CPU cores)
 module.exports = {
   apps: [
     {
       name: 'orm-api',
       script: './src/server.js',
-      instances: 2, // Start with 2 processes (adjust based on server: 1-4)
+      instances: 2, // 2 API processes
       exec_mode: 'cluster',
       env: {
         NODE_ENV: 'development',
@@ -12,9 +13,9 @@ module.exports = {
       env_production: {
         NODE_ENV: 'production',
         PORT: 3000,
-        DISABLE_WORKERS: 'true' // Disable queue processors in API, run separately
+        DISABLE_WORKERS: 'true'
       },
-      max_memory_restart: '512M', // Restart if memory exceeds 512MB (adjust: 256M-1G)
+      max_memory_restart: '512M',
       error_file: './logs/pm2-error.log',
       out_file: './logs/pm2-out.log',
       merge_logs: true,
@@ -23,27 +24,26 @@ module.exports = {
       max_restarts: 10,
       min_uptime: '10s',
       kill_timeout: 5000,
-      listen_timeout: 10000,
-      shutdown_with_message: true,
-      // Memory management
-      node_args: '--max-old-space-size=512', // Limit heap to 512MB
-      exp_backoff_restart_delay: 100 // Exponential backoff for restarts
+      node_args: '--max-old-space-size=512',
+      exp_backoff_restart_delay: 100
     },
     {
       name: 'orm-worker',
       script: './src/worker.js',
-      instances: 1, // Start with 1 worker (scale to 2-4 as needed)
-      exec_mode: 'cluster',
+      instances: 1, // 1 worker process
+      exec_mode: 'fork',
       env: {
         NODE_ENV: 'development'
       },
       env_production: {
         NODE_ENV: 'production',
-        WEBHOOK_CONCURRENCY: 5,  // Reduced from 10
-        AI_CONCURRENCY: 5,        // Reduced from 10
-        AUTOREPLY_CONCURRENCY: 3  // Reduced from 5
+        WEBHOOK_CONCURRENCY: 5,
+        AI_CONCURRENCY: 5,
+        AUTOREPLY_CONCURRENCY: 3,
+        MONGODB_POOL_MAX: 20,
+        MONGODB_POOL_MIN: 5
       },
-      max_memory_restart: '512M', // Restart if memory exceeds 512MB
+      max_memory_restart: '512M',
       error_file: './logs/pm2-worker-error.log',
       out_file: './logs/pm2-worker-out.log',
       merge_logs: true,
@@ -52,8 +52,7 @@ module.exports = {
       max_restarts: 10,
       min_uptime: '10s',
       kill_timeout: 5000,
-      // Memory management
-      node_args: '--max-old-space-size=512', // Limit heap to 512MB
+      node_args: '--max-old-space-size=512',
       exp_backoff_restart_delay: 100
     }
   ]

@@ -32,22 +32,18 @@ if (process.env.NODE_ENV === 'development') {
   app.use(morgan('combined'));
 }
 
-// Redis-backed rate limiting
-const limiter = rateLimit({
+// Rate limiting - will be initialized after Redis connects
+// For now, use in-memory rate limiting as fallback
+let limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-  store: new RedisStore({
-    // Use the existing Redis client from config
-    // @ts-expect-error - rate-limit-redis expects Redis v4 client
-    client: getRedisClient(),
-    prefix: 'rl:', // Rate limit key prefix in Redis
-  }),
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { success: false, error: 'Too many requests from this IP, please try again later' }
 });
 
-app.use('/api/', limiter);
+// Middleware wrapper that uses the current limiter
+app.use('/api/', (req, res, next) => limiter(req, res, next));
 
 // Health check route
 app.get('/health', (req, res) => {
@@ -95,5 +91,28 @@ app.use((req, res) => {
 // Error handler (must be last)
 app.use(errorHandler);
 
+// Function to upgrade rate limiting to Redis-backed after Redis connects
+const upgradeRateLimiting = () => {
+  try {
+    const redisClient = getRedisClient();
+    limiter = rateLimit({
+      windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+      max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: new RedisStore({
+        // @ts-expect-error - rate-limit-redis expects Redis v4 client
+        client: redisClient,
+        prefix: 'rl:',
+      }),
+      message: { success: false, error: 'Too many requests from this IP, please try again later' }
+    });
+    console.log('✅ Rate limiting upgraded to Redis-backed store');
+  } catch (error) {
+    console.warn('⚠️  Could not upgrade to Redis-backed rate limiting, using in-memory fallback:', error.message);
+  }
+};
+
 module.exports = app;
+module.exports.upgradeRateLimiting = upgradeRateLimiting;
 
