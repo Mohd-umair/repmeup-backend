@@ -5,9 +5,9 @@ const queueOptions = {
   redis: process.env.REDIS_URL || 'redis://localhost:6379',
   settings: {
     maxStalledCount: 3, // Max times job can stall before failing
-    stalledInterval: 30000, // Check for stalled jobs every 30s
-    lockDuration: 30000, // Job lock expires after 30s
-    lockRenewTime: 15000 // Renew lock every 15s
+    stalledInterval: 60000, // Check for stalled jobs every 60s (increased from 30s)
+    lockDuration: 120000, // Job lock expires after 120s (increased from 30s)
+    lockRenewTime: 60000 // Renew lock every 60s (increased from 15s)
   },
   limiter: {
     max: 100, // Max 100 jobs per groupKey

@@ -36,9 +36,13 @@ if (process.env.NODE_ENV === 'development') {
 // For now, use in-memory rate limiting as fallback
 let limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 100 to 1000
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting for health check
+    return req.path === '/health';
+  },
   message: { success: false, error: 'Too many requests from this IP, please try again later' }
 });
 
@@ -97,9 +101,13 @@ const upgradeRateLimiting = () => {
     const redisClient = getRedisClient();
     limiter = rateLimit({
       windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-      max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+      max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 100 to 1000
       standardHeaders: true,
       legacyHeaders: false,
+      skip: (req) => {
+        // Skip rate limiting for health check
+        return req.path === '/health';
+      },
       store: new RedisStore({
         // @ts-expect-error - rate-limit-redis expects Redis v4 client
         client: redisClient,
@@ -107,7 +115,7 @@ const upgradeRateLimiting = () => {
       }),
       message: { success: false, error: 'Too many requests from this IP, please try again later' }
     });
-    console.log('✅ Rate limiting upgraded to Redis-backed store');
+    console.log('✅ Rate limiting upgraded to Redis-backed store (1000 req/15min)');
   } catch (error) {
     console.warn('⚠️  Could not upgrade to Redis-backed rate limiting, using in-memory fallback:', error.message);
   }

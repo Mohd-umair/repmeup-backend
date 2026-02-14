@@ -136,16 +136,12 @@ class AutoReplyScheduler {
 
       const settings = organization.autoReplySettings;
       
-      console.log(`📊 [Auto-Reply Queue] Checking trigger mode: ${settings.triggerMode}, webhookImmediate: ${settings.webhookImmediate}`);
-      
       // Check if webhook mode or hybrid mode is enabled
       if (settings.triggerMode !== 'webhook' && settings.triggerMode !== 'hybrid') {
-        console.log(`⚠️  [Auto-Reply Queue] Trigger mode is "${settings.triggerMode}" - webhook auto-reply not enabled`);
         return false;
       }
 
       if (!settings.webhookImmediate) {
-        console.log(`⚠️  [Auto-Reply Queue] webhookImmediate is false - webhook auto-reply disabled`);
         return false;
       }
 
@@ -171,7 +167,6 @@ class AutoReplyScheduler {
         }
       );
 
-      console.log(`✅ [Auto-Reply Queue] Queued webhook auto-reply for interaction ${interactionId} with ${delay}min delay`);
       return true;
 
     } catch (error) {
