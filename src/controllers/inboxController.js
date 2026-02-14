@@ -22,6 +22,7 @@ exports.getInteractions = async (req, res, next) => {
       status,
       search,
       assignedTo,
+      viewMode,
       page = 1,
       limit = 50,
       sortBy = 'createdAt',
@@ -40,6 +41,24 @@ exports.getInteractions = async (req, res, next) => {
     if (sentiment) query.sentiment = sentiment;
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
+
+    // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA)
+    const SLA_HOURS = 24;
+    const slaCutoff = new Date(Date.now() - SLA_HOURS * 60 * 60 * 1000);
+    let effectiveSortBy = sortBy;
+    let effectiveSortOrder = sortOrder;
+    if (viewMode === 'assigned') {
+      query.assignedTo = req.user._id;
+    } else if (viewMode === 'needs_response') {
+      query.status = 'unread';
+      effectiveSortBy = 'platformCreatedAt';
+      effectiveSortOrder = 'asc';
+    } else if (viewMode === 'overdue') {
+      query.status = { $nin: ['replied', 'resolved'] };
+      query.platformCreatedAt = { $lt: slaCutoff };
+      effectiveSortBy = 'platformCreatedAt';
+      effectiveSortOrder = 'asc';
+    }
     
     // Build search condition - escape special regex characters
     // Trim and validate search term
@@ -84,11 +103,11 @@ exports.getInteractions = async (req, res, next) => {
       ]
     };
 
-    // Build agent condition
+    // Build agent condition: agents see only chats assigned to them OR previously assigned to them
     const agentCondition = req.user.role === 'agent' ? {
       $or: [
         { assignedTo: req.user._id },
-        { assignedTo: { $exists: false } }
+        { 'assignmentHistory.assignedTo': req.user._id }
       ]
     } : null;
 
@@ -120,21 +139,22 @@ exports.getInteractions = async (req, res, next) => {
 
     // Calculate pagination
     const skip = (page - 1) * limit;
-    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
+    const sort = { [effectiveSortBy]: effectiveSortOrder === 'desc' ? -1 : 1 };
 
     // Try to get from cache (include search in cache key, normalized)
-    // Normalize search term for cache key (lowercase and trimmed)
     const cacheSearchKey = searchTerm ? searchTerm.toLowerCase().trim() : '';
+    const effectiveAssignedTo = viewMode === 'assigned' ? req.user._id.toString() : (assignedTo || '');
     const cacheKey = cacheService.interactionsKey(req.user.organization._id, {
       platform,
       type,
       sentiment,
       status,
-      search: cacheSearchKey, // Include normalized search term in cache key
+      viewMode: viewMode || '',
+      search: cacheSearchKey,
       page,
       limit,
-      assignedTo: req.user.role === 'agent' ? req.user._id.toString() : assignedTo || '',
-      activeConnections: activeConnectionIds.map(id => id.toString()).sort().join(',') // Include active connections in cache key
+      assignedTo: req.user.role === 'agent' ? req.user._id.toString() : effectiveAssignedTo,
+      activeConnections: activeConnectionIds.map(id => id.toString()).sort().join(',')
     });
 
     const cached = await cacheService.get(cacheKey);
@@ -212,6 +232,20 @@ exports.getInteraction = async (req, res, next) => {
         success: false,
         error: 'Access denied'
       });
+    }
+
+    // Agents can only view interactions assigned to them or previously assigned to them
+    if (req.user.role === 'agent') {
+      const isAssigned = interaction.assignedTo?.toString() === req.user._id.toString();
+      const wasPreviouslyAssigned = (interaction.assignmentHistory || []).some(
+        h => h.assignedTo?.toString() === req.user._id.toString()
+      );
+      if (!isAssigned && !wasPreviouslyAssigned) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access denied'
+        });
+      }
     }
 
     // Mark as read
@@ -323,6 +357,17 @@ exports.replyToInteraction = async (req, res, next) => {
         success: false,
         error: 'Access denied'
       });
+    }
+
+    // Agents can only reply when currently assigned to this interaction
+    if (req.user.role === 'agent') {
+      const assignedToId = interaction.assignedTo?.toString?.() || interaction.assignedTo;
+      if (assignedToId !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          error: 'You can only reply to conversations assigned to you'
+        });
+      }
     }
 
     let replyContent = content;
@@ -735,38 +780,182 @@ exports.updateStatus = async (req, res, next) => {
 // @desc    Get inbox stats
 // @route   GET /api/inbox/stats
 // @access  Private
+// @query   platform (optional) - filter by platform for per-platform stats
 exports.getStats = async (req, res, next) => {
   try {
     const orgId = req.user.organization._id;
+    const { platform } = req.query;
+
+    // Match parent interactions only (exclude replies), same as inbox list
+    const matchStage = {
+      organization: orgId,
+      $or: [
+        { parentId: { $exists: false } },
+        { parentId: null },
+        { parentId: '' }
+      ]
+    };
+    if (platform) matchStage.platform = platform;
+
+    const SLA_HOURS = 24;
+    const slaThresholdMs = SLA_HOURS * 60 * 60 * 1000;
+    const now = new Date();
+    const slaCutoff = new Date(now.getTime() - slaThresholdMs);
 
     const stats = await Interaction.aggregate([
-      { $match: { organization: orgId } },
+      { $match: matchStage },
       {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          unread: {
-            $sum: { $cond: [{ $eq: ['$status', 'unread'] }, 1, 0] }
-          },
-          assigned: {
-            $sum: { $cond: [{ $eq: ['$status', 'assigned'] }, 1, 0] }
-          },
-          positive: {
-            $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] }
-          },
-          negative: {
-            $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] }
-          },
-          neutral: {
-            $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] }
+        $facet: {
+          counts: [
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                unread: {
+                  $sum: { $cond: [{ $eq: ['$status', 'unread'] }, 1, 0] }
+                },
+                assigned: {
+                  $sum: { $cond: [{ $eq: ['$status', 'assigned'] }, 1, 0] }
+                },
+                replied: {
+                  $sum: { $cond: [{ $eq: ['$status', 'replied'] }, 1, 0] }
+                },
+                resolved: {
+                  $sum: { $cond: [{ $eq: ['$status', 'resolved'] }, 1, 0] }
+                },
+                positive: {
+                  $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] }
+                },
+                negative: {
+                  $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] }
+                },
+                neutral: {
+                  $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] }
+                }
+              }
+            },
+            {
+              $addFields: {
+                responseRate: {
+                  $cond: [
+                    { $gt: ['$total', 0] },
+                    { $round: [{ $multiply: [{ $divide: [{ $add: ['$replied', '$resolved'] }, '$total'] }, 100] }, 0] },
+                    0
+                  ]
+                }
+              }
+            }
+          ],
+          avgResponse: [
+            {
+              $match: {
+                respondedAt: { $exists: true, $ne: null },
+                platformCreatedAt: { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: null,
+                avgMs: { $avg: { $subtract: ['$respondedAt', '$platformCreatedAt'] } }
+              }
+            }
+          ],
+          overdue: [
+            {
+              $match: {
+                status: { $nin: ['replied', 'resolved'] },
+                platformCreatedAt: { $lt: slaCutoff }
+              }
+            },
+            { $count: 'count' }
+          ]
+        }
+      },
+      {
+        $addFields: {
+          _counts: { $arrayElemAt: ['$counts', 0] },
+          _avgResp: { $arrayElemAt: ['$avgResponse', 0] },
+          _overdue: { $arrayElemAt: ['$overdue', 0] }
+        }
+      },
+      {
+        $replaceRoot: {
+          newRoot: {
+            $mergeObjects: [
+              { $ifNull: ['$_counts', {}] },
+              {
+                avgResponseTimeMinutes: {
+                  $cond: [
+                    { $and: [{ $ne: ['$_avgResp.avgMs', null] }, { $gt: ['$_avgResp.avgMs', 0] }] },
+                    { $round: [{ $divide: ['$_avgResp.avgMs', 60000] }, 0] },
+                    null
+                  ]
+                },
+                overdueCount: { $ifNull: ['$_overdue.count', 0] }
+              }
+            ]
           }
+        }
+      },
+      {
+        $addFields: {
+          total: { $ifNull: ['$total', 0] },
+          unread: { $ifNull: ['$unread', 0] },
+          assigned: { $ifNull: ['$assigned', 0] },
+          replied: { $ifNull: ['$replied', 0] },
+          resolved: { $ifNull: ['$resolved', 0] },
+          responseRate: { $ifNull: ['$responseRate', 0] },
+          positive: { $ifNull: ['$positive', 0] },
+          negative: { $ifNull: ['$negative', 0] },
+          neutral: { $ifNull: ['$neutral', 0] },
+          overdueCount: { $ifNull: ['$overdueCount', 0] }
         }
       }
     ]);
 
+    const data = stats[0] || {};
+    // Ensure responseRate is included when no stats
+    if (!data.responseRate && data.total === undefined) {
+      data.responseRate = 0;
+    }
+
     res.status(200).json({
       success: true,
-      data: stats[0] || {}
+      data
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get org labels
+// @route   GET /api/inbox/labels
+// @access  Private
+exports.getLabels = async (req, res, next) => {
+  try {
+    let labels = await Label.find({ organization: req.user.organization._id })
+      .select('_id name color icon')
+      .sort({ name: 1 })
+      .lean();
+    
+    // Auto-create default labels if none exist
+    if (labels.length === 0) {
+      const labelService = require('../services/labelService');
+      const created = await labelService.ensureDefaultLabels(
+        req.user.organization._id,
+        req.user._id
+      );
+      labels = created.map(l => ({
+        _id: l._id,
+        name: l.name,
+        color: l.color,
+        icon: l.icon
+      }));
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: labels
     });
   } catch (error) {
     next(error);
@@ -1253,25 +1442,12 @@ exports.getEscalatedInteractions = async (req, res, next) => {
 // @access  Private (Manager/Admin)
 exports.getAvailableAgents = async (req, res, next) => {
   try {
-    const organization = await Organization.findById(req.user.organization._id);
-    
-    let agents;
-    const availableAgentIds = organization.escalationSettings?.availableAgents || [];
-    
-    if (availableAgentIds.length > 0) {
-      // Get configured agents
-      agents = await User.find({
-        _id: { $in: availableAgentIds },
-        isActive: true
-      }).select('firstName lastName email role');
-    } else {
-      // Fallback: Get all admins and managers
-      agents = await User.find({
-        organization: req.user.organization._id,
-        role: { $in: ['admin', 'manager'] },
-        isActive: true
-      }).select('firstName lastName email role');
-    }
+    // Always return ALL assignable users (admins, managers, agents) for manual assignment dropdown
+    const agents = await User.find({
+      organization: req.user.organization._id,
+      role: { $in: ['admin', 'manager', 'agent'] },
+      isActive: true
+    }).select('firstName lastName email role').sort({ role: 1, firstName: 1 });
 
     // Get workload for each agent
     const agentsWithWorkload = await Promise.all(
@@ -1362,6 +1538,110 @@ exports.bulkAssignInteractions = async (req, res, next) => {
     });
   } catch (error) {
     console.error('Bulk assign error:', error);
+    next(error);
+  }
+};
+
+// @desc    Bulk update interaction status
+// @route   POST /api/inbox/status-bulk
+// @access  Private
+exports.bulkUpdateStatus = async (req, res, next) => {
+  try {
+    const { interactionIds, status } = req.body;
+
+    if (!interactionIds || !Array.isArray(interactionIds) || interactionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'interactionIds array is required'
+      });
+    }
+
+    if (!status || !['unread', 'read', 'replied', 'resolved', 'archived', 'spam'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: 'status must be one of: unread, read, replied, resolved, archived, spam'
+      });
+    }
+
+    const update = { status };
+    if (status === 'resolved') {
+      update.resolvedAt = new Date();
+    }
+
+    const result = await Interaction.updateMany(
+      {
+        _id: { $in: interactionIds },
+        organization: req.user.organization._id
+      },
+      { $set: update }
+    );
+
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    res.status(200).json({
+      success: true,
+      data: { updated: result.modifiedCount },
+      message: `Successfully updated ${result.modifiedCount} interaction(s) to ${status}`
+    });
+  } catch (error) {
+    console.error('Bulk status update error:', error);
+    next(error);
+  }
+};
+
+// @desc    Bulk add label to interactions
+// @route   POST /api/inbox/labels-bulk
+// @access  Private
+exports.bulkAddLabel = async (req, res, next) => {
+  try {
+    const { interactionIds, labelId } = req.body;
+
+    if (!interactionIds || !Array.isArray(interactionIds) || interactionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'interactionIds array is required'
+      });
+    }
+
+    if (!labelId) {
+      return res.status(400).json({
+        success: false,
+        error: 'labelId is required'
+      });
+    }
+
+    const label = await Label.findById(labelId);
+    if (!label) {
+      return res.status(404).json({
+        success: false,
+        error: 'Label not found'
+      });
+    }
+
+    const interactions = await Interaction.find({
+      _id: { $in: interactionIds },
+      organization: req.user.organization._id
+    });
+
+    let updated = 0;
+    for (const interaction of interactions) {
+      if (!interaction.labels.includes(labelId)) {
+        interaction.labels.push(labelId);
+        await interaction.save();
+        await label.incrementUsage();
+        updated++;
+      }
+    }
+
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    res.status(200).json({
+      success: true,
+      data: { updated },
+      message: `Successfully added label to ${updated} interaction(s)`
+    });
+  } catch (error) {
+    console.error('Bulk add label error:', error);
     next(error);
   }
 };
