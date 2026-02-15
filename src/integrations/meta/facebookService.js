@@ -771,22 +771,39 @@ class FacebookService {
         throw new Error(`Cannot load video file for reel upload: ${downloadError.message}`);
       }
 
-      // Create reel with direct file upload using multipart/form-data
+      // Facebook Reel API requires two-phase upload:
+      // Phase 1: START - Initialize upload session and get video_id
+      // Phase 2: FINISH - Upload file with video_id
+      
+      const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
+      
+      // Phase 1: Start upload session
+      console.log(`📤 [Facebook] Phase 1: Starting reel upload session`);
+      const startResponse = await axios.post(endpoint, null, {
+        params: {
+          upload_phase: 'start',
+          access_token: accessToken
+        }
+      });
+      
+      const videoId = startResponse.data.video_id;
+      console.log(`✅ [Facebook] Upload session started, video_id: ${videoId}`);
+
+      // Phase 2: Upload video file with multipart/form-data
       const FormData = require('form-data');
       const form = new FormData();
       
-      form.append('source', videoBuffer, {
+      form.append('video_file_chunk', videoBuffer, {
         filename: 'reel.mp4',
         contentType: 'video/mp4'
       });
-      form.append('upload_phase', 'finish'); // Required parameter
+      form.append('upload_phase', 'finish');
+      form.append('video_id', videoId);
       form.append('description', description || title || '');
       form.append('access_token', accessToken);
 
-      const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
-      
-      console.log(`📤 [Facebook] Uploading reel with direct file upload (upload_phase: finish)`);
-      const response = await axios.post(endpoint, form, {
+      console.log(`📤 [Facebook] Phase 2: Uploading video file (${videoBuffer.length} bytes)`);
+      const finishResponse = await axios.post(endpoint, form, {
         headers: {
           ...form.getHeaders(),
         },
@@ -795,7 +812,7 @@ class FacebookService {
         timeout: 120000 // 2 minutes
       });
 
-      const reelId = response.data.id;
+      const reelId = finishResponse.data.id || videoId;
       console.log(`✅ [Facebook] Reel created successfully: ${reelId}`);
 
       const reelUrl = `https://www.facebook.com/reel/${reelId}`;
