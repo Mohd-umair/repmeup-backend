@@ -757,12 +757,13 @@ class FacebookService {
         access_token: accessToken,
         upload_phase: 'finish',
         video_id: videoId,
-        video_file_url: videoUrl, // Facebook will download from this URL
+        file_url: videoUrl, // Use same param name as regular video posts
         description: description || title || '',
         title: title || 'Reel'
       };
 
       console.log(`📤 [Facebook] Finishing reel upload with video URL`);
+      console.log(`📋 [Facebook] Finish params:`, { video_id: videoId, file_url: videoUrl });
       const finishResponse = await axios.post(endpoint, null, { params: finishParams });
 
       console.log(`✅ [Facebook] Reel created successfully:`, finishResponse.data);
@@ -775,17 +776,25 @@ class FacebookService {
         success: true
       };
     } catch (error) {
-      console.error('❌ [Facebook] Create reel error:', error.response?.data || error.message);
+      const errorData = error.response?.data?.error;
+      console.error('❌ [Facebook] Create reel error:', errorData || error.message);
       
-      // Facebook Reels API might not be available for all pages
-      // Fallback to regular video post
-      console.warn('⚠️ [Facebook] Reel creation failed, falling back to regular video post');
+      // Check if it's the "Video Upload Is Missing" error (6000/1363130)
+      // This means Facebook Reel API doesn't support URL-based uploads
+      if (errorData?.code === 6000 || errorData?.error_subcode === 1363130) {
+        console.warn('⚠️ [Facebook] Reel API requires direct file upload (not URL-based)');
+        console.warn('⚠️ [Facebook] Falling back to regular video post (will appear as regular video, not reel)');
+      } else {
+        console.warn('⚠️ [Facebook] Reel creation failed, falling back to regular video post');
+      }
       
       try {
         const videoPost = await this.createVideoPost(platformConnection, {
           videoUrl: reelData.videoUrl,
           description: reelData.description || reelData.title
         });
+        
+        console.log('✅ [Facebook] Posted as regular video instead of reel');
         return videoPost;
       } catch (fallbackError) {
         console.error('❌ [Facebook] Video post fallback also failed:', fallbackError.response?.data || fallbackError.message);
@@ -797,8 +806,8 @@ class FacebookService {
           message: errorMessage,
           code: errorCode,
           platformError: {
-            title: 'Facebook Reel Creation Failed',
-            message: errorMessage + ' (Reel API not available - video post fallback also failed)',
+            title: 'Facebook Video Post Failed',
+            message: 'Both reel and video post creation failed. ' + errorMessage,
             code: errorCode
           }
         };
