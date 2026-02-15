@@ -3,6 +3,8 @@ const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const youtubeService = require('../integrations/google/youtubeService');
 const { processWebhook } = require('../jobs/processWebhook');
+const logger = require('../config/logger');
+const logEvents = require('../utils/logEvents');
 
 /**
  * @desc    Handle Google Business Profile webhook
@@ -27,7 +29,11 @@ exports.handleGoogleWebhook = async (req, res, next) => {
     const messageData = JSON.parse(Buffer.from(message.data, 'base64').toString());
     const { eventType, locationId, reviewId } = messageData;
 
-    console.log('Google webhook received:', { eventType, locationId, reviewId });
+    logEvents.webhook.received({
+      platform: 'google',
+      eventType,
+      objectId: reviewId || locationId
+    });
 
     // Find platform connection by location ID
     const connection = await PlatformConnection.findOne({
@@ -37,7 +43,10 @@ exports.handleGoogleWebhook = async (req, res, next) => {
     });
 
     if (!connection) {
-      console.log(`No active connection found for location ${locationId}`);
+      req.log?.info('No active connection found for webhook', { 
+        platform: 'google',
+        locationId 
+      });
       return res.status(200).json({ success: true, message: 'No connection found' });
     }
 

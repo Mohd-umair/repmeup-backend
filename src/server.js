@@ -4,11 +4,15 @@ const connectDB = require('./config/database');
 const { connectRedis } = require('./config/redis');
 const http = require('http');
 const socketIO = require('socket.io');
+const logger = require('./config/logger');
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
-  console.error('UNCAUGHT EXCEPTION! 💥 Shutting down...');
-  console.error(err.name, err.message);
+  logger.error('UNCAUGHT EXCEPTION! Shutting down...', {
+    error: err.message,
+    stack: err.stack,
+    name: err.name
+  });
   process.exit(1);
 });
 
@@ -28,15 +32,18 @@ app.set('io', io);
 
 // Socket.IO connection handler
 io.on('connection', (socket) => {
-  console.log('New client connected:', socket.id);
+  logger.debug('Socket client connected', { socketId: socket.id });
 
   socket.on('join-organization', (organizationId) => {
     socket.join(`org-${organizationId}`);
-    console.log(`Socket ${socket.id} joined organization ${organizationId}`);
+    logger.debug('Socket joined organization', { 
+      socketId: socket.id, 
+      organizationId 
+    });
   });
 
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    logger.debug('Socket client disconnected', { socketId: socket.id });
   });
 });
 
@@ -47,11 +54,11 @@ async function startServer() {
   try {
     // Connect to MongoDB
     await connectDB();
-    console.log('✅ MongoDB connected successfully');
+    logger.info('MongoDB connected successfully');
 
     // Connect to Redis
     await connectRedis();
-    console.log('✅ Redis connected successfully');
+    logger.info('Redis connected successfully');
     
     // Upgrade rate limiting to Redis-backed after connection
     if (app.upgradeRateLimiting) {
@@ -70,43 +77,58 @@ async function startServer() {
       const AI_CONCURRENCY = parseInt(process.env.AI_CONCURRENCY) || 10;
       const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
 
-      console.log('🔧 Queue Concurrency Configuration:');
-      console.log(`   Webhook: ${WEBHOOK_CONCURRENCY} concurrent jobs`);
-      console.log(`   AI: ${AI_CONCURRENCY} concurrent jobs`);
-      console.log(`   Auto-reply: ${AUTOREPLY_CONCURRENCY} concurrent jobs`);
+      logger.info('Queue concurrency configuration', {
+        webhook: WEBHOOK_CONCURRENCY,
+        ai: AI_CONCURRENCY,
+        autoReply: AUTOREPLY_CONCURRENCY
+      });
 
       // Start webhook queue processor
       webhookQueue.process(WEBHOOK_CONCURRENCY, async (job) => {
-        console.log(`\n📥 [Queue] Processing webhook job ${job.id}`);
+        const jobLogger = logger.createChild({ module: 'webhook-queue', jobId: job.id });
+        jobLogger.info('Processing webhook job');
         return await processWebhook(job);
       });
-      console.log('✅ Webhook queue processor started');
+      logger.info('Webhook queue processor started');
 
       // Start AI queue processor
       aiQueue.process(AI_CONCURRENCY, async (job) => {
-        console.log(`\n🤖 [Queue] Processing AI job ${job.id}`);
+        const jobLogger = logger.createChild({ module: 'ai-queue', jobId: job.id });
+        jobLogger.info('Processing AI job');
         return await processAI(job);
       });
-      console.log('✅ AI queue processor started');
+      logger.info('AI queue processor started');
 
       // Start auto-reply queue processor
       autoReplyQueue.process(AUTOREPLY_CONCURRENCY, async (job) => {
-        console.log(`\n💬 [Queue] Processing auto-reply job ${job.id}`);
+        const jobLogger = logger.createChild({ module: 'autoreply-queue', jobId: job.id });
+        jobLogger.info('Processing auto-reply job');
         return await processAutoReply(job);
       });
-      console.log('✅ Auto-reply queue processor started');
+      logger.info('Auto-reply queue processor started');
     } else {
-      console.log('⚠️  Queue processors disabled (DISABLE_WORKERS=true). Workers should run separately.');
+      logger.warn('Queue processors disabled (DISABLE_WORKERS=true). Workers should run separately.');
     }
 
     // Initialize auto-reply scheduler
     const autoReplyScheduler = require('./services/autoReplyScheduler');
     await autoReplyScheduler.initializeScheduledJobs();
-    console.log('✅ Auto-reply scheduler initialized');
+    logger.info('Auto-reply scheduler initialized');
 
     // Start listening
     server.listen(PORT, () => {
-      console.log(`
+      logger.info('ORM System API Server started', {
+        environment: process.env.NODE_ENV,
+        port: PORT,
+        apiUrl: `http://localhost:${PORT}`,
+        healthUrl: `http://localhost:${PORT}/health`,
+        mongodb: 'connected',
+        redis: 'connected'
+      });
+      
+      // Pretty banner for console (only in dev)
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`
 ╔═══════════════════════════════════════════════════════╗
 ║                                                       ║
 ║          🚀 ORM SYSTEM API SERVER RUNNING 🚀          ║
@@ -121,17 +143,24 @@ async function startServer() {
 ║                                                       ║
 ╚═══════════════════════════════════════════════════════╝
       `);
+      }
     });
   } catch (error) {
-    console.error('❌ Failed to start server:', error);
+    logger.error('Failed to start server', {
+      error: error.message,
+      stack: error.stack
+    });
     process.exit(1);
   }
 }
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {
-  console.error('UNHANDLED REJECTION! 💥 Shutting down...');
-  console.error(err.name, err.message);
+  logger.error('UNHANDLED REJECTION! Shutting down...', {
+    error: err.message,
+    stack: err.stack,
+    name: err.name
+  });
   server.close(() => {
     process.exit(1);
   });
@@ -139,9 +168,9 @@ process.on('unhandledRejection', (err) => {
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('👋 SIGTERM received. Shutting down gracefully...');
+  logger.info('SIGTERM received. Shutting down gracefully...');
   server.close(() => {
-    console.log('💥 Process terminated!');
+    logger.info('Process terminated');
   });
 });
 

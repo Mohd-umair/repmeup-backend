@@ -1,6 +1,7 @@
 const axios = require('axios');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const aiCreditService = require('./aiCreditService');
+const logger = require('../config/logger');
 
 class AIService {
   constructor() {
@@ -22,11 +23,11 @@ class AIService {
     } else if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
       // Auto-detect: Use OpenAI if API key is present
       this.provider = 'openai';
-      console.log('✅ Auto-detected OpenAI provider (API key found)');
+      logger.info('AI Service: Auto-detected OpenAI provider', { hasApiKey: true });
     } else {
       // Fallback to Ollama if no OpenAI key
       this.provider = 'ollama';
-      console.log('⚠️  Using Ollama provider (no OpenAI API key found)');
+      logger.warn('AI Service: Using Ollama provider', { reason: 'No OpenAI API key found' });
     }
 
     console.log(`🤖 AI Provider: ${this.provider.toUpperCase()}`);
