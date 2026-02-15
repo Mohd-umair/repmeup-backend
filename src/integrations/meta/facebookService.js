@@ -807,9 +807,15 @@ class FacebookService {
       
       try {
         if (uploadUrl) {
-          // Use the provided upload_url (already includes auth and params)
+          // Use the provided upload_url and add access_token (required for auth)
           console.log(`   Uploading to provided upload_url`);
-          await axios.post(uploadUrl, form, {
+          
+          // Add access_token to the upload_url
+          const uploadUrlWithAuth = uploadUrl.includes('?') 
+            ? `${uploadUrl}&access_token=${accessToken}`
+            : `${uploadUrl}?access_token=${accessToken}`;
+          
+          await axios.post(uploadUrlWithAuth, form, {
             headers: {
               ...form.getHeaders(),
             },
@@ -923,26 +929,99 @@ class FacebookService {
       // Pre-check: Verify URL is publicly accessible
       await this.verifyMediaUrlAccessible(videoUrl);
 
+      // Try URL-based upload first (simpler and faster)
       const endpoint = `${this.baseURL}/${platformPageId}/videos`;
       
-      const response = await axios.post(endpoint, null, {
-        params: {
-          file_url: videoUrl,
-          description: description || '',
-          access_token: accessToken
+      try {
+        console.log(`📤 [Facebook] Attempting URL-based video upload`);
+        const response = await axios.post(endpoint, null, {
+          params: {
+            file_url: videoUrl,
+            description: description || '',
+            access_token: accessToken
+          }
+        });
+
+        console.log(`✅ [Facebook] Video post created successfully (URL method):`, response.data);
+
+        const videoId = response.data.id;
+        const videoUrl_result = `https://www.facebook.com/${videoId}`;
+
+        return {
+          postId: videoId,
+          postUrl: videoUrl_result,
+          success: true
+        };
+      } catch (urlError) {
+        // Check if it's the "Unable to fetch video file from URL" error
+        const errorCode = urlError.response?.data?.error?.code;
+        const errorSubcode = urlError.response?.data?.error?.error_subcode;
+        
+        if (errorCode === 389 && errorSubcode === 1363057) {
+          console.warn(`⚠️ [Facebook] URL-based upload failed (error 389/1363057)`);
+          console.log(`📤 [Facebook] Retrying with direct file upload`);
+          
+          // Fallback to direct file upload
+          let videoBuffer;
+          const isOwnMedia = videoUrl.includes('/api/posts/media/');
+          
+          if (isOwnMedia) {
+            const filename = videoUrl.split('/').pop();
+            const videoFilePath = path.join(__dirname, '../../../uploads/posts', filename);
+            
+            if (fs.existsSync(videoFilePath)) {
+              console.log(`📁 [Facebook] Reading local video file: ${filename}`);
+              videoBuffer = fs.readFileSync(videoFilePath);
+            } else {
+              throw new Error(`Local file not found: ${videoFilePath}`);
+            }
+          } else {
+            console.log(`📥 [Facebook] Downloading video from URL`);
+            const response = await axios.get(videoUrl, {
+              responseType: 'arraybuffer',
+              timeout: 60000
+            });
+            videoBuffer = Buffer.from(response.data);
+          }
+          
+          console.log(`✅ [Facebook] Video loaded, size: ${videoBuffer.length} bytes`);
+          
+          // Upload video with direct file upload
+          const FormData = require('form-data');
+          const form = new FormData();
+          
+          form.append('source', videoBuffer, {
+            filename: 'video.mp4',
+            contentType: 'video/mp4'
+          });
+          form.append('description', description || '');
+          form.append('access_token', accessToken);
+          
+          console.log(`📤 [Facebook] Uploading video with direct file upload`);
+          const uploadResponse = await axios.post(endpoint, form, {
+            headers: {
+              ...form.getHeaders(),
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 120000
+          });
+          
+          console.log(`✅ [Facebook] Video post created successfully (direct upload):`, uploadResponse.data);
+          
+          const videoId = uploadResponse.data.id;
+          const videoUrl_result = `https://www.facebook.com/${videoId}`;
+          
+          return {
+            postId: videoId,
+            postUrl: videoUrl_result,
+            success: true
+          };
+        } else {
+          // Re-throw if it's a different error
+          throw urlError;
         }
-      });
-
-      console.log(`✅ [Facebook] Video post created successfully:`, response.data);
-
-      const videoId = response.data.id;
-      const videoUrl_result = `https://www.facebook.com/${videoId}`;
-
-      return {
-        postId: videoId,
-        postUrl: videoUrl_result,
-        success: true
-      };
+      }
     } catch (error) {
       console.error('❌ [Facebook] Create video post error:', error.response?.data || error.message);
       
