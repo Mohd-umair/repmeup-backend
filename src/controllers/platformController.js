@@ -6,6 +6,8 @@ const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
 const whatsappService = require('../integrations/whatsapp/whatsappService');
 const crypto = require('crypto');
+const logger = require('../config/logger');
+const logEvents = require('../utils/logEvents');
 
 /**
  * @desc    Initiate Google OAuth flow
@@ -213,7 +215,11 @@ exports.handleGoogleCallback = async (req, res, next) => {
       // Redirect to frontend with success
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:4200'}/app/settings?connected=${platform}&success=true`);
     } catch (error) {
-      console.error('OAuth callback error:', error);
+      logger.error('OAuth callback error', { 
+        error: error.message,
+        platform,
+        userId: req.user?._id?.toString()
+      });
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:4200'}/app/settings?error=${encodeURIComponent(error.message)}`);
     }
   } catch (error) {
@@ -346,7 +352,11 @@ exports.disconnectPlatform = async (req, res, next) => {
       message: `${platformType} disconnected successfully. Interactions from this platform will no longer appear in your inbox.`
     });
   } catch (error) {
-    console.error('Error disconnecting platform:', error);
+    logger.error('Error disconnecting platform', { 
+      error: error.message,
+      platform: req.body.platform,
+      userId: req.user._id.toString()
+    });
     next(error);
   }
 };

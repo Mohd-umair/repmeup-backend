@@ -1,3 +1,4 @@
+require('dotenv').config();
 const connectDB = require('./config/database');
 const { connectRedis } = require('./config/redis');
 const { webhookQueue, aiQueue, autoReplyQueue } = require('./config/queue');

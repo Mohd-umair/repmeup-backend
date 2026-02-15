@@ -146,8 +146,7 @@ const subscriptionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
-subscriptionSchema.index({ organization: 1 });
+// Indexes (organization omitted - unique: true on field already creates index)
 subscriptionSchema.index({ status: 1 });
 subscriptionSchema.index({ currentPeriodEnd: 1 });
 

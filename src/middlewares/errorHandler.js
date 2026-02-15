@@ -1,10 +1,24 @@
+const logger = require('../config/logger');
+
 // Error handler middleware
 const errorHandler = (err, req, res, next) => {
   let error = { ...err };
   error.message = err.message;
 
-  // Log error for debugging
-  console.error('Error:', err);
+  // Use request logger if available, otherwise use root logger
+  const log = req.log || logger;
+  
+  // Log error with full context
+  log.error('Request error', {
+    error: err.message,
+    stack: err.stack,
+    name: err.name,
+    code: err.code,
+    method: req.method,
+    url: req.originalUrl,
+    userId: req.user?._id?.toString(),
+    orgId: req.user?.organization?.toString()
+  });
 
   // Mongoose bad ObjectId
   if (err.name === 'CastError') {

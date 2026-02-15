@@ -3,40 +3,47 @@ const KnowledgeBase = require('../models/KnowledgeBase');
 const User = require('../models/User');
 const aiService = require('../services/aiService');
 const emailService = require('../services/emailService');
+const logger = require('../config/logger');
+const logEvents = require('../utils/logEvents');
 
 /**
  * Process AI analysis for an interaction
  * This job is triggered when a new interaction is created
  */
 module.exports = async function processAI(job) {
+  const { interactionId } = job.data;
+  const jobLogger = logger.createChild({ 
+    module: 'processAI', 
+    jobId: job.id,
+    interactionId 
+  });
+  
   try {
-    const { interactionId } = job.data;
-
-    console.log(`Processing AI for interaction: ${interactionId}`);
+    logEvents.ai.analysisStarted({ interactionId, operation: 'full_analysis' });
 
     // Get interaction
     const interaction = await Interaction.findById(interactionId)
       .populate('organization');
 
     if (!interaction) {
-      console.log(`⏭️  [AI] Interaction ${interactionId} not found - skipping`);
+      jobLogger.info('Interaction not found - skipping');
       return { skipped: true, reason: 'Interaction not found' };
     }
 
     // IMPORTANT: Skip if interaction already has replies (already been replied to)
     if (interaction.replies && interaction.replies.length > 0) {
-      console.log(`⏭️  [AI] Skipping AI processing - interaction ${interactionId} already has ${interaction.replies.length} reply(ies)`);
+      jobLogger.debug('Skipping - interaction already has replies', { replyCount: interaction.replies.length });
       return { skipped: true, reason: 'Already has replies' };
     }
 
     // Skip if already replied/resolved
     if (interaction.status === 'replied' || interaction.status === 'resolved') {
-      console.log(`⏭️  [AI] Skipping AI processing - interaction ${interactionId} status is ${interaction.status}`);
+      jobLogger.debug('Skipping - interaction status', { status: interaction.status });
       return { skipped: true, reason: `Status is ${interaction.status}` };
     }
 
     // Step 1: Analyze sentiment
-    console.log('Analyzing sentiment...');
+    jobLogger.debug('Analyzing sentiment');
     const sentimentResult = await aiService.analyzeSentiment(interaction.content);
     
     interaction.sentiment = sentimentResult.sentiment;
@@ -44,12 +51,12 @@ module.exports = async function processAI(job) {
     interaction.sentimentConfidence = sentimentResult.sentimentConfidence;
 
     // Step 2: Detect intent
-    console.log('Detecting intent...');
+    jobLogger.debug('Detecting intent');
     const intent = await aiService.detectIntent(interaction.content);
     interaction.intent = intent;
 
     // Step 3: Extract topics
-    console.log('Extracting topics...');
+    jobLogger.debug('Extracting topics');
     const topics = await aiService.extractTopics(interaction.content);
     interaction.topics = topics;
 
@@ -61,7 +68,7 @@ module.exports = async function processAI(job) {
     }).sort({ trainingWeight: -1 }).limit(10);
 
     // Step 5: Generate AI response suggestion
-    console.log('Generating AI response...');
+    jobLogger.debug('Generating AI response');
     const aiResponse = await aiService.generateResponse(interaction, knowledgeBase);
     
     if (aiResponse) {
@@ -73,17 +80,10 @@ module.exports = async function processAI(job) {
 
     // Step 7: Check if should auto-reply or assign to agent
     if (interaction.autoReplyEligible && aiResponse) {
-      // TODO: Implement actual auto-reply logic
-      // For now, just mark as eligible
-      console.log('Interaction is eligible for auto-reply');
-      
-      // In production, you would:
-      // 1. Auto-reply via platform integration
-      // 2. Mark as replied
-      // 3. Log the response
+      jobLogger.debug('Interaction eligible for auto-reply');
     } else {
       // Assign to agent
-      console.log('Assigning to agent...');
+      jobLogger.debug('Assigning to agent');
       await assignToAgent(interaction, 'ai_unable');
     }
 
@@ -105,7 +105,15 @@ module.exports = async function processAI(job) {
     };
 
   } catch (error) {
-    console.error('AI processing error:', error);
+    jobLogger.error('AI processing error', { 
+      error: error.message,
+      stack: error.stack
+    });
+    logEvents.ai.error({ 
+      operation: 'full_analysis', 
+      error, 
+      context: { interactionId } 
+    });
     throw error;
   }
 };
@@ -123,7 +131,9 @@ async function assignToAgent(interaction, reason) {
     });
 
     if (agents.length === 0) {
-      console.log('No agents available for assignment');
+      logger.warn('No agents available for assignment', { 
+        organizationId: interaction.organization.toString() 
+      });
       return;
     }
 
@@ -151,7 +161,10 @@ async function assignToAgent(interaction, reason) {
     console.log(`Assigned interaction ${interaction._id} to agent ${selectedAgent.email}`);
 
   } catch (error) {
-    console.error('Agent assignment error:', error);
+    logger.error('Agent assignment error', { 
+      error: error.message,
+      interactionId: interaction._id.toString()
+    });
   }
 }
 
@@ -170,10 +183,13 @@ async function checkNegativeSpike(interaction) {
       createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
     });
 
-    console.log(`Negative comment count for post: ${negativeCount}`);
+    logger.debug('Negative comment count check', { postId: interaction.metadata.postId, negativeCount });
 
     if (negativeCount >= 3) {
-      console.log('ALERT: Negative spike detected!');
+      logger.warn('Negative spike detected', { 
+        postId: interaction.metadata.postId, 
+        negativeCount 
+      });
 
       // Find manager or admin to alert
       const manager = await User.findOne({
@@ -196,7 +212,10 @@ async function checkNegativeSpike(interaction) {
       interaction.urgency = 'urgent';
     }
   } catch (error) {
-    console.error('Negative spike check error:', error);
+    logger.error('Negative spike check error', { 
+      error: error.message,
+      interactionId: interaction._id.toString()
+    });
   }
 }
 

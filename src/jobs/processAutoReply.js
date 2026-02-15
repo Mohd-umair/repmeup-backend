@@ -3,20 +3,28 @@ const Organization = require('../models/Organization');
 const aiService = require('../services/aiService');
 const cacheService = require('../services/cacheService');
 const escalationService = require('../services/escalationService');
+const logger = require('../config/logger');
+const logEvents = require('../utils/logEvents');
 
 /**
  * Process auto-reply job
  * This job handles generating and optionally sending auto-replies
  */
 module.exports = async function processAutoReply(job) {
+  const { type, organizationId, interactionId } = job.data;
+  const jobLogger = logger.createChild({ 
+    module: 'processAutoReply', 
+    jobId: job.id,
+    orgId: organizationId,
+    type
+  });
+  
   try {
-    const { type, organizationId, interactionId } = job.data;
-
     // Get organization settings
     const organization = await Organization.findById(organizationId);
     
     if (!organization || !organization.autoReplySettings.enabled) {
-      console.log('Auto-reply disabled for organization');
+      jobLogger.info('Auto-reply disabled for organization');
       return { success: false, reason: 'Auto-reply disabled' };
     }
 
@@ -32,7 +40,9 @@ module.exports = async function processAutoReply(job) {
     }
 
     if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
-      console.log('Daily auto-reply limit reached');
+      jobLogger.info('Daily auto-reply limit reached', { 
+        limit: organization.autoReplySettings.maxRepliesPerDay 
+      });
       return { success: false, reason: 'Daily limit reached' };
     }
 
@@ -64,7 +74,13 @@ module.exports = async function processAutoReply(job) {
     // Clear cache
     await cacheService.delPattern(`interactions:${organizationId}*`);
 
-    console.log(`\n✅ [Auto-Reply] Complete: ${sentCount} sent, ${processedCount} processed, ${skippedCount} skipped (Total today: ${organization.autoReplySettings.repliesCountToday}/${organization.autoReplySettings.maxRepliesPerDay})`);
+    jobLogger.info('Auto-reply job completed', {
+      sent: sentCount,
+      processed: processedCount,
+      skipped: skippedCount,
+      todayTotal: organization.autoReplySettings.repliesCountToday,
+      dailyLimit: organization.autoReplySettings.maxRepliesPerDay
+    });
 
     return {
       success: true,
@@ -74,7 +90,10 @@ module.exports = async function processAutoReply(job) {
     };
 
   } catch (error) {
-    console.error('Auto-reply job error:', error);
+    jobLogger.error('Auto-reply job error', { 
+      error: error.message,
+      stack: error.stack
+    });
     throw error;
   }
 };
@@ -187,7 +206,12 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: autoReply.reason };
     }
     
-    console.log(`✅ [Auto-Reply] "${interaction.content.substring(0, 40)}..." → Confidence: ${autoReply.response.confidence.toFixed(2)}`);
+    logEvents.autoReply.generated({
+      interactionId: interaction._id,
+      confidence: autoReply.response.confidence,
+      sentiment: interaction.sentiment,
+      length: autoReply.response.content.length
+    });
 
     // Check escalation after generating reply (to check AI confidence)
     const postReplyEscalationCheck = await escalationService.shouldEscalate(
@@ -212,7 +236,10 @@ async function processSingleInteraction(interactionId, organization) {
     if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
       const sent = await sendReplyToPlatform(interaction, autoReply.response.content, organization);
       if (sent) {
-        console.log(`   📤 Sent to ${interaction.platform}`);
+        logEvents.autoReply.sent({
+          interactionId: interaction._id,
+          platform: interaction.platform
+        });
       }
       return { sent: sent };
     }
@@ -221,7 +248,11 @@ async function processSingleInteraction(interactionId, organization) {
     return { processed: true };
 
   } catch (error) {
-    console.error('Error processing single interaction:', error);
+    logEvents.autoReply.failed({
+      interactionId,
+      error,
+      phase: 'processSingleInteraction'
+    });
     return { skipped: true, reason: error.message };
   }
 }
@@ -252,7 +283,10 @@ async function processBatchInteractions(organizationId, organization) {
       .populate('platformConnection')
       .limit(20); // Process max 20 at a time
 
-    console.log(`\n🔍 [Auto-Reply] Found ${interactions.length} unread interaction(s) to process`);
+    logger.info('Auto-reply batch processing', { 
+      interactionCount: interactions.length,
+      organizationId 
+    });
 
     for (const interaction of interactions) {
       // IMPORTANT: Double-check if already replied (in case it was replied to between query and processing)
@@ -271,7 +305,10 @@ async function processBatchInteractions(organizationId, organization) {
       
       // Check daily limit
       if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
-        console.log(`⚠️  [Auto-Reply] Daily limit reached (${organization.autoReplySettings.repliesCountToday}/${organization.autoReplySettings.maxRepliesPerDay})`);
+        logger.warn('Auto-reply daily limit reached', {
+          current: organization.autoReplySettings.repliesCountToday,
+          limit: organization.autoReplySettings.maxRepliesPerDay
+        });
         results.skipped++;
         results.details.push({ id: interaction._id, reason: 'Daily limit reached' });
         continue;
@@ -357,14 +394,22 @@ async function processBatchInteractions(organizationId, organization) {
         continue;
       }
 
-      console.log(`✅ [Eligible] "${interaction.content.substring(0, 40)}..." (${interaction.sentiment || 'unknown'}, confidence: ${autoReply.response.confidence.toFixed(2)})`);
+      logEvents.autoReply.generated({
+        interactionId: interaction._id,
+        confidence: autoReply.response.confidence,
+        sentiment: interaction.sentiment,
+        length: autoReply.response.content.length
+      });
       results.processed++;
 
       // Send if autoSend is enabled
       if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
         const sent = await sendReplyToPlatform(interaction, autoReply.response.content, organization);
         if (sent) {
-          console.log(`   📤 Sent to ${interaction.platform}`);
+          logEvents.autoReply.sent({
+            interactionId: interaction._id,
+            platform: interaction.platform
+          });
           results.sent++;
           organization.autoReplySettings.repliesCountToday++;
           results.details.push({ id: interaction._id, status: 'sent' });
@@ -379,7 +424,10 @@ async function processBatchInteractions(organizationId, organization) {
     return results;
 
   } catch (error) {
-    console.error('Error processing batch interactions:', error);
+    logger.error('Error processing batch interactions', { 
+      error: error.message,
+      organizationId 
+    });
     return results;
   }
 }
@@ -435,7 +483,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
     } else if (interaction.platform === 'google') {
       const googleService = require('../integrations/google/googleService');
       // TODO: Implement Google Business reply
-      console.log('Google Business reply not yet implemented');
+      logger.debug('Google Business reply not yet implemented');
     }
     // Add other platforms here
 
@@ -474,7 +522,11 @@ async function sendReplyToPlatform(interaction, content, organization) {
     return false;
 
   } catch (error) {
-    console.error('Error sending reply to platform:', error);
+    logger.error('Error sending reply to platform', { 
+      error: error.message,
+      platform: interaction.platform,
+      interactionId: interaction._id.toString()
+    });
     return false;
   }
 }

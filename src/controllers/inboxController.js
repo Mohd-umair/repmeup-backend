@@ -22,6 +22,7 @@ exports.getInteractions = async (req, res, next) => {
       status,
       search,
       assignedTo,
+      label,
       viewMode,
       page = 1,
       limit = 50,
@@ -41,6 +42,11 @@ exports.getInteractions = async (req, res, next) => {
     if (sentiment) query.sentiment = sentiment;
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
+    
+    // Label filter - check if label exists in labels array
+    if (label) {
+      query.labels = label; // MongoDB will match if label ID exists in the labels array
+    }
 
     // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA)
     const SLA_HOURS = 24;

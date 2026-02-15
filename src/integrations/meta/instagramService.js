@@ -726,10 +726,8 @@ class InstagramService {
         mediaType
       });
 
-      // Step 2: For videos, wait for processing to complete
-      if (mediaType === 'video') {
-        await this.checkContainerStatus(platformConnection.accessToken, containerId);
-      }
+      // Step 2: Wait for media to be ready (videos need processing; images need a brief moment)
+      await this.checkContainerStatus(platformConnection.accessToken, containerId, mediaType === 'video' ? 30 : 5);
 
       // Step 3: Publish the container
       const result = await this.publishMediaContainer(platformConnection, containerId);

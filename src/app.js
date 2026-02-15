@@ -25,7 +25,11 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Logging middleware
+// Request logger middleware (adds req.log and requestId)
+const requestLogger = require('./middlewares/requestLogger');
+app.use(requestLogger);
+
+// Logging middleware (HTTP format logging)
 if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
 } else {
