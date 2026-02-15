@@ -898,6 +898,10 @@ class InstagramService {
         validateStatus: (status) => status === 200
       });
       
+
+
+
+      
       console.log(`✅ [Instagram] URL is accessible (${response.status})`);
       console.log(`📊 [Instagram] Content-Type: ${response.headers['content-type']}, Size: ${response.headers['content-length']} bytes`);
       
