@@ -145,10 +145,28 @@ class AutoReplyScheduler {
         return false;
       }
 
+      // Pre-check: Don't queue if interaction already has replies
+      const Interaction = require('../models/Interaction');
+      const interaction = await Interaction.findById(interactionId).select('replies status');
+      
+      if (!interaction) {
+        console.log(`⚠️  [Auto-Reply Queue] Interaction ${interactionId} not found`);
+        return false;
+      }
+
+      // Skip if already replied or has replies
+      if (interaction.replies && interaction.replies.length > 0) {
+        return false; // Silently skip - already handled
+      }
+
+      if (interaction.status === 'replied' || interaction.status === 'resolved') {
+        return false; // Silently skip - already handled
+      }
+
       // Use configured delay
       const delay = settings.webhookDelay || delayMinutes;
 
-      // Add job with delay
+      // Add job with delay and unique jobId to prevent duplicates
       await autoReplyQueue.add(
         {
           type: 'single',
@@ -156,6 +174,7 @@ class AutoReplyScheduler {
           organizationId: organizationId
         },
         {
+          jobId: `auto-reply-${interactionId}`, // Unique ID prevents duplicate jobs for same interaction
           delay: delay * 60 * 1000, // Convert minutes to milliseconds
           attempts: 3,
           backoff: {

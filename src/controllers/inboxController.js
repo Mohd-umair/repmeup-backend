@@ -155,6 +155,7 @@ exports.getInteractions = async (req, res, next) => {
       type,
       sentiment,
       status,
+      label, // Include label in cache key to prevent wrong cached results
       viewMode: viewMode || '',
       search: cacheSearchKey,
       page,

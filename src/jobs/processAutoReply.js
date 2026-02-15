@@ -74,13 +74,22 @@ module.exports = async function processAutoReply(job) {
     // Clear cache
     await cacheService.delPattern(`interactions:${organizationId}*`);
 
-    jobLogger.info('Auto-reply job completed', {
-      sent: sentCount,
-      processed: processedCount,
-      skipped: skippedCount,
-      todayTotal: organization.autoReplySettings.repliesCountToday,
-      dailyLimit: organization.autoReplySettings.maxRepliesPerDay
-    });
+    // Only log at info level if something was sent or processed
+    // Use debug level for skipped-only jobs to reduce log spam
+    if (sentCount > 0 || processedCount > 0) {
+      jobLogger.info('Auto-reply job completed', {
+        sent: sentCount,
+        processed: processedCount,
+        skipped: skippedCount,
+        todayTotal: organization.autoReplySettings.repliesCountToday,
+        dailyLimit: organization.autoReplySettings.maxRepliesPerDay
+      });
+    } else {
+      jobLogger.debug('Auto-reply job completed (all skipped)', {
+        type,
+        skipped: skippedCount
+      });
+    }
 
     return {
       success: true,
