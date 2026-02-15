@@ -1,6 +1,8 @@
 const axios = require('axios');
 const PlatformConnection = require('../../models/PlatformConnection');
 const Interaction = require('../../models/Interaction');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Facebook Service
@@ -733,60 +735,81 @@ class FacebookService {
       console.log(`🎬 [Facebook] Creating reel on page: ${platformPageId}`);
       console.log(`📹 [Facebook] Video URL: ${videoUrl}`);
 
-      // Pre-check: Verify URL is publicly accessible (same as Instagram)
+      // Pre-check: Verify URL is publicly accessible
       await this.verifyMediaUrlAccessible(videoUrl);
 
-      // Facebook Reels API - Simplified approach (no 'transfer' phase)
-      // According to latest API: only 'start' and 'finish' are supported
+      // Facebook Reels API requires direct file upload, not URL
+      // Download/load the video file
+      let videoBuffer;
+      
+      try {
+        // Check if it's our own media URL
+        const isOwnMedia = videoUrl.includes('/api/posts/media/');
+        
+        if (isOwnMedia) {
+          // Extract filename and get local file path
+          const filename = videoUrl.split('/').pop();
+          const videoFilePath = path.join(__dirname, '../../../uploads/posts', filename);
+          
+          if (fs.existsSync(videoFilePath)) {
+            console.log(`📁 [Facebook] Reading local video file: ${filename}`);
+            videoBuffer = fs.readFileSync(videoFilePath);
+          } else {
+            throw new Error(`Local file not found: ${videoFilePath}`);
+          }
+        } else {
+          // Download from external URL
+          console.log(`📥 [Facebook] Downloading video from URL`);
+          const response = await axios.get(videoUrl, {
+            responseType: 'arraybuffer',
+            timeout: 60000 // 60 seconds
+          });
+          videoBuffer = Buffer.from(response.data);
+        }
+        
+        console.log(`✅ [Facebook] Video loaded, size: ${videoBuffer.length} bytes`);
+      } catch (downloadError) {
+        console.error(`❌ [Facebook] Failed to load video file:`, downloadError.message);
+        throw new Error(`Cannot load video file for reel upload: ${downloadError.message}`);
+      }
+
+      // Create reel with direct file upload using multipart/form-data
+      const FormData = require('form-data');
+      const form = new FormData();
+      
+      form.append('source', videoBuffer, {
+        filename: 'reel.mp4',
+        contentType: 'video/mp4'
+      });
+      form.append('description', description || title || '');
+      form.append('access_token', accessToken);
+
       const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
       
-      // Start the upload session
-      console.log(`📤 [Facebook] Starting reel upload session`);
-      const startResponse = await axios.post(endpoint, null, {
-        params: {
-          upload_phase: 'start',
-          access_token: accessToken
-        }
+      console.log(`📤 [Facebook] Uploading reel with direct file upload`);
+      const response = await axios.post(endpoint, form, {
+        headers: {
+          ...form.getHeaders(),
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 120000 // 2 minutes
       });
-      
-      const videoId = startResponse.data.video_id;
-      console.log(`✅ [Facebook] Reel session started: ${videoId}`);
 
-      // Finish the upload with video URL (Facebook will fetch it)
-      const finishParams = {
-        access_token: accessToken,
-        upload_phase: 'finish',
-        video_id: videoId,
-        file_url: videoUrl, // Use same param name as regular video posts
-        description: description || title || '',
-        title: title || 'Reel'
-      };
+      const reelId = response.data.id;
+      console.log(`✅ [Facebook] Reel created successfully: ${reelId}`);
 
-      console.log(`📤 [Facebook] Finishing reel upload with video URL`);
-      console.log(`📋 [Facebook] Finish params:`, { video_id: videoId, file_url: videoUrl });
-      const finishResponse = await axios.post(endpoint, null, { params: finishParams });
-
-      console.log(`✅ [Facebook] Reel created successfully:`, finishResponse.data);
-
-      const reelUrl = `https://www.facebook.com/reel/${videoId}`;
+      const reelUrl = `https://www.facebook.com/reel/${reelId}`;
 
       return {
-        postId: videoId,
+        postId: reelId,
         postUrl: reelUrl,
         success: true
       };
     } catch (error) {
       const errorData = error.response?.data?.error;
       console.error('❌ [Facebook] Create reel error:', errorData || error.message);
-      
-      // Check if it's the "Video Upload Is Missing" error (6000/1363130)
-      // This means Facebook Reel API doesn't support URL-based uploads
-      if (errorData?.code === 6000 || errorData?.error_subcode === 1363130) {
-        console.warn('⚠️ [Facebook] Reel API requires direct file upload (not URL-based)');
-        console.warn('⚠️ [Facebook] Falling back to regular video post (will appear as regular video, not reel)');
-      } else {
-        console.warn('⚠️ [Facebook] Reel creation failed, falling back to regular video post');
-      }
+      console.warn('⚠️ [Facebook] Reel creation failed, falling back to regular video post');
       
       try {
         const videoPost = await this.createVideoPost(platformConnection, {
