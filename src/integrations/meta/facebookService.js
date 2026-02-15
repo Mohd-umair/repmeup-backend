@@ -807,9 +807,15 @@ class FacebookService {
       
       try {
         if (uploadUrl) {
-          // Use the provided upload_url (already includes auth and params)
+          // Use the provided upload_url and add access_token (required for auth)
           console.log(`   Uploading to provided upload_url`);
-          await axios.post(uploadUrl, form, {
+          
+          // Add access_token to the upload_url
+          const uploadUrlWithAuth = uploadUrl.includes('?') 
+            ? `${uploadUrl}&access_token=${accessToken}`
+            : `${uploadUrl}?access_token=${accessToken}`;
+          
+          await axios.post(uploadUrlWithAuth, form, {
             headers: {
               ...form.getHeaders(),
             },
