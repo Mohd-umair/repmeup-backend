@@ -492,6 +492,11 @@ class FacebookService {
         console.log(`📤 [Facebook] Uploading photo directly to: ${endpoint}`);
       } else if (url) {
         // Photo post with URL (fallback)
+        console.log(`📷 [Facebook] Photo URL: ${url}`);
+        
+        // Pre-check: Verify URL is publicly accessible
+        await this.verifyMediaUrlAccessible(url);
+        
         endpoint = `${this.baseURL}/${platformPageId}/photos`;
         requestData = null;
         config = {
@@ -668,6 +673,41 @@ class FacebookService {
   }
 
   /**
+   * Verify that a media URL is publicly accessible
+   * This prevents Facebook error 389/1363057 (cannot fetch video/image from URL)
+   */
+  async verifyMediaUrlAccessible(mediaUrl) {
+    try {
+      console.log(`🔍 [Facebook] Verifying URL is accessible: ${mediaUrl}`);
+      
+      const response = await axios.head(mediaUrl, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: (status) => status === 200
+      });
+      
+      console.log(`✅ [Facebook] URL is accessible (${response.status})`);
+      console.log(`📊 [Facebook] Content-Type: ${response.headers['content-type']}, Size: ${response.headers['content-length']} bytes`);
+      
+      return true;
+    } catch (error) {
+      console.error(`❌ [Facebook] URL is NOT accessible:`, error.message);
+      
+      if (error.code === 'ECONNREFUSED') {
+        throw new Error(`URL is not accessible: Connection refused. Check if your server is running and accessible from the internet (not just localhost).`);
+      } else if (error.code === 'ENOTFOUND') {
+        throw new Error(`URL is not accessible: Domain not found. Check your BASE_URL in .env file.`);
+      } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+        throw new Error(`URL is not accessible: Connection timeout. Check firewall settings and ensure public access.`);
+      } else if (error.response) {
+        throw new Error(`URL is not accessible: Server returned ${error.response.status}. Ensure the /api/posts/media/ endpoint is public (no auth required).`);
+      } else {
+        throw new Error(`URL is not accessible: ${error.message}`);
+      }
+    }
+  }
+
+  /**
    * Create a Reel (Short) on Facebook Page
    * Reels are short-form vertical videos
    * @param {Object} platformConnection - Platform connection object
@@ -691,43 +731,38 @@ class FacebookService {
       }
 
       console.log(`🎬 [Facebook] Creating reel on page: ${platformPageId}`);
+      console.log(`📹 [Facebook] Video URL: ${videoUrl}`);
 
-      // Facebook Reels use the video endpoint with specific parameters
+      // Pre-check: Verify URL is publicly accessible (same as Instagram)
+      await this.verifyMediaUrlAccessible(videoUrl);
+
+      // Facebook Reels API - Simplified approach (no 'transfer' phase)
+      // According to latest API: only 'start' and 'finish' are supported
       const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
       
-      const params = {
-        upload_phase: 'start',
-        access_token: accessToken
-      };
-
       // Start the upload session
       console.log(`📤 [Facebook] Starting reel upload session`);
-      const startResponse = await axios.post(endpoint, null, { params });
+      const startResponse = await axios.post(endpoint, null, {
+        params: {
+          upload_phase: 'start',
+          access_token: accessToken
+        }
+      });
       
       const videoId = startResponse.data.video_id;
-      console.log(`✅ [Facebook] Reel upload session started: ${videoId}`);
+      console.log(`✅ [Facebook] Reel session started: ${videoId}`);
 
-      // Upload the video file
-      const uploadParams = {
-        access_token: accessToken,
-        upload_phase: 'transfer',
-        video_id: videoId,
-        file_url: videoUrl
-      };
-
-      console.log(`📤 [Facebook] Uploading reel video`);
-      await axios.post(endpoint, null, { params: uploadParams });
-
-      // Finish the upload
+      // Finish the upload with video URL (Facebook will fetch it)
       const finishParams = {
         access_token: accessToken,
         upload_phase: 'finish',
         video_id: videoId,
-        description: description || '',
+        video_file_url: videoUrl, // Facebook will download from this URL
+        description: description || title || '',
         title: title || 'Reel'
       };
 
-      console.log(`📤 [Facebook] Finishing reel upload`);
+      console.log(`📤 [Facebook] Finishing reel upload with video URL`);
       const finishResponse = await axios.post(endpoint, null, { params: finishParams });
 
       console.log(`✅ [Facebook] Reel created successfully:`, finishResponse.data);
@@ -753,6 +788,8 @@ class FacebookService {
         });
         return videoPost;
       } catch (fallbackError) {
+        console.error('❌ [Facebook] Video post fallback also failed:', fallbackError.response?.data || fallbackError.message);
+        
         const errorMessage = error.response?.data?.error?.message || error.message;
         const errorCode = error.response?.data?.error?.code;
         
@@ -761,7 +798,7 @@ class FacebookService {
           code: errorCode,
           platformError: {
             title: 'Facebook Reel Creation Failed',
-            message: errorMessage + ' (Reel API not available - tried video post fallback)',
+            message: errorMessage + ' (Reel API not available - video post fallback also failed)',
             code: errorCode
           }
         };
@@ -783,6 +820,10 @@ class FacebookService {
       const { videoUrl, description } = videoData;
 
       console.log(`🎥 [Facebook] Creating video post on page: ${platformPageId}`);
+      console.log(`📹 [Facebook] Video URL: ${videoUrl}`);
+
+      // Pre-check: Verify URL is publicly accessible
+      await this.verifyMediaUrlAccessible(videoUrl);
 
       const endpoint = `${this.baseURL}/${platformPageId}/videos`;
       
