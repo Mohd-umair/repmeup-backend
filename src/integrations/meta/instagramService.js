@@ -606,22 +606,51 @@ class InstagramService {
           {
             params: {
               access_token: accessToken,
-              fields: 'status_code'
+              fields: 'status_code,status' // Request both status_code and detailed status
             }
           }
         );
 
         const statusCode = response.data.status_code;
+        const statusDetails = response.data.status;
         console.log(`📊 [Instagram] Container status (attempt ${i + 1}/${maxAttempts}): ${statusCode}`);
+        
+        // Log full response for debugging
+        if (statusDetails) {
+          console.log(`📋 [Instagram] Status details:`, JSON.stringify(statusDetails));
+        }
 
         if (statusCode === 'FINISHED') {
           console.log(`✅ [Instagram] Container ready for publishing`);
           return true;
         } else if (statusCode === 'ERROR') {
-          // Get more details about the error if available
-          const errorDetails = response.data.status || response.data.error || 'Unknown error';
-          console.error(`❌ [Instagram] Container processing error:`, errorDetails);
-          throw new Error(`Video processing failed: ${JSON.stringify(errorDetails)}`);
+          // Extract detailed error message from status field
+          let errorMessage = 'Video processing failed';
+          
+          if (statusDetails) {
+            if (typeof statusDetails === 'string') {
+              errorMessage = statusDetails;
+            } else if (statusDetails.error_message) {
+              errorMessage = statusDetails.error_message;
+            } else if (statusDetails.message) {
+              errorMessage = statusDetails.message;
+            } else {
+              errorMessage = JSON.stringify(statusDetails);
+            }
+          }
+          
+          console.error(`❌ [Instagram] Video processing failed:`, errorMessage);
+          
+          // Common issues and suggestions
+          const suggestions = [
+            'Check video format (MP4 with H.264 codec)',
+            'Verify duration (15-90 seconds for reels)',
+            'Ensure aspect ratio is 9:16 (vertical) or 1:1',
+            'Audio must be AAC codec',
+            'File size should be under 1GB'
+          ];
+          
+          throw new Error(`${errorMessage}. Possible issues: ${suggestions.join('; ')}`);
         } else if (statusCode === 'EXPIRED') {
           throw new Error('Container expired - took too long to process');
         }
