@@ -620,11 +620,6 @@ class InstagramService {
           console.log(`📋 [Instagram] Status details:`, JSON.stringify(statusDetails));
         }
 
-
-
-
-        
-
         if (statusCode === 'FINISHED') {
           console.log(`✅ [Instagram] Container ready for publishing`);
           return true;
