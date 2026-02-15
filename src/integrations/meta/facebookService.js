@@ -805,23 +805,42 @@ class FacebookService {
 
       console.log(`📤 [Facebook] Phase 2: Uploading video file (${videoBuffer.length} bytes)`);
       
-      // Upload to the provided upload_url or back to the endpoint
-      const uploadEndpoint = uploadUrl || `${videoApiUrl}/${platformPageId}/videos`;
-      await axios.post(uploadEndpoint, form, {
-        params: {
-          access_token: accessToken,
-          upload_phase: 'transfer',
-          video_id: videoId
-        },
-        headers: {
-          ...form.getHeaders(),
-        },
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-        timeout: 120000 // 2 minutes
-      });
-
-      console.log(`✅ [Facebook] Video file uploaded successfully`);
+      try {
+        if (uploadUrl) {
+          // Use the provided upload_url (already includes auth and params)
+          console.log(`   Uploading to provided upload_url`);
+          await axios.post(uploadUrl, form, {
+            headers: {
+              ...form.getHeaders(),
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 120000 // 2 minutes
+          });
+        } else {
+          // Fallback: upload to video endpoint with transfer phase
+          console.log(`   No upload_url provided, using video endpoint`);
+          const uploadEndpoint = `${videoApiUrl}/${platformPageId}/videos`;
+          await axios.post(uploadEndpoint, form, {
+            params: {
+              access_token: accessToken,
+              upload_phase: 'transfer',
+              video_id: videoId
+            },
+            headers: {
+              ...form.getHeaders(),
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 120000
+          });
+        }
+        
+        console.log(`✅ [Facebook] Video file uploaded successfully`);
+      } catch (uploadError) {
+        console.error(`❌ [Facebook] Phase 2 upload failed:`, uploadError.response?.data || uploadError.message);
+        throw uploadError;
+      }
 
       // Phase 3: Finish - Finalize and publish the reel
       const finishEndpoint = `${this.baseURL}/${platformPageId}/video_reels`;
@@ -847,8 +866,15 @@ class FacebookService {
         success: true
       };
     } catch (error) {
-      const errorData = error.response?.data?.error;
+      const errorData = error.response?.data?.error || error.response?.data;
       console.error('❌ [Facebook] Create reel error:', errorData || error.message);
+      
+      // Log full error details for debugging
+      if (error.response) {
+        console.error('   Status:', error.response.status);
+        console.error('   Response:', JSON.stringify(error.response.data, null, 2));
+      }
+      
       console.warn('⚠️ [Facebook] Reel creation failed, falling back to regular video post');
       
       try {
