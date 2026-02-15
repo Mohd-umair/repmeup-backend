@@ -30,7 +30,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 8 * 1024 * 1024 // 8MB limit
+    fileSize: 8 * 1024 * 1024 // 8MB limit per file
   },
   fileFilter: function (req, file, cb) {
     const allowedTypes = /jpeg|jpg|png|mp4/;
@@ -43,7 +43,7 @@ const upload = multer({
       cb(new Error('Only JPEG, PNG, and MP4 files are allowed'));
     }
   }
-}).single('media');
+}).array('media', 10); // Support up to 10 files for carousel posts
 
 /**
  * @desc    Generate post content with AI
@@ -181,8 +181,61 @@ exports.publishPost = async (req, res) => {
         postType: postType || 'post'
       };
 
-      // Handle media if uploaded
-      if (req.file) {
+      // Handle media if uploaded (single or multiple for carousel)
+      if (req.files && req.files.length > 0) {
+        // Multiple media files (carousel)
+        const mediaStoragePaths = [];
+        const mediaTypes = [];
+        
+        for (const file of req.files) {
+          const mediaType = file.mimetype.startsWith('image') ? 'image' : 'video';
+          const fileExtension = path.extname(file.originalname);
+          
+          // Validate each media file
+          const validation = validateMedia(
+            platform.toLowerCase(),
+            mediaType,
+            file.size,
+            fileExtension,
+            postType
+          );
+
+          if (!validation.valid) {
+            // Delete all uploaded files on validation failure
+            for (const f of req.files) {
+              try {
+                await fs.unlink(f.path);
+              } catch (err) {
+                console.error('Error deleting file:', err);
+              }
+            }
+            
+            return res.status(400).json({
+              success: false,
+              message: `Media validation failed for ${file.originalname}`,
+              errors: validation.errors,
+              warnings: validation.warnings
+            });
+          }
+
+          if (validation.warnings.length > 0) {
+            console.warn(`⚠️ Media warnings for ${file.originalname}:`, validation.warnings);
+          }
+
+          mediaStoragePaths.push(file.path);
+          mediaTypes.push(mediaType);
+        }
+
+        postData.mediaStoragePaths = mediaStoragePaths;
+        postData.mediaTypes = mediaTypes;
+        
+        // For backward compatibility, also set single media fields to first item
+        postData.mediaStoragePath = mediaStoragePaths[0];
+        postData.mediaType = mediaTypes[0];
+        
+        console.log(`📎 [Upload] ${mediaStoragePaths.length} media files uploaded for carousel`);
+      } else if (req.file) {
+        // Single media file (legacy support)
         const mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
         const fileExtension = path.extname(req.file.originalname);
         
@@ -469,10 +522,22 @@ exports.deleteScheduledPost = async (req, res) => {
       return res.status(404).json({ message: 'Scheduled post not found' });
     }
 
-    // Delete media file if exists
-    if (post.mediaStoragePath) {
+    // Delete media files (carousel or single)
+    if (post.mediaStoragePaths && post.mediaStoragePaths.length > 0) {
+      // Carousel - delete all media files
+      for (const mediaPath of post.mediaStoragePaths) {
+        try {
+          await fs.unlink(mediaPath);
+          console.log(`🗑️  Deleted carousel media: ${mediaPath}`);
+        } catch (err) {
+          console.error('Error deleting carousel media:', err);
+        }
+      }
+    } else if (post.mediaStoragePath) {
+      // Single media file
       try {
         await fs.unlink(post.mediaStoragePath);
+        console.log(`🗑️  Deleted media: ${post.mediaStoragePath}`);
       } catch (err) {
         console.error('Error deleting media file:', err);
       }
@@ -561,16 +626,43 @@ function getPublicMediaUrl(filePath, req) {
  * Helper: Publish to Instagram
  */
 async function publishToInstagram(connection, post, req) {
-  const { content, mediaStoragePath, mediaType, postType } = post;
+  const { content, mediaStoragePath, mediaStoragePaths, mediaType, mediaTypes, postType } = post;
 
-  if (!mediaStoragePath) {
+  // Check if carousel (multiple media)
+  const isCarousel = mediaStoragePaths && mediaStoragePaths.length > 1;
+
+  if (!mediaStoragePath && !isCarousel) {
     throw new Error('Instagram posts require an image or video');
   }
 
+  let result;
+
+  // Handle carousel posts (multiple media)
+  if (isCarousel) {
+    console.log(`🎠 [Instagram] Publishing carousel with ${mediaStoragePaths.length} items`);
+    
+    // Generate public URLs for all media
+    const mediaUrls = mediaStoragePaths.map((storagePath, index) => {
+      return {
+        url: getPublicMediaUrl(storagePath, req),
+        type: mediaTypes[index]
+      };
+    });
+
+    result = await instagramService.createCarouselPost(connection, {
+      caption: content,
+      mediaUrls: mediaUrls
+    });
+
+    return {
+      postId: result.postId,
+      postUrl: result.postUrl
+    };
+  }
+
+  // Handle single media posts
   const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
   console.log(`📸 [Instagram] Publishing ${postType || 'post'} with media: ${mediaUrl}`);
-
-  let result;
 
   // Route to appropriate method based on post type
   switch (postType) {
