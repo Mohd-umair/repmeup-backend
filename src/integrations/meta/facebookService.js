@@ -757,7 +757,6 @@ class FacebookService {
             throw new Error(`Local file not found: ${videoFilePath}`);
           }
         } else {
-          // Download from external URL
           console.log(`📥 [Facebook] Downloading video from URL`);
           const response = await axios.get(videoUrl, {
             responseType: 'arraybuffer',
@@ -780,12 +779,13 @@ class FacebookService {
         filename: 'reel.mp4',
         contentType: 'video/mp4'
       });
+      form.append('upload_phase', 'finish'); // Required parameter
       form.append('description', description || title || '');
       form.append('access_token', accessToken);
 
       const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
       
-      console.log(`📤 [Facebook] Uploading reel with direct file upload`);
+      console.log(`📤 [Facebook] Uploading reel with direct file upload (upload_phase: finish)`);
       const response = await axios.post(endpoint, form, {
         headers: {
           ...form.getHeaders(),
