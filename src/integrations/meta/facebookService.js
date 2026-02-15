@@ -753,7 +753,6 @@ class FacebookService {
       console.log(`✅ [Facebook] Reel session started: ${videoId}`);
 
       // Finish the upload with video URL (Facebook will fetch it)
-      // Try 'file_url' first (same as regular videos), fallback to video post if fails
       const finishParams = {
         access_token: accessToken,
         upload_phase: 'finish',
