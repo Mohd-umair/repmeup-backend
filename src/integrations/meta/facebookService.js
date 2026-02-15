@@ -757,7 +757,6 @@ class FacebookService {
             throw new Error(`Local file not found: ${videoFilePath}`);
           }
         } else {
-          // Download from external URL
           console.log(`📥 [Facebook] Downloading video from URL`);
           const response = await axios.get(videoUrl, {
             responseType: 'arraybuffer',
