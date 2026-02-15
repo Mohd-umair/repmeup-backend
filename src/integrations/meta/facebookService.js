@@ -815,9 +815,13 @@ class FacebookService {
             ? `${uploadUrl}&access_token=${accessToken}`
             : `${uploadUrl}?access_token=${accessToken}`;
           
+          // Add required headers for chunked/resumable upload
+          const formHeaders = form.getHeaders();
           await axios.post(uploadUrlWithAuth, form, {
             headers: {
-              ...form.getHeaders(),
+              ...formHeaders,
+              'offset': '0', // Byte offset (start of file)
+              'file_size': videoBuffer.length.toString() // Total file size
             },
             maxContentLength: Infinity,
             maxBodyLength: Infinity,
