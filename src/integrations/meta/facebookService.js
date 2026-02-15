@@ -771,25 +771,30 @@ class FacebookService {
         throw new Error(`Cannot load video file for reel upload: ${downloadError.message}`);
       }
 
-      // Facebook Reel API requires two-phase upload:
-      // Phase 1: START - Initialize upload session and get video_id
-      // Phase 2: FINISH - Upload file with video_id
+      // Facebook Reel API requires three-phase upload:
+      // Phase 1: START - Initialize and get upload_url + video_id (graph-video.facebook.com)
+      // Phase 2: UPLOAD - Upload file to upload_url 
+      // Phase 3: FINISH - Finalize and publish (graph.facebook.com)
       
-      const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
+      const videoApiUrl = `https://graph-video.facebook.com/${this.apiVersion}`;
+      const startEndpoint = `${videoApiUrl}/${platformPageId}/video_reels`;
       
-      // Phase 1: Start upload session
+      // Phase 1: Start upload session - get upload_url and video_id
       console.log(`📤 [Facebook] Phase 1: Starting reel upload session`);
-      const startResponse = await axios.post(endpoint, null, {
+      const startResponse = await axios.post(startEndpoint, null, {
         params: {
           upload_phase: 'start',
-          access_token: accessToken
+          access_token: accessToken,
+          file_size: videoBuffer.length // Required for START phase
         }
       });
       
-      const videoId = startResponse.data.video_id;
-      console.log(`✅ [Facebook] Upload session started, video_id: ${videoId}`);
+      const { video_id: videoId, upload_url: uploadUrl } = startResponse.data;
+      console.log(`✅ [Facebook] Upload session started`);
+      console.log(`   Video ID: ${videoId}`);
+      console.log(`   Upload URL: ${uploadUrl ? 'received' : 'not provided'}`);
 
-      // Phase 2: Upload video file with multipart/form-data
+      // Phase 2: Upload video file to the upload_url
       const FormData = require('form-data');
       const form = new FormData();
       
@@ -797,19 +802,38 @@ class FacebookService {
         filename: 'reel.mp4',
         contentType: 'video/mp4'
       });
-      form.append('upload_phase', 'finish');
-      form.append('video_id', videoId);
-      form.append('description', description || title || '');
-      form.append('access_token', accessToken);
 
       console.log(`📤 [Facebook] Phase 2: Uploading video file (${videoBuffer.length} bytes)`);
-      const finishResponse = await axios.post(endpoint, form, {
+      
+      // Upload to the provided upload_url or back to the endpoint
+      const uploadEndpoint = uploadUrl || `${videoApiUrl}/${platformPageId}/videos`;
+      await axios.post(uploadEndpoint, form, {
+        params: {
+          access_token: accessToken,
+          upload_phase: 'transfer',
+          video_id: videoId
+        },
         headers: {
           ...form.getHeaders(),
         },
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
         timeout: 120000 // 2 minutes
+      });
+
+      console.log(`✅ [Facebook] Video file uploaded successfully`);
+
+      // Phase 3: Finish - Finalize and publish the reel
+      const finishEndpoint = `${this.baseURL}/${platformPageId}/video_reels`;
+      
+      console.log(`📤 [Facebook] Phase 3: Finalizing reel`);
+      const finishResponse = await axios.post(finishEndpoint, null, {
+        params: {
+          upload_phase: 'finish',
+          video_id: videoId,
+          description: description || title || '',
+          access_token: accessToken
+        }
       });
 
       const reelId = finishResponse.data.id || videoId;
