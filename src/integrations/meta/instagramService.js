@@ -937,6 +937,7 @@ class InstagramService {
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       console.log(`🎬 [Instagram] Starting reel creation for account: ${businessAccountId}`);
+      console.log(`📹 [Instagram] Video URL: ${mediaUrl}`);
 
       // Pre-check: Verify URL is publicly accessible before sending to Instagram
       await this.verifyMediaUrlAccessible(mediaUrl);
@@ -950,7 +951,11 @@ class InstagramService {
         share_to_feed: true // Also share to main feed
       };
 
-      console.log(`📹 [Instagram] Creating reel container`);
+      console.log(`📹 [Instagram] Creating reel container with params:`, {
+        media_type: params.media_type,
+        video_url: params.video_url,
+        share_to_feed: params.share_to_feed
+      });
       const containerResponse = await axios.post(
         `${this.baseUrl}/${businessAccountId}/media`,
         null,
