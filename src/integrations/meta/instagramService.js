@@ -641,16 +641,22 @@ class InstagramService {
           
           console.error(`❌ [Instagram] Video processing failed:`, errorMessage);
           
-          // Common issues and suggestions
-          const suggestions = [
-            'Check video format (MP4 with H.264 codec)',
-            'Verify duration (15-90 seconds for reels)',
-            'Ensure aspect ratio is 9:16 (vertical) or 1:1',
-            'Audio must be AAC codec',
-            'File size should be under 1GB'
-          ];
-          
-          throw new Error(`${errorMessage}. Possible issues: ${suggestions.join('; ')}`);
+          // Check for specific error codes
+          if (errorMessage.includes('2207076')) {
+            throw new Error('Instagram cannot access the video URL. Ensure the URL is publicly accessible without authentication. Check your server firewall and SSL certificate.');
+          } else if (errorMessage.includes('2207027')) {
+            throw new Error('Media is not ready yet. This usually happens with large videos - try a smaller file.');
+          } else {
+            // Generic error with suggestions
+            const suggestions = [
+              'Video format: MP4 with H.264 codec + AAC audio',
+              'Duration: 15-90 seconds for reels',
+              'Aspect ratio: 9:16 (vertical) or 1:1',
+              'File size: Under 1GB',
+              'URL must be publicly accessible'
+            ];
+            throw new Error(`${errorMessage}. Requirements: ${suggestions.join('; ')}`);
+          }
         } else if (statusCode === 'EXPIRED') {
           throw new Error('Container expired - took too long to process');
         }
@@ -762,6 +768,9 @@ class InstagramService {
 
       console.log(`🚀 [Instagram] Starting post creation flow`);
 
+      // Pre-check: Verify URL is publicly accessible
+      await this.verifyMediaUrlAccessible(mediaUrl);
+
       // Step 1: Create media container
       const { containerId } = await this.createMediaContainer(platformConnection, {
         caption,
@@ -802,6 +811,9 @@ class InstagramService {
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       console.log(`📖 [Instagram] Starting story creation for account: ${businessAccountId}`);
+
+      // Pre-check: Verify URL is publicly accessible
+      await this.verifyMediaUrlAccessible(mediaUrl);
 
       // Step 1: Create story container
       const params = {
@@ -873,6 +885,41 @@ class InstagramService {
   }
 
   /**
+   * Verify that a media URL is publicly accessible
+   * This prevents Instagram error 2207076 (cannot download media)
+   */
+  async verifyMediaUrlAccessible(mediaUrl) {
+    try {
+      console.log(`🔍 [Instagram] Verifying URL is accessible: ${mediaUrl}`);
+      
+      const response = await axios.head(mediaUrl, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: (status) => status === 200
+      });
+      
+      console.log(`✅ [Instagram] URL is accessible (${response.status})`);
+      console.log(`📊 [Instagram] Content-Type: ${response.headers['content-type']}, Size: ${response.headers['content-length']} bytes`);
+      
+      return true;
+    } catch (error) {
+      console.error(`❌ [Instagram] URL is NOT accessible:`, error.message);
+      
+      if (error.code === 'ECONNREFUSED') {
+        throw new Error(`URL is not accessible: Connection refused. Check if your server is running and accessible from the internet (not just localhost).`);
+      } else if (error.code === 'ENOTFOUND') {
+        throw new Error(`URL is not accessible: Domain not found. Check your BASE_URL in .env file.`);
+      } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+        throw new Error(`URL is not accessible: Connection timeout. Check firewall settings and ensure public access.`);
+      } else if (error.response) {
+        throw new Error(`URL is not accessible: Server returned ${error.response.status}. Ensure the /api/posts/media/ endpoint is public (no auth required).`);
+      } else {
+        throw new Error(`URL is not accessible: ${error.message}`);
+      }
+    }
+  }
+
+  /**
    * Create and Publish Instagram Reel
    * Reels are short-form video content optimized for discovery
    */
@@ -886,6 +933,9 @@ class InstagramService {
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       console.log(`🎬 [Instagram] Starting reel creation for account: ${businessAccountId}`);
+
+      // Pre-check: Verify URL is publicly accessible before sending to Instagram
+      await this.verifyMediaUrlAccessible(mediaUrl);
 
       // Step 1: Create reel container
       const params = {
@@ -987,6 +1037,13 @@ class InstagramService {
       }
 
       console.log(`📸 [Instagram] Creating carousel with ${mediaUrls.length} items`);
+
+      // Pre-check: Verify all URLs are publicly accessible
+      for (let i = 0; i < mediaUrls.length; i++) {
+        const mediaItem = mediaUrls[i];
+        console.log(`🔍 [Instagram] Verifying carousel item ${i + 1}/${mediaUrls.length}`);
+        await this.verifyMediaUrlAccessible(mediaItem.url);
+      }
 
       // Step 1: Create containers for each media item
       const containerIds = [];
