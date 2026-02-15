@@ -747,7 +747,6 @@ class FacebookService {
         const isOwnMedia = videoUrl.includes('/api/posts/media/');
         
         if (isOwnMedia) {
-          // Extract filename and get local file path
           const filename = videoUrl.split('/').pop();
           const videoFilePath = path.join(__dirname, '../../../uploads/posts', filename);
           
