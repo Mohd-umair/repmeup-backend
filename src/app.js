@@ -44,8 +44,9 @@ let limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limiting for health check
-    return req.path === '/health';
+    // Skip rate limiting for health check and media serving
+    // Media endpoints need to be accessible by Instagram/Facebook/LinkedIn without rate limits
+    return req.path === '/health' || req.path.startsWith('/api/posts/media/');
   },
   message: { success: false, error: 'Too many requests from this IP, please try again later' }
 });
