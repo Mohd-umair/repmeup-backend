@@ -46,8 +46,16 @@ const scheduledPostSchema = new mongoose.Schema({
     enum: ['image', 'video', null]
   },
   mediaStoragePath: {
-    type: String // Local storage path before upload
+    type: String // Local storage path before upload (single media)
   },
+  // Support for carousel posts (multiple media)
+  mediaStoragePaths: [{
+    type: String // Array of local storage paths
+  }],
+  mediaTypes: [{
+    type: String,
+    enum: ['image', 'video']
+  }],
   scheduledFor: {
     type: Date,
     index: true

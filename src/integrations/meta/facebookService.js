@@ -447,13 +447,14 @@ class FacebookService {
    * @param {Object} postData - Post data
    * @param {string} postData.message - Post caption/message
    * @param {string} [postData.url] - Image URL (for photo posts)
+   * @param {Buffer} [postData.imageBuffer] - Image file buffer (for direct upload)
    * @param {string} [postData.link] - Link URL (for link posts)
    * @returns {Object} - Created post details
    */
   async createPost(platformConnection, postData) {
     try {
       const { accessToken, platformPageId } = platformConnection;
-      const { message, url, link } = postData;
+      const { message, url, link, imageBuffer } = postData;
 
       if (!platformPageId) {
         throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
@@ -462,33 +463,71 @@ class FacebookService {
       console.log(`📝 [Facebook] Creating post on page: ${platformPageId}`);
 
       let endpoint;
-      let params = {
-        access_token: accessToken
-      };
+      let requestData;
+      let config;
 
       // Determine post type and endpoint
-      if (url) {
-        // Photo post
-        endpoint = `${this.baseURL}/${platformPageId}/photos`;
-        params.url = url;
+      if (imageBuffer) {
+        // Photo post with direct file upload (more reliable than URL)
+        const FormData = require('form-data');
+        const form = new FormData();
+        
+        form.append('source', imageBuffer, {
+          filename: 'image.jpg',
+          contentType: 'image/jpeg'
+        });
         if (message) {
-          params.caption = message;
+          form.append('caption', message);
         }
+        form.append('access_token', accessToken);
+
+        endpoint = `${this.baseURL}/${platformPageId}/photos`;
+        requestData = form;
+        config = {
+          headers: form.getHeaders(),
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        };
+
+        console.log(`📤 [Facebook] Uploading photo directly to: ${endpoint}`);
+      } else if (url) {
+        // Photo post with URL (fallback)
+        endpoint = `${this.baseURL}/${platformPageId}/photos`;
+        requestData = null;
+        config = {
+          params: {
+            url: url,
+            caption: message || '',
+            access_token: accessToken
+          }
+        };
+        console.log(`📤 [Facebook] Posting photo URL to: ${endpoint}`);
       } else if (link) {
         // Link post
         endpoint = `${this.baseURL}/${platformPageId}/feed`;
-        params.message = message || '';
-        params.link = link;
+        requestData = null;
+        config = {
+          params: {
+            message: message || '',
+            link: link,
+            access_token: accessToken
+          }
+        };
+        console.log(`📤 [Facebook] Posting link to: ${endpoint}`);
       } else {
         // Text post
         endpoint = `${this.baseURL}/${platformPageId}/feed`;
-        params.message = message || ' '; // Facebook requires at least some content
+        requestData = null;
+        config = {
+          params: {
+            message: message || 'Posted from RepMeUp',
+            access_token: accessToken
+          }
+        };
+        console.log(`📤 [Facebook] Posting text to: ${endpoint}`);
       }
 
-      console.log(`📤 [Facebook] Posting to endpoint: ${endpoint}`);
-      console.log(`📦 [Facebook] Post params:`, { ...params, access_token: '[REDACTED]' });
-
-      const response = await axios.post(endpoint, null, { params });
+      const response = await axios.post(endpoint, requestData, config);
 
       console.log(`✅ [Facebook] Post created successfully:`, response.data);
 
@@ -513,6 +552,269 @@ class FacebookService {
         code: errorCode,
         platformError: {
           title: 'Facebook Posting Failed',
+          message: errorMessage,
+          code: errorCode
+        }
+      };
+    }
+  }
+
+  /**
+   * Create a Story on Facebook Page
+   * Stories are 24-hour temporary content
+   * @param {Object} platformConnection - Platform connection object
+   * @param {Object} storyData - Story data
+   * @param {string} storyData.imageUrl - Image URL (for photo stories)
+   * @param {string} storyData.videoUrl - Video URL (for video stories)
+   * @param {Buffer} storyData.imageBuffer - Image file buffer (for direct upload)
+   * @returns {Object} - Created story details
+   */
+  async createStory(platformConnection, storyData) {
+    try {
+      const { accessToken, platformPageId } = platformConnection;
+      const { imageUrl, videoUrl, imageBuffer } = storyData;
+
+      if (!platformPageId) {
+        throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
+      }
+
+      console.log(`📖 [Facebook] Creating story on page: ${platformPageId}`);
+
+      let endpoint;
+      let requestData;
+      let config;
+
+      // Stories require photo or video endpoint with temporary publishing
+      if (imageBuffer) {
+        // Photo story with direct file upload
+        const FormData = require('form-data');
+        const form = new FormData();
+        
+        form.append('source', imageBuffer, {
+          filename: 'story.jpg',
+          contentType: 'image/jpeg'
+        });
+        form.append('published', 'true');
+        form.append('temporary', 'true'); // This makes it a story (24h expiry)
+        form.append('access_token', accessToken);
+
+        endpoint = `${this.baseURL}/${platformPageId}/photos`;
+        requestData = form;
+        config = {
+          headers: form.getHeaders(),
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        };
+
+        console.log(`📤 [Facebook] Uploading photo story directly`);
+      } else if (imageUrl) {
+        // Photo story with URL
+        endpoint = `${this.baseURL}/${platformPageId}/photos`;
+        requestData = null;
+        config = {
+          params: {
+            url: imageUrl,
+            published: true,
+            temporary: true, // 24h expiry
+            access_token: accessToken
+          }
+        };
+        console.log(`📤 [Facebook] Posting photo story URL`);
+      } else if (videoUrl) {
+        // Video story
+        endpoint = `${this.baseURL}/${platformPageId}/videos`;
+        requestData = null;
+        config = {
+          params: {
+            file_url: videoUrl,
+            published: true,
+            temporary: true, // 24h expiry
+            access_token: accessToken
+          }
+        };
+        console.log(`📤 [Facebook] Posting video story URL`);
+      } else {
+        throw new Error('Story requires an image or video');
+      }
+
+      const response = await axios.post(endpoint, requestData, config);
+
+      console.log(`✅ [Facebook] Story created successfully:`, response.data);
+
+      const storyId = response.data.id || response.data.post_id;
+      const storyUrl = `https://www.facebook.com/stories/${storyId}`;
+
+      return {
+        postId: storyId,
+        postUrl: storyUrl,
+        success: true
+      };
+    } catch (error) {
+      console.error('❌ [Facebook] Create story error:', error.response?.data || error.message);
+      
+      const errorMessage = error.response?.data?.error?.message || error.message;
+      const errorCode = error.response?.data?.error?.code;
+      
+      throw {
+        message: errorMessage,
+        code: errorCode,
+        platformError: {
+          title: 'Facebook Story Creation Failed',
+          message: errorMessage,
+          code: errorCode
+        }
+      };
+    }
+  }
+
+  /**
+   * Create a Reel (Short) on Facebook Page
+   * Reels are short-form vertical videos
+   * @param {Object} platformConnection - Platform connection object
+   * @param {Object} reelData - Reel data
+   * @param {string} reelData.videoUrl - Video URL
+   * @param {string} [reelData.description] - Video description/caption
+   * @param {string} [reelData.title] - Video title
+   * @returns {Object} - Created reel details
+   */
+  async createReel(platformConnection, reelData) {
+    try {
+      const { accessToken, platformPageId } = platformConnection;
+      const { videoUrl, description, title } = reelData;
+
+      if (!platformPageId) {
+        throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
+      }
+
+      if (!videoUrl) {
+        throw new Error('Video URL is required for Facebook Reels');
+      }
+
+      console.log(`🎬 [Facebook] Creating reel on page: ${platformPageId}`);
+
+      // Facebook Reels use the video endpoint with specific parameters
+      const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
+      
+      const params = {
+        upload_phase: 'start',
+        access_token: accessToken
+      };
+
+      // Start the upload session
+      console.log(`📤 [Facebook] Starting reel upload session`);
+      const startResponse = await axios.post(endpoint, null, { params });
+      
+      const videoId = startResponse.data.video_id;
+      console.log(`✅ [Facebook] Reel upload session started: ${videoId}`);
+
+      // Upload the video file
+      const uploadParams = {
+        access_token: accessToken,
+        upload_phase: 'transfer',
+        video_id: videoId,
+        file_url: videoUrl
+      };
+
+      console.log(`📤 [Facebook] Uploading reel video`);
+      await axios.post(endpoint, null, { params: uploadParams });
+
+      // Finish the upload
+      const finishParams = {
+        access_token: accessToken,
+        upload_phase: 'finish',
+        video_id: videoId,
+        description: description || '',
+        title: title || 'Reel'
+      };
+
+      console.log(`📤 [Facebook] Finishing reel upload`);
+      const finishResponse = await axios.post(endpoint, null, { params: finishParams });
+
+      console.log(`✅ [Facebook] Reel created successfully:`, finishResponse.data);
+
+      const reelUrl = `https://www.facebook.com/reel/${videoId}`;
+
+      return {
+        postId: videoId,
+        postUrl: reelUrl,
+        success: true
+      };
+    } catch (error) {
+      console.error('❌ [Facebook] Create reel error:', error.response?.data || error.message);
+      
+      // Facebook Reels API might not be available for all pages
+      // Fallback to regular video post
+      console.warn('⚠️ [Facebook] Reel creation failed, falling back to regular video post');
+      
+      try {
+        const videoPost = await this.createVideoPost(platformConnection, {
+          videoUrl: reelData.videoUrl,
+          description: reelData.description || reelData.title
+        });
+        return videoPost;
+      } catch (fallbackError) {
+        const errorMessage = error.response?.data?.error?.message || error.message;
+        const errorCode = error.response?.data?.error?.code;
+        
+        throw {
+          message: errorMessage,
+          code: errorCode,
+          platformError: {
+            title: 'Facebook Reel Creation Failed',
+            message: errorMessage + ' (Reel API not available - tried video post fallback)',
+            code: errorCode
+          }
+        };
+      }
+    }
+  }
+
+  /**
+   * Create a Video Post on Facebook Page (fallback for reels)
+   * @param {Object} platformConnection - Platform connection object
+   * @param {Object} videoData - Video data
+   * @param {string} videoData.videoUrl - Video URL
+   * @param {string} [videoData.description] - Video description
+   * @returns {Object} - Created video post details
+   */
+  async createVideoPost(platformConnection, videoData) {
+    try {
+      const { accessToken, platformPageId } = platformConnection;
+      const { videoUrl, description } = videoData;
+
+      console.log(`🎥 [Facebook] Creating video post on page: ${platformPageId}`);
+
+      const endpoint = `${this.baseURL}/${platformPageId}/videos`;
+      
+      const response = await axios.post(endpoint, null, {
+        params: {
+          file_url: videoUrl,
+          description: description || '',
+          access_token: accessToken
+        }
+      });
+
+      console.log(`✅ [Facebook] Video post created successfully:`, response.data);
+
+      const videoId = response.data.id;
+      const videoUrl_result = `https://www.facebook.com/${videoId}`;
+
+      return {
+        postId: videoId,
+        postUrl: videoUrl_result,
+        success: true
+      };
+    } catch (error) {
+      console.error('❌ [Facebook] Create video post error:', error.response?.data || error.message);
+      
+      const errorMessage = error.response?.data?.error?.message || error.message;
+      const errorCode = error.response?.data?.error?.code;
+      
+      throw {
+        message: errorMessage,
+        code: errorCode,
+        platformError: {
+          title: 'Facebook Video Post Failed',
           message: errorMessage,
           code: errorCode
         }

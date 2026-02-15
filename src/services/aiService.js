@@ -1,6 +1,7 @@
 const axios = require('axios');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const aiCreditService = require('./aiCreditService');
+const logger = require('../config/logger');
 
 class AIService {
   constructor() {
@@ -22,11 +23,11 @@ class AIService {
     } else if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
       // Auto-detect: Use OpenAI if API key is present
       this.provider = 'openai';
-      console.log('✅ Auto-detected OpenAI provider (API key found)');
+      logger.info('AI Service: Auto-detected OpenAI provider', { hasApiKey: true });
     } else {
       // Fallback to Ollama if no OpenAI key
       this.provider = 'ollama';
-      console.log('⚠️  Using Ollama provider (no OpenAI API key found)');
+      logger.warn('AI Service: Using Ollama provider', { reason: 'No OpenAI API key found' });
     }
 
     console.log(`🤖 AI Provider: ${this.provider.toUpperCase()}`);
@@ -78,6 +79,144 @@ class AIService {
       console.error('Knowledge base search error:', error.message);
       return [];
     }
+  }
+
+  /**
+   * Generate social media post content from a prompt
+   * @param {String} prompt - User's description of what they want to post
+   * @param {Array} platforms - Array of platform names ['instagram', 'facebook', 'linkedin']
+   * @param {String} mode - 'same' for same post across all, 'custom' for different per platform
+   * @param {String} postType - 'post', 'story', 'reel', 'short'
+   * @returns {Promise<Object>} Generated post(s) and credits used
+   */
+  async generatePost(prompt, platforms, mode = 'same', postType = 'post') {
+    try {
+      console.log(`✍️ [AI] Generating ${mode} post for platforms:`, platforms);
+      console.log(`📝 [AI] Prompt: "${prompt}"`);
+      console.log(`📋 [AI] Post type: ${postType}`);
+
+      if (mode === 'same') {
+        // Generate ONE post for all platforms
+        const post = await this._generateSinglePost(prompt, platforms, postType);
+        return {
+          mode: 'same',
+          posts: { all: post },
+          creditsUsed: 1
+        };
+      } else {
+        // Generate CUSTOM post for EACH platform
+        const posts = {};
+        for (const platform of platforms) {
+          posts[platform] = await this._generateSinglePost(prompt, [platform], postType);
+        }
+        return {
+          mode: 'custom',
+          posts: posts,
+          creditsUsed: platforms.length
+        };
+      }
+    } catch (error) {
+      console.error('Generate post error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate a single post optimized for specific platform(s)
+   * @private
+   */
+  async _generateSinglePost(prompt, platforms, postType) {
+    const platformNames = platforms.join(', ');
+    const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
+
+    const systemPrompt = `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
+
+${platformGuidelines}
+
+Guidelines:
+- Be authentic and engaging
+- Use appropriate emojis sparingly
+- Include relevant hashtags (3-5 for Instagram, 1-2 for others)
+- Keep tone professional yet conversational
+- Match platform best practices
+- For stories: Keep it casual and time-sensitive
+- For reels/shorts: Hook in first 3 seconds
+
+Generate ONLY the post content. No explanations or meta-commentary.`;
+
+    if (this.provider === 'openai') {
+      const response = await axios.post(
+        this.openaiApiUrl,
+        {
+          model: this.openaiModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.8,
+          max_tokens: 500
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.openaiApiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+
+      return response.data.choices[0].message.content.trim();
+    } else {
+      // Ollama
+      const response = await axios.post(
+        `${this.ollamaUrl}/api/chat`,
+        {
+          model: this.ollamaModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+          ],
+          stream: false
+        },
+        { timeout: 30000 }
+      );
+
+      return response.data.message.content.trim();
+    }
+  }
+
+  /**
+   * Get platform-specific guidelines for post generation
+   * @private
+   */
+  _getPlatformGuidelines(platforms, postType) {
+    const guidelines = [];
+
+    if (platforms.includes('instagram')) {
+      if (postType === 'story') {
+        guidelines.push('• Instagram Story: Keep it casual, behind-the-scenes, use stickers/polls language');
+      } else if (postType === 'reel') {
+        guidelines.push('• Instagram Reel: Hook in 3 seconds, trending topics, discovery-focused hashtags');
+      } else {
+        guidelines.push('• Instagram: Visual-first, 2200 char max, 5-10 hashtags, emojis welcome');
+      }
+    }
+
+    if (platforms.includes('facebook')) {
+      if (postType === 'story') {
+        guidelines.push('• Facebook Story: Conversational, call-to-action, time-sensitive');
+      } else if (postType === 'reel' || postType === 'short') {
+        guidelines.push('• Facebook Reel: Engaging hook, share-worthy, community-focused');
+      } else {
+        guidelines.push('• Facebook: Community-focused, longer form OK, questions for engagement');
+      }
+    }
+
+    if (platforms.includes('linkedin')) {
+      guidelines.push('• LinkedIn: Professional tone, industry insights, 3000 char max, 1-3 hashtags');
+    }
+
+    return guidelines.join('\n');
   }
 
   /**
@@ -325,8 +464,6 @@ Scoring:
       sentiment = 'negative';
       score = Math.max(-0.8, -0.4 - (negativeScore * 0.1));
     }
-
-    console.log(`⚠️  [AI] Fallback sentiment: ${sentiment} (pos: ${positiveScore}, neg: ${negativeScore})`);
 
     return {
       sentiment,
@@ -937,8 +1074,20 @@ Generate a response that addresses the customer's message appropriately.`;
       }
 
       // Deduct AI credits after successful generation
+      // Try to find a user to attribute this to (assigned user or an admin)
+      const User = require('../models/User');
+      let userId = interaction.assignedTo;
+      if (!userId) {
+        const adminUser = await User.findOne({ 
+          organization: organizationId, 
+          role: { $in: ['admin', 'manager'] } 
+        }).select('_id');
+        userId = adminUser?._id;
+      }
+      
       await aiCreditService.deductCredits(organizationId, 1, {
         operation: 'auto_reply',
+        userId: userId,
         interactionId: interaction._id.toString(),
         platform: interaction.platform
       });

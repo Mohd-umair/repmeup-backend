@@ -204,8 +204,8 @@ const interactionSchema = new mongoose.Schema({
     },
     assignedBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true
+      ref: 'User'
+      // optional: null when assigned by system/AI (e.g. processAI job)
     },
     assignedAt: {
       type: Date,

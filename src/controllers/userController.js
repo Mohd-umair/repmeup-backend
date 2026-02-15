@@ -476,6 +476,53 @@ exports.getUserStats = async (req, res, next) => {
 };
 
 // @desc    Get available agents for assignment
+// @route   GET /api/users/ai-credits
+// @access  Private
+exports.getAICredits = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id || req.user.organization;
+    const aiCreditService = require('../services/aiCreditService');
+    
+    const credits = await aiCreditService.getUsage(organizationId);
+    
+    res.status(200).json({
+      success: true,
+      credits: credits
+    });
+  } catch (error) {
+    console.error('Get AI credits error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Get AI credit usage history
+ * GET /api/users/ai-credits/usage
+ */
+exports.getAICreditUsageHistory = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id || req.user.organization;
+    const { page, limit, startDate, endDate } = req.query;
+
+    // Dynamically import to avoid circular dependency
+    const aiCreditService = require('../services/aiCreditService');
+    const history = await aiCreditService.getUsageHistory(organizationId, {
+      page,
+      limit,
+      startDate,
+      endDate
+    });
+
+    res.status(200).json({
+      success: true,
+      ...history
+    });
+  } catch (error) {
+    console.error('Get AI credit usage history error:', error);
+    next(error);
+  }
+};
+
 // @route   GET /api/users/agents/available
 // @access  Private
 exports.getAvailableAgents = async (req, res, next) => {

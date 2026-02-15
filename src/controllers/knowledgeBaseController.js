@@ -315,6 +315,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
       actualCost,
       {
         operation: 'knowledge_base_from_url',
+        userId: req.user._id,
         url: url,
         wordCount: actualWordCount,
         tagCount: summaryData.tags.length

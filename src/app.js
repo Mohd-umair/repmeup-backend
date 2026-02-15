@@ -3,6 +3,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const RedisStore = require('rate-limit-redis');
+const { getRedisClient } = require('./config/redis');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -23,21 +25,33 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Logging middleware
+// Request logger middleware (adds req.log and requestId)
+const requestLogger = require('./middlewares/requestLogger');
+app.use(requestLogger);
+
+// Logging middleware (HTTP format logging)
 if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
 } else {
   app.use(morgan('combined'));
 }
 
-// Rate limiting
-const limiter = rateLimit({
+// Rate limiting - will be initialized after Redis connects
+// For now, use in-memory rate limiting as fallback
+let limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-  message: 'Too many requests from this IP, please try again later.'
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 100 to 1000
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting for health check
+    return req.path === '/health';
+  },
+  message: { success: false, error: 'Too many requests from this IP, please try again later' }
 });
 
-app.use('/api/', limiter);
+// Middleware wrapper that uses the current limiter
+app.use('/api/', (req, res, next) => limiter(req, res, next));
 
 // Health check route
 app.get('/health', (req, res) => {
@@ -48,6 +62,10 @@ app.get('/health', (req, res) => {
     environment: process.env.NODE_ENV
   });
 });
+
+// Bull Board monitoring UI
+const bullBoardAdapter = require('./config/bullBoard');
+app.use('/admin/queues', bullBoardAdapter.getRouter());
 
 // API routes
 app.use('/api/auth', require('./routes/auth'));
@@ -81,5 +99,32 @@ app.use((req, res) => {
 // Error handler (must be last)
 app.use(errorHandler);
 
+// Function to upgrade rate limiting to Redis-backed after Redis connects
+const upgradeRateLimiting = () => {
+  try {
+    const redisClient = getRedisClient();
+    limiter = rateLimit({
+      windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+      max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 100 to 1000
+      standardHeaders: true,
+      legacyHeaders: false,
+      skip: (req) => {
+        // Skip rate limiting for health check
+        return req.path === '/health';
+      },
+      store: new RedisStore({
+        // @ts-expect-error - rate-limit-redis expects Redis v4 client
+        client: redisClient,
+        prefix: 'rl:',
+      }),
+      message: { success: false, error: 'Too many requests from this IP, please try again later' }
+    });
+    console.log('✅ Rate limiting upgraded to Redis-backed store (1000 req/15min)');
+  } catch (error) {
+    console.warn('⚠️  Could not upgrade to Redis-backed rate limiting, using in-memory fallback:', error.message);
+  }
+};
+
 module.exports = app;
+module.exports.upgradeRateLimiting = upgradeRateLimiting;
 

@@ -9,6 +9,11 @@ const path = require('path');
  * @route /api/posts
  */
 
+// @route   GET /api/posts/media-requirements
+// @desc    Get media requirements for platforms
+// @access  Public (no rate limit - static data)
+router.get('/media-requirements', postController.getMediaRequirements);
+
 // @route   GET /api/posts/media/:filename
 // @desc    Serve uploaded media files (public for Instagram API)
 // @access  Public (needed for Instagram to access the media)
@@ -31,6 +36,11 @@ router.get('/media/:filename', (req, res) => {
     res.status(500).json({ message: 'Error serving media file' });
   }
 });
+
+// @route   POST /api/posts/generate
+// @desc    Generate post content with AI
+// @access  Private
+router.post('/generate', protect, postController.generatePostWithAI);
 
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately

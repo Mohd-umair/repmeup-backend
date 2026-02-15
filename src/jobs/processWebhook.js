@@ -1,16 +1,23 @@
 const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const { aiQueue } = require('../config/queue');
+const logger = require('../config/logger');
 
 /**
  * Process webhook events from social media platforms
  * This job handles incoming webhook payloads and creates interactions
  */
 module.exports = async function processWebhook(job) {
+  const jobLogger = logger.createChild({ 
+    module: 'processWebhook', 
+    jobId: job.id,
+    orgId: job.data.organizationId 
+  });
+  
   try {
     const { platform, payload, organizationId } = job.data;
 
-    console.log(`Processing webhook from ${platform} for organization ${organizationId}`);
+    jobLogger.info('Processing webhook', { platform });
 
     let interaction = null;
 
@@ -40,14 +47,16 @@ module.exports = async function processWebhook(job) {
         break;
       
       default:
-        console.log(`Unknown platform: ${platform}`);
+        jobLogger.warn('Unknown platform', { platform });
     }
 
     if (interaction) {
-      console.log(`\n✅ [Webhook] Interaction created: ${interaction._id}`);
-      console.log(`   Platform: ${interaction.platform}`);
-      console.log(`   Type: ${interaction.type}`);
-      console.log(`   Content: "${interaction.content?.substring(0, 100)}..."`);
+      jobLogger.info('Interaction created', {
+        interactionId: interaction._id.toString(),
+        platform: interaction.platform,
+        type: interaction.type,
+        contentPreview: interaction.content?.substring(0, 100)
+      });
       
       // IMPORTANT: Check if interaction already has replies
       // If it does, skip auto-reply queueing (it's already been replied to)

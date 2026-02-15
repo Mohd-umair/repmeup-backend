@@ -7,12 +7,20 @@ const {
   updateUser,
   deleteUser,
   getUserStats,
-  getAvailableAgents
+  getAvailableAgents,
+  getAICredits,
+  getAICreditUsageHistory
 } = require('../controllers/userController');
 const { protect } = require('../middlewares/auth');
 
 // All routes require authentication
 router.use(protect);
+
+// GET /api/users/ai-credits - Get AI credits for current user's organization
+router.get('/ai-credits', getAICredits);
+
+// GET /api/users/ai-credits/usage - Get AI credit usage history
+router.get('/ai-credits/usage', getAICreditUsageHistory);
 
 // GET /api/users/agents/available - Get available agents for assignment
 router.get('/agents/available', getAvailableAgents);

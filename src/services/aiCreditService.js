@@ -1,5 +1,6 @@
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
+const AICreditUsage = require('../models/AICreditUsage');
 
 /**
  * AI Credit Service - Single Responsibility Principle
@@ -83,7 +84,7 @@ class AICreditService {
    * Deduct AI credits after successful operation
    * @param {String} organizationId
    * @param {Number} actualCost - Actual credits used
-   * @param {Object} metadata - Optional metadata (operation type, details)
+   * @param {Object} metadata - Optional metadata (operation type, details, userId)
    * @returns {Promise<Object>} Updated usage
    */
   async deductCredits(organizationId, actualCost = 1, metadata = {}) {
@@ -102,6 +103,24 @@ class AICreditService {
         return { success: false };
       }
 
+      // Log usage event for history tracking
+      try {
+        await AICreditUsage.create({
+          organization: organizationId,
+          user: metadata.userId || organizationId, // Fallback to org ID if user not provided
+          operation: metadata.operation || 'unknown',
+          creditsUsed: actualCost,
+          metadata: {
+            ...metadata,
+            userId: undefined, // Remove userId from metadata to avoid duplication
+            operation: undefined // Remove operation from metadata to avoid duplication
+          }
+        });
+      } catch (logError) {
+        console.error('Error logging AI credit usage:', logError);
+        // Don't fail the deduction if logging fails
+      }
+
       console.log(`💰 [AI Credits] Deducted ${actualCost} credits for org ${organizationId}. New total: ${result.usage.aiCreditsThisMonth}/${result.limits.maxAICreditsPerMonth}`);
 
       return {
@@ -116,6 +135,52 @@ class AICreditService {
       };
     } catch (error) {
       console.error('Deduct AI credits error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get AI credit usage history for organization
+   * @param {String} organizationId
+   * @param {Object} options - Query options (page, limit, startDate, endDate)
+   * @returns {Promise<Object>} Usage history with pagination
+   */
+  async getUsageHistory(organizationId, options = {}) {
+    try {
+      const page = parseInt(options.page) || 1;
+      const limit = parseInt(options.limit) || 20;
+      const skip = (page - 1) * limit;
+
+      const query = { organization: organizationId };
+
+      // Date filtering
+      if (options.startDate || options.endDate) {
+        query.createdAt = {};
+        if (options.startDate) query.createdAt.$gte = new Date(options.startDate);
+        if (options.endDate) query.createdAt.$lte = new Date(options.endDate);
+      }
+
+      const [usageHistory, total] = await Promise.all([
+        AICreditUsage.find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .select('-__v')
+          .lean(),
+        AICreditUsage.countDocuments(query)
+      ]);
+
+      return {
+        data: usageHistory,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('Get AI credit usage history error:', error);
       throw error;
     }
   }

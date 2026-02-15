@@ -6,6 +6,8 @@ const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
 const whatsappService = require('../integrations/whatsapp/whatsappService');
 const crypto = require('crypto');
+const logger = require('../config/logger');
+const logEvents = require('../utils/logEvents');
 
 /**
  * @desc    Initiate Google OAuth flow
@@ -213,7 +215,11 @@ exports.handleGoogleCallback = async (req, res, next) => {
       // Redirect to frontend with success
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:4200'}/app/settings?connected=${platform}&success=true`);
     } catch (error) {
-      console.error('OAuth callback error:', error);
+      logger.error('OAuth callback error', { 
+        error: error.message,
+        platform,
+        userId: req.user?._id?.toString()
+      });
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:4200'}/app/settings?error=${encodeURIComponent(error.message)}`);
     }
   } catch (error) {
@@ -346,7 +352,11 @@ exports.disconnectPlatform = async (req, res, next) => {
       message: `${platformType} disconnected successfully. Interactions from this platform will no longer appear in your inbox.`
     });
   } catch (error) {
-    console.error('Error disconnecting platform:', error);
+    logger.error('Error disconnecting platform', { 
+      error: error.message,
+      platform: req.body.platform,
+      userId: req.user._id.toString()
+    });
     next(error);
   }
 };
@@ -412,16 +422,13 @@ exports.syncPlatform = async (req, res, next) => {
           error: 'Both comments and DMs sync are disabled for this connection'
         });
       }
-      console.log('📸 [Sync] Instagram sync result:', result);
     } else if (connection.platform === 'facebook') {
       // Fetch both comments and reviews
       result = await facebookService.fetchAllInteractions(connection);
-      console.log('📘 [Sync] Facebook sync result:', result);
     } else if (connection.platform === 'linkedin') {
       try {
         // Fetch LinkedIn posts and comments
         result = await linkedinService.fetchAllInteractions(connection);
-        console.log('💼 [Sync] LinkedIn sync result:', result);
       } catch (linkedinError) {
         console.error('❌ [Sync] LinkedIn sync error:', linkedinError.message);
         return res.status(400).json({
@@ -462,8 +469,6 @@ exports.syncPlatform = async (req, res, next) => {
           { replies: { $exists: false } }
         ]
       });
-
-      console.log(`📊 [Sync] Found ${newInteractions.length} NEW interactions eligible for auto-reply`);
       
       // AUTOMATIC SENTIMENT ANALYSIS: Analyze sentiment for new interactions immediately
       for (const interaction of newInteractions) {
@@ -507,9 +512,6 @@ exports.syncPlatform = async (req, res, next) => {
           
           if (queued) {
             autoReplyQueued++;
-            console.log(`🤖 [Sync] Auto-reply queued for: ${interaction._id} (${interaction.content?.substring(0, 50)}...)`);
-          } else {
-            console.log(`⚠️  [Sync] Auto-reply NOT queued for: ${interaction._id} - check settings`);
           }
         } catch (queueError) {
           console.error(`Error queueing interaction ${interaction._id}:`, queueError);

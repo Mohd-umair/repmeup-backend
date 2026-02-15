@@ -165,8 +165,7 @@ const planSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
-planSchema.index({ planId: 1 });
+// Indexes (planId omitted - unique: true on field already creates index)
 planSchema.index({ tier: 1 });
 planSchema.index({ isActive: 1, isPublic: 1 });
 planSchema.index({ displayOrder: 1 });
