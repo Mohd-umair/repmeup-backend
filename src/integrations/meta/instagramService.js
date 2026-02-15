@@ -612,28 +612,42 @@ class InstagramService {
         );
 
         const statusCode = response.data.status_code;
-        console.log(`📊 [Instagram] Container status (attempt ${i + 1}): ${statusCode}`);
+        console.log(`📊 [Instagram] Container status (attempt ${i + 1}/${maxAttempts}): ${statusCode}`);
 
         if (statusCode === 'FINISHED') {
           console.log(`✅ [Instagram] Container ready for publishing`);
           return true;
         } else if (statusCode === 'ERROR') {
-          throw new Error('Video processing failed');
+          // Get more details about the error if available
+          const errorDetails = response.data.status || response.data.error || 'Unknown error';
+          console.error(`❌ [Instagram] Container processing error:`, errorDetails);
+          throw new Error(`Video processing failed: ${JSON.stringify(errorDetails)}`);
         } else if (statusCode === 'EXPIRED') {
-          throw new Error('Container expired');
+          throw new Error('Container expired - took too long to process');
         }
+        
+        // Log current status for debugging
+        console.log(`⏳ [Instagram] Still processing (${statusCode})... waiting 2s before retry`);
 
         // Wait 2 seconds before next check
         await new Promise(resolve => setTimeout(resolve, 2000));
       } catch (error) {
+        // If it's a processing/expired error, throw immediately
         if (error.message.includes('processing') || error.message.includes('expired')) {
           throw error;
         }
-        console.error(`⚠️ [Instagram] Status check error (attempt ${i + 1}):`, error.message);
+        
+        // If it's an API error, log and retry
+        console.error(`⚠️ [Instagram] Status check error (attempt ${i + 1}/${maxAttempts}):`, error.response?.data || error.message);
+        
+        // If this was the last attempt, throw the error
+        if (i === maxAttempts - 1) {
+          throw new Error(`Failed to check container status: ${error.message}`);
+        }
       }
     }
 
-    throw new Error('Video processing timeout - container not ready after 60 seconds');
+    throw new Error(`Video processing timeout - container not ready after ${maxAttempts * 2} seconds. The video may not meet Instagram's requirements (codec, format, duration, etc.).`);
   }
 
   /**
