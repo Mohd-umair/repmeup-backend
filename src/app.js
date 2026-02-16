@@ -80,6 +80,7 @@ app.use('/api/diagnostics', require('./routes/diagnostics'));
 app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/data-delete', require('./routes/dataDelete'));
 app.use('/api/posts', require('./routes/postRoutes'));
+app.use('/api/media-library', require('./routes/mediaLibrary'));
 app.use('/api/meta', require('./routes/meta'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/menus', require('./routes/menus'));

@@ -1,5 +1,6 @@
 const ScheduledPost = require('../models/ScheduledPost');
 const PlatformConnection = require('../models/PlatformConnection');
+const Media = require('../models/Media');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
 const aiService = require('../services/aiService');
@@ -138,7 +139,7 @@ exports.publishPost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -181,8 +182,51 @@ exports.publishPost = async (req, res) => {
         postType: postType || 'post'
       };
 
-      // Handle media if uploaded (single or multiple for carousel)
-      if (req.files && req.files.length > 0) {
+      // Check if using media from library or uploading new media
+      if (mediaLibraryIds && mediaLibraryIds.length > 0) {
+        // Multiple media from library (carousel)
+        const libraryIds = Array.isArray(mediaLibraryIds) ? mediaLibraryIds : JSON.parse(mediaLibraryIds);
+        const libraryMediaItems = await Media.find({
+          _id: { $in: libraryIds },
+          organization: organizationId
+        });
+
+        if (libraryMediaItems.length !== libraryIds.length) {
+          return res.status(404).json({
+            success: false,
+            message: 'Some media items not found in library or do not belong to your organization'
+          });
+        }
+
+        postData.mediaStoragePaths = libraryMediaItems.map(m => m.filePath);
+        postData.mediaTypes = libraryMediaItems.map(m => m.mediaType);
+        postData.mediaLibraryIds = libraryMediaItems.map(m => m._id);
+        
+        // For backward compatibility
+        postData.mediaStoragePath = libraryMediaItems[0].filePath;
+        postData.mediaType = libraryMediaItems[0].mediaType;
+
+        console.log(`📚 [Post] Using ${libraryMediaItems.length} items from library for carousel`);
+      } else if (mediaLibraryId) {
+        // Single media from library
+        const libraryMedia = await Media.findOne({
+          _id: mediaLibraryId,
+          organization: organizationId
+        });
+
+        if (!libraryMedia) {
+          return res.status(404).json({
+            success: false,
+            message: 'Media not found in library or does not belong to your organization'
+          });
+        }
+
+        postData.mediaStoragePath = libraryMedia.filePath;
+        postData.mediaType = libraryMedia.mediaType;
+        postData.mediaLibraryId = libraryMedia._id;
+
+        console.log(`📚 [Post] Using media from library: ${libraryMedia.originalName}`);
+      } else if (req.files && req.files.length > 0) {
         // Multiple media files (carousel)
         const mediaStoragePaths = [];
         const mediaTypes = [];
@@ -311,6 +355,36 @@ exports.publishPost = async (req, res) => {
         post.platformPostUrl = result.postUrl;
         await post.save();
 
+        // Track media usage if using library media
+        if (post.mediaLibraryId) {
+          try {
+            const media = await Media.findById(post.mediaLibraryId);
+            if (media) {
+              await media.incrementUsage();
+              console.log(`📈 [Media Library] Usage incremented for ${media.originalName}`);
+            }
+          } catch (err) {
+            console.error('Error tracking media usage:', err);
+            // Non-critical, don't fail the request
+          }
+        }
+
+        // Track usage for carousel media
+        if (post.mediaLibraryIds && post.mediaLibraryIds.length > 0) {
+          try {
+            for (const mediaId of post.mediaLibraryIds) {
+              const media = await Media.findById(mediaId);
+              if (media) {
+                await media.incrementUsage();
+              }
+            }
+            console.log(`📈 [Media Library] Usage incremented for ${post.mediaLibraryIds.length} carousel items`);
+          } catch (err) {
+            console.error('Error tracking carousel media usage:', err);
+            // Non-critical, don't fail the request
+          }
+        }
+
         res.status(201).json({
           message: 'Post published successfully',
           post: post,
@@ -354,7 +428,7 @@ exports.schedulePost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -398,7 +472,28 @@ exports.schedulePost = async (req, res) => {
         postType: postType || 'post'
       };
 
-      if (req.file) {
+      // Check if using media from library or uploading new media
+      if (mediaLibraryId) {
+        // Use media from library
+        const libraryMedia = await Media.findOne({
+          _id: mediaLibraryId,
+          organization: organizationId
+        });
+
+        if (!libraryMedia) {
+          return res.status(404).json({
+            success: false,
+            message: 'Media not found in library or does not belong to your organization'
+          });
+        }
+
+        // Use library media's file path and type
+        postData.mediaStoragePath = libraryMedia.filePath;
+        postData.mediaType = libraryMedia.mediaType;
+        postData.mediaLibraryId = libraryMedia._id; // Track which library media is used
+
+        console.log(`📚 [Post] Using media from library: ${libraryMedia.originalName} (${libraryMedia._id})`);
+      } else if (req.file) {
         const mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
         const fileExtension = path.extname(req.file.originalname);
         
