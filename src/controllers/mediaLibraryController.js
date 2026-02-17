@@ -59,10 +59,11 @@ exports.uploadMedia = async (req, res) => {
       data: media
     });
   } catch (error) {
-    console.error('Upload media error:', error);
+    console.error('❌ [Media Library] Upload error:', error);
+    console.error('❌ [Media Library] Error stack:', error.stack);
     res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message || 'Failed to upload media to library'
     });
   }
 };
