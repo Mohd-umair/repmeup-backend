@@ -376,6 +376,9 @@ router.get('/google', async (req, res, next) => {
   try {
     const authURL = googleAuthService.getAuthURL();
     
+    console.log('🔗 [Google Auth] Generated authUrl redirect_uri:', process.env.GOOGLE_AUTH_REDIRECT_URI);
+    console.log('🔗 [Google Auth] Full authUrl:', authURL);
+    
     res.json({ 
       success: true, 
       authUrl: authURL 
