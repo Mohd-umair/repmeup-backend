@@ -20,5 +20,11 @@ router.post('/platform/:platform', analyticsController.getPlatformAnalytics);
 // Export analytics data
 router.post('/export', analyticsController.exportData);
 
+// Agent analytics
+router.post('/agents', analyticsController.getAgentAnalytics);
+
+// Engagement analytics
+router.post('/engagement', analyticsController.getEngagementAnalytics);
+
 module.exports = router;
 

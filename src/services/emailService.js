@@ -7,30 +7,15 @@ class EmailService {
   }
 
   initializeTransporter() {
-    // For development, use a test account or console logging
-    if (process.env.NODE_ENV === 'development') {
-      // Create a test transporter
-      this.transporter = nodemailer.createTransport({
-        host: 'smtp.ethereal.email',
-        port: 587,
-        secure: false,
-        auth: {
-          user: 'ethereal.user@ethereal.email',
-          pass: 'pass'
-        }
-      });
-    } else {
-      // Production: Use SendGrid, AWS SES, or other service
-      this.transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.sendgrid.net',
-        port: process.env.SMTP_PORT || 587,
-        secure: false,
-        auth: {
-          user: process.env.SMTP_USER || 'apikey',
-          pass: process.env.SENDGRID_API_KEY || process.env.SMTP_PASS
-        }
-      });
-    }
+    this.transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.hostinger.com',
+      port: parseInt(process.env.SMTP_PORT || '465'),
+      secure: (process.env.SMTP_PORT || '465') === '465', // true for 465, false for 587
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    });
   }
 
   /**
@@ -165,16 +150,62 @@ class EmailService {
    * Send password reset email
    */
   async sendPasswordResetEmail(user, resetToken) {
-    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
-    const subject = 'Password Reset Request';
+    const resetUrl = `${process.env.FRONTEND_URL}/auth/reset-password?token=${resetToken}`;
+    const subject = 'Reset Your RepMeUp Password';
     const html = `
-      <h2>Password Reset Request</h2>
-      <p>Hi ${user.firstName},</p>
-      <p>You requested a password reset. Click the link below to reset your password:</p>
-      <p><a href="${resetUrl}">Reset Password</a></p>
-      <p>This link will expire in 1 hour.</p>
-      <p>If you didn't request this, please ignore this email.</p>
-      <p>Best regards,<br>ORM System</p>
+      <!DOCTYPE html>
+      <html>
+      <body style="margin:0;padding:0;background-color:#0a0a0a;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
+          <tr>
+            <td align="center">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:2px solid #1a1a1a;">
+                <!-- Header -->
+                <tr>
+                  <td style="background-color:#0a0a0a;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
+                    <span style="font-size:28px;font-weight:900;color:#c8f135;letter-spacing:-1px;">RepMeUp</span>
+                  </td>
+                </tr>
+                <!-- Body -->
+                <tr>
+                  <td style="padding:40px 36px;">
+                    <h2 style="margin:0 0 8px;font-size:22px;color:#0a0a0a;">Reset Your Password</h2>
+                    <p style="margin:0 0 24px;color:#555;font-size:15px;">Hi ${user.firstName},</p>
+                    <p style="margin:0 0 28px;color:#555;font-size:15px;line-height:1.6;">
+                      We received a request to reset the password for your RepMeUp account. Click the button below to set a new password. This link expires in <strong>1 hour</strong>.
+                    </p>
+                    <table cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td align="center">
+                          <a href="${resetUrl}"
+                            style="display:inline-block;background-color:#c8f135;color:#0a0a0a;font-weight:700;font-size:16px;text-decoration:none;padding:14px 40px;border-radius:10px;">
+                            Reset Password
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                    <p style="margin:28px 0 0;color:#888;font-size:13px;line-height:1.6;">
+                      If the button doesn't work, copy and paste this link into your browser:<br>
+                      <a href="${resetUrl}" style="color:#c8f135;word-break:break-all;">${resetUrl}</a>
+                    </p>
+                    <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
+                    <p style="margin:0;color:#aaa;font-size:13px;">
+                      If you didn't request a password reset, you can safely ignore this email. Your password will not be changed.
+                    </p>
+                  </td>
+                </tr>
+                <!-- Footer -->
+                <tr>
+                  <td style="background-color:#f9f9f9;padding:20px 36px;text-align:center;border-top:1px solid #eee;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">© ${new Date().getFullYear()} RepMeUp. All rights reserved.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
     `;
 
     return this.sendEmail({
