@@ -434,6 +434,7 @@ router.get('/google/callback', async (req, res) => {
     // Redirect to frontend with token
     const redirectUrl = `${process.env.FRONTEND_URL}/auth/google-callback?token=${result.token}&refreshToken=${result.refreshToken}&isNewUser=${result.isNewUser}`;
     
+    console.log('✅ [Google Auth] Redirecting to:', process.env.FRONTEND_URL + '/auth/google-callback');
     res.redirect(redirectUrl);
   } catch (error) {
     console.error('❌ [Google Auth] Callback error:', error);
