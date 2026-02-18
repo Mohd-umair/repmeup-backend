@@ -97,6 +97,24 @@ const userSchema = new mongoose.Schema({
     signupSource: String,
     signupIp: String,
     deviceInfo: String
+  },
+  risc: {
+    googleSignInDisabled: {
+      type: Boolean,
+      default: false
+    },
+    accountDisabledReason: String,
+    requiresCredentialChange: {
+      type: Boolean,
+      default: false
+    },
+    lastEvent: {
+      type: {
+        type: String
+      },
+      timestamp: Date,
+      reason: String
+    }
   }
 }, {
   timestamps: true

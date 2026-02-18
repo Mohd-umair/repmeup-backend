@@ -3,6 +3,7 @@ const router = express.Router();
 const authController = require('../controllers/authController');
 const { protect, authorize } = require('../middlewares/auth');
 const { validateRegistration, validateLogin } = require('../middlewares/validation');
+const riscController = require('../controllers/riscController');
 
 // Public routes
 router.post('/register', validateRegistration, authController.register);
@@ -355,7 +356,22 @@ router.get('/linkedin/callback', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Google Cross-Account Protection (RISC) endpoints
+// ---------------------------------------------------------------------------
+
+// Raw body parser for RISC SETs (Content-Type: application/secevent+jwt)
+const riscRawBody = express.text({ type: ['application/secevent+jwt', 'text/plain', 'application/json'] });
+
+// POST /api/auth/risc/receiver — public, called by Google
+router.post('/risc/receiver', riscRawBody, riscController.receiveSecurityEvent);
+
+// GET /api/auth/risc/status — admin only
+router.get('/risc/status', protect, authorize('admin'), riscController.getStatus);
+
+// ---------------------------------------------------------------------------
 // Google OAuth for Login/Signup (not platform connection)
+// ---------------------------------------------------------------------------
 router.get('/google', async (req, res, next) => {
   try {
     const authURL = googleAuthService.getAuthURL();

@@ -229,6 +229,14 @@ class AuthService {
       let user = await User.findOne({ email }).populate('organization');
 
       if (user) {
+        // Block sign-in if RISC reported this Google account as disabled
+        if (user.risc && user.risc.googleSignInDisabled) {
+          throw new Error(
+            'Google sign-in has been temporarily disabled for this account due to a security event. ' +
+            'Please contact support or use your email and password to log in.'
+          );
+        }
+
         // User exists - update OAuth info and login
         user.oauth = {
           provider: 'google',
