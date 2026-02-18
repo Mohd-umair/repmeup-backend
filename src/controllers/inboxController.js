@@ -48,7 +48,7 @@ exports.getInteractions = async (req, res, next) => {
       query.labels = label; // MongoDB will match if label ID exists in the labels array
     }
 
-    // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA)
+    // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA), archived
     const SLA_HOURS = 24;
     const slaCutoff = new Date(Date.now() - SLA_HOURS * 60 * 60 * 1000);
     let effectiveSortBy = sortBy;
@@ -64,6 +64,21 @@ exports.getInteractions = async (req, res, next) => {
       query.platformCreatedAt = { $lt: slaCutoff };
       effectiveSortBy = 'platformCreatedAt';
       effectiveSortOrder = 'asc';
+    } else if (viewMode === 'archived') {
+      // Show only archived conversations
+      query.status = 'archived';
+    }
+    
+    // For non-archived views, explicitly exclude archived conversations
+    // unless the user has specifically filtered by archived status
+    if (viewMode !== 'archived' && !status) {
+      if (query.status && typeof query.status === 'object' && query.status.$nin) {
+        // If status is already an object with $nin, add 'archived' to it
+        query.status.$nin.push('archived');
+      } else if (!query.status) {
+        // If no status filter exists, exclude archived
+        query.status = { $ne: 'archived' };
+      }
     }
     
     // Build search condition - escape special regex characters
@@ -1456,13 +1471,12 @@ exports.getAvailableAgents = async (req, res, next) => {
       isActive: true
     }).select('firstName lastName email role').sort({ role: 1, firstName: 1 });
 
-    // Get workload for each agent
+    // Get workload for each agent (count all assigned conversations not yet resolved/archived)
     const agentsWithWorkload = await Promise.all(
       agents.map(async (agent) => {
         const assignedCount = await Interaction.countDocuments({
           assignedTo: agent._id,
-          status: 'assigned',
-          requiresHumanResponse: true
+          status: { $nin: ['resolved', 'archived', 'closed'] }
         });
 
         return {
@@ -1516,7 +1530,10 @@ exports.bulkAssignInteractions = async (req, res, next) => {
       });
     }
 
-    // Update all interactions
+    const assignedAt = new Date();
+
+    // Update all interactions — also push to assignmentHistory so the
+    // "Assigned to X by Y" timeline banner appears in the detail view.
     const result = await Interaction.updateMany(
       {
         _id: { $in: interactionIds },
@@ -1526,9 +1543,17 @@ exports.bulkAssignInteractions = async (req, res, next) => {
         $set: {
           assignedTo: userId,
           assignedBy: req.user._id,
-          assignedAt: new Date(),
+          assignedAt,
           assignmentReason: 'manual',
           status: 'assigned'
+        },
+        $push: {
+          assignmentHistory: {
+            assignedTo: userId,
+            assignedBy: req.user._id,
+            assignedAt,
+            reason: 'manual'
+          }
         }
       }
     );
