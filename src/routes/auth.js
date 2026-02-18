@@ -8,6 +8,8 @@ const riscController = require('../controllers/riscController');
 // Public routes
 router.post('/register', validateRegistration, authController.register);
 router.post('/login', validateLogin, authController.login);
+router.post('/forgot-password', authController.forgotPassword);
+router.post('/reset-password', authController.resetPassword);
 
 // Protected routes
 router.get('/me', protect, authController.getMe);
@@ -376,9 +378,6 @@ router.get('/google', async (req, res, next) => {
   try {
     const authURL = googleAuthService.getAuthURL();
     
-    console.log('🔗 [Google Auth] Generated authUrl redirect_uri:', process.env.GOOGLE_AUTH_REDIRECT_URI);
-    console.log('🔗 [Google Auth] Full authUrl:', authURL);
-    
     res.json({ 
       success: true, 
       authUrl: authURL 
@@ -392,22 +391,13 @@ router.get('/google/callback', async (req, res) => {
   try {
     const { code, state, error, error_description } = req.query;
 
-    console.log('📥 [Google Auth Callback] Received callback:', {
-      hasCode: !!code,
-      hasState: !!state,
-      error: error
-    });
-
-    // Handle OAuth errors
     if (error) {
-      console.error('❌ [Google Auth] OAuth error:', error, error_description);
       return res.redirect(
         `${process.env.FRONTEND_URL}/login?status=error&message=${encodeURIComponent(error_description || error)}`
       );
     }
 
     if (!code) {
-      console.error('❌ [Google Auth] Missing authorization code');
       return res.redirect(
         `${process.env.FRONTEND_URL}/login?status=error&message=Missing authorization code`
       );
@@ -417,30 +407,18 @@ router.get('/google/callback', async (req, res) => {
     try {
       googleAuthService.verifyState(state);
     } catch (error) {
-      console.error('❌ [Google Auth] State verification failed:', error.message);
       return res.redirect(
         `${process.env.FRONTEND_URL}/login?status=error&message=Invalid state parameter`
       );
     }
 
-    // Exchange code for tokens
     const tokens = await googleAuthService.getTokens(code);
-    console.log('✅ [Google Auth] Tokens obtained');
-
-    // Get user profile
     const profile = await googleAuthService.getUserProfile(tokens.access_token);
-    console.log('✅ [Google Auth] Profile obtained:', profile.email);
-
-    // Login or signup user
     const result = await authController.googleAuth(profile);
 
-    // Redirect to frontend with token
     const redirectUrl = `${process.env.FRONTEND_URL}/auth/google-callback?token=${result.token}&refreshToken=${result.refreshToken}&isNewUser=${result.isNewUser}`;
-    
-    console.log('✅ [Google Auth] Redirecting to:', process.env.FRONTEND_URL + '/auth/google-callback');
     res.redirect(redirectUrl);
   } catch (error) {
-    console.error('❌ [Google Auth] Callback error:', error);
     res.redirect(
       `${process.env.FRONTEND_URL}/login?status=error&message=${encodeURIComponent(error.message || 'Authentication failed')}`
     );

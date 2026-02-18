@@ -1,5 +1,7 @@
 const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
+const User = require('../models/User');
+const exportService = require('../services/exportService');
 
 /**
  * Analytics Controller - Scalable analytics data aggregation
@@ -407,23 +409,308 @@ exports.getPlatformAnalytics = async (req, res, next) => {
 };
 
 /**
- * Export analytics data
+ * Export analytics data (CSV / XLSX / PDF)
  */
 exports.exportData = async (req, res, next) => {
   try {
     const organizationId = req.user.organization._id;
-    const { dateRange, format } = req.body;
+    const { dateRange, format = 'csv', reportType = 'platform', platforms } = req.body;
 
-    // TODO: Implement export logic based on format (csv, xlsx, pdf)
-    // For now, return a placeholder
+    const startDate = dateRange?.startDate ? new Date(dateRange.startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const endDate = dateRange?.endDate ? new Date(dateRange.endDate) : new Date();
 
-    res.status(200).json({
-      success: true,
-      message: `Export as ${format} will be available soon`
-    });
+    const matchFilter = {
+      organization: organizationId,
+      platformCreatedAt: { $gte: startDate, $lte: endDate }
+    };
+    if (platforms?.length) matchFilter.platform = { $in: platforms };
+
+    const fmtDate = (d) => d.toLocaleDateString('en-GB');
+    const dateRangeLabel = { start: fmtDate(startDate), end: fmtDate(endDate) };
+
+    let reportData, filename, contentType;
+
+    if (reportType === 'agent') {
+      // Reuse agent analytics aggregation
+      const agentData = await _getAgentData(organizationId, startDate, endDate);
+      const { csv, excelSheets, pdfSections } = exportService.formatAgentReport(agentData, dateRangeLabel);
+      reportData = { csv, excelSheets, pdfSections, title: 'Agent Performance Report' };
+    } else {
+      // Default: fetch dashboard analytics
+      const [platformMetrics, sentimentData, rtData] = await Promise.all([
+        Interaction.aggregate([
+          { $match: matchFilter },
+          {
+            $group: {
+              _id: '$platform',
+              totalInteractions: { $sum: 1 },
+              responded: { $sum: { $cond: [{ $gt: [{ $size: { $ifNull: ['$replies', []] } }, 0] }, 1, 0] } },
+              avgResponseTime: { $avg: '$responseTime' },
+              avgSentiment: { $avg: { $switch: { branches: [{ case: { $eq: ['$aiAnalysis.sentiment', 'positive'] }, then: 100 }, { case: { $eq: ['$aiAnalysis.sentiment', 'negative'] }, then: 0 }], default: 50 } } }
+            }
+          },
+          {
+            $project: {
+              platform: '$_id', _id: 0, totalInteractions: 1, responded: 1,
+              pending: { $subtract: ['$totalInteractions', '$responded'] },
+              avgResponseTime: { $ifNull: ['$avgResponseTime', 0] },
+              sentimentScore: { $ifNull: [{ $round: ['$avgSentiment', 1] }, 50] }
+            }
+          }
+        ]),
+        Interaction.aggregate([
+          { $match: matchFilter },
+          {
+            $group: {
+              _id: '$aiAnalysis.sentiment',
+              count: { $sum: 1 }
+            }
+          }
+        ]),
+        Interaction.aggregate([
+          { $match: { ...matchFilter, responseTime: { $exists: true, $gt: 0 } } },
+          {
+            $group: {
+              _id: null,
+              avg: { $avg: '$responseTime' },
+              median: { $avg: '$responseTime' },
+              within1Hour: { $sum: { $cond: [{ $lte: ['$responseTime', 60] }, 1, 0] } },
+              within24Hours: { $sum: { $cond: [{ $and: [{ $gt: ['$responseTime', 60] }, { $lte: ['$responseTime', 1440] }] }, 1, 0] } },
+              over24Hours: { $sum: { $cond: [{ $gt: ['$responseTime', 1440] }, 1, 0] } }
+            }
+          }
+        ])
+      ]);
+
+      const sentimentBreakdown = { positive: 0, neutral: 0, negative: 0, total: 0 };
+      sentimentData.forEach(s => {
+        if (s._id) sentimentBreakdown[s._id] = s.count;
+        sentimentBreakdown.total += s.count;
+      });
+
+      const analytics = { platformMetrics, sentimentBreakdown, responseTimeMetrics: rtData[0] || {} };
+
+      let formatted;
+      if (reportType === 'sentiment') {
+        formatted = exportService.formatSentimentReport(analytics, dateRangeLabel);
+        reportData = { ...formatted, title: 'Sentiment Analysis Report' };
+      } else if (reportType === 'response') {
+        formatted = exportService.formatResponseReport(analytics, dateRangeLabel);
+        reportData = { ...formatted, title: 'Response Performance Report' };
+      } else {
+        formatted = exportService.formatPlatformReport(analytics, dateRangeLabel);
+        reportData = { ...formatted, title: 'Platform Comparison Report' };
+      }
+    }
+
+    const safeName = reportData.title.replace(/\s+/g, '-').toLowerCase();
+
+    if (format === 'csv') {
+      contentType = 'text/csv; charset=utf-8';
+      filename = `${safeName}-${Date.now()}.csv`;
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(reportData.csv);
+    }
+
+    if (format === 'xlsx') {
+      contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      filename = `${safeName}-${Date.now()}.xlsx`;
+      const buffer = await exportService.generateExcel(reportData.title, reportData.excelSheets);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(buffer);
+    }
+
+    if (format === 'pdf') {
+      contentType = 'application/pdf';
+      filename = `${safeName}-${Date.now()}.pdf`;
+      const buffer = await exportService.generatePDF({
+        title: reportData.title,
+        dateRange: dateRangeLabel,
+        sections: reportData.pdfSections
+      });
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(buffer);
+    }
+
+    res.status(400).json({ success: false, error: 'Invalid export format. Use csv, xlsx, or pdf.' });
 
   } catch (error) {
     console.error('❌ [Analytics] Export error:', error);
+    next(error);
+  }
+};
+
+// ─── Internal helper ──────────────────────────────────────────────────────────
+async function _getAgentData(organizationId, startDate, endDate) {
+  const matchFilter = { organization: organizationId, platformCreatedAt: { $gte: startDate, $lte: endDate } };
+  const agentStats = await Interaction.aggregate([
+    { $match: { ...matchFilter, assignedTo: { $exists: true, $ne: null } } },
+    {
+      $group: {
+        _id: '$assignedTo',
+        totalAssigned: { $sum: 1 },
+        totalResolved: { $sum: { $cond: [{ $eq: ['$status', 'resolved'] }, 1, 0] } },
+        avgResponseTime: { $avg: '$responseTime' },
+        sentimentPositive: { $sum: { $cond: [{ $eq: ['$aiAnalysis.sentiment', 'positive'] }, 1, 0] } },
+        sentimentNeutral: { $sum: { $cond: [{ $eq: ['$aiAnalysis.sentiment', 'neutral'] }, 1, 0] } },
+        sentimentNegative: { $sum: { $cond: [{ $eq: ['$aiAnalysis.sentiment', 'negative'] }, 1, 0] } }
+      }
+    },
+    {
+      $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' }
+    },
+    { $unwind: { path: '$user', preserveNullAndEmpty: true } },
+    {
+      $project: {
+        userId: '$_id', _id: 0,
+        name: { $concat: [{ $ifNull: ['$user.firstName', 'Unknown'] }, ' ', { $ifNull: ['$user.lastName', ''] }] },
+        totalAssigned: 1, totalResolved: 1,
+        avgResponseTime: { $ifNull: ['$avgResponseTime', 0] },
+        sentimentBreakdown: { positive: '$sentimentPositive', neutral: '$sentimentNeutral', negative: '$sentimentNegative' },
+        performanceScore: {
+          $round: [{
+            $multiply: [
+              { $cond: [{ $gt: ['$totalAssigned', 0] }, { $divide: ['$totalResolved', '$totalAssigned'] }, 0] },
+              100
+            ]
+          }, 1]
+        }
+      }
+    },
+    { $sort: { performanceScore: -1 } }
+  ]);
+
+  const totals = agentStats.reduce((acc, a) => {
+    acc.totalResponseTime += a.avgResponseTime;
+    acc.totalResolved += a.totalResolved;
+    acc.totalAssigned += a.totalAssigned;
+    return acc;
+  }, { totalResponseTime: 0, totalResolved: 0, totalAssigned: 0 });
+
+  const count = agentStats.length || 1;
+  return {
+    agents: agentStats,
+    teamAverages: {
+      avgResponseTime: Math.round(totals.totalResponseTime / count),
+      resolutionRate: totals.totalAssigned ? +((totals.totalResolved / totals.totalAssigned) * 100).toFixed(1) : 0
+    }
+  };
+}
+
+/**
+ * Agent Analytics endpoint
+ */
+exports.getAgentAnalytics = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id;
+    const { dateRange, agentId } = req.body;
+    const startDate = dateRange?.startDate ? new Date(dateRange.startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const endDate = dateRange?.endDate ? new Date(dateRange.endDate) : new Date();
+
+    const data = await _getAgentData(organizationId, startDate, endDate);
+
+    if (agentId) {
+      data.agents = data.agents.filter(a => String(a.userId) === String(agentId));
+    }
+
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error('❌ [Analytics] Agent analytics error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Engagement Analytics endpoint
+ */
+exports.getEngagementAnalytics = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id;
+    const { dateRange, platforms } = req.body;
+    const startDate = dateRange?.startDate ? new Date(dateRange.startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const endDate = dateRange?.endDate ? new Date(dateRange.endDate) : new Date();
+
+    const matchFilter = {
+      organization: organizationId,
+      platformCreatedAt: { $gte: startDate, $lte: endDate }
+    };
+    if (platforms?.length) matchFilter.platform = { $in: platforms };
+
+    const [overview, byPlatform, topInteractions, timeSeries] = await Promise.all([
+      Interaction.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: null,
+            totalLikes: { $sum: { $ifNull: ['$engagement.likes', 0] } },
+            totalShares: { $sum: { $ifNull: ['$engagement.shares', 0] } },
+            totalViews: { $sum: { $ifNull: ['$engagement.views', 0] } },
+            totalInteractions: { $sum: 1 }
+          }
+        }
+      ]),
+      Interaction.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: '$platform',
+            likes: { $sum: { $ifNull: ['$engagement.likes', 0] } },
+            shares: { $sum: { $ifNull: ['$engagement.shares', 0] } },
+            views: { $sum: { $ifNull: ['$engagement.views', 0] } },
+            count: { $sum: 1 }
+          }
+        },
+        {
+          $project: {
+            platform: '$_id', _id: 0, likes: 1, shares: 1, views: 1,
+            engagementRate: {
+              $cond: [{ $gt: ['$count', 0] },
+                { $round: [{ $multiply: [{ $divide: [{ $add: ['$likes', '$shares'] }, '$count'] }, 100] }, 2] },
+                0]
+            }
+          }
+        },
+        { $sort: { likes: -1 } }
+      ]),
+      Interaction.find(matchFilter)
+        .sort({ 'engagement.likes': -1 })
+        .limit(10)
+        .select('platform content engagement.likes engagement.shares createdAt')
+        .lean(),
+      Interaction.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$platformCreatedAt' } },
+            likes: { $sum: { $ifNull: ['$engagement.likes', 0] } },
+            shares: { $sum: { $ifNull: ['$engagement.shares', 0] } },
+            views: { $sum: { $ifNull: ['$engagement.views', 0] } }
+          }
+        },
+        { $sort: { _id: 1 } },
+        { $project: { date: '$_id', _id: 0, likes: 1, shares: 1, views: 1 } }
+      ])
+    ]);
+
+    const ov = overview[0] || { totalLikes: 0, totalShares: 0, totalViews: 0, totalInteractions: 0 };
+    const avgEngagementRate = ov.totalInteractions
+      ? +((((ov.totalLikes + ov.totalShares) / ov.totalInteractions) * 100).toFixed(2))
+      : 0;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        overview: { ...ov, avgEngagementRate },
+        byPlatform,
+        topInteractions,
+        timeSeries
+      }
+    });
+  } catch (error) {
+    console.error('❌ [Analytics] Engagement analytics error:', error);
     next(error);
   }
 };

@@ -171,3 +171,56 @@ exports.googleAuth = async (googleProfile) => {
   }
 };
 
+// @desc    Forgot password — send reset email
+// @route   POST /api/auth/forgot-password
+// @access  Public
+exports.forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+
+    await authService.forgotPassword(email);
+
+    // Always return the same message to avoid email enumeration
+    res.status(200).json({
+      success: true,
+      data: { message: 'If an account with that email exists, a password reset link has been sent.' }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Reset password using token
+// @route   POST /api/auth/reset-password
+// @access  Public
+exports.resetPassword = async (req, res, next) => {
+  try {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({ success: false, error: 'Token and new password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+    }
+
+    const result = await authService.resetPassword(token, password);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        message: 'Password reset successfully',
+        token: result.token,
+        refreshToken: result.refreshToken
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+};
+
