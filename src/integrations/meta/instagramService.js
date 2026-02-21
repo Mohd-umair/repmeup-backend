@@ -196,13 +196,19 @@ class InstagramService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Instagram] Saved ${interactions.length} comments to database`);
@@ -417,13 +423,19 @@ class InstagramService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Instagram] Saved ${interactions.length} DMs to database`);
@@ -499,17 +511,27 @@ class InstagramService {
   }
 
   /**
-   * Send Instagram DM
-   * Note: Requires Instagram Messaging API
+   * Send Instagram DM (Messaging API).
+   * Uses HUMAN_AGENT message tag when useHumanAgentTag is true (default), per Meta App Review requirements.
+   * @param {string} recipientId - Instagram recipient user ID (PSID)
+   * @param {string} message - Text to send
+   * @param {string} accessToken - Page access token
+   * @param {string} pageId - Facebook Page ID (owns the Instagram account)
+   * @param {boolean} [useHumanAgentTag=true] - Send with MESSAGE_TAG + HUMAN_AGENT for human agent replies
    */
-  async sendMessage(recipientId, message, accessToken, pageId) {
+  async sendMessage(recipientId, message, accessToken, pageId, useHumanAgentTag = true) {
     try {
+      const body = {
+        recipient: { id: recipientId },
+        message: { text: message }
+      };
+      if (useHumanAgentTag) {
+        body.messaging_type = 'MESSAGE_TAG';
+        body.tag = 'HUMAN_AGENT';
+      }
       const response = await axios.post(
         `${this.baseUrl}/${pageId}/messages`,
-        {
-          recipient: { id: recipientId },
-          message: { text: message }
-        },
+        body,
         {
           params: {
             access_token: accessToken

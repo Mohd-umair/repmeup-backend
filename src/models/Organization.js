@@ -175,6 +175,14 @@ const organizationSchema = new mongoose.Schema({
     lastScheduledRun: Date // Track last scheduled run time
   },
   
+  // Inbox UI settings
+  inboxSettings: {
+    autoSyncEnabled: {
+      type: Boolean,
+      default: true
+    }
+  },
+
   // Human agent escalation settings
   escalationSettings: {
     enabled: {
