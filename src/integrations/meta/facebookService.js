@@ -188,13 +188,19 @@ class FacebookService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Facebook] Saved ${interactions.length} comments to database`);
@@ -270,13 +276,19 @@ class FacebookService {
 
       // Bulk upsert
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Facebook] Saved ${interactions.length} reviews to database`);

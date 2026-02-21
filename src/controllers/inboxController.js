@@ -434,18 +434,35 @@ exports.replyToInteraction = async (req, res, next) => {
         }
       } else if (interaction.platform === 'instagram') {
         const instagramService = require('../integrations/meta/instagramService');
-        const result = await instagramService.replyToComment(
-          interaction.platformId,
-          replyContent,
-          interaction.platformConnection.accessToken
-        );
-        
-        if (result.success && result.platformResponseId) {
+        let result;
+        if (interaction.type === 'dm') {
+          const pageId = interaction.platformConnection.platformPageId || interaction.platformConnection.platformUserId;
+          const recipientId = interaction.author?.platformId;
+          if (!pageId || !recipientId) {
+            replyStatus = 'failed';
+            errorMessage = 'Missing page or recipient for Instagram DM reply.';
+          } else {
+            result = await instagramService.sendMessage(
+              recipientId,
+              replyContent,
+              interaction.platformConnection.accessToken,
+              pageId,
+              true
+            );
+          }
+        } else {
+          result = await instagramService.replyToComment(
+            interaction.platformId,
+            replyContent,
+            interaction.platformConnection.accessToken
+          );
+        }
+        if (result && result.success && result.platformResponseId) {
           platformResponseId = result.platformResponseId;
           replyStatus = 'sent';
-        } else {
+        } else if (replyStatus !== 'failed') {
           replyStatus = 'failed';
-          errorMessage = result.error || 'Failed to post reply to Instagram';
+          errorMessage = (result && result.error) || 'Failed to post reply to Instagram';
         }
       } else if (interaction.platform === 'facebook') {
         const facebookService = require('../integrations/meta/facebookService');

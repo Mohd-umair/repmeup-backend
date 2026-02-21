@@ -92,6 +92,18 @@ exports.updateOrganization = async (req, res, next) => {
       });
     }
 
+    // Handle inboxSettings (merge nested object)
+    if (req.body.inboxSettings !== undefined) {
+      if (!organization.inboxSettings) {
+        organization.inboxSettings = {};
+      }
+      Object.keys(req.body.inboxSettings).forEach(key => {
+        if (req.body.inboxSettings[key] !== undefined) {
+          organization.inboxSettings[key] = req.body.inboxSettings[key];
+        }
+      });
+    }
+
     await organization.save();
 
     // Update scheduled jobs after saving (so we have the updated organization)

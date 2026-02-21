@@ -33,7 +33,7 @@ exports.getDashboard = async (req, res, next) => {
       matchFilter.type = { $in: types };
     }
     if (sentiment && sentiment.length > 0) {
-      matchFilter['aiAnalysis.sentiment'] = { $in: sentiment };
+      matchFilter['sentiment'] = { $in: sentiment };
     }
     if (status && status.length > 0) {
       matchFilter.status = { $in: status };
@@ -65,15 +65,15 @@ exports.getDashboard = async (req, res, next) => {
             totalResponseTime: {
               $sum: {
                 $cond: [
-                  { $and: [{ $ne: ['$repliedAt', null] }, { $ne: ['$platformCreatedAt', null] }] },
-                  { $subtract: ['$repliedAt', '$platformCreatedAt'] },
+                  { $and: [{ $ne: ['$respondedAt', null] }, { $ne: ['$platformCreatedAt', null] }] },
+                  { $subtract: ['$respondedAt', '$platformCreatedAt'] },
                   0
                 ]
               }
             },
             respondedCount: {
               $sum: {
-                $cond: [{ $ne: ['$repliedAt', null] }, 1, 0]
+                $cond: [{ $ne: ['$respondedAt', null] }, 1, 0]
               }
             }
           }
@@ -100,15 +100,15 @@ exports.getDashboard = async (req, res, next) => {
             totalResponseTime: {
               $sum: {
                 $cond: [
-                  { $and: [{ $ne: ['$repliedAt', null] }, { $ne: ['$platformCreatedAt', null] }] },
-                  { $subtract: ['$repliedAt', '$platformCreatedAt'] },
+                  { $and: [{ $ne: ['$respondedAt', null] }, { $ne: ['$platformCreatedAt', null] }] },
+                  { $subtract: ['$respondedAt', '$platformCreatedAt'] },
                   0
                 ]
               }
             },
             respondedCount: {
               $sum: {
-                $cond: [{ $ne: ['$repliedAt', null] }, 1, 0]
+                $cond: [{ $ne: ['$respondedAt', null] }, 1, 0]
               }
             }
           }
@@ -135,7 +135,7 @@ exports.getDashboard = async (req, res, next) => {
         { $match: matchFilter },
         {
           $group: {
-            _id: '$aiAnalysis.sentiment',
+            _id: '$sentiment',
             count: { $sum: 1 }
           }
         }
@@ -173,7 +173,7 @@ exports.getDashboard = async (req, res, next) => {
         {
           $match: {
             ...matchFilter,
-            repliedAt: { $ne: null },
+            respondedAt: { $ne: null },
             platformCreatedAt: { $ne: null }
           }
         },
@@ -181,7 +181,7 @@ exports.getDashboard = async (req, res, next) => {
           $project: {
             responseTime: {
               $divide: [
-                { $subtract: ['$repliedAt', '$platformCreatedAt'] },
+                { $subtract: ['$respondedAt', '$platformCreatedAt'] },
                 60000 // Convert to minutes
               ]
             }
@@ -388,7 +388,7 @@ exports.getPlatformAnalytics = async (req, res, next) => {
           bySentiment: [
             {
               $group: {
-                _id: '$aiAnalysis.sentiment',
+                _id: '$sentiment',
                 count: { $sum: 1 }
               }
             }
@@ -446,7 +446,7 @@ exports.exportData = async (req, res, next) => {
               totalInteractions: { $sum: 1 },
               responded: { $sum: { $cond: [{ $gt: [{ $size: { $ifNull: ['$replies', []] } }, 0] }, 1, 0] } },
               avgResponseTime: { $avg: '$responseTime' },
-              avgSentiment: { $avg: { $switch: { branches: [{ case: { $eq: ['$aiAnalysis.sentiment', 'positive'] }, then: 100 }, { case: { $eq: ['$aiAnalysis.sentiment', 'negative'] }, then: 0 }], default: 50 } } }
+              avgSentiment: { $avg: { $switch: { branches: [{ case: { $eq: ['$sentiment', 'positive'] }, then: 100 }, { case: { $eq: ['$sentiment', 'negative'] }, then: 0 }], default: 50 } } }
             }
           },
           {
@@ -462,7 +462,7 @@ exports.exportData = async (req, res, next) => {
           { $match: matchFilter },
           {
             $group: {
-              _id: '$aiAnalysis.sentiment',
+              _id: '$sentiment',
               count: { $sum: 1 }
             }
           }
@@ -545,30 +545,66 @@ exports.exportData = async (req, res, next) => {
 
 // ─── Internal helper ──────────────────────────────────────────────────────────
 async function _getAgentData(organizationId, startDate, endDate) {
-  const matchFilter = { organization: organizationId, platformCreatedAt: { $gte: startDate, $lte: endDate } };
   const agentStats = await Interaction.aggregate([
-    { $match: { ...matchFilter, assignedTo: { $exists: true, $ne: null } } },
+    { $match: { organization: organizationId } },
+    // Use the *most recent* of: updatedAt (assign/reply/resolve), createdAt, platformCreatedAt
+    // so interactions that were assigned or resolved in the period are included
+    {
+      $addFields: {
+        _computedDate: {
+          $max: [
+            { $ifNull: ['$updatedAt', new Date(0)] },
+            { $ifNull: ['$resolvedAt', new Date(0)] },
+            { $ifNull: ['$respondedAt', new Date(0)] },
+            { $ifNull: ['$platformCreatedAt', new Date(0)] },
+            { $ifNull: ['$createdAt', new Date(0)] }
+          ]
+        }
+      }
+    },
+    { $match: { _computedDate: { $gte: startDate, $lte: endDate } } },
+    // Attribute to assignedTo if set, else first reply's sentBy
+    {
+      $addFields: {
+        effectiveAgentId: {
+          $ifNull: [
+            '$assignedTo',
+            { $arrayElemAt: [ { $map: { input: { $ifNull: ['$replies', []] }, as: 'r', in: '$$r.sentBy' } }, 0 ] }
+          ]
+        },
+        responseTimeMinutes: {
+          $cond: [
+            { $gt: [{ $ifNull: ['$firstResponseTime', 0] }, 0] },
+            { $divide: ['$firstResponseTime', 60000] },
+            null
+          ]
+        }
+      }
+    },
+    { $match: { effectiveAgentId: { $exists: true, $ne: null } } },
     {
       $group: {
-        _id: '$assignedTo',
+        _id: '$effectiveAgentId',
         totalAssigned: { $sum: 1 },
-        totalResolved: { $sum: { $cond: [{ $eq: ['$status', 'resolved'] }, 1, 0] } },
-        avgResponseTime: { $avg: '$responseTime' },
-        sentimentPositive: { $sum: { $cond: [{ $eq: ['$aiAnalysis.sentiment', 'positive'] }, 1, 0] } },
-        sentimentNeutral: { $sum: { $cond: [{ $eq: ['$aiAnalysis.sentiment', 'neutral'] }, 1, 0] } },
-        sentimentNegative: { $sum: { $cond: [{ $eq: ['$aiAnalysis.sentiment', 'negative'] }, 1, 0] } }
+        totalResolved: {
+          $sum: { $cond: [{ $in: ['$status', ['replied', 'resolved']] }, 1, 0] }
+        },
+        avgResponseTime: { $avg: '$responseTimeMinutes' },
+        sentimentPositive: { $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] } },
+        sentimentNeutral: { $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] } },
+        sentimentNegative: { $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] } }
       }
     },
     {
       $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' }
     },
-    { $unwind: { path: '$user', preserveNullAndEmpty: true } },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
     {
       $project: {
         userId: '$_id', _id: 0,
         name: { $concat: [{ $ifNull: ['$user.firstName', 'Unknown'] }, ' ', { $ifNull: ['$user.lastName', ''] }] },
         totalAssigned: 1, totalResolved: 1,
-        avgResponseTime: { $ifNull: ['$avgResponseTime', 0] },
+        avgResponseTime: { $round: [{ $ifNull: ['$avgResponseTime', 0] }, 0] },
         sentimentBreakdown: { positive: '$sentimentPositive', neutral: '$sentimentNeutral', negative: '$sentimentNegative' },
         performanceScore: {
           $round: [{

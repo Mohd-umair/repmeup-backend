@@ -124,25 +124,27 @@ async function handleInstagramWebhook(payload, organizationId) {
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.id },
           {
-            organization: organizationId,
-            platform: 'instagram',
-            type: 'comment',
-            platformId: comment.id,
-            content: comment.text,
-            author: {
-              platformId: comment.from?.id,
-              username: comment.from?.username,
-              name: comment.from?.username,
-              avatarUrl: comment.from?.id
-                ? `https://graph.facebook.com/v18.0/${comment.from.id}/picture?type=normal`
-                : undefined
+            $set: {
+              organization: organizationId,
+              platform: 'instagram',
+              type: 'comment',
+              platformId: comment.id,
+              content: comment.text,
+              author: {
+                platformId: comment.from?.id,
+                username: comment.from?.username,
+                name: comment.from?.username,
+                avatarUrl: comment.from?.id
+                  ? `https://graph.facebook.com/v18.0/${comment.from.id}/picture?type=normal`
+                  : undefined
+              },
+              metadata: {
+                postId: comment.media?.id,
+                postUrl: `https://www.instagram.com/p/${comment.media?.id}`
+              },
+              platformCreatedAt: new Date(comment.timestamp)
             },
-            metadata: {
-              postId: comment.media?.id,
-              postUrl: `https://www.instagram.com/p/${comment.media?.id}`
-            },
-            platformCreatedAt: new Date(comment.timestamp),
-            status: 'unread'
+            $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
@@ -157,22 +159,24 @@ async function handleInstagramWebhook(payload, organizationId) {
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
-            organization: organizationId,
-            platform: 'instagram',
-            type: 'dm',
-            platformId: message.id,
-            content: message.message?.text || message.text,
-            author: {
-              platformId: message.from.id,
-              username: message.from.username,
-              name: message.from.name || message.from.username,
-              avatarUrl: message.from.id
-                ? `https://graph.facebook.com/v18.0/${message.from.id}/picture?type=normal`
-                : undefined
+            $set: {
+              organization: organizationId,
+              platform: 'instagram',
+              type: 'dm',
+              platformId: message.id,
+              content: message.message?.text || message.text,
+              author: {
+                platformId: message.from.id,
+                username: message.from.username,
+                name: message.from.name || message.from.username,
+                avatarUrl: message.from.id
+                  ? `https://graph.facebook.com/v18.0/${message.from.id}/picture?type=normal`
+                  : undefined
+              },
+              threadId: message.conversation_id,
+              platformCreatedAt: new Date(message.timestamp)
             },
-            threadId: message.conversation_id,
-            platformCreatedAt: new Date(message.timestamp),
-            status: 'unread'
+            $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
@@ -206,21 +210,23 @@ async function handleFacebookWebhook(payload, organizationId) {
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.comment_id },
           {
-            organization: organizationId,
-            platform: 'facebook',
-            type: 'comment',
-            platformId: comment.comment_id,
-            content: comment.message,
-            author: {
-              platformId: comment.from.id,
-              name: comment.from.name
+            $set: {
+              organization: organizationId,
+              platform: 'facebook',
+              type: 'comment',
+              platformId: comment.comment_id,
+              content: comment.message,
+              author: {
+                platformId: comment.from.id,
+                name: comment.from.name
+              },
+              metadata: {
+                postId: comment.post_id,
+                postUrl: `https://www.facebook.com/${comment.post_id}`
+              },
+              platformCreatedAt: new Date(comment.created_time)
             },
-            metadata: {
-              postId: comment.post_id,
-              postUrl: `https://www.facebook.com/${comment.post_id}`
-            },
-            platformCreatedAt: new Date(comment.created_time),
-            status: 'unread'
+            $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
@@ -235,18 +241,20 @@ async function handleFacebookWebhook(payload, organizationId) {
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
-            organization: organizationId,
-            platform: 'facebook',
-            type: 'dm',
-            platformId: message.id,
-            content: message.message,
-            author: {
-              platformId: message.from.id,
-              name: message.from.name
+            $set: {
+              organization: organizationId,
+              platform: 'facebook',
+              type: 'dm',
+              platformId: message.id,
+              content: message.message,
+              author: {
+                platformId: message.from.id,
+                name: message.from.name
+              },
+              threadId: message.thread_id,
+              platformCreatedAt: new Date(message.created_time)
             },
-            threadId: message.thread_id,
-            platformCreatedAt: new Date(message.created_time),
-            status: 'unread'
+            $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
@@ -279,17 +287,19 @@ async function handleWhatsAppWebhook(payload, organizationId) {
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
-            organization: organizationId,
-            platform: 'whatsapp',
-            type: 'dm',
-            platformId: message.id,
-            content: message.text?.body || message.body,
-            author: {
-              platformId: message.from,
-              name: change.value.contacts?.[0]?.profile?.name || message.from
+            $set: {
+              organization: organizationId,
+              platform: 'whatsapp',
+              type: 'dm',
+              platformId: message.id,
+              content: message.text?.body || message.body,
+              author: {
+                platformId: message.from,
+                name: change.value.contacts?.[0]?.profile?.name || message.from
+              },
+              platformCreatedAt: new Date(parseInt(message.timestamp) * 1000)
             },
-            platformCreatedAt: new Date(parseInt(message.timestamp) * 1000),
-            status: 'unread'
+            $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
@@ -448,28 +458,30 @@ async function handleLinkedInComment(data, organizationId) {
     const interaction = await Interaction.findOneAndUpdate(
       { platformId: commentId },
       {
-        organization: organizationId,
-        platform: 'linkedin',
-        platformConnection: connection._id,
-        type: 'comment',
-        platformId: commentId,
-        content: commentText,
-        author: {
-          platformId: authorId,
-          name: authorName || 'LinkedIn User',
-          username: authorName
+        $set: {
+          organization: organizationId,
+          platform: 'linkedin',
+          platformConnection: connection._id,
+          type: 'comment',
+          platformId: commentId,
+          content: commentText,
+          author: {
+            platformId: authorId,
+            name: authorName || 'LinkedIn User',
+            username: authorName
+          },
+          metadata: {
+            postId: shareId,
+            postUrl: shareUrl || `https://www.linkedin.com/feed/update/${shareUrn}`,
+            shareUrn,
+            commentUrn,
+            parentCommentUrn,
+            isReply: !!parentCommentUrn
+          },
+          threadId: parentCommentUrn || shareUrn,
+          platformCreatedAt: createdAt ? new Date(createdAt) : new Date()
         },
-        metadata: {
-          postId: shareId,
-          postUrl: shareUrl || `https://www.linkedin.com/feed/update/${shareUrn}`,
-          shareUrn,
-          commentUrn,
-          parentCommentUrn,
-          isReply: !!parentCommentUrn
-        },
-        threadId: parentCommentUrn || shareUrn, // Group comments by parent or post
-        platformCreatedAt: createdAt ? new Date(createdAt) : new Date(),
-        status: 'unread'
+        $setOnInsert: { status: 'unread', isRead: false }
       },
       { upsert: true, new: true }
     );
