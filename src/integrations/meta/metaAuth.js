@@ -140,27 +140,28 @@ class MetaAuthService {
 
   /**
    * Generate Instagram OAuth URL
+   * @param {object} options - Optional. { auth_type: 'reauthorize' } to force Meta to show the consent screen (e.g. for App Review screencast).
    */
-  getInstagramAuthURL(userId, organizationId) {
+  getInstagramAuthURL(userId, organizationId, options = {}) {
     // Check for app ID - try multiple environment variable names
-    const appId = process.env.META_APP_ID || 
-                  process.env.INSTAGRAM_APP_ID || 
+    const appId = process.env.META_APP_ID ||
+                  process.env.INSTAGRAM_APP_ID ||
                   process.env.FACEBOOK_APP_ID;
-    
+
     if (!appId) {
       throw new Error('Meta App ID not configured. Please set META_APP_ID, INSTAGRAM_APP_ID, or FACEBOOK_APP_ID in your environment variables.');
     }
 
     const state = this.generateState(userId, organizationId, 'instagram');
-    
-    const redirectUri = process.env.INSTAGRAM_CALLBACK_URL || 
+
+    const redirectUri = process.env.INSTAGRAM_CALLBACK_URL ||
                        process.env.META_CALLBACK_URL ||
                        `${process.env.FRONTEND_URL}/api/auth/instagram/callback`;
-    
+
     if (!redirectUri) {
       throw new Error('Instagram callback URL not configured. Please set INSTAGRAM_CALLBACK_URL or META_CALLBACK_URL in your environment variables.');
     }
-    
+
     const params = new URLSearchParams({
       client_id: appId,
       redirect_uri: redirectUri,
@@ -175,6 +176,11 @@ class MetaAuthService {
       ].join(','),
       response_type: 'code'
     });
+
+    if (options.auth_type === 'reauthorize') {
+      params.set('auth_type', 'reauthorize');
+      console.log('🔗 [Instagram] OAuth URL includes auth_type=reauthorize (consent screen will be shown)');
+    }
 
     console.log(`🔗 [Instagram] Generating OAuth URL with App ID: ${appId.substring(0, 10)}...`);
     return `${this.facebookAuthURL}?${params.toString()}`;

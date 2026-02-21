@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const knowledgeBaseController = require('../controllers/knowledgeBaseController');
 const { protect } = require('../middlewares/auth');
+const { validateKnowledgeBaseManual, validateKnowledgeBaseUpdate } = require('../middlewares/validation');
 
 // All routes require authentication
 router.use(protect);
@@ -16,7 +17,7 @@ router.get('/categories', knowledgeBaseController.getCategories);
 router.get('/:id', knowledgeBaseController.getKnowledgeBaseById);
 
 // Create manual knowledge base entry
-router.post('/manual', knowledgeBaseController.createManualKnowledgeBase);
+router.post('/manual', validateKnowledgeBaseManual, knowledgeBaseController.createManualKnowledgeBase);
 
 // Create knowledge base from PDF
 router.post('/pdf', knowledgeBaseController.upload.single('file'), knowledgeBaseController.createPDFKnowledgeBase);
@@ -25,7 +26,7 @@ router.post('/pdf', knowledgeBaseController.upload.single('file'), knowledgeBase
 router.post('/url', knowledgeBaseController.createURLKnowledgeBase);
 
 // Update knowledge base entry
-router.put('/:id', knowledgeBaseController.updateKnowledgeBase);
+router.put('/:id', validateKnowledgeBaseUpdate, knowledgeBaseController.updateKnowledgeBase);
 
 // Delete knowledge base entry
 router.delete('/:id', knowledgeBaseController.deleteKnowledgeBase);

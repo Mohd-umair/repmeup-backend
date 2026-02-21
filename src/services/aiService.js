@@ -2,6 +2,7 @@ const axios = require('axios');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const aiCreditService = require('./aiCreditService');
 const logger = require('../config/logger');
+const { escapeRegex } = require('../utils/sanitize');
 
 class AIService {
   constructor() {
@@ -56,6 +57,7 @@ class AIService {
       // If no results from text search, try keyword matching
       if (results.length === 0) {
         const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+        const escapedForRegex = queryWords.map(w => escapeRegex(w));
 
         if (queryWords.length > 0) {
           const keywordResults = await KnowledgeBase.find({
@@ -63,7 +65,7 @@ class AIService {
             isActive: true,
             $or: [
               { keywords: { $in: queryWords } },
-              { title: { $regex: queryWords.join('|'), $options: 'i' } }
+              { title: { $regex: escapedForRegex.join('|'), $options: 'i' } }
             ]
           })
             .select('title content category priority keywords')
