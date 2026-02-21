@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Organization = require('../models/Organization');
 const Subscription = require('../models/Subscription');
 const Interaction = require('../models/Interaction');
+const { escapeRegex } = require('../utils/sanitize');
 
 // @desc    Get all users in organization
 // @route   GET /api/users
@@ -22,11 +23,12 @@ exports.getUsers = async (req, res, next) => {
       query.isActive = status === 'active';
     }
 
-    if (search) {
+    if (search && typeof search === 'string' && search.trim()) {
+      const escapedSearch = escapeRegex(search.trim());
       query.$or = [
-        { firstName: { $regex: search, $options: 'i' } },
-        { lastName: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
+        { firstName: { $regex: escapedSearch, $options: 'i' } },
+        { lastName: { $regex: escapedSearch, $options: 'i' } },
+        { email: { $regex: escapedSearch, $options: 'i' } }
       ];
     }
 

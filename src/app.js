@@ -12,8 +12,25 @@ const app = express();
 // Trust proxy (required when behind nginx/reverse proxy for rate-limit and correct client IP)
 app.set('trust proxy', 1);
 
-// Security middleware
-app.use(helmet());
+// Security middleware: CSP, XSS, and other safe headers
+const frontendOrigin = process.env.CORS_ORIGIN || process.env.FRONTEND_URL || 'http://localhost:4200';
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", frontendOrigin],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"]
+    }
+  },
+  hsts: process.env.NODE_ENV === 'production' ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false
+}));
 
 // CORS
 app.use(cors({

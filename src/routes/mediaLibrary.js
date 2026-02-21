@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middlewares/auth');
+const { validateMediaUpdate } = require('../middlewares/validation');
 const mediaLibraryController = require('../controllers/mediaLibraryController');
 const multer = require('multer');
 const path = require('path');
@@ -73,7 +74,7 @@ router.get('/:id', protect, mediaLibraryController.getMediaById);
 // @route   PUT /api/media-library/:id
 // @desc    Update media metadata
 // @access  Private
-router.put('/:id', protect, mediaLibraryController.updateMedia);
+router.put('/:id', protect, validateMediaUpdate, mediaLibraryController.updateMedia);
 
 // @route   DELETE /api/media-library/:id
 // @desc    Delete media from library

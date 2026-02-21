@@ -3,6 +3,7 @@ const pdf = require('pdf-parse');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
+const { escapeRegex } = require('../utils/sanitize');
 
 // Services (Dependency Injection - SOLID Principle)
 const webScraperService = require('../services/webScraperService');
@@ -52,11 +53,12 @@ exports.getAllKnowledgeBase = async (req, res) => {
       query.category = category;
     }
 
-    if (search) {
+    if (search && typeof search === 'string' && search.trim()) {
+      const escapedSearch = escapeRegex(search.trim());
       query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { content: { $regex: search, $options: 'i' } },
-        { tags: { $regex: search, $options: 'i' } }
+        { title: { $regex: escapedSearch, $options: 'i' } },
+        { content: { $regex: escapedSearch, $options: 'i' } },
+        { tags: { $regex: escapedSearch, $options: 'i' } }
       ];
     }
 

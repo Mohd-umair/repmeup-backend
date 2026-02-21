@@ -167,16 +167,20 @@ router.get('/facebook/callback', async (req, res) => {
 });
 
 // Instagram OAuth - check plan limit before starting OAuth
+// Query: auth_type=reauthorize to force Meta to show the consent screen (for App Review screencast)
 router.get('/instagram', protect, checkConnectionLimit, async (req, res, next) => {
   try {
+    const options = {};
+    if (req.query.auth_type === 'reauthorize') options.auth_type = 'reauthorize';
     const authURL = metaAuth.getInstagramAuthURL(
       req.user.id,
-      req.user.organization._id || req.user.organization
+      req.user.organization._id || req.user.organization,
+      options
     );
-    
-    res.json({ 
-      success: true, 
-      authUrl: authURL 
+
+    res.json({
+      success: true,
+      authUrl: authURL
     });
   } catch (error) {
     next(error);

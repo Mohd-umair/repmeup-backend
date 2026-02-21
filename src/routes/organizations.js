@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const organizationController = require('../controllers/organizationController');
 const { protect, authorize } = require('../middlewares/auth');
+const { validateOrganizationUpdate } = require('../middlewares/validation');
 
 // All organization routes require authentication
 router.use(protect);
@@ -13,6 +14,7 @@ router.get('/:id', organizationController.getOrganization);
 router.put(
   '/:id',
   authorize('admin', 'manager'),
+  validateOrganizationUpdate,
   organizationController.updateOrganization
 );
 
