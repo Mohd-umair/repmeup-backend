@@ -82,9 +82,15 @@ module.exports = async function processAI(job) {
     if (interaction.autoReplyEligible && aiResponse) {
       jobLogger.debug('Interaction eligible for auto-reply');
     } else {
-      // Assign to agent
-      jobLogger.debug('Assigning to agent');
-      await assignToAgent(interaction, 'ai_unable');
+      // Assign to agent only if organization has auto-assign enabled
+      const organization = interaction.organization && typeof interaction.organization === 'object' ? interaction.organization : null;
+      const autoAssign = organization?.escalationSettings?.autoAssign !== false;
+      if (autoAssign) {
+        jobLogger.debug('Assigning to agent (auto-assign enabled)');
+        await assignToAgent(interaction, 'ai_unable');
+      } else {
+        jobLogger.debug('Skipping assignment (auto-assign disabled, manual assign)');
+      }
     }
 
     // Step 8: Check for negative spike (3+ negative comments on same post)
