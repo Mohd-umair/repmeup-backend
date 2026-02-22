@@ -284,12 +284,6 @@ class MetaAuthService {
 
       const pages = response.data.data || [];
       console.log(`📄 [Meta] Found ${pages.length} pages`);
-      // [DEBUG profilePicture] Log what Meta returns for each page's Instagram account
-      pages.forEach((p, i) => {
-        const ig = p.instagram_business_account;
-        const hasUrl = !!(ig && ig.profile_picture_url);
-        console.log(`[DEBUG profilePicture] getUserPages page[${i}] name=${p.name} hasInstagram=${!!ig} profile_picture_url=${hasUrl ? 'YES' : 'NO'}`);
-      });
       return pages;
     } catch (error) {
       console.error('❌ [Meta] Get pages error:', error.response?.data || error.message);
@@ -493,10 +487,6 @@ class MetaAuthService {
         throw new Error('No Instagram Business Account linked to this page');
       }
 
-      // [DEBUG profilePicture] Log what Meta API returned for this page's Instagram account
-      console.log('[DEBUG profilePicture] saveInstagramConnection instagramAccount keys:', Object.keys(instagramAccount || {}));
-      console.log('[DEBUG profilePicture] saveInstagramConnection profile_picture_url:', instagramAccount.profile_picture_url ? `${String(instagramAccount.profile_picture_url).slice(0, 60)}...` : 'MISSING');
-
       // Check if connection already exists
       const existingConnection = await PlatformConnection.findOne({
         organization: organizationId,
@@ -534,8 +524,6 @@ class MetaAuthService {
       console.log(`💾 [MetaAuth] User ID: ${userId}, Organization ID: ${organizationId}`);
       console.log(`💾 [MetaAuth] Instagram Account ID: ${instagramAccount.id}`);
       console.log(`💾 [MetaAuth] Facebook Page ID: ${pageData.id}`);
-      console.log('[DEBUG profilePicture] Creating with platformProfilePicture:', instagramAccount.profile_picture_url ? 'SET' : 'NOT SET', 'metadata.profilePicture:', instagramAccount.profile_picture_url ? 'SET' : 'NOT SET');
-
       const connection = await PlatformConnection.create({
         user: userId,
         organization: organizationId,

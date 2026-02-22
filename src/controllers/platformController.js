@@ -241,17 +241,18 @@ exports.getPlatformConnections = async (req, res, next) => {
       req.user.organization._id
     );
 
-    // [DEBUG profilePicture] Log what we're sending for each connection
-    (result.connections || []).forEach((c, i) => {
-      const root = !!c.platformProfilePicture;
-      const meta = !!(c.metadata && c.metadata.profilePicture);
-      const url = c.platformProfilePicture || (c.metadata && c.metadata.profilePicture);
-      console.log(`[DEBUG profilePicture] GET /platforms connection[${i}] platform=${c.platform} platformProfilePicture=${root ? 'YES' : 'NO'} metadata.profilePicture=${meta ? 'YES' : 'NO'} url=${url ? `${String(url).slice(0, 50)}...` : 'MISSING'}`);
+    // Normalize so frontend always gets platformProfilePicture when we have it (root or metadata)
+    const connections = (result.connections || []).map((c) => {
+      const doc = c.toObject ? c.toObject() : { ...c };
+      if (!doc.platformProfilePicture && doc.metadata?.profilePicture) {
+        doc.platformProfilePicture = doc.metadata.profilePicture;
+      }
+      return doc;
     });
 
     res.status(200).json({
       success: true,
-      data: result.connections,
+      data: connections,
       // Include usage and limits so frontend can show "X of Y" and disable "Add account"
       usage: result.usage,
       limits: result.limits

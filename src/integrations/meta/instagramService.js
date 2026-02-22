@@ -14,29 +14,30 @@ class InstagramService {
    */
   async _fetchInstagramUserProfile(accessToken, userId) {
     if (!userId) return null;
-    try {
-      const response = await axios.get(
-        `${this.instagramGraphUrl}/${userId}`,
-        {
-          params: {
-            fields: 'name,username,profile_pic',
-            access_token: accessToken,
-          },
+    const token = typeof accessToken === 'string' ? accessToken.trim() : null;
+    if (!token) return null;
+    // Try graph.facebook.com first (same token works for comments there); graph.instagram.com often returns "Cannot parse access token"
+    const urlsToTry = [
+      { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fields: 'name,username,profile_pic,profile_picture_url' },
+      { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fields: 'name,username,profile_pic' }
+    ];
+    for (const { url, name, fields } of urlsToTry) {
+      try {
+        const response = await axios.get(url, {
+          params: { fields, access_token: token },
           timeout: 5000,
+        });
+        const data = response.data || null;
+        const picUrl = data && (data.profile_pic || data.profile_picture_url);
+        if (data) {
+          if (picUrl) data.profile_pic = data.profile_pic || data.profile_picture_url;
+          return data;
         }
-      );
-      const data = response.data || null;
-      // [DEBUG profilePicture] Inbox author profile from Instagram API
-      const hasPic = !!(data && (data.profile_pic || data.profile_picture_url));
-      console.log(`[DEBUG profilePicture] _fetchInstagramUserProfile userId=${userId} profile_pic=${hasPic ? 'YES' : 'NO'} keys=${data ? Object.keys(data).join(',') : 'null'}`);
-      return data;
-    } catch (err) {
-      if (err.response?.status !== 400 && err.response?.status !== 404) {
-        console.warn(`[Instagram] Could not fetch profile for user ${userId}:`, err.message);
+      } catch (_) {
+        // Try next URL or return null
       }
-      console.log(`[DEBUG profilePicture] _fetchInstagramUserProfile userId=${userId} ERROR:`, err.response?.data?.error?.message || err.message);
-      return null;
     }
+    return null;
   }
 
   /**
@@ -54,7 +55,7 @@ class InstagramService {
    */
   async fetchComments(platformConnection) {
     try {
-      const { accessToken } = platformConnection;
+      const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       if (!businessAccountId) {
@@ -139,10 +140,8 @@ class InstagramService {
               author: {
                 platformId: comment.from?.id,
                 username: comment.username || comment.from?.username || 'unknown',
-                name: comment.from?.username || comment.username || 'Unknown User',
-                avatarUrl: comment.from?.id
-                  ? `${this.baseUrl}/${comment.from.id}/picture?type=normal`
-                  : undefined
+                name: comment.from?.username || comment.username || 'Unknown User'
+                // avatarUrl set below from Instagram User Profile API (not Facebook /picture)
               },
               metadata: {
                 postId: media.id,
@@ -173,10 +172,8 @@ class InstagramService {
                   author: {
                     platformId: reply.from?.id,
                     username: reply.username || reply.from?.username || 'unknown',
-                    name: reply.from?.username || reply.username || 'Unknown User',
-                    avatarUrl: reply.from?.id
-                      ? `${this.baseUrl}/${reply.from.id}/picture?type=normal`
-                      : undefined
+                    name: reply.from?.username || reply.username || 'Unknown User'
+                    // avatarUrl set below from Instagram User Profile API
                   },
                   metadata: {
                     postId: media.id,
@@ -197,6 +194,23 @@ class InstagramService {
         } catch (error) {
           console.error(`Error processing media ${media.id}:`, error.message);
           continue;
+        }
+      }
+
+      // Fetch user profile (profile_pic) for comment/reply authors so inbox can show avatar
+      const authorIds = [...new Set(interactions.map(i => i.author?.platformId).filter(Boolean))];
+      const tokenOk = typeof accessToken === 'string' && accessToken.trim().length > 0;
+      const profilePicByAuthor = new Map();
+      for (const authorId of authorIds) {
+        const profile = tokenOk ? await this._fetchInstagramUserProfile(accessToken, authorId) : null;
+        const pic = profile?.profile_pic || profile?.profile_picture_url;
+        if (pic) profilePicByAuthor.set(authorId, pic);
+      }
+      let withAvatar = 0;
+      for (const interaction of interactions) {
+        if (interaction.author?.platformId && profilePicByAuthor.has(interaction.author.platformId)) {
+          interaction.author.avatarUrl = profilePicByAuthor.get(interaction.author.platformId);
+          withAvatar++;
         }
       }
 
@@ -387,7 +401,6 @@ class InstagramService {
                 if (!avatarUrl) {
                   avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
                 }
-                console.log(`[DEBUG profilePicture] DM author from.id=${message.from?.id} author.avatarUrl=${avatarUrl ? 'SET' : 'MISSING'}`);
               }
               const interaction = {
                 organization: platformConnection.organization,
