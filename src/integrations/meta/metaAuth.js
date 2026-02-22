@@ -278,13 +278,18 @@ class MetaAuthService {
       const response = await axios.get(`${this.graphURL}/me/accounts`, {
         params: {
           access_token: accessToken,
-          fields: 'id,name,access_token,instagram_business_account{id,username,profile_picture_url}'
+          fields: 'id,name,access_token,picture,instagram_business_account{id,username,profile_picture_url}'
         }
       });
 
       const pages = response.data.data || [];
       console.log(`📄 [Meta] Found ${pages.length} pages`);
-      
+      // [DEBUG profilePicture] Log what Meta returns for each page's Instagram account
+      pages.forEach((p, i) => {
+        const ig = p.instagram_business_account;
+        const hasUrl = !!(ig && ig.profile_picture_url);
+        console.log(`[DEBUG profilePicture] getUserPages page[${i}] name=${p.name} hasInstagram=${!!ig} profile_picture_url=${hasUrl ? 'YES' : 'NO'}`);
+      });
       return pages;
     } catch (error) {
       console.error('❌ [Meta] Get pages error:', error.response?.data || error.message);
@@ -429,11 +434,18 @@ class MetaAuthService {
         existingConnection.isActive = true;
         existingConnection.lastSyncAt = new Date();
         existingConnection.platformPageId = pageData.id; // Ensure platformPageId is set
+        const pagePictureUrl = pageData.picture?.data?.url || (typeof pageData.picture === 'string' ? pageData.picture : null) || null;
+        if (pagePictureUrl) {
+          existingConnection.platformProfilePicture = pagePictureUrl;
+          if (!existingConnection.metadata) existingConnection.metadata = {};
+          existingConnection.metadata.profilePicture = pagePictureUrl;
+        }
         await existingConnection.save();
         return existingConnection;
       }
 
       // Create new connection
+      const pagePictureUrl = pageData.picture?.data?.url || (typeof pageData.picture === 'string' ? pageData.picture : null) || null;
       const connection = await PlatformConnection.create({
         user: userId,
         organization: organizationId,
@@ -444,6 +456,7 @@ class MetaAuthService {
         platformDisplayName: pageData.name,
         platformEmail: null,
         platformPageId: pageData.id,
+        platformProfilePicture: pagePictureUrl,
         accessToken: pageAccessToken,
         refreshToken: null,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000), // 60 days
@@ -452,7 +465,8 @@ class MetaAuthService {
         isActive: true,
         metadata: {
           instagramAccountId: pageData.instagram_business_account?.id || null,
-          instagramUsername: pageData.instagram_business_account?.username || null
+          instagramUsername: pageData.instagram_business_account?.username || null,
+          profilePicture: pagePictureUrl
         }
       });
 
@@ -479,6 +493,10 @@ class MetaAuthService {
         throw new Error('No Instagram Business Account linked to this page');
       }
 
+      // [DEBUG profilePicture] Log what Meta API returned for this page's Instagram account
+      console.log('[DEBUG profilePicture] saveInstagramConnection instagramAccount keys:', Object.keys(instagramAccount || {}));
+      console.log('[DEBUG profilePicture] saveInstagramConnection profile_picture_url:', instagramAccount.profile_picture_url ? `${String(instagramAccount.profile_picture_url).slice(0, 60)}...` : 'MISSING');
+
       // Check if connection already exists
       const existingConnection = await PlatformConnection.findOne({
         organization: organizationId,
@@ -501,6 +519,11 @@ class MetaAuthService {
         existingConnection.platformData.businessAccountId = instagramAccount.id;
         existingConnection.platformData.pageId = pageData.id;
         existingConnection.platformData.pageName = pageData.name;
+        if (instagramAccount.profile_picture_url) {
+          existingConnection.platformProfilePicture = instagramAccount.profile_picture_url;
+          if (!existingConnection.metadata) existingConnection.metadata = {};
+          existingConnection.metadata.profilePicture = instagramAccount.profile_picture_url;
+        }
         await existingConnection.save();
         console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
         return existingConnection;
@@ -511,7 +534,8 @@ class MetaAuthService {
       console.log(`💾 [MetaAuth] User ID: ${userId}, Organization ID: ${organizationId}`);
       console.log(`💾 [MetaAuth] Instagram Account ID: ${instagramAccount.id}`);
       console.log(`💾 [MetaAuth] Facebook Page ID: ${pageData.id}`);
-      
+      console.log('[DEBUG profilePicture] Creating with platformProfilePicture:', instagramAccount.profile_picture_url ? 'SET' : 'NOT SET', 'metadata.profilePicture:', instagramAccount.profile_picture_url ? 'SET' : 'NOT SET');
+
       const connection = await PlatformConnection.create({
         user: userId,
         organization: organizationId,
@@ -522,6 +546,7 @@ class MetaAuthService {
         platformDisplayName: instagramAccount.username,
         platformEmail: null,
         platformPageId: pageData.id, // Facebook Page ID
+        platformProfilePicture: instagramAccount.profile_picture_url || null,
         accessToken: pageAccessToken,
         refreshToken: null,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),

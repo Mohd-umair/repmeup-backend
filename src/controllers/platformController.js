@@ -241,12 +241,88 @@ exports.getPlatformConnections = async (req, res, next) => {
       req.user.organization._id
     );
 
+    // [DEBUG profilePicture] Log what we're sending for each connection
+    (result.connections || []).forEach((c, i) => {
+      const root = !!c.platformProfilePicture;
+      const meta = !!(c.metadata && c.metadata.profilePicture);
+      const url = c.platformProfilePicture || (c.metadata && c.metadata.profilePicture);
+      console.log(`[DEBUG profilePicture] GET /platforms connection[${i}] platform=${c.platform} platformProfilePicture=${root ? 'YES' : 'NO'} metadata.profilePicture=${meta ? 'YES' : 'NO'} url=${url ? `${String(url).slice(0, 50)}...` : 'MISSING'}`);
+    });
+
     res.status(200).json({
       success: true,
       data: result.connections,
       // Include usage and limits so frontend can show "X of Y" and disable "Add account"
       usage: result.usage,
       limits: result.limits
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Refresh profile pictures for existing Meta (Facebook/Instagram) connections
+ *          Uses current Meta API data to backfill platformProfilePicture / metadata.profilePicture
+ * @route   POST /api/platforms/refresh-profile-pictures
+ * @access  Private
+ */
+exports.refreshProfilePictures = async (req, res, next) => {
+  try {
+    const metaAuth = require('../integrations/meta/metaAuth');
+    const organizationId = req.user.organization._id || req.user.organization;
+
+    const userConnection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'facebook',
+      'metadata.type': 'user_token',
+      isActive: true
+    }).select('accessToken');
+    if (!userConnection?.accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'No Facebook user connection found. Connect a Facebook account first.'
+      });
+    }
+
+    const pages = await metaAuth.getUserPages(userConnection.accessToken);
+    let updated = 0;
+    for (const page of pages) {
+      const pagePictureUrl = page.picture?.data?.url || (typeof page.picture === 'string' ? page.picture : null) || null;
+      const fbConn = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'facebook',
+        platformUserId: page.id,
+        isActive: true
+      });
+      if (fbConn && pagePictureUrl) {
+        fbConn.platformProfilePicture = pagePictureUrl;
+        if (!fbConn.metadata) fbConn.metadata = {};
+        fbConn.metadata.profilePicture = pagePictureUrl;
+        await fbConn.save();
+        updated++;
+      }
+      const ig = page.instagram_business_account;
+      if (ig?.profile_picture_url) {
+        const igConn = await PlatformConnection.findOne({
+          organization: organizationId,
+          platform: 'instagram',
+          platformUserId: ig.id,
+          isActive: true
+        });
+        if (igConn) {
+          igConn.platformProfilePicture = ig.profile_picture_url;
+          if (!igConn.metadata) igConn.metadata = {};
+          igConn.metadata.profilePicture = ig.profile_picture_url;
+          await igConn.save();
+          updated++;
+        }
+      }
+    }
+    res.status(200).json({
+      success: true,
+      message: `Refreshed profile pictures for ${updated} connection(s)`,
+      updated
     });
   } catch (error) {
     next(error);
