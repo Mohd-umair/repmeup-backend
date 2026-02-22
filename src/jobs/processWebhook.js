@@ -2,6 +2,7 @@ const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const { aiQueue } = require('../config/queue');
 const logger = require('../config/logger');
+const instagramService = require('../integrations/meta/instagramService');
 
 /**
  * Process webhook events from social media platforms
@@ -107,6 +108,27 @@ module.exports = async function processWebhook(job) {
 };
 
 /**
+ * Fetch Instagram commenter/DM author profile picture (for inbox avatar).
+ * Returns avatarUrl or undefined. Logs for debug.
+ */
+async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
+  if (!igUserId) return undefined;
+  try {
+    const connection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'instagram',
+      status: 'connected',
+      isActive: true
+    }).select('accessToken');
+    if (!connection?.accessToken) return undefined;
+    const profile = await instagramService._fetchInstagramUserProfile(connection.accessToken, igUserId);
+    return profile?.profile_pic || profile?.profile_picture_url || undefined;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+/**
  * Handle Instagram webhook
  */
 async function handleInstagramWebhook(payload, organizationId) {
@@ -118,8 +140,16 @@ async function handleInstagramWebhook(payload, organizationId) {
 
     for (const change of changes) {
       if (change.field === 'comments') {
-        // New comment
+        // New comment: fetch commenter profile for inbox avatar
         const comment = change.value;
+        const authorId = comment.from?.id;
+        const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, authorId);
+        const author = {
+          platformId: authorId,
+          username: comment.from?.username,
+          name: comment.from?.username
+        };
+        if (avatarUrl) author.avatarUrl = avatarUrl;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.id },
@@ -130,14 +160,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               type: 'comment',
               platformId: comment.id,
               content: comment.text,
-              author: {
-                platformId: comment.from?.id,
-                username: comment.from?.username,
-                name: comment.from?.username,
-                avatarUrl: comment.from?.id
-                  ? `https://graph.facebook.com/v18.0/${comment.from.id}/picture?type=normal`
-                  : undefined
-              },
+              author,
               metadata: {
                 postId: comment.media?.id,
                 postUrl: `https://www.instagram.com/p/${comment.media?.id}`
@@ -151,10 +174,18 @@ async function handleInstagramWebhook(payload, organizationId) {
 
         return interaction;
       }
-      
+
       if (change.field === 'messages') {
-        // New DM
+        // New DM: fetch sender profile for inbox avatar
         const message = change.value;
+        const authorId = message.from?.id;
+        const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, authorId);
+        const author = {
+          platformId: authorId,
+          username: message.from?.username,
+          name: message.from?.name || message.from?.username
+        };
+        if (avatarUrl) author.avatarUrl = avatarUrl;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
@@ -165,14 +196,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               type: 'dm',
               platformId: message.id,
               content: message.message?.text || message.text,
-              author: {
-                platformId: message.from.id,
-                username: message.from.username,
-                name: message.from.name || message.from.username,
-                avatarUrl: message.from.id
-                  ? `https://graph.facebook.com/v18.0/${message.from.id}/picture?type=normal`
-                  : undefined
-              },
+              author,
               threadId: message.conversation_id,
               platformCreatedAt: new Date(message.timestamp)
             },
