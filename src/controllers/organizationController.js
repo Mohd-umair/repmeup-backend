@@ -104,6 +104,18 @@ exports.updateOrganization = async (req, res, next) => {
       });
     }
 
+    // Handle escalationSettings (e.g. autoAssign for new conversations)
+    if (req.body.escalationSettings !== undefined) {
+      if (!organization.escalationSettings) {
+        organization.escalationSettings = {};
+      }
+      Object.keys(req.body.escalationSettings).forEach(key => {
+        if (req.body.escalationSettings[key] !== undefined) {
+          organization.escalationSettings[key] = req.body.escalationSettings[key];
+        }
+      });
+    }
+
     await organization.save();
 
     // Update scheduled jobs after saving (so we have the updated organization)

@@ -17,8 +17,8 @@ const organizationSchema = new mongoose.Schema({
   industry: String,
   size: {
     type: String,
-    enum: ['small', 'medium', 'large', 'enterprise'],
-    default: 'small'
+    enum: ['', '1-10', '11-50', '51-200', '201-500', '501-1000', '1000+', 'small', 'medium', 'large', 'enterprise'],
+    default: ''
   },
   
   // Subscription details
