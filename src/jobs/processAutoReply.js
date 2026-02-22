@@ -477,7 +477,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
             content,
             interaction.platformConnection.accessToken,
             pageId,
-            true
+            false
           );
         }
       }
