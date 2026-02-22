@@ -27,7 +27,6 @@ router.delete('/:id', platformController.disconnectPlatform);
 router.post('/:id/sync', platformController.syncPlatform);
 router.post('/:id/refresh-locations', platformController.refreshGoogleLocations);
 
-// WhatsApp needs connection limit check
 router.post('/whatsapp/connect', checkConnectionLimit, platformController.connectWhatsApp);
 
 module.exports = router;
