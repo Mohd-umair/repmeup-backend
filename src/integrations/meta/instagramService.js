@@ -25,11 +25,16 @@ class InstagramService {
           timeout: 5000,
         }
       );
-      return response.data || null;
+      const data = response.data || null;
+      // [DEBUG profilePicture] Inbox author profile from Instagram API
+      const hasPic = !!(data && (data.profile_pic || data.profile_picture_url));
+      console.log(`[DEBUG profilePicture] _fetchInstagramUserProfile userId=${userId} profile_pic=${hasPic ? 'YES' : 'NO'} keys=${data ? Object.keys(data).join(',') : 'null'}`);
+      return data;
     } catch (err) {
       if (err.response?.status !== 400 && err.response?.status !== 404) {
         console.warn(`[Instagram] Could not fetch profile for user ${userId}:`, err.message);
       }
+      console.log(`[DEBUG profilePicture] _fetchInstagramUserProfile userId=${userId} ERROR:`, err.response?.data?.error?.message || err.message);
       return null;
     }
   }
@@ -168,7 +173,10 @@ class InstagramService {
                   author: {
                     platformId: reply.from?.id,
                     username: reply.username || reply.from?.username || 'unknown',
-                    name: reply.from?.username || reply.username || 'Unknown User'
+                    name: reply.from?.username || reply.username || 'Unknown User',
+                    avatarUrl: reply.from?.id
+                      ? `${this.baseUrl}/${reply.from.id}/picture?type=normal`
+                      : undefined
                   },
                   metadata: {
                     postId: media.id,
@@ -379,6 +387,7 @@ class InstagramService {
                 if (!avatarUrl) {
                   avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
                 }
+                console.log(`[DEBUG profilePicture] DM author from.id=${message.from?.id} author.avatarUrl=${avatarUrl ? 'SET' : 'MISSING'}`);
               }
               const interaction = {
                 organization: platformConnection.organization,

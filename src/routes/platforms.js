@@ -21,12 +21,12 @@ router.get('/whatsapp/status', platformController.getWhatsAppStatus);
 // Platform management
 router.get('/', attachConnectionLimits, platformController.getPlatformConnections);
 router.get('/connections', attachConnectionLimits, platformController.getPlatformConnections); // Alias for frontend
+router.post('/refresh-profile-pictures', platformController.refreshProfilePictures);
 router.get('/:id', platformController.getPlatformConnection);
 router.delete('/:id', platformController.disconnectPlatform);
 router.post('/:id/sync', platformController.syncPlatform);
 router.post('/:id/refresh-locations', platformController.refreshGoogleLocations);
 
-// WhatsApp needs connection limit check
 router.post('/whatsapp/connect', checkConnectionLimit, platformController.connectWhatsApp);
 
 module.exports = router;
