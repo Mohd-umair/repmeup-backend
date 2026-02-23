@@ -24,6 +24,7 @@ exports.getInteractions = async (req, res, next) => {
       assignedTo,
       label,
       viewMode,
+      postId,
       page = 1,
       limit = 50,
       sortBy = 'createdAt',
@@ -39,6 +40,7 @@ exports.getInteractions = async (req, res, next) => {
 
     if (platform) query.platform = platform;
     if (type) query.type = type;
+    if (postId) query['metadata.postId'] = postId;
     if (sentiment) query.sentiment = sentiment;
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
@@ -171,6 +173,7 @@ exports.getInteractions = async (req, res, next) => {
       sentiment,
       status,
       label, // Include label in cache key to prevent wrong cached results
+      postId: postId || '',
       viewMode: viewMode || '',
       search: cacheSearchKey,
       page,
