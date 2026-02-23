@@ -500,8 +500,13 @@ exports.syncPlatform = async (req, res, next) => {
         });
       }
     } else if (connection.platform === 'facebook') {
-      // Fetch both comments and reviews
-      result = await facebookService.fetchAllInteractions(connection);
+      // User-level Facebook connections (platformPageId null) are for listing pages only; they cannot sync comments
+      if (!connection.platformPageId) {
+        console.warn('⚠️ [Sync] Facebook connection has no Page ID (user-level connection). Sync comments from a connected Page in Page Manager.');
+        result = { count: 0, interactions: [] };
+      } else {
+        result = await facebookService.fetchAllInteractions(connection);
+      }
     } else if (connection.platform === 'linkedin') {
       try {
         // Fetch LinkedIn posts and comments

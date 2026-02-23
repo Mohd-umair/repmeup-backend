@@ -255,14 +255,19 @@ class InstagramService {
    */
   async fetchMessages(platformConnection) {
     try {
-      const { accessToken } = platformConnection;
+      const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       if (!businessAccountId) {
         throw new Error('Instagram Business Account ID not found in connection');
       }
 
-      console.log(`💬 [Instagram] Fetching DMs for account: ${businessAccountId}`);
+      // Log which token is used (masked) for debugging "capability" errors
+      const tokenPreview = accessToken
+        ? `${String(accessToken).slice(0, 8)}...${String(accessToken).slice(-4)}`
+        : '(missing)';
+      console.log(`💬 [Instagram] Fetching DMs for account: ${businessAccountId} (Page ID: ${platformConnection.platformPageId || 'n/a'})`);
+      console.log(`💬 [Instagram] Using token: ${tokenPreview} (from PlatformConnection.accessToken – Page access token for the Facebook Page linked to this IG account)`);
 
       // Get conversations
       let allConversations = [];

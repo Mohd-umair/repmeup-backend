@@ -130,14 +130,61 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
 
 /**
  * Handle Instagram webhook
+ * Supports two payload formats:
+ * 1. Graph API (comments): entry[].changes[] with field "comments" or "messages"
+ * 2. Instagram Messaging (DMs): entry[].messaging[] - used by Meta for DM webhooks
  */
 async function handleInstagramWebhook(payload, organizationId) {
   try {
     const entry = payload.entry?.[0];
+
+    console.log('Entry++++++++++++++++++++++++++++++++++++++++++++++++++++:', JSON.stringify(entry, null, 2));
     if (!entry) return null;
 
-    const changes = entry.changes || [];
+    // --- Instagram Messaging (DMs) format: entry.messaging[] ---
+    // Meta sends DMs in this format when "messages" is subscribed for Instagram
+    const messaging = entry.messaging || [];
+    for (const event of messaging) {
+      const message = event.message;
+      if (!message) continue;
+      // Skip echo (messages sent by our business) and unsupported/deleted
+      if (message.is_echo || message.is_deleted || message.is_unsupported) continue;
 
+      const senderId = event.sender?.id;
+      const mid = message.mid;
+      const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
+      if (!mid || !senderId) continue;
+
+      const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, senderId);
+      const author = {
+        platformId: senderId,
+        username: undefined,
+        name: undefined
+      };
+      if (avatarUrl) author.avatarUrl = avatarUrl;
+
+      const interaction = await Interaction.findOneAndUpdate(
+        { platformId: mid },
+        {
+          $set: {
+            organization: organizationId,
+            platform: 'instagram',
+            type: 'dm',
+            platformId: mid,
+            content: text,
+            author,
+            threadId: senderId,
+            platformCreatedAt: new Date(event.timestamp)
+          },
+          $setOnInsert: { status: 'unread', isRead: false }
+        },
+        { upsert: true, new: true }
+      );
+      return interaction;
+    }
+
+    // --- Graph API format: entry.changes[] (comments, or legacy "messages") ---
+    const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'comments') {
         // New comment: fetch commenter profile for inbox avatar
@@ -176,7 +223,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       }
 
       if (change.field === 'messages') {
-        // New DM: fetch sender profile for inbox avatar
+        // New DM (legacy Graph API format): fetch sender profile for inbox avatar
         const message = change.value;
         const authorId = message.from?.id;
         const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, authorId);
