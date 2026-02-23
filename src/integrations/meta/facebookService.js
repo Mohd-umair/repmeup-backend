@@ -15,6 +15,38 @@ class FacebookService {
   }
 
   /**
+   * Fetch Page feed posts only (no comments). Used for Content / platform posts listing.
+   * @param {Object} platformConnection - Must have accessToken, platformPageId
+   * @returns {Promise<Array>} Array of { id, message, created_time, full_picture?, permalink_url? }
+   */
+  async getPagePosts(platformConnection) {
+    const { accessToken, platformPageId } = platformConnection;
+    if (!platformPageId) {
+      throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
+    }
+    let allPosts = [];
+    let nextPage = `${this.baseURL}/${platformPageId}/feed`;
+    let pageCount = 0;
+    const maxPages = 10;
+    const fields = 'id,message,created_time,full_picture,permalink_url,attachments{media_type,type}';
+    while (nextPage && pageCount < maxPages) {
+      try {
+        const response = await axios.get(nextPage, {
+          params: { fields, limit: 25, access_token: accessToken }
+        });
+        const posts = response.data.data || [];
+        allPosts = allPosts.concat(posts);
+        nextPage = response.data.paging?.next;
+        pageCount++;
+      } catch (error) {
+        console.error(`[Facebook] getPagePosts error:`, error.message);
+        break;
+      }
+    }
+    return allPosts;
+  }
+
+  /**
    * Fetch all posts and comments from Facebook Page
    * Updated to match new Interaction schema (similar to Instagram)
    */

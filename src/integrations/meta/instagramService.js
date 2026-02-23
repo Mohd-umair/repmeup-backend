@@ -45,8 +45,43 @@ class InstagramService {
    * Falls back to platformUserId if platformData.businessAccountId is not set
    */
   _getBusinessAccountId(platformConnection) {
-    return platformConnection.platformData?.businessAccountId || 
+    return platformConnection.platformData?.businessAccountId ||
            platformConnection.platformUserId;
+  }
+
+  /**
+   * Fetch Instagram media (posts, reels) only. Used for Content / platform posts listing.
+   * @param {Object} platformConnection - Must have accessToken and business account ID
+   * @returns {Promise<Array>} Array of { id, caption, media_type, timestamp, permalink, media_url }
+   */
+  async getMedia(platformConnection) {
+    const accessToken = platformConnection.accessToken || platformConnection.access_token;
+    const businessAccountId = this._getBusinessAccountId(platformConnection);
+    if (!businessAccountId) {
+      throw new Error('Instagram Business Account ID not found in connection');
+    }
+    let allMedia = [];
+    let nextPage = `${this.baseUrl}/${businessAccountId}/media`;
+    let pageCount = 0;
+    const maxPages = 10;
+    while (nextPage && pageCount < maxPages) {
+      try {
+        const mediaResponse = await axios.get(nextPage, {
+          params: {
+            access_token: accessToken,
+            fields: 'id,caption,media_type,timestamp,permalink,media_url',
+            limit: 25
+          }
+        });
+        allMedia = allMedia.concat(mediaResponse.data.data || []);
+        nextPage = mediaResponse.data.paging?.next;
+        pageCount++;
+      } catch (error) {
+        console.error(`[Instagram] getMedia error:`, error.message);
+        break;
+      }
+    }
+    return allMedia;
   }
 
   /**
