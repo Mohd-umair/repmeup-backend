@@ -147,6 +147,8 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
  */
 async function handleInstagramWebhook(payload, organizationId) {
   try {
+
+    console.log('Payload++++++++++++++++++++++++++++++++++++++++++++++++++++:', JSON.stringify(payload, null, 2));
     const entry = payload.entry?.[0];
 
     if (!entry) return null;
