@@ -149,7 +149,6 @@ async function handleInstagramWebhook(payload, organizationId) {
   try {
     const entry = payload.entry?.[0];
 
-    console.log('Entry++++++++++++++++++++++++++++++++++++++++++++++++++++:', JSON.stringify(entry, null, 2));
     if (!entry) return null;
 
     // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
@@ -180,13 +179,17 @@ async function handleInstagramWebhook(payload, organizationId) {
       const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
       if (!mid || !senderId) continue;
 
+      // Webhook only sends sender.id; fetch name/username via User Profile API (GET /{ig-scoped-id})
       const profile = await fetchInstagramAuthorProfile(organizationId, senderId);
       const author = {
         platformId: senderId,
-        username: profile?.username ?? undefined,
-        name: profile?.name ?? undefined
+        name: profile?.name || profile?.username || 'Instagram User',
+        username: profile?.username ?? undefined
       };
       if (profile?.avatarUrl) author.avatarUrl = profile.avatarUrl;
+      if (profile?.username) {
+        console.log('[Instagram Webhook] DM from sender', senderId, '-> username:', profile.username, 'name:', profile.name || profile.username);
+      }
 
       const updateFields = {
         organization: organizationId,
