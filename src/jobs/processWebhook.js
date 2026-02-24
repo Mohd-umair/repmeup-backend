@@ -200,7 +200,8 @@ async function handleInstagramWebhook(payload, organizationId) {
         content: text,
         author,
         threadId: senderId,
-        platformCreatedAt: new Date(event.timestamp)
+        platformCreatedAt: new Date(event.timestamp),
+        'metadata.instagramAccountId': igAccountId
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 

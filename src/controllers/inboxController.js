@@ -416,17 +416,37 @@ exports.replyToInteraction = async (req, res, next) => {
       // Resolve platform connection (may be missing if interaction was created via webhook without it)
       let connection = interaction.platformConnection;
       if (!connection && interaction.platform && interaction.organization) {
-        const conn = await PlatformConnection.findOne({
-          organization: interaction.organization,
-          platform: interaction.platform,
-          status: 'connected',
-          isActive: true
-        }).lean();
-        if (conn) connection = conn;
+        // Instagram DM: must use the connection that owns the thread (the IG account that received the message).
+        // Using any org Instagram connection causes "(#100) not the thread owner".
+        if (interaction.platform === 'instagram' && interaction.type === 'dm') {
+          const igAccountId = interaction.metadata?.instagramAccountId;
+          if (igAccountId) {
+            const conn = await PlatformConnection.findOne({
+              organization: interaction.organization,
+              platform: 'instagram',
+              platformUserId: igAccountId,
+              status: 'connected',
+              isActive: true
+            }).lean();
+            if (conn) connection = conn;
+          }
+        } else {
+          const conn = await PlatformConnection.findOne({
+            organization: interaction.organization,
+            platform: interaction.platform,
+            status: 'connected',
+            isActive: true
+          }).lean();
+          if (conn) connection = conn;
+        }
       }
       if (!connection) {
         replyStatus = 'failed';
-        errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
+        if (interaction.platform === 'instagram' && interaction.type === 'dm') {
+          errorMessage = 'Could not determine which Instagram account this conversation belongs to. Please reconnect the Instagram account that receives these DMs in Settings.';
+        } else {
+          errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
+        }
       } else if (connection.status !== 'connected' || !connection.isActive) {
         replyStatus = 'failed';
         errorMessage = 'Platform connection is not active. Please reconnect this account in Settings.';
