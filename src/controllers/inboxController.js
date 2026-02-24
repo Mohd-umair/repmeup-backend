@@ -413,17 +413,27 @@ exports.replyToInteraction = async (req, res, next) => {
 
     // Send actual reply to platform via integration service
     try {
-      // Check if platform connection exists and is active
-      if (!interaction.platformConnection) {
+      // Resolve platform connection (may be missing if interaction was created via webhook without it)
+      let connection = interaction.platformConnection;
+      if (!connection && interaction.platform && interaction.organization) {
+        const conn = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: interaction.platform,
+          status: 'connected',
+          isActive: true
+        }).lean();
+        if (conn) connection = conn;
+      }
+      if (!connection) {
         replyStatus = 'failed';
-        errorMessage = 'Platform connection not found. Please reconnect your YouTube account in Settings.';
-      } else if (interaction.platformConnection.status !== 'connected' || !interaction.platformConnection.isActive) {
+        errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
+      } else if (connection.status !== 'connected' || !connection.isActive) {
         replyStatus = 'failed';
-        errorMessage = 'Platform connection is not active. Please reconnect your YouTube account in Settings.';
+        errorMessage = 'Platform connection is not active. Please reconnect this account in Settings.';
       } else if (interaction.platform === 'youtube') {
         const youtubeService = require('../integrations/google/youtubeService');
         const result = await youtubeService.replyToComment(
-          interaction.platformConnection,
+          connection,
           interaction.platformId,
           replyContent
         );
@@ -439,16 +449,18 @@ exports.replyToInteraction = async (req, res, next) => {
         const instagramService = require('../integrations/meta/instagramService');
         let result;
         if (interaction.type === 'dm') {
-          const pageId = interaction.platformConnection.platformPageId || interaction.platformConnection.platformUserId;
+          // Send API requires Facebook Page ID (not Instagram business account ID)
+          const pageId = connection.platformPageId || connection.platformData?.pageId;
           const recipientId = interaction.author?.platformId;
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
-            errorMessage = 'Missing page or recipient for Instagram DM reply.';
+            errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect Instagram in Settings so we have the Facebook Page ID.';
+            console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId });
           } else {
             result = await instagramService.sendMessage(
               recipientId,
               replyContent,
-              interaction.platformConnection.accessToken,
+              connection.accessToken,
               pageId,
               true
             );
@@ -457,7 +469,7 @@ exports.replyToInteraction = async (req, res, next) => {
           result = await instagramService.replyToComment(
             interaction.platformId,
             replyContent,
-            interaction.platformConnection.accessToken
+            connection.accessToken
           );
         }
         if (result && result.success && result.platformResponseId) {
@@ -470,7 +482,7 @@ exports.replyToInteraction = async (req, res, next) => {
       } else if (interaction.platform === 'facebook') {
         const facebookService = require('../integrations/meta/facebookService');
         const result = await facebookService.replyToComment(
-          interaction.platformConnection,
+          connection,
           interaction.platformId,
           replyContent
         );
@@ -485,7 +497,7 @@ exports.replyToInteraction = async (req, res, next) => {
       } else if (interaction.platform === 'linkedin') {
         const linkedinService = require('../integrations/linkedin/linkedinService');
         const result = await linkedinService.replyToComment(
-          interaction.platformConnection,
+          connection,
           interaction._id,
           replyContent
         );
@@ -519,9 +531,9 @@ exports.replyToInteraction = async (req, res, next) => {
           errorMessage = 'Missing location or review ID for Google review reply.';
         } else {
           try {
-            await googleService.ensureValidToken(interaction.platformConnection);
+            await googleService.ensureValidToken(connection);
             await googleService.replyToReview(
-              interaction.platformConnection,
+              connection,
               locationId,
               reviewId,
               replyContent
@@ -538,9 +550,14 @@ exports.replyToInteraction = async (req, res, next) => {
         errorMessage = `Replies for ${interaction.platform} are not yet implemented`;
       }
     } catch (platformError) {
-      console.error('Error posting reply to platform:', platformError.response?.data || platformError.message);
+      const metaError = platformError.response?.data?.error || platformError.platformError;
+      const metaUserMsg = metaError?.error_user_msg || metaError?.message;
+      console.error('Error posting reply to platform:', metaUserMsg || platformError.message);
+      if (platformError.response?.data) {
+        console.error('Platform API response:', JSON.stringify(platformError.response.data));
+      }
       replyStatus = 'failed';
-      errorMessage = platformError.response?.data?.error?.message || platformError.message || 'Failed to post reply to platform';
+      errorMessage = metaUserMsg || platformError.message || 'Failed to post reply to platform';
     }
 
     // Add reply to database with platform response ID
@@ -594,6 +611,7 @@ exports.replyToInteraction = async (req, res, next) => {
         message: 'Reply sent successfully to YouTube'
       });
     } else {
+      console.error('[Inbox Reply] Failed to send to platform:', errorMessage || 'Unknown error');
       res.status(500).json({
         success: false,
         error: errorMessage || 'Failed to send reply to platform',

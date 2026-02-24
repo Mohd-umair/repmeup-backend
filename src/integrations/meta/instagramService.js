@@ -427,6 +427,7 @@ class InstagramService {
 
             if (!isFromUs && message.message) {
               let authorName = message.from?.name || message.from?.username || 'Unknown User';
+              let authorUsername = message.from?.username || null;
               let avatarUrl = undefined;
               if (message.from?.id) {
                 if (!profileCache.has(message.from.id)) {
@@ -437,6 +438,7 @@ class InstagramService {
                 if (profile) {
                   if (profile.profile_pic) avatarUrl = profile.profile_pic;
                   if (profile.name) authorName = profile.name;
+                  if (profile.username) authorUsername = profile.username;
                 }
                 if (!avatarUrl) {
                   avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
@@ -453,7 +455,7 @@ class InstagramService {
                 content: message.message,
                 author: {
                   platformId: message.from?.id,
-                  username: message.from?.username || 'unknown',
+                  username: authorUsername || 'unknown',
                   name: authorName,
                   avatarUrl
                 },
@@ -606,11 +608,20 @@ class InstagramService {
         platformResponseId: response.data.message_id
       };
     } catch (error) {
-      console.error('Instagram send message error:', error.message);
-      if (error.response) {
-        console.error('API Response:', error.response.data);
+      const data = error.response?.data;
+      const apiError = data?.error;
+      let userMsg = apiError?.error_user_msg || apiError?.message || error.message;
+      if (apiError?.code === 200 && userMsg && userMsg.includes('instagram_manage_messages')) {
+        userMsg = 'Instagram messaging requires Advanced Access for instagram_manage_messages (App Review). Until approved, you can only reply to users who are Testers on your Meta app. Add the recipient as a Tester in your app’s Roles, or complete App Review for Advanced Access.';
       }
-      throw error;
+      console.error('Instagram send message error:', userMsg);
+      if (data) {
+        console.error('Instagram API response:', JSON.stringify(data));
+      }
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
     }
   }
   /**
