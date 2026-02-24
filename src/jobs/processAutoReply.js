@@ -444,24 +444,26 @@ async function processBatchInteractions(organizationId, organization) {
 /**
  * Resolve the platform connection to use for sending. For Instagram DM we must use the thread owner
  * (the IG account that received the message) to avoid "(#100) not the thread owner".
+ * Uses $in lookup so we match whether platformUserId is stored as string or number.
  */
 async function getConnectionForReply(interaction) {
-  let connection = interaction.platformConnection;
-  if (interaction.platform === 'instagram' && interaction.type === 'dm') {
-    const igAccountId = interaction.metadata?.instagramAccountId;
-    if (igAccountId) {
-      const PlatformConnection = require('../models/PlatformConnection');
-      const threadOwner = await PlatformConnection.findOne({
-        organization: interaction.organization,
-        platform: 'instagram',
-        platformUserId: igAccountId,
-        status: 'connected',
-        isActive: true
-      }).lean();
-      if (threadOwner) connection = threadOwner;
-    }
+  const isInstagramDm = interaction.platform === 'instagram' && interaction.type === 'dm';
+  const igAccountId = interaction.metadata?.instagramAccountId;
+
+  if (isInstagramDm && igAccountId) {
+    const PlatformConnection = require('../models/PlatformConnection');
+    const threadOwner = await PlatformConnection.findOne({
+      organization: interaction.organization,
+      platform: 'instagram',
+      platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
+      status: 'connected',
+      isActive: true
+    }).lean();
+    if (threadOwner) return threadOwner;
+    return null;
   }
-  return connection;
+
+  return interaction.platformConnection;
 }
 
 /**

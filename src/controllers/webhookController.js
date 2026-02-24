@@ -323,7 +323,7 @@ exports.handleInstagramWebhook = async (req, res) => {
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
-      platformUserId: instagramId,
+      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
       isActive: true
     });
 
