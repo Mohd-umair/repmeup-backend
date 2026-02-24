@@ -440,6 +440,21 @@ exports.replyToInteraction = async (req, res, next) => {
           if (conn) connection = conn;
         }
       }
+      // Instagram DM: ensure we use the thread owner even if interaction has wrong/mismatched platformConnection
+      if (connection && interaction.platform === 'instagram' && interaction.type === 'dm') {
+        const igAccountId = interaction.metadata?.instagramAccountId;
+        const connectionIgId = connection.platformUserId?.toString?.() || connection.platformUserId;
+        if (igAccountId && connectionIgId && connectionIgId !== String(igAccountId)) {
+          const threadOwnerConn = await PlatformConnection.findOne({
+            organization: interaction.organization,
+            platform: 'instagram',
+            platformUserId: igAccountId,
+            status: 'connected',
+            isActive: true
+          }).lean();
+          if (threadOwnerConn) connection = threadOwnerConn;
+        }
+      }
       if (!connection) {
         replyStatus = 'failed';
         if (interaction.platform === 'instagram' && interaction.type === 'dm') {

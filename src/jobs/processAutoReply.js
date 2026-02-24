@@ -442,11 +442,35 @@ async function processBatchInteractions(organizationId, organization) {
 }
 
 /**
+ * Resolve the platform connection to use for sending. For Instagram DM we must use the thread owner
+ * (the IG account that received the message) to avoid "(#100) not the thread owner".
+ */
+async function getConnectionForReply(interaction) {
+  let connection = interaction.platformConnection;
+  if (interaction.platform === 'instagram' && interaction.type === 'dm') {
+    const igAccountId = interaction.metadata?.instagramAccountId;
+    if (igAccountId) {
+      const PlatformConnection = require('../models/PlatformConnection');
+      const threadOwner = await PlatformConnection.findOne({
+        organization: interaction.organization,
+        platform: 'instagram',
+        platformUserId: igAccountId,
+        status: 'connected',
+        isActive: true
+      }).lean();
+      if (threadOwner) connection = threadOwner;
+    }
+  }
+  return connection;
+}
+
+/**
  * Send reply to platform
  */
 async function sendReplyToPlatform(interaction, content, organization) {
   try {
-    if (!interaction.platformConnection || interaction.platformConnection.status !== 'connected') {
+    const connection = await getConnectionForReply(interaction);
+    if (!connection || connection.status !== 'connected' || !connection.isActive) {
       return false;
     }
 
@@ -456,7 +480,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
     if (interaction.platform === 'youtube') {
       const youtubeService = require('../integrations/google/youtubeService');
       const result = await youtubeService.replyToComment(
-        interaction.platformConnection,
+        connection,
         interaction.platformId,
         content
       );
@@ -469,13 +493,14 @@ async function sendReplyToPlatform(interaction, content, organization) {
       const instagramService = require('../integrations/meta/instagramService');
       let result;
       if (interaction.type === 'dm') {
-        const pageId = interaction.platformConnection.platformPageId || interaction.platformConnection.platformUserId;
+        // Must use Facebook Page ID (not Instagram business account ID / platformUserId)
+        const pageId = connection.platformPageId || connection.platformData?.pageId;
         const recipientId = interaction.author?.platformId;
         if (pageId && recipientId) {
           result = await instagramService.sendMessage(
             recipientId,
             content,
-            interaction.platformConnection.accessToken,
+            connection.accessToken,
             pageId,
             false
           );
@@ -485,7 +510,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
         result = await instagramService.replyToComment(
           interaction.platformId,
           content,
-          interaction.platformConnection.accessToken
+          connection.accessToken
         );
       }
       if (result && result.success && result.platformResponseId) {
@@ -495,7 +520,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
     } else if (interaction.platform === 'facebook') {
       const facebookService = require('../integrations/meta/facebookService');
       const result = await facebookService.replyToComment(
-        interaction.platformConnection,
+        connection,
         interaction.platformId,
         content
       );
