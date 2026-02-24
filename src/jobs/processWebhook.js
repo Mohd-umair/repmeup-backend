@@ -201,10 +201,11 @@ async function handleInstagramWebhook(payload, organizationId) {
         content: text,
         author,
         threadId: senderId,
-        platformCreatedAt: new Date(event.timestamp),
-        'metadata.instagramAccountId': igAccountId
+        platformCreatedAt: new Date(event.timestamp)
       };
+      if (igAccountId) updateFields['metadata.instagramAccountId'] = igAccountId;
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
+      if (!igAccountId) console.warn('[Instagram Webhook] entry.id missing – reply may fail for this DM', { mid: mid?.slice?.(0, 20) });
 
       const interaction = await Interaction.findOneAndUpdate(
         { platformId: mid },

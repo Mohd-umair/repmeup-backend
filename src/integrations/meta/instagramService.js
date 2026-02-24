@@ -437,6 +437,7 @@ class InstagramService {
                   avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
                 }
               }
+              const igAccountId = platformConnection.platformUserId || platformConnection.platformData?.businessAccountId;
               const interaction = {
                 organization: platformConnection.organization,
                 platformConnection: platformConnection._id,
@@ -455,7 +456,8 @@ class InstagramService {
                 metadata: {
                   conversationId: conversation.id,
                   participants: conversation.participants?.data || [],
-                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0)
+                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0),
+                  ...(igAccountId && { instagramAccountId: String(igAccountId) })
                 },
                 platformCreatedAt: new Date(message.created_time),
                 status: 'unread',

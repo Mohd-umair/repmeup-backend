@@ -434,7 +434,7 @@ exports.replyToInteraction = async (req, res, next) => {
         }
       }
 
-      if (!connection) {
+      if (!connection && !isInstagramDm) {
         connection = interaction.platformConnection;
       }
       if (!connection && interaction.platform && interaction.organization && !isInstagramDm) {
@@ -445,6 +445,10 @@ exports.replyToInteraction = async (req, res, next) => {
           isActive: true
         }).lean();
         if (conn) connection = conn;
+      }
+      // Instagram DM without metadata: do not guess – require sync so we get the correct thread owner
+      if (isInstagramDm && !igAccountId) {
+        connection = null;
       }
       // For Instagram DM with metadata: never use a connection that isn't the thread owner
       if (connection && isInstagramDm && igAccountId) {
@@ -463,7 +467,7 @@ exports.replyToInteraction = async (req, res, next) => {
       if (!connection) {
         replyStatus = 'failed';
         if (interaction.platform === 'instagram' && interaction.type === 'dm') {
-          errorMessage = 'Could not determine which Instagram account this conversation belongs to. Please reconnect the Instagram account that receives these DMs in Settings.';
+          errorMessage = 'This conversation is not linked to an Instagram account. Go to Settings → Integrations, open your Instagram connection and click Sync so we can link it to the account that receives these DMs, then try replying again.';
         } else {
           errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
         }
