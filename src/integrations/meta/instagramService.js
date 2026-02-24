@@ -341,28 +341,21 @@ class InstagramService {
             console.error('  Trace ID:', apiError.fbtrace_id);
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
-            // Check for specific permission errors
-            if (apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
+            // Check for specific permission/capability errors (3 = capability, 10/200/190 = permission)
+            if (apiError.code === 3 || apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
               console.warn('');
-              console.warn('⚠️  [Instagram DM] PERMISSION ERROR DETECTED');
+              console.warn('⚠️  [Instagram DM] CAPABILITY/PERMISSION ERROR (code ' + apiError.code + ')');
               console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              console.warn('📋 Instagram DMs require additional setup:');
-              console.warn('');
+              if (apiError.code === 3) {
+                console.warn('   (#3) Application does not have the capability to make this API call.');
+                console.warn('   → Get Advanced Access for instagram_manage_messages (App Review).');
+                console.warn('   → Ensure "Instagram Messaging" product is added to your Meta app.');
+              }
+              console.warn('📋 Instagram DMs require:');
               console.warn('   1. Add "Instagram Messaging" product to your Meta app');
-              console.warn('      → https://developers.facebook.com/apps/1241029857870706/products/');
-              console.warn('');
-              console.warn('   2. Request "instagram_manage_messages" permission');
-              console.warn('      → App Review → Permissions and Features');
-              console.warn('');
-              console.warn('   3. Complete Business Verification');
-              console.warn('      → Settings → Basic → Business Verification');
-              console.warn('');
-              console.warn('   4. Switch app to Live mode (not Development)');
-              console.warn('      → Settings → Basic → App Mode');
-              console.warn('');
-              console.warn('   5. After approval, reconnect Instagram in app settings');
-              console.warn('');
-              console.warn('📖 See: backend/docs/INSTAGRAM_DM_SETUP.md for full guide');
+              console.warn('   2. Request instagram_manage_messages and get Advanced Access (App Review)');
+              console.warn('   3. After approval, reconnect Instagram in app settings');
+              console.warn('📖 See: docs/META_APP_REVIEW_instagram_manage_messages.md');
               console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
               console.warn('✅ Comments will continue to work normally');
               console.warn('');
