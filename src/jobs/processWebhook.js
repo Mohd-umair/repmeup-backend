@@ -179,6 +179,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
       if (!mid || !senderId) continue;
 
+      console.log('[Instagram Webhook] Processing DM from sender', senderId, '-> fetching profile for username...');
       // Webhook only sends sender.id; fetch name/username via User Profile API (GET /{ig-scoped-id})
       const profile = await fetchInstagramAuthorProfile(organizationId, senderId);
       const author = {
