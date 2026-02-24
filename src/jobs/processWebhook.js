@@ -152,13 +152,14 @@ async function handleInstagramWebhook(payload, organizationId) {
     if (!entry) return null;
 
     // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
-    const igAccountId = entry.id;
+    const igAccountIdRaw = entry.id;
+    const igAccountId = igAccountIdRaw != null ? String(igAccountIdRaw) : null;
     let platformConnectionId = null;
     if (igAccountId) {
       const conn = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'instagram',
-        platformUserId: igAccountId,
+        platformUserId: { $in: [igAccountId, igAccountIdRaw].filter(Boolean) },
         status: 'connected',
         isActive: true
       }).select('_id').lean();
