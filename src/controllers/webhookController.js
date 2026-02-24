@@ -310,21 +310,15 @@ exports.verifyInstagramWebhook = (req, res) => {
  */
 exports.handleInstagramWebhook = async (req, res) => {
   try {
-    const { webhookQueue } = require('../config/queue');
-    
-    console.log('Instagram webhook received:', JSON.stringify(req.body, null, 2));
-
-    // Acknowledge receipt immediately
+    // Acknowledge receipt immediately so Meta doesn't retry
     res.sendStatus(200);
 
-    // Process webhook asynchronously
     const entry = req.body.entry?.[0];
     if (!entry) {
       console.log('No entry in Instagram webhook payload');
       return;
     }
 
-    // Determine organization from Instagram account ID
     const instagramId = entry.id;
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
@@ -338,20 +332,19 @@ exports.handleInstagramWebhook = async (req, res) => {
       return;
     }
 
-    // Queue webhook for processing
-    await webhookQueue.add({
-      platform: 'instagram',
-      payload: req.body,
-      organizationId: connection.organization.toString()
-    }, {
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 2000
-      }
-    });
+    const organizationId = connection.organization.toString();
 
-    console.log('Instagram webhook queued for processing');
+    // Process and save DM to database immediately (don't wait for queue or sync)
+    const processWebhook = require('../jobs/processWebhook');
+    try {
+      await processWebhook({
+        data: { platform: 'instagram', payload: req.body, organizationId },
+        id: 'instagram-' + Date.now()
+      });
+      console.log('Instagram webhook processed and DM saved to database');
+    } catch (processErr) {
+      console.error('Instagram webhook processing error:', processErr.message);
+    }
   } catch (error) {
     console.error('Instagram webhook handler error:', error);
     // Don't send error response as we already sent 200
