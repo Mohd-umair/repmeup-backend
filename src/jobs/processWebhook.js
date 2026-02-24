@@ -108,11 +108,11 @@ module.exports = async function processWebhook(job) {
 };
 
 /**
- * Fetch Instagram commenter/DM author profile picture (for inbox avatar).
- * Returns avatarUrl or undefined. Logs for debug.
+ * Fetch Instagram commenter/DM author profile (name, username, avatar) for inbox display.
+ * Returns { name, username, avatarUrl } or null.
  */
-async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
-  if (!igUserId) return undefined;
+async function fetchInstagramAuthorProfile(organizationId, igUserId) {
+  if (!igUserId) return null;
   try {
     const connection = await PlatformConnection.findOne({
       organization: organizationId,
@@ -120,12 +120,23 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
       status: 'connected',
       isActive: true
     }).select('accessToken');
-    if (!connection?.accessToken) return undefined;
+    if (!connection?.accessToken) return null;
     const profile = await instagramService._fetchInstagramUserProfile(connection.accessToken, igUserId);
-    return profile?.profile_pic || profile?.profile_picture_url || undefined;
+    if (!profile) return null;
+    return {
+      name: profile.name || profile.username || null,
+      username: profile.username || null,
+      avatarUrl: profile.profile_pic || profile.profile_picture_url || null
+    };
   } catch (_) {
-    return undefined;
+    return null;
   }
+}
+
+/** @deprecated Use fetchInstagramAuthorProfile for name/username too. Returns avatarUrl or undefined. */
+async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
+  const p = await fetchInstagramAuthorProfile(organizationId, igUserId);
+  return p?.avatarUrl || undefined;
 }
 
 /**
@@ -141,6 +152,20 @@ async function handleInstagramWebhook(payload, organizationId) {
     console.log('Entry++++++++++++++++++++++++++++++++++++++++++++++++++++:', JSON.stringify(entry, null, 2));
     if (!entry) return null;
 
+    // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
+    const igAccountId = entry.id;
+    let platformConnectionId = null;
+    if (igAccountId) {
+      const conn = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'instagram',
+        platformUserId: igAccountId,
+        status: 'connected',
+        isActive: true
+      }).select('_id').lean();
+      if (conn) platformConnectionId = conn._id;
+    }
+
     // --- Instagram Messaging (DMs) format: entry.messaging[] ---
     // Meta sends DMs in this format when "messages" is subscribed for Instagram
     const messaging = entry.messaging || [];
@@ -155,27 +180,30 @@ async function handleInstagramWebhook(payload, organizationId) {
       const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
       if (!mid || !senderId) continue;
 
-      const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, senderId);
+      const profile = await fetchInstagramAuthorProfile(organizationId, senderId);
       const author = {
         platformId: senderId,
-        username: undefined,
-        name: undefined
+        username: profile?.username ?? undefined,
+        name: profile?.name ?? undefined
       };
-      if (avatarUrl) author.avatarUrl = avatarUrl;
+      if (profile?.avatarUrl) author.avatarUrl = profile.avatarUrl;
+
+      const updateFields = {
+        organization: organizationId,
+        platform: 'instagram',
+        type: 'dm',
+        platformId: mid,
+        content: text,
+        author,
+        threadId: senderId,
+        platformCreatedAt: new Date(event.timestamp)
+      };
+      if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
       const interaction = await Interaction.findOneAndUpdate(
         { platformId: mid },
         {
-          $set: {
-            organization: organizationId,
-            platform: 'instagram',
-            type: 'dm',
-            platformId: mid,
-            content: text,
-            author,
-            threadId: senderId,
-            platformCreatedAt: new Date(event.timestamp)
-          },
+          $set: updateFields,
           $setOnInsert: { status: 'unread', isRead: false }
         },
         { upsert: true, new: true }
