@@ -414,30 +414,8 @@ exports.replyToInteraction = async (req, res, next) => {
     // Send actual reply to platform via integration service
     try {
       // Resolve platform connection (may be missing if interaction was created via webhook without it)
-      let connection = null;
-      const isInstagramDm = interaction.platform === 'instagram' && interaction.type === 'dm';
-      const igAccountId = interaction.metadata?.instagramAccountId;
-
-      if (isInstagramDm && igAccountId) {
-        // Instagram DM: MUST use the connection that owns the thread (platformUserId === igAccountId).
-        // Match both string and number to avoid type mismatch (webhook sends string, DB may have number).
-        const threadOwnerConn = await PlatformConnection.findOne({
-          organization: interaction.organization,
-          platform: 'instagram',
-          platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
-          status: 'connected',
-          isActive: true
-        }).lean();
-        if (threadOwnerConn) connection = threadOwnerConn;
-        if (!connection) {
-          console.warn('[Inbox Reply] Instagram DM: no connection for thread owner', { interactionId: interaction._id, metadataIgId: igAccountId });
-        }
-      }
-
-      if (!connection && !isInstagramDm) {
-        connection = interaction.platformConnection;
-      }
-      if (!connection && interaction.platform && interaction.organization && !isInstagramDm) {
+      let connection = interaction.platformConnection;
+      if (!connection && interaction.platform && interaction.organization) {
         const conn = await PlatformConnection.findOne({
           organization: interaction.organization,
           platform: interaction.platform,
@@ -446,31 +424,9 @@ exports.replyToInteraction = async (req, res, next) => {
         }).lean();
         if (conn) connection = conn;
       }
-      // Instagram DM without metadata: do not guess – require sync so we get the correct thread owner
-      if (isInstagramDm && !igAccountId) {
-        connection = null;
-      }
-      // For Instagram DM with metadata: never use a connection that isn't the thread owner
-      if (connection && isInstagramDm && igAccountId) {
-        const connectionIgId = connection.platformUserId != null ? String(connection.platformUserId) : '';
-        if (connectionIgId !== String(igAccountId)) {
-          const threadOwnerConn = await PlatformConnection.findOne({
-            organization: interaction.organization,
-            platform: 'instagram',
-            platformUserId: { $in: [igAccountId, String(igAccountId)] },
-            status: 'connected',
-            isActive: true
-          }).lean();
-          connection = threadOwnerConn || null;
-        }
-      }
       if (!connection) {
         replyStatus = 'failed';
-        if (interaction.platform === 'instagram' && interaction.type === 'dm') {
-          errorMessage = 'This conversation is not linked to an Instagram account. Go to Settings → Integrations, open your Instagram connection and click Sync so we can link it to the account that receives these DMs, then try replying again.';
-        } else {
-          errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
-        }
+        errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
       } else if (connection.status !== 'connected' || !connection.isActive) {
         replyStatus = 'failed';
         errorMessage = 'Platform connection is not active. Please reconnect this account in Settings.';
@@ -501,7 +457,6 @@ exports.replyToInteraction = async (req, res, next) => {
             errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect Instagram in Settings so we have the Facebook Page ID.';
             console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId });
           } else {
-            console.log('[Inbox Reply] Instagram DM: using connection', { connectionId: connection._id, platformUserId: connection.platformUserId, pageId, metadataIgId: igAccountId });
             result = await instagramService.sendMessage(
               recipientId,
               replyContent,
