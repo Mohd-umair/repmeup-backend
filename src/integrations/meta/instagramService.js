@@ -341,21 +341,28 @@ class InstagramService {
             console.error('  Trace ID:', apiError.fbtrace_id);
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
-            // Check for specific permission/capability errors (3 = capability, 10/200/190 = permission)
-            if (apiError.code === 3 || apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
+            // Check for specific permission errors
+            if (apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
               console.warn('');
-              console.warn('⚠️  [Instagram DM] CAPABILITY/PERMISSION ERROR (code ' + apiError.code + ')');
+              console.warn('⚠️  [Instagram DM] PERMISSION ERROR DETECTED');
               console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              if (apiError.code === 3) {
-                console.warn('   (#3) Application does not have the capability to make this API call.');
-                console.warn('   → Get Advanced Access for instagram_manage_messages (App Review).');
-                console.warn('   → Ensure "Instagram Messaging" product is added to your Meta app.');
-              }
-              console.warn('📋 Instagram DMs require:');
+              console.warn('📋 Instagram DMs require additional setup:');
+              console.warn('');
               console.warn('   1. Add "Instagram Messaging" product to your Meta app');
-              console.warn('   2. Request instagram_manage_messages and get Advanced Access (App Review)');
-              console.warn('   3. After approval, reconnect Instagram in app settings');
-              console.warn('📖 See: docs/META_APP_REVIEW_instagram_manage_messages.md');
+              console.warn('      → https://developers.facebook.com/apps/1241029857870706/products/');
+              console.warn('');
+              console.warn('   2. Request "instagram_manage_messages" permission');
+              console.warn('      → App Review → Permissions and Features');
+              console.warn('');
+              console.warn('   3. Complete Business Verification');
+              console.warn('      → Settings → Basic → Business Verification');
+              console.warn('');
+              console.warn('   4. Switch app to Live mode (not Development)');
+              console.warn('      → Settings → Basic → App Mode');
+              console.warn('');
+              console.warn('   5. After approval, reconnect Instagram in app settings');
+              console.warn('');
+              console.warn('📖 See: backend/docs/INSTAGRAM_DM_SETUP.md for full guide');
               console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
               console.warn('✅ Comments will continue to work normally');
               console.warn('');
@@ -420,7 +427,6 @@ class InstagramService {
 
             if (!isFromUs && message.message) {
               let authorName = message.from?.name || message.from?.username || 'Unknown User';
-              let authorUsername = message.from?.username || null;
               let avatarUrl = undefined;
               if (message.from?.id) {
                 if (!profileCache.has(message.from.id)) {
@@ -431,13 +437,11 @@ class InstagramService {
                 if (profile) {
                   if (profile.profile_pic) avatarUrl = profile.profile_pic;
                   if (profile.name) authorName = profile.name;
-                  if (profile.username) authorUsername = profile.username;
                 }
                 if (!avatarUrl) {
                   avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
                 }
               }
-              const igAccountId = platformConnection.platformUserId || platformConnection.platformData?.businessAccountId;
               const interaction = {
                 organization: platformConnection.organization,
                 platformConnection: platformConnection._id,
@@ -449,15 +453,14 @@ class InstagramService {
                 content: message.message,
                 author: {
                   platformId: message.from?.id,
-                  username: authorUsername || 'unknown',
+                  username: message.from?.username || 'unknown',
                   name: authorName,
                   avatarUrl
                 },
                 metadata: {
                   conversationId: conversation.id,
                   participants: conversation.participants?.data || [],
-                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0),
-                  ...(igAccountId && { instagramAccountId: String(igAccountId) })
+                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0)
                 },
                 platformCreatedAt: new Date(message.created_time),
                 status: 'unread',

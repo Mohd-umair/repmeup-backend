@@ -108,11 +108,11 @@ module.exports = async function processWebhook(job) {
 };
 
 /**
- * Fetch Instagram commenter/DM author profile (name, username, avatar) for inbox display.
- * Returns { name, username, avatarUrl } or null.
+ * Fetch Instagram commenter/DM author profile picture (for inbox avatar).
+ * Returns avatarUrl or undefined. Logs for debug.
  */
-async function fetchInstagramAuthorProfile(organizationId, igUserId) {
-  if (!igUserId) return null;
+async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
+  if (!igUserId) return undefined;
   try {
     const connection = await PlatformConnection.findOne({
       organization: organizationId,
@@ -120,23 +120,12 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId) {
       status: 'connected',
       isActive: true
     }).select('accessToken');
-    if (!connection?.accessToken) return null;
+    if (!connection?.accessToken) return undefined;
     const profile = await instagramService._fetchInstagramUserProfile(connection.accessToken, igUserId);
-    if (!profile) return null;
-    return {
-      name: profile.name || profile.username || null,
-      username: profile.username || null,
-      avatarUrl: profile.profile_pic || profile.profile_picture_url || null
-    };
+    return profile?.profile_pic || profile?.profile_picture_url || undefined;
   } catch (_) {
-    return null;
+    return undefined;
   }
-}
-
-/** @deprecated Use fetchInstagramAuthorProfile for name/username too. Returns avatarUrl or undefined. */
-async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
-  const p = await fetchInstagramAuthorProfile(organizationId, igUserId);
-  return p?.avatarUrl || undefined;
 }
 
 /**
@@ -147,21 +136,19 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
  */
 async function handleInstagramWebhook(payload, organizationId) {
   try {
-
-    console.log('Payload++++++++++++++++++++++++++++++++++++++++++++++++++++:', JSON.stringify(payload, null, 2));
     const entry = payload.entry?.[0];
 
+    console.log('Entry++++++++++++++++++++++++++++++++++++++++++++++++++++:', JSON.stringify(entry, null, 2));
     if (!entry) return null;
 
     // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
-    const igAccountIdRaw = entry.id;
-    const igAccountId = igAccountIdRaw != null ? String(igAccountIdRaw) : null;
+    const igAccountId = entry.id;
     let platformConnectionId = null;
     if (igAccountId) {
       const conn = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'instagram',
-        platformUserId: { $in: [igAccountId, igAccountIdRaw].filter(Boolean) },
+        platformUserId: igAccountId,
         status: 'connected',
         isActive: true
       }).select('_id').lean();
@@ -169,79 +156,48 @@ async function handleInstagramWebhook(payload, organizationId) {
     }
 
     // --- Instagram Messaging (DMs) format: entry.messaging[] ---
-    // Meta sends: "message" for new messages, "message_edit" for edits. entry.id = IG business account that received the message.
+    // Meta sends DMs in this format when "messages" is subscribed for Instagram
     const messaging = entry.messaging || [];
     for (const event of messaging) {
       const message = event.message;
-      const messageEdit = event.message_edit;
+      if (!message) continue;
+      // Skip echo (messages sent by our business) and unsupported/deleted
+      if (message.is_echo || message.is_deleted || message.is_unsupported) continue;
 
-      if (message) {
-        // New (or incoming) message
-        if (message.is_echo || message.is_deleted || message.is_unsupported) continue;
+      const senderId = event.sender?.id;
+      const mid = message.mid;
+      const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
+      if (!mid || !senderId) continue;
 
-        const senderId = event.sender?.id;
-        const mid = message.mid;
-        const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
-        if (!mid || !senderId) continue;
+      const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, senderId);
+      const author = {
+        platformId: senderId,
+        username: undefined,
+        name: undefined
+      };
+      if (avatarUrl) author.avatarUrl = avatarUrl;
 
-        console.log('[Instagram Webhook] Processing DM from sender', senderId, '-> fetching profile for username...');
-        const profile = await fetchInstagramAuthorProfile(organizationId, senderId);
-        const author = {
-          platformId: senderId,
-          name: profile?.name || profile?.username || 'Instagram User',
-          username: profile?.username ?? undefined
-        };
-        if (profile?.avatarUrl) author.avatarUrl = profile.avatarUrl;
-        if (profile?.username) {
-          console.log('[Instagram Webhook] DM from sender', senderId, '-> username:', profile.username, 'name:', profile.name || profile.username);
-        }
+      const updateFields = {
+        organization: organizationId,
+        platform: 'instagram',
+        type: 'dm',
+        platformId: mid,
+        content: text,
+        author,
+        threadId: senderId,
+        platformCreatedAt: new Date(event.timestamp)
+      };
+      if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
-        const updateFields = {
-          organization: organizationId,
-          platform: 'instagram',
-          type: 'dm',
-          platformId: mid,
-          content: text,
-          author,
-          threadId: senderId,
-          platformCreatedAt: new Date(event.timestamp)
-        };
-        if (igAccountId) updateFields['metadata.instagramAccountId'] = igAccountId;
-        if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
-        if (!igAccountId) console.warn('[Instagram Webhook] entry.id missing – reply may fail for this DM', { mid: mid?.slice?.(0, 20) });
-
-        const interaction = await Interaction.findOneAndUpdate(
-          { platformId: mid },
-          {
-            $set: updateFields,
-            $setOnInsert: { status: 'unread', isRead: false }
-          },
-          { upsert: true, new: true }
-        );
-        return interaction;
-      }
-
-      if (messageEdit && messageEdit.mid) {
-        // Message edit: ensure existing interaction has thread owner so reply works
-        const mid = messageEdit.mid;
-        const senderId = event.sender?.id;
-        const updateFields = {
-          'metadata.lastEditAt': new Date(event.timestamp || Date.now())
-        };
-        if (igAccountId) updateFields['metadata.instagramAccountId'] = igAccountId;
-        if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
-        if (senderId) updateFields.threadId = senderId;
-
-        const interaction = await Interaction.findOneAndUpdate(
-          { platformId: mid },
-          { $set: updateFields },
-          { new: true }
-        );
-        if (interaction) {
-          console.log('[Instagram Webhook] Updated DM (edit) with thread owner', { mid: mid?.slice?.(0, 30), igAccountId });
-        }
-        return interaction;
-      }
+      const interaction = await Interaction.findOneAndUpdate(
+        { platformId: mid },
+        {
+          $set: updateFields,
+          $setOnInsert: { status: 'unread', isRead: false }
+        },
+        { upsert: true, new: true }
+      );
+      return interaction;
     }
 
     // --- Graph API format: entry.changes[] (comments, or legacy "messages") ---

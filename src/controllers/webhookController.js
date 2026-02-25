@@ -307,9 +307,12 @@ exports.verifyInstagramWebhook = (req, res) => {
 /**
  * Handle Instagram webhook events
  * POST /api/webhooks/instagram
+ * Option A: 200 immediately, queue for processing (worker saves DM to DB; retries on failure).
  */
 exports.handleInstagramWebhook = async (req, res) => {
   try {
+    const { webhookQueue } = require('../config/queue');
+
     // Acknowledge receipt immediately so Meta doesn't retry
     res.sendStatus(200);
 
@@ -334,17 +337,19 @@ exports.handleInstagramWebhook = async (req, res) => {
 
     const organizationId = connection.organization.toString();
 
-    // Process and save DM to database immediately (don't wait for queue or sync)
-    const processWebhook = require('../jobs/processWebhook');
-    try {
-      await processWebhook({
-        data: { platform: 'instagram', payload: req.body, organizationId },
-        id: 'instagram-' + Date.now()
-      });
-      console.log('Instagram webhook processed and DM saved to database');
-    } catch (processErr) {
-      console.error('Instagram webhook processing error:', processErr.message);
-    }
+    await webhookQueue.add({
+      platform: 'instagram',
+      payload: req.body,
+      organizationId
+    }, {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000
+      }
+    });
+
+    console.log('Instagram webhook queued for processing');
   } catch (error) {
     console.error('Instagram webhook handler error:', error);
     // Don't send error response as we already sent 200
