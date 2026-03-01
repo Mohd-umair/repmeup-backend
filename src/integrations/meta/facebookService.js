@@ -47,6 +47,45 @@ class FacebookService {
   }
 
   /**
+   * Send a Messenger (Page DM) message to a user.
+   * @param {string} recipientPsid - Page-scoped ID of the recipient (person who messaged the Page)
+   * @param {string} text - Message text
+   * @param {string} accessToken - Page access token
+   * @param {string} pageId - Facebook Page ID
+   * @param {boolean} useHumanAgentTag - If true, send with messaging_type MESSAGE_TAG and tag HUMAN_AGENT (for outside 24h window)
+   * @returns {Promise<{ success: boolean, platformResponseId?: string, error?: string }>}
+   */
+  async sendMessage(recipientPsid, text, accessToken, pageId, useHumanAgentTag = false) {
+    if (!pageId || !recipientPsid || !accessToken) {
+      return { success: false, error: 'Missing pageId, recipientPsid, or accessToken' };
+    }
+    try {
+      const body = {
+        recipient: { id: String(recipientPsid) },
+        message: { text: String(text) }
+      };
+      if (useHumanAgentTag) {
+        body.messaging_type = 'MESSAGE_TAG';
+        body.tag = 'HUMAN_AGENT';
+      } else {
+        body.messaging_type = 'RESPONSE';
+      }
+      const response = await axios.post(
+        `${this.baseURL}/${pageId}/messages`,
+        body,
+        { params: { access_token: accessToken }, timeout: 15000 }
+      );
+      const messageId = response.data?.message_id;
+      return { success: true, platformResponseId: messageId };
+    } catch (err) {
+      const apiError = err.response?.data?.error;
+      const message = apiError?.message || err.message;
+      console.error('[Facebook] sendMessage error:', message, apiError?.code);
+      return { success: false, error: message };
+    }
+  }
+
+  /**
    * Fetch all posts and comments from Facebook Page
    * Updated to match new Interaction schema (similar to Instagram)
    */

@@ -255,7 +255,7 @@ exports.handleFacebookWebhook = async (req, res) => {
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'facebook',
-      platformPageId: pageId,
+      platformPageId: { $in: [String(pageId), pageId].filter(Boolean) },
       isActive: true
     });
 
