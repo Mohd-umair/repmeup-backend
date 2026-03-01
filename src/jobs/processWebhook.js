@@ -185,7 +185,8 @@ async function handleInstagramWebhook(payload, organizationId) {
         author,
         threadId: senderId,
         platformCreatedAt: new Date(event.timestamp),
-        'metadata.lastMid': mid
+        'metadata.lastMid': mid,
+        'metadata.instagramAccountId': igAccountId
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
@@ -193,7 +194,13 @@ async function handleInstagramWebhook(payload, organizationId) {
         { platformId: threadPlatformId },
         {
           $set: updateFields,
-          $setOnInsert: { status: 'unread', isRead: false }
+          $setOnInsert: { status: 'unread', isRead: false },
+          $push: {
+            'metadata.incomingMessages': {
+              $each: [{ mid, text, timestamp: event.timestamp }],
+              $slice: -100
+            }
+          }
         },
         { upsert: true, new: true }
       );
