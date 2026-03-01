@@ -137,8 +137,6 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
 async function handleInstagramWebhook(payload, organizationId) {
   try {
     const entry = payload.entry?.[0];
-
-    console.log('Entry++++++++++++++++++++++++++++++++++++++++++++++++++++:', JSON.stringify(entry, null, 2));
     if (!entry) return null;
 
     // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
@@ -156,12 +154,11 @@ async function handleInstagramWebhook(payload, organizationId) {
     }
 
     // --- Instagram Messaging (DMs) format: entry.messaging[] ---
-    // Meta sends DMs in this format when "messages" is subscribed for Instagram
+    // One conversation thread per sender: platformId = dm_igAccountId_senderId (not per-message mid)
     const messaging = entry.messaging || [];
     for (const event of messaging) {
       const message = event.message;
       if (!message) continue;
-      // Skip echo (messages sent by our business) and unsupported/deleted
       if (message.is_echo || message.is_deleted || message.is_unsupported) continue;
 
       const senderId = event.sender?.id;
@@ -177,20 +174,23 @@ async function handleInstagramWebhook(payload, organizationId) {
       };
       if (avatarUrl) author.avatarUrl = avatarUrl;
 
+      // One thread per conversation (IG account + sender), not per message
+      const threadPlatformId = `dm_${String(igAccountId)}_${String(senderId)}`;
       const updateFields = {
         organization: organizationId,
         platform: 'instagram',
         type: 'dm',
-        platformId: mid,
+        platformId: threadPlatformId,
         content: text,
         author,
         threadId: senderId,
-        platformCreatedAt: new Date(event.timestamp)
+        platformCreatedAt: new Date(event.timestamp),
+        'metadata.lastMid': mid
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
       const interaction = await Interaction.findOneAndUpdate(
-        { platformId: mid },
+        { platformId: threadPlatformId },
         {
           $set: updateFields,
           $setOnInsert: { status: 'unread', isRead: false }
