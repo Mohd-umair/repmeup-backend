@@ -347,14 +347,94 @@ async function handleInstagramWebhook(payload, organizationId) {
 
 /**
  * Handle Facebook webhook
+ * Supports:
+ * 1. Messenger (Page DMs): entry.messaging[] - sender.id (PSID), message.mid, message.text
+ * 2. Feed comments: entry.changes[] with field "feed", item "comment"
+ * 3. Legacy conversations: entry.changes[] with field "conversations"
  */
 async function handleFacebookWebhook(payload, organizationId) {
   try {
     const entry = payload.entry?.[0];
     if (!entry) return null;
 
-    const changes = entry.changes || [];
+    const pageId = entry.id;
 
+    // Resolve Page connection (for DMs we need token and connection for reply)
+    let platformConnectionId = null;
+    let pageConnection = null;
+    if (pageId) {
+      const conn = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'facebook',
+        platformPageId: { $in: [String(pageId), pageId].filter(Boolean) },
+        status: 'connected',
+        isActive: true
+      }).select('_id accessToken').lean();
+      if (conn) {
+        platformConnectionId = conn._id;
+        pageConnection = conn;
+      }
+    }
+
+    // --- Messenger (Page DMs) format: entry.messaging[] ---
+    const messaging = entry.messaging || [];
+    for (const event of messaging) {
+      const message = event.message;
+      if (!message) continue;
+      if (message.is_echo || message.is_deleted) continue;
+
+      const senderId = event.sender?.id;
+      const mid = message.mid;
+      const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
+      if (!mid || !senderId) continue;
+
+      const profile = await fetchFacebookSenderProfile(organizationId, pageId, senderId, pageConnection?.accessToken);
+      const author = {
+        platformId: senderId,
+        username: profile.name,
+        name: profile.name
+      };
+      if (profile.profilePic) author.avatarUrl = profile.profilePic;
+
+      const threadPlatformId = `dm_${String(pageId)}_${String(senderId)}`;
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
+      if (existing && existing.metadata?.lastMid === mid) {
+        return await Interaction.findById(existing._id);
+      }
+
+      const updateFields = {
+        organization: organizationId,
+        platform: 'facebook',
+        type: 'dm',
+        platformId: threadPlatformId,
+        content: text,
+        author,
+        threadId: senderId,
+        platformCreatedAt: new Date(event.timestamp),
+        'metadata.lastMid': mid,
+        'metadata.facebookPageId': pageId
+      };
+      if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
+
+      const interaction = await Interaction.findOneAndUpdate(
+        { platformId: threadPlatformId },
+        {
+          $set: updateFields,
+          $setOnInsert: { status: 'unread', isRead: false },
+          $push: {
+            'metadata.incomingMessages': {
+              $each: [{ mid, text, timestamp: event.timestamp }],
+              $slice: -100
+            }
+          }
+        },
+        { upsert: true, new: true }
+      );
+      return interaction;
+    }
+
+    // --- Feed comments and legacy conversations: entry.changes[] ---
+    const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'feed' && change.value.item === 'comment') {
         // New comment on post
@@ -388,7 +468,7 @@ async function handleFacebookWebhook(payload, organizationId) {
       }
 
       if (change.field === 'conversations') {
-        // New message
+        // Legacy format: New message
         const message = change.value;
 
         const interaction = await Interaction.findOneAndUpdate(
@@ -420,6 +500,42 @@ async function handleFacebookWebhook(payload, organizationId) {
   } catch (error) {
     console.error('Facebook webhook handler error:', error);
     throw error;
+  }
+}
+
+/**
+ * Fetch Facebook Messenger sender profile (name, profile_pic) for PSID.
+ * Uses Graph API GET /{psid}?fields=name,profile_pic with Page access token.
+ */
+async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTokenFromConnection = null) {
+  if (!psid) return {};
+  let token = accessTokenFromConnection;
+  if (!token && pageId) {
+    const conn = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'facebook',
+      platformPageId: { $in: [String(pageId), pageId] },
+      status: 'connected',
+      isActive: true
+    }).select('accessToken').lean();
+    token = conn?.accessToken;
+  }
+  if (!token) return {};
+  try {
+    const axios = require('axios');
+    const baseUrl = `https://graph.facebook.com/v18.0`;
+    const res = await axios.get(`${baseUrl}/${psid}`, {
+      params: { fields: 'name,profile_pic', access_token: token },
+      timeout: 5000
+    });
+    const data = res.data || {};
+    return {
+      name: data.name || undefined,
+      profilePic: data.profile_pic || undefined
+    };
+  } catch (err) {
+    console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid, err.response?.data?.error?.message || err.message);
+    return {};
   }
 }
 

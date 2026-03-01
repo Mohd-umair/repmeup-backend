@@ -244,8 +244,9 @@ const interactionSchema = new mongoose.Schema({
     }],
     lastMid: String,
     instagramAccountId: String,
-    
-    // For reviews
+
+    // For Facebook Messenger DM thread
+    facebookPageId: String,
     rating: {
       type: Number,
       min: 1,

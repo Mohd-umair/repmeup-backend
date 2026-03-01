@@ -422,6 +422,13 @@ exports.replyToInteraction = async (req, res, next) => {
         if (parts.length >= 3) igAccountId = parts[1];
       }
 
+      const isFacebookDm = interaction.platform === 'facebook' && interaction.type === 'dm';
+      let facebookPageId = interaction.metadata?.facebookPageId;
+      if (isFacebookDm && !facebookPageId && interaction.platformId && interaction.platformId.startsWith('dm_')) {
+        const parts = interaction.platformId.split('_');
+        if (parts.length >= 3) facebookPageId = parts[1];
+      }
+
       if (isInstagramDm && igAccountId) {
         const threadOwnerConn = await PlatformConnection.findOne({
           organization: interaction.organization,
@@ -442,6 +449,16 @@ exports.replyToInteraction = async (req, res, next) => {
         }).lean();
         if (conn) connection = conn;
       }
+      if (isFacebookDm && facebookPageId && (!connection || String(connection.platformPageId) !== String(facebookPageId))) {
+        const pageConn = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: 'facebook',
+          platformPageId: { $in: [String(facebookPageId), facebookPageId] },
+          status: 'connected',
+          isActive: true
+        }).lean();
+        if (pageConn) connection = pageConn;
+      }
       if (connection && isInstagramDm && igAccountId) {
         const connectionIgId = connection.platformUserId != null ? String(connection.platformUserId) : '';
         if (connectionIgId !== String(igAccountId)) {
@@ -461,6 +478,10 @@ exports.replyToInteraction = async (req, res, next) => {
           errorMessage = igAccountId
             ? 'Could not find the Instagram account for this conversation. Please reconnect it in Settings.'
             : 'This conversation is not linked to an Instagram account. Sync the Instagram that receives these DMs from Settings, then try again.';
+        } else if (isFacebookDm) {
+          errorMessage = facebookPageId
+            ? 'Could not find the Facebook Page for this conversation. Please reconnect it in Settings.'
+            : 'This conversation is not linked to a Facebook Page. Reconnect the Page that receives these messages in Settings.';
         } else {
           errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
         }
@@ -518,18 +539,35 @@ exports.replyToInteraction = async (req, res, next) => {
         }
       } else if (interaction.platform === 'facebook') {
         const facebookService = require('../integrations/meta/facebookService');
-        const result = await facebookService.replyToComment(
-          connection,
-          interaction.platformId,
-          replyContent
-        );
-        
-        if (result.success && result.commentId) {
-          platformResponseId = result.commentId;
-          replyStatus = 'sent';
+        let result;
+        if (interaction.type === 'dm') {
+          const pageId = connection.platformPageId || connection.platformData?.pageId;
+          const recipientId = interaction.author?.platformId;
+          if (!pageId || !recipientId) {
+            replyStatus = 'failed';
+            errorMessage = 'Missing Page or recipient for Facebook Messenger reply. Reconnect the Page in Settings.';
+          } else {
+            result = await facebookService.sendMessage(
+              recipientId,
+              replyContent,
+              connection.accessToken,
+              pageId,
+              true
+            );
+          }
         } else {
+          result = await facebookService.replyToComment(
+            connection,
+            interaction.platformId,
+            replyContent
+          );
+        }
+        if (result && result.success && (result.platformResponseId || result.commentId)) {
+          platformResponseId = result.platformResponseId || result.commentId;
+          replyStatus = 'sent';
+        } else if (replyStatus !== 'failed') {
           replyStatus = 'failed';
-          errorMessage = result.error || 'Failed to post reply to Facebook';
+          errorMessage = (result && result.error) || 'Failed to post reply to Facebook';
         }
       } else if (interaction.platform === 'linkedin') {
         const linkedinService = require('../integrations/linkedin/linkedinService');
