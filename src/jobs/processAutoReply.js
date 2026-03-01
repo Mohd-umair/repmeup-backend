@@ -442,11 +442,38 @@ async function processBatchInteractions(organizationId, organization) {
 }
 
 /**
+ * Resolve the platform connection to use for sending. For Instagram DM must use the thread owner
+ * to avoid "(#100) not the thread owner". Derives igAccountId from metadata or from platformId (dm_igId_senderId).
+ */
+async function getConnectionForReply(interaction) {
+  const isInstagramDm = interaction.platform === 'instagram' && interaction.type === 'dm';
+  let igAccountId = interaction.metadata?.instagramAccountId;
+  if (isInstagramDm && !igAccountId && interaction.platformId && interaction.platformId.startsWith('dm_')) {
+    const parts = interaction.platformId.split('_');
+    if (parts.length >= 3) igAccountId = parts[1];
+  }
+  if (isInstagramDm && igAccountId) {
+    const PlatformConnection = require('../models/PlatformConnection');
+    const conn = await PlatformConnection.findOne({
+      organization: interaction.organization,
+      platform: 'instagram',
+      platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
+      status: 'connected',
+      isActive: true
+    }).lean();
+    if (conn) return conn;
+    return null;
+  }
+  return interaction.platformConnection;
+}
+
+/**
  * Send reply to platform
  */
 async function sendReplyToPlatform(interaction, content, organization) {
   try {
-    if (!interaction.platformConnection || interaction.platformConnection.status !== 'connected') {
+    const connection = await getConnectionForReply(interaction);
+    if (!connection || connection.status !== 'connected' || !connection.isActive) {
       return false;
     }
 
@@ -456,7 +483,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
     if (interaction.platform === 'youtube') {
       const youtubeService = require('../integrations/google/youtubeService');
       const result = await youtubeService.replyToComment(
-        interaction.platformConnection,
+        connection,
         interaction.platformId,
         content
       );
@@ -469,13 +496,13 @@ async function sendReplyToPlatform(interaction, content, organization) {
       const instagramService = require('../integrations/meta/instagramService');
       let result;
       if (interaction.type === 'dm') {
-        const pageId = interaction.platformConnection.platformPageId || interaction.platformConnection.platformUserId;
+        const pageId = connection.platformPageId || connection.platformData?.pageId;
         const recipientId = interaction.author?.platformId;
         if (pageId && recipientId) {
           result = await instagramService.sendMessage(
             recipientId,
             content,
-            interaction.platformConnection.accessToken,
+            connection.accessToken,
             pageId,
             false
           );
@@ -485,7 +512,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
         result = await instagramService.replyToComment(
           interaction.platformId,
           content,
-          interaction.platformConnection.accessToken
+          connection.accessToken
         );
       }
       if (result && result.success && result.platformResponseId) {
@@ -495,7 +522,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
     } else if (interaction.platform === 'facebook') {
       const facebookService = require('../integrations/meta/facebookService');
       const result = await facebookService.replyToComment(
-        interaction.platformConnection,
+        connection,
         interaction.platformId,
         content
       );

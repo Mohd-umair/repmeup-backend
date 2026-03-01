@@ -414,8 +414,26 @@ exports.replyToInteraction = async (req, res, next) => {
     // Send actual reply to platform via integration service
     try {
       // Resolve platform connection (may be missing if interaction was created via webhook without it)
-      let connection = interaction.platformConnection;
-      if (!connection && interaction.platform && interaction.organization) {
+      let connection = null;
+      const isInstagramDm = interaction.platform === 'instagram' && interaction.type === 'dm';
+      let igAccountId = interaction.metadata?.instagramAccountId;
+      if (isInstagramDm && !igAccountId && interaction.platformId && interaction.platformId.startsWith('dm_')) {
+        const parts = interaction.platformId.split('_');
+        if (parts.length >= 3) igAccountId = parts[1];
+      }
+
+      if (isInstagramDm && igAccountId) {
+        const threadOwnerConn = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: 'instagram',
+          platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
+          status: 'connected',
+          isActive: true
+        }).lean();
+        if (threadOwnerConn) connection = threadOwnerConn;
+      }
+      if (!connection) connection = interaction.platformConnection;
+      if (!connection && interaction.platform && interaction.organization && !isInstagramDm) {
         const conn = await PlatformConnection.findOne({
           organization: interaction.organization,
           platform: interaction.platform,
@@ -424,9 +442,28 @@ exports.replyToInteraction = async (req, res, next) => {
         }).lean();
         if (conn) connection = conn;
       }
+      if (connection && isInstagramDm && igAccountId) {
+        const connectionIgId = connection.platformUserId != null ? String(connection.platformUserId) : '';
+        if (connectionIgId !== String(igAccountId)) {
+          const threadOwnerConn = await PlatformConnection.findOne({
+            organization: interaction.organization,
+            platform: 'instagram',
+            platformUserId: { $in: [igAccountId, String(igAccountId)] },
+            status: 'connected',
+            isActive: true
+          }).lean();
+          connection = threadOwnerConn || null;
+        }
+      }
       if (!connection) {
         replyStatus = 'failed';
-        errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
+        if (isInstagramDm) {
+          errorMessage = igAccountId
+            ? 'Could not find the Instagram account for this conversation. Please reconnect it in Settings.'
+            : 'This conversation is not linked to an Instagram account. Sync the Instagram that receives these DMs from Settings, then try again.';
+        } else {
+          errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
+        }
       } else if (connection.status !== 'connected' || !connection.isActive) {
         replyStatus = 'failed';
         errorMessage = 'Platform connection is not active. Please reconnect this account in Settings.';
