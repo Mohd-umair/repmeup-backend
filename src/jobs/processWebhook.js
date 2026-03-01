@@ -176,6 +176,11 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       // One thread per conversation (IG account + sender), not per message
       const threadPlatformId = `dm_${String(igAccountId)}_${String(senderId)}`;
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
+      if (existing && existing.metadata?.lastMid === mid) {
+        return await Interaction.findById(existing._id);
+      }
+
       const updateFields = {
         organization: organizationId,
         platform: 'instagram',
