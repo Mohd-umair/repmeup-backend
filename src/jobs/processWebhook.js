@@ -108,8 +108,37 @@ module.exports = async function processWebhook(job) {
 };
 
 /**
+ * Fetch Instagram commenter/DM author profile (username, name, avatar) for inbox display.
+ * Uses Instagram User Profile API; webhook only sends sender.id, not username/name.
+ * Returns { username, name, avatarUrl } or partial; missing fields left undefined.
+ */
+async function fetchInstagramAuthorProfile(organizationId, igUserId) {
+  if (!igUserId) return {};
+  try {
+    const connection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'instagram',
+      status: 'connected',
+      isActive: true
+    }).select('accessToken');
+    if (!connection?.accessToken) return {};
+    const profile = await instagramService._fetchInstagramUserProfile(connection.accessToken, igUserId);
+    if (!profile) return {};
+    const avatarUrl = profile.profile_pic || profile.profile_picture_url || undefined;
+    return {
+      username: profile.username || undefined,
+      name: profile.name || profile.username || undefined,
+      avatarUrl
+    };
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
  * Fetch Instagram commenter/DM author profile picture (for inbox avatar).
  * Returns avatarUrl or undefined. Logs for debug.
+ * @deprecated Prefer fetchInstagramAuthorProfile when you need username/name too.
  */
 async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
   if (!igUserId) return undefined;
@@ -166,13 +195,14 @@ async function handleInstagramWebhook(payload, organizationId) {
       const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
       if (!mid || !senderId) continue;
 
-      const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, senderId);
+      // Webhook only sends sender.id; fetch username/name/profile_pic from Instagram User Profile API
+      const profile = await fetchInstagramAuthorProfile(organizationId, senderId);
       const author = {
         platformId: senderId,
-        username: undefined,
-        name: undefined
+        username: profile.username,
+        name: profile.name
       };
-      if (avatarUrl) author.avatarUrl = avatarUrl;
+      if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
       // One thread per conversation (IG account + sender), not per message
       const threadPlatformId = `dm_${String(igAccountId)}_${String(senderId)}`;
