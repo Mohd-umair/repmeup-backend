@@ -16,7 +16,7 @@ class InstagramService {
     if (!userId) return null;
     const token = typeof accessToken === 'string' ? accessToken.trim() : null;
     if (!token) return null;
-    // Try graph.facebook.com first (same token works for comments there); graph.instagram.com often returns "Cannot parse access token"
+    // Try graph.facebook.com first (same token works for comments there); graph.instagram.com for messaging
     const urlsToTry = [
       { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fields: 'name,username,profile_pic,profile_picture_url' },
       { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fields: 'name,username,profile_pic' }
@@ -33,7 +33,10 @@ class InstagramService {
           if (picUrl) data.profile_pic = data.profile_pic || data.profile_picture_url;
           return data;
         }
-      } catch (_) {
+      } catch (err) {
+        const msg = err.response?.data?.error?.message || err.message;
+        const code = err.response?.data?.error?.code;
+        console.warn(`[Instagram] User profile ${name} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
         // Try next URL or return null
       }
     }

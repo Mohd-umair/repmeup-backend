@@ -110,19 +110,29 @@ module.exports = async function processWebhook(job) {
 /**
  * Fetch Instagram commenter/DM author profile (username, name, avatar) for inbox display.
  * Uses Instagram User Profile API; webhook only sends sender.id, not username/name.
+ * For DMs, pass accessToken of the Instagram connection that *received* the message (required by Meta).
  * Returns { username, name, avatarUrl } or partial; missing fields left undefined.
  */
-async function fetchInstagramAuthorProfile(organizationId, igUserId) {
+async function fetchInstagramAuthorProfile(organizationId, igUserId, accessTokenFromConnection = null) {
   if (!igUserId) return {};
+  let token = accessTokenFromConnection;
+  if (!token) {
+    try {
+      const connection = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'instagram',
+        status: 'connected',
+        isActive: true
+      }).select('accessToken');
+      token = connection?.accessToken;
+    } catch (e) {
+      console.warn('[processWebhook] fetchInstagramAuthorProfile: connection lookup failed', e.message);
+      return {};
+    }
+  }
+  if (!token) return {};
   try {
-    const connection = await PlatformConnection.findOne({
-      organization: organizationId,
-      platform: 'instagram',
-      status: 'connected',
-      isActive: true
-    }).select('accessToken');
-    if (!connection?.accessToken) return {};
-    const profile = await instagramService._fetchInstagramUserProfile(connection.accessToken, igUserId);
+    const profile = await instagramService._fetchInstagramUserProfile(token, igUserId);
     if (!profile) return {};
     const avatarUrl = profile.profile_pic || profile.profile_picture_url || undefined;
     return {
@@ -130,7 +140,8 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId) {
       name: profile.name || profile.username || undefined,
       avatarUrl
     };
-  } catch (_) {
+  } catch (e) {
+    console.warn('[processWebhook] fetchInstagramAuthorProfile failed for igUserId=', igUserId, e.message);
     return {};
   }
 }
@@ -171,15 +182,19 @@ async function handleInstagramWebhook(payload, organizationId) {
     // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
     const igAccountId = entry.id;
     let platformConnectionId = null;
+    let dmReceiverConnection = null;
     if (igAccountId) {
       const conn = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'instagram',
-        platformUserId: igAccountId,
+        platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) },
         status: 'connected',
         isActive: true
-      }).select('_id').lean();
-      if (conn) platformConnectionId = conn._id;
+      }).select('_id accessToken').lean();
+      if (conn) {
+        platformConnectionId = conn._id;
+        dmReceiverConnection = conn;
+      }
     }
 
     // --- Instagram Messaging (DMs) format: entry.messaging[] ---
@@ -195,8 +210,16 @@ async function handleInstagramWebhook(payload, organizationId) {
       const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
       if (!mid || !senderId) continue;
 
-      // Webhook only sends sender.id; fetch username/name/profile_pic from Instagram User Profile API
-      const profile = await fetchInstagramAuthorProfile(organizationId, senderId);
+      // Webhook only sends sender.id; fetch username/name/profile_pic from Instagram User Profile API.
+      // Must use the token of the IG account that *received* the DM (Meta requirement).
+      const profile = await fetchInstagramAuthorProfile(
+        organizationId,
+        senderId,
+        dmReceiverConnection?.accessToken || null
+      );
+      if (!profile.username && !profile.name && !profile.avatarUrl) {
+        console.warn('[processWebhook] Instagram DM: no profile for senderId=', senderId, 'hasReceiverToken=', !!dmReceiverConnection?.accessToken);
+      }
       const author = {
         platformId: senderId,
         username: profile.username,
