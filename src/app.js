@@ -105,6 +105,9 @@ app.use('/api/menus', require('./routes/menus'));
 app.use('/api/subscription', require('./routes/subscription'));
 app.use('/api/social-accounts', require('./routes/socialAccounts'));
 app.use('/api/plans', require('./routes/plans'));
+app.use('/api/brand-config', require('./routes/brandConfig'));
+app.use('/api/trends', require('./routes/trends'));
+app.use('/api/audit-logs', require('./routes/auditLog'));
 // app.use('/api/labels', require('./routes/labels'));
 // app.use('/api/templates', require('./routes/templates'));
 

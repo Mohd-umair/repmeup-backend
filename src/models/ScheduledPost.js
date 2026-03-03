@@ -72,10 +72,20 @@ const scheduledPostSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['draft', 'scheduled', 'publishing', 'published', 'failed'],
+    enum: ['draft', 'pending_approval', 'scheduled', 'publishing', 'published', 'failed', 'rejected'],
     default: 'draft',
     index: true
   },
+  // Approval workflow
+  approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  approvedAt: { type: Date },
+  rejectedReason: { type: String },
+  rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  rejectedAt: { type: Date },
+  originalContent: { type: String }, // For diff view (AI suggestion before edit)
+  riskScore: { type: Number, min: 0, max: 100 },
+  complianceFlags: [{ type: String }],
+  generatedBy: { type: String, enum: ['ai', 'human'], default: 'human' },
   publishedAt: {
     type: Date
   },
