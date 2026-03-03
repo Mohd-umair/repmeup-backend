@@ -99,7 +99,7 @@ class MetaAuthService {
    * Generate Facebook OAuth URL
    * @param {string} userId
    * @param {string} organizationId
-   * @param {object} options - Optional. { auth_type: 'reauthorize' } to force Meta to show the consent screen (for App Review screencast).
+   * @param {object}options - Optional. { auth_type: 'reauthorize' } to force Meta to show the consent screen (for App Review screencast).
    */
   getFacebookAuthURL(userId, organizationId, options = {}) {
     // Check for app ID - try multiple environment variable names
