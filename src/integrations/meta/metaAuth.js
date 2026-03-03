@@ -97,8 +97,11 @@ class MetaAuthService {
 
   /**
    * Generate Facebook OAuth URL
+   * @param {string} userId
+   * @param {string} organizationId
+   * @param {object} options - Optional. { auth_type: 'reauthorize' } to force Meta to show the consent screen (for App Review screencast).
    */
-  getFacebookAuthURL(userId, organizationId) {
+  getFacebookAuthURL(userId, organizationId, options = {}) {
     // Check for app ID - try multiple environment variable names
     const appId = process.env.META_APP_ID ||
       process.env.FACEBOOK_APP_ID ||
@@ -134,6 +137,12 @@ class MetaAuthService {
       display: 'popup',
       prompt: 'consent'
     });
+    // Force consent screen (for App Review); use page display so it's visible in same tab
+    if (options.auth_type === 'reauthorize') {
+      params.set('auth_type', 'reauthorize');
+      params.set('display', 'page');
+      console.log('🔗 [Facebook] OAuth URL includes auth_type=reauthorize (consent screen will be shown)');
+    }
 
     const authUrl = `${this.facebookAuthURL}?${params.toString()}`;
     console.log('🔗 [Facebook] Generated OAuth URL (length):', authUrl.length);
@@ -183,10 +192,11 @@ class MetaAuthService {
       prompt: 'consent'
     });
 
-    // if (options.auth_type === 'reauthorize') {
-    //   params.set('auth_type', 'reauthorize');
-    //   console.log('🔗 [Instagram] OAuth URL includes auth_type=reauthorize (consent screen will be shown)');
-    // }
+    if (options.auth_type === 'reauthorize') {
+      params.set('auth_type', 'reauthorize');
+      params.set('display', 'page');
+      console.log('🔗 [Instagram] OAuth URL includes auth_type=reauthorize (consent screen will be shown)');
+    }
 
     console.log(`🔗 [Instagram] Generating OAuth URL with App ID: ${appId.substring(0, 10)}...`);
     return `${this.facebookAuthURL}?${params.toString()}`;
