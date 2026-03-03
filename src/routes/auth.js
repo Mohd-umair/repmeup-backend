@@ -36,16 +36,20 @@ const linkedinAuth = require('../integrations/linkedin/linkedinAuth');
 const googleAuthService = require('../integrations/google/googleAuthService');
 
 // Facebook OAuth - check plan limit before starting OAuth
+// Query: auth_type=reauthorize to force Meta to show the consent screen (for App Review screencast)
 router.get('/facebook', protect, checkConnectionLimit, async (req, res, next) => {
   try {
+    const options = {};
+    if (req.query.auth_type === 'reauthorize') options.auth_type = 'reauthorize';
     const authURL = metaAuth.getFacebookAuthURL(
       req.user.id,
-      req.user.organization._id || req.user.organization
+      req.user.organization._id || req.user.organization,
+      options
     );
-    
-    res.json({ 
-      success: true, 
-      authUrl: authURL 
+
+    res.json({
+      success: true,
+      authUrl: authURL
     });
   } catch (error) {
     next(error);
