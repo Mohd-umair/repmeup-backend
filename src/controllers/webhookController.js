@@ -236,6 +236,13 @@ exports.verifyFacebookWebhook = (req, res) => {
  */
 exports.handleFacebookWebhook = async (req, res) => {
   try {
+    // Log immediately so we can see if Meta is hitting this endpoint at all
+    console.log('[Facebook Webhook] POST received', {
+      hasBody: !!req.body,
+      object: req.body?.object,
+      entryCount: req.body?.entry?.length ?? 0
+    });
+
     const { webhookQueue } = require('../config/queue');
     
     console.log('Facebook webhook received:', JSON.stringify(req.body, null, 2));

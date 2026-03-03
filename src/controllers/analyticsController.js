@@ -1,6 +1,7 @@
 const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const User = require('../models/User');
+const ScheduledPost = require('../models/ScheduledPost');
 const exportService = require('../services/exportService');
 
 /**
@@ -748,6 +749,62 @@ exports.getEngagementAnalytics = async (req, res, next) => {
   } catch (error) {
     console.error('❌ [Analytics] Engagement analytics error:', error);
     next(error);
+  }
+};
+
+/**
+ * GET /api/analytics/content-performance
+ * AI vs Human post performance (published posts in last 30 days by generatedBy)
+ */
+exports.getContentPerformance = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [aiCount, humanCount] = await Promise.all([
+      ScheduledPost.countDocuments({
+        organization: organizationId,
+        status: 'published',
+        publishedAt: { $gte: startDate },
+        generatedBy: 'ai'
+      }),
+      ScheduledPost.countDocuments({
+        organization: organizationId,
+        status: 'published',
+        publishedAt: { $gte: startDate },
+        $or: [{ generatedBy: 'human' }, { generatedBy: { $exists: false } }]
+      })
+    ]);
+    const total = aiCount + humanCount;
+    res.status(200).json({
+      success: true,
+      data: {
+        aiCount,
+        humanCount,
+        total,
+        aiPercent: total ? Math.round((aiCount / total) * 100) : 0
+      }
+    });
+  } catch (error) {
+    console.error('Content performance error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * GET /api/analytics/suggested-improvements
+ * Placeholder for AI-generated insights (can be wired to aiService later)
+ */
+exports.getSuggestedImprovements = async (req, res) => {
+  try {
+    const suggestions = [
+      { id: '1', type: 'cadence', title: 'Post more consistently', description: 'Posts published on weekdays between 9–11 AM tend to get higher engagement.' },
+      { id: '2', type: 'content', title: 'Use more visuals', description: 'Posts with images or video have 2x higher engagement than text-only.' },
+      { id: '3', type: 'hashtags', title: 'Optimize hashtags', description: 'Use 3–5 relevant hashtags per post for better discoverability.' }
+    ];
+    res.status(200).json({ success: true, data: suggestions });
+  } catch (error) {
+    console.error('Suggested improvements error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 

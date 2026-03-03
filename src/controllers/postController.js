@@ -5,6 +5,7 @@ const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
 const aiService = require('../services/aiService');
 const aiCreditService = require('../services/aiCreditService');
+const auditLogController = require('./auditLogController');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
@@ -91,7 +92,7 @@ exports.generatePostWithAI = async (req, res) => {
     }
 
     // Generate posts
-    const result = await aiService.generatePost(prompt, platforms, mode, postType);
+    const result = await aiService.generatePost(prompt, platforms, mode, postType, organizationId);
 
     // Deduct credits
     await aiCreditService.deductCredits(organizationId, result.creditsUsed, {
@@ -122,6 +123,104 @@ exports.generatePostWithAI = async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || 'Failed to generate post'
+    });
+  }
+};
+
+/**
+ * @desc    Generate multiple post variants (Content Studio)
+ * @route   POST /api/posts/generate-variants
+ * @access  Private
+ */
+exports.generatePostVariantsWithAI = async (req, res) => {
+  try {
+    const { topic, platforms, count, audience, intent, includeTrend, postType, generateImage } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    if (!topic || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Topic and platforms are required'
+      });
+    }
+
+    const variantCount = Math.min(parseInt(count, 10) || 3, 5);
+    const withImages = !!generateImage;
+    const totalCredits = variantCount + (withImages ? variantCount : 0); // text + optional image per variant
+
+    const creditCheck = await aiCreditService.checkCredits(organizationId, totalCredits);
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        message: creditCheck.error || 'Insufficient AI credits',
+        credits: {
+          current: creditCheck.current,
+          limit: creditCheck.limit,
+          remaining: creditCheck.remaining,
+          needed: totalCredits
+        }
+      });
+    }
+
+    const result = await aiService.generatePostVariants(topic, platforms, {
+      count: variantCount,
+      organizationId,
+      postType: postType || 'post',
+      audience: audience || '',
+      intent: intent || '',
+      includeTrend: !!includeTrend
+    });
+
+    await aiCreditService.deductCredits(organizationId, variantCount, {
+      operation: 'post_variants',
+      userId: req.user._id,
+      topic: topic.substring(0, 100),
+      platforms,
+      variantCount
+    });
+
+    if (withImages && result.variants && result.variants.length > 0) {
+      const uploadDir = path.join(__dirname, '../../uploads/posts');
+      await fs.mkdir(uploadDir, { recursive: true });
+
+      for (let i = 0; i < result.variants.length; i++) {
+        const v = result.variants[i];
+        const imagePrompt = topic + (v.content ? ` Post style: ${v.content.substring(0, 200)}` : '');
+        const buffer = await aiService.generateImage(imagePrompt);
+        if (buffer) {
+          const filename = `ai-${Date.now()}-${i}.png`;
+          const fullPath = path.join(uploadDir, filename);
+          await fs.writeFile(fullPath, buffer);
+          v.imageUrl = getPublicMediaUrl(fullPath, req);
+        }
+      }
+
+      await aiCreditService.deductCredits(organizationId, variantCount, {
+        operation: 'post_variants_image',
+        userId: req.user._id,
+        topic: topic.substring(0, 100),
+        variantCount
+      });
+    }
+
+    const updatedCredits = await aiCreditService.getUsage(organizationId);
+
+    res.status(200).json({
+      success: true,
+      data: result,
+      credits: {
+        used: totalCredits,
+        current: updatedCredits.current,
+        limit: updatedCredits.limit,
+        remaining: updatedCredits.remaining,
+        isUnlimited: updatedCredits.isUnlimited
+      }
+    });
+  } catch (error) {
+    console.error('Generate post variants error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to generate variants'
     });
   }
 };
@@ -428,7 +527,7 @@ exports.schedulePost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType, mediaLibraryId } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaUrl } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -436,20 +535,15 @@ exports.schedulePost = async (req, res) => {
         return res.status(400).json({ message: 'Platform, content, and scheduledFor are required' });
       }
 
-      // Get platform connection
-      // For Facebook, we need a page-level connection with platformPageId
       let query = {
         organization: organizationId,
         platform: platform.toLowerCase(),
         isActive: true
       };
-
-      // For Facebook, specifically look for page connections (with platformPageId)
       if (platform.toLowerCase() === 'facebook') {
         query.platformPageId = { $exists: true, $ne: null };
-        query.usesAccountSlot = true; // Page connections use account slots
+        query.usesAccountSlot = true;
       }
-
       const connection = await PlatformConnection.findOne(query);
 
       if (!connection) {
@@ -472,7 +566,7 @@ exports.schedulePost = async (req, res) => {
         postType: postType || 'post'
       };
 
-      // Check if using media from library or uploading new media
+      // Check if using media from library, AI-generated media URL, or uploading new media
       if (mediaLibraryId) {
         // Use media from library
         const libraryMedia = await Media.findOne({
@@ -493,6 +587,19 @@ exports.schedulePost = async (req, res) => {
         postData.mediaLibraryId = libraryMedia._id; // Track which library media is used
 
         console.log(`📚 [Post] Using media from library: ${libraryMedia.originalName} (${libraryMedia._id})`);
+      } else if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
+        const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
+        if (filename) {
+          const uploadDir = path.join(__dirname, '../../uploads/posts');
+          const fullPath = path.join(uploadDir, filename);
+          try {
+            await fs.access(fullPath);
+            postData.mediaStoragePath = fullPath;
+            postData.mediaType = 'image';
+          } catch {
+            // File not found, ignore mediaUrl
+          }
+        }
       } else if (req.file) {
         const mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
         const fileExtension = path.extname(req.file.originalname);
@@ -545,6 +652,34 @@ exports.schedulePost = async (req, res) => {
 };
 
 /**
+ * @desc    Get dashboard counts (scheduled, pending approval, AI %)
+ * @route   GET /api/posts/dashboard-counts
+ * @access  Private
+ */
+exports.getDashboardCounts = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    const [scheduled, pendingApproval, totalPosts, aiGenerated] = await Promise.all([
+      ScheduledPost.countDocuments({ organization: organizationId, status: 'scheduled' }),
+      ScheduledPost.countDocuments({ organization: organizationId, status: 'pending_approval' }),
+      ScheduledPost.countDocuments({ organization: organizationId, status: { $in: ['scheduled', 'published', 'draft', 'pending_approval'] } }),
+      ScheduledPost.countDocuments({ organization: organizationId, generatedBy: 'ai', status: { $in: ['scheduled', 'published'] } })
+    ]);
+
+    const aiGeneratedPercent = totalPosts > 0 ? Math.round((aiGenerated / totalPosts) * 100) : 0;
+
+    res.status(200).json({
+      success: true,
+      data: { scheduled, pendingApproval, aiGeneratedPercent }
+    });
+  } catch (error) {
+    console.error('Get dashboard counts error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
  * @desc    Get all scheduled posts
  * @route   GET /api/posts/scheduled
  * @access  Private
@@ -576,6 +711,217 @@ exports.getScheduledPosts = async (req, res) => {
 };
 
 /**
+ * @desc    Get posts pending approval (Approval Queue)
+ * @route   GET /api/posts/pending-approval
+ * @access  Private
+ */
+exports.getPendingApprovalPosts = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    const posts = await ScheduledPost.find({
+      organization: organizationId,
+      status: 'pending_approval'
+    })
+      .sort({ createdAt: -1 })
+      .populate('platformConnection', 'platform platformPageId platformUsername')
+      .populate('user', 'name email')
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      data: posts,
+      count: posts.length
+    });
+  } catch (error) {
+    console.error('Get pending approval posts error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Approve a post (optionally set scheduledFor and status to scheduled)
+ * @route   PATCH /api/posts/:id/approve
+ * @access  Private
+ */
+exports.approvePost = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { scheduledFor } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    const post = await ScheduledPost.findOne({
+      _id: id,
+      organization: organizationId,
+      status: 'pending_approval'
+    });
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found or not pending approval'
+      });
+    }
+
+    post.status = scheduledFor ? 'scheduled' : 'draft';
+    post.approvedBy = req.user._id;
+    post.approvedAt = new Date();
+    if (scheduledFor) post.scheduledFor = new Date(scheduledFor);
+    await post.save();
+
+    await auditLogController.log(
+      organizationId,
+      'post',
+      post._id,
+      'approved',
+      req.user._id,
+      { scheduledFor: post.scheduledFor, status: post.status }
+    );
+
+    res.status(200).json({
+      success: true,
+      data: post
+    });
+  } catch (error) {
+    console.error('Approve post error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Reject a post
+ * @route   PATCH /api/posts/:id/reject
+ * @access  Private
+ */
+exports.rejectPost = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    const post = await ScheduledPost.findOne({
+      _id: id,
+      organization: organizationId,
+      status: 'pending_approval'
+    });
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found or not pending approval'
+      });
+    }
+
+    post.status = 'rejected';
+    post.rejectedBy = req.user._id;
+    post.rejectedAt = new Date();
+    if (reason) post.rejectedReason = reason;
+    await post.save();
+
+    await auditLogController.log(
+      organizationId,
+      'post',
+      post._id,
+      'rejected',
+      req.user._id,
+      { reason: post.rejectedReason }
+    );
+
+    res.status(200).json({
+      success: true,
+      data: post
+    });
+  } catch (error) {
+    console.error('Reject post error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @desc    Create post as pending approval (Send to Approval from Content Studio)
+ * @route   POST /api/posts/to-approval
+ * @access  Private
+ */
+exports.sendToApproval = async (req, res) => {
+  try {
+    const { platform, content, postType, originalContent, riskScore, complianceFlags, generatedBy, mediaUrl } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const userId = req.user._id;
+
+    if (!platform || !content) {
+      return res.status(400).json({
+        success: false,
+        message: 'Platform and content are required'
+      });
+    }
+
+    const connection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: platform.toLowerCase(),
+      isActive: true
+    });
+
+    if (!connection) {
+      return res.status(404).json({
+        success: false,
+        message: `No active ${platform} connection found`
+      });
+    }
+
+    const postData = {
+      organization: organizationId,
+      user: userId,
+      platform: platform.toLowerCase(),
+      platformConnection: connection._id,
+      content: content.trim(),
+      status: 'pending_approval',
+      postType: postType || 'post',
+      originalContent: originalContent || content.trim(),
+      riskScore: riskScore != null ? Number(riskScore) : undefined,
+      complianceFlags: Array.isArray(complianceFlags) ? complianceFlags : [],
+      generatedBy: generatedBy === 'ai' ? 'ai' : 'human'
+    };
+
+    if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
+      const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
+      if (filename) {
+        const uploadDir = path.join(__dirname, '../../uploads/posts');
+        const fullPath = path.join(uploadDir, filename);
+        try {
+          await fs.access(fullPath);
+          postData.mediaStoragePath = fullPath;
+          postData.mediaType = 'image';
+        } catch {
+          // File not found
+        }
+      }
+    }
+
+    const post = await ScheduledPost.create(postData);
+
+    res.status(201).json({
+      success: true,
+      data: post
+    });
+  } catch (error) {
+    console.error('Send to approval error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+/**
  * @desc    Get all published posts
  * @route   GET /api/posts/published
  * @access  Private
@@ -596,6 +942,33 @@ exports.getPublishedPosts = async (req, res) => {
   } catch (error) {
     console.error('Get published posts error:', error);
     res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * @desc    Delete scheduled post
+ * @route   DELETE /api/posts/scheduled/:id
+ * @access  Private
+ */
+exports.reschedulePost = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const { scheduledFor } = req.body;
+    if (!scheduledFor) {
+      return res.status(400).json({ success: false, message: 'scheduledFor is required' });
+    }
+    const post = await ScheduledPost.findOneAndUpdate(
+      { _id: req.params.id, organization: organizationId, status: 'scheduled' },
+      { $set: { scheduledFor: new Date(scheduledFor) } },
+      { new: true }
+    );
+    if (!post) {
+      return res.status(404).json({ success: false, message: 'Scheduled post not found' });
+    }
+    res.status(200).json({ success: true, data: post });
+  } catch (error) {
+    console.error('Reschedule post error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
@@ -895,3 +1268,51 @@ async function publishToFacebook(connection, post, req) {
     postUrl: result.postUrl
   };
 }
+
+/**
+ * Execute publish for a single scheduled post (used by processScheduledPublish job).
+ */
+exports.executePublishForScheduledPost = async function (postId) {
+  const post = await ScheduledPost.findById(postId).populate('platformConnection');
+  if (!post || post.status !== 'scheduled') {
+    return { success: false, error: 'Post not found or not scheduled' };
+  }
+  const connection = post.platformConnection;
+  if (!connection) {
+    post.status = 'failed';
+    post.error = 'Platform connection not found';
+    await post.save();
+    return { success: false, error: post.error };
+  }
+  const req = {
+    protocol: 'https',
+    get: (name) => (name === 'host' ? (process.env.API_URL || process.env.BASE_URL || 'localhost:3000').replace(/^https?:\/\//, '') : null)
+  };
+  post.status = 'publishing';
+  await post.save();
+  try {
+    let result;
+    if (post.platform === 'instagram') {
+      result = await publishToInstagram(connection, post, req);
+    } else if (post.platform === 'facebook') {
+      result = await publishToFacebook(connection, post, req);
+    } else {
+      post.status = 'failed';
+      post.error = 'Unsupported platform: ' + post.platform;
+      await post.save();
+      return { success: false, error: post.error };
+    }
+    post.status = 'published';
+    post.publishedAt = new Date();
+    post.platformPostId = result.postId;
+    post.platformPostUrl = result.postUrl;
+    post.error = undefined;
+    await post.save();
+    return { success: true };
+  } catch (err) {
+    post.status = 'failed';
+    post.error = err.message;
+    await post.save();
+    return { success: false, error: err.message };
+  }
+};

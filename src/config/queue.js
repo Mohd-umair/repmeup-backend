@@ -21,6 +21,7 @@ const syncQueue = new Queue('platform-sync', queueOptions);
 const aiQueue = new Queue('ai-processing', queueOptions);
 const notificationQueue = new Queue('notifications', queueOptions);
 const autoReplyQueue = new Queue('auto-reply', queueOptions);
+const scheduledPublishQueue = new Queue('scheduled-publish', queueOptions);
 
 // Configure job settings (memory-efficient)
 const queueConfig = {
@@ -34,7 +35,7 @@ const queueConfig = {
 };
 
 // Error handling for all queues
-const queues = [webhookQueue, syncQueue, aiQueue, notificationQueue, autoReplyQueue];
+const queues = [webhookQueue, syncQueue, aiQueue, notificationQueue, autoReplyQueue, scheduledPublishQueue];
 
 queues.forEach(queue => {
   queue.on('error', (error) => {
@@ -56,6 +57,7 @@ module.exports = {
   aiQueue,
   notificationQueue,
   autoReplyQueue,
+  scheduledPublishQueue,
   queueConfig
 };
 

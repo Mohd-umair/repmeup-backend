@@ -138,6 +138,11 @@ router.get('/media/:filename', (req, res) => {
 // @access  Private
 router.post('/generate', protect, postController.generatePostWithAI);
 
+// @route   POST /api/posts/generate-variants
+// @desc    Generate N post variants for Content Studio
+// @access  Private
+router.post('/generate-variants', protect, postController.generatePostVariantsWithAI);
+
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately
 // @access  Private
@@ -148,10 +153,35 @@ router.post('/publish', protect, postController.publishPost);
 // @access  Private
 router.post('/schedule', protect, postController.schedulePost);
 
+// @route   POST /api/posts/to-approval
+// @desc    Create a post as pending approval (Send to Approval from Content Studio)
+// @access  Private
+router.post('/to-approval', protect, postController.sendToApproval);
+
 // @route   GET /api/posts/scheduled
 // @desc    Get all scheduled posts
 // @access  Private
 router.get('/scheduled', protect, postController.getScheduledPosts);
+
+// @route   GET /api/posts/dashboard-counts
+// @desc    Dashboard KPIs: scheduled, pending approval, AI %
+// @access  Private
+router.get('/dashboard-counts', protect, postController.getDashboardCounts);
+
+// @route   GET /api/posts/pending-approval
+// @desc    Get posts pending approval (Approval Queue)
+// @access  Private
+router.get('/pending-approval', protect, postController.getPendingApprovalPosts);
+
+// @route   PATCH /api/posts/:id/approve
+// @desc    Approve a post (optionally set scheduledFor)
+// @access  Private
+router.patch('/:id/approve', protect, postController.approvePost);
+
+// @route   PATCH /api/posts/:id/reject
+// @desc    Reject a post
+// @access  Private
+router.patch('/:id/reject', protect, postController.rejectPost);
 
 // @route   GET /api/posts/published
 // @desc    Get all published posts
@@ -161,6 +191,7 @@ router.get('/published', protect, postController.getPublishedPosts);
 // @route   DELETE /api/posts/scheduled/:id
 // @desc    Delete scheduled post
 // @access  Private
+router.patch('/scheduled/:id/reschedule', protect, postController.reschedulePost);
 router.delete('/scheduled/:id', protect, postController.deleteScheduledPost);
 
 module.exports = router;

@@ -33,5 +33,9 @@ router.post('/agents', validateAnalyticsAgents, analyticsController.getAgentAnal
 // Engagement analytics
 router.post('/engagement', validateAnalyticsEngagement, analyticsController.getEngagementAnalytics);
 
+// Content performance (AI vs Human) and suggested improvements
+router.get('/content-performance', analyticsController.getContentPerformance);
+router.get('/suggested-improvements', analyticsController.getSuggestedImprovements);
+
 module.exports = router;
 

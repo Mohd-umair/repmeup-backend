@@ -20,10 +20,12 @@ const aiCreditUsageSchema = new mongoose.Schema({
     type: String,
     required: true,
     enum: [
-      'post_generation', 
-      'content_analysis', 
-      'sentiment_analysis', 
-      'knowledge_base_analysis', 
+      'post_generation',
+      'post_variants',
+      'post_variants_image',
+      'content_analysis',
+      'sentiment_analysis',
+      'knowledge_base_analysis',
       'knowledge_base_from_url',
       'ai_response',
       'auto_reply'
