@@ -97,9 +97,9 @@ class MetaAuthService {
 
   /**
    * Generate Facebook OAuth URL
-   * @param {string} userId
-   * @param {string} organizationId
-   * @param {object}options - Optional. { auth_type: 'reauthorize' } to force Meta to show the consent screen (for App Review screencast).
+   * Uses auth_type=reauthorize + display=page to ask Meta to re-prompt for permissions.
+   * If the consent screen still does not show (e.g. app Admin/Tester in Development mode), the user must
+   * revoke our app first: Facebook → Settings → Apps and Websites → [App] → Remove, then connect again.
    */
   getFacebookAuthURL(userId, organizationId, options = {}) {
     // Check for app ID - try multiple environment variable names
@@ -133,26 +133,21 @@ class MetaAuthService {
         'pages_manage_engagement'
       ].join(','),
       response_type: 'code',
-      auth_type: 'rerequest',
-      display: 'popup',
-      prompt: 'consent'
+      auth_type: 'reauthorize',
+      display: 'page'
     });
-    // Force consent screen (for App Review); use page display so it's visible in same tab
-    if (options.auth_type === 'reauthorize') {
-      params.set('auth_type', 'reauthorize');
-      params.set('display', 'page');
-      console.log('🔗 [Facebook] OAuth URL includes auth_type=reauthorize (consent screen will be shown)');
-    }
 
     const authUrl = `${this.facebookAuthURL}?${params.toString()}`;
-    console.log('🔗 [Facebook] Generated OAuth URL (length):', authUrl.length);
+    console.log('🔗 [Facebook] Generated OAuth URL (auth_type=reauthorize, display=page)');
 
     return authUrl;
   }
 
   /**
    * Generate Instagram OAuth URL
-   * @param {object} options - Optional. { auth_type: 'reauthorize' } to force Meta to show the consent screen (e.g. for App Review screencast).
+   * Uses auth_type=reauthorize + display=page to ask Meta to re-prompt for permissions.
+   * If the consent screen still does not show (e.g. app Admin/Tester in Development mode), the user must
+   * revoke our app first: Facebook → Settings → Apps and Websites → [App] → Remove, then connect again.
    */
   getInstagramAuthURL(userId, organizationId, options = {}) {
     // Check for app ID - try multiple environment variable names
@@ -187,18 +182,11 @@ class MetaAuthService {
         'pages_read_engagement'
       ].join(','),
       response_type: 'code',
-      auth_type: 'rerequest',
-      display: 'popup',
-      prompt: 'consent'
+      auth_type: 'reauthorize',
+      display: 'page'
     });
 
-    if (options.auth_type === 'reauthorize') {
-      params.set('auth_type', 'reauthorize');
-      params.set('display', 'page');
-      console.log('🔗 [Instagram] OAuth URL includes auth_type=reauthorize (consent screen will be shown)');
-    }
-
-    console.log(`🔗 [Instagram] Generating OAuth URL with App ID: ${appId.substring(0, 10)}...`);
+    console.log('🔗 [Instagram] OAuth URL (auth_type=reauthorize, display=page)');
     return `${this.facebookAuthURL}?${params.toString()}`;
   }
 
