@@ -80,7 +80,7 @@ router.get('/facebook/callback', async (req, res) => {
       );
     }
 
-    // Meta may send a GET to validate the callback URL (no code/state). Respond 200 so validation succeeds.
+    // Meta may send a  to validate the callback URL (no code/state). Respond 200 so validation succeeds.
     if (!code && !state) {
       res.status(200).send('OK');
       return;
