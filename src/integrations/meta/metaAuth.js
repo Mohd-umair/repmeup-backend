@@ -82,16 +82,14 @@ class MetaAuthService {
 
   /**
    * Get Facebook redirect URI (helper method to ensure consistency)
-   * Use FACEBOOK_CALLBACK_URL or FRONTEND_URL so Facebook OAuth lands on /api/auth/facebook/callback.
-   * Do not use META_CALLBACK_URL here if that is set to the webhook URL (/api/platforms/meta/callback).
    */
   getFacebookRedirectURI() {
-    const redirectUri = process.env.FACEBOOK_CALLBACK_URL ||
-      process.env.META_CALLBACK_URL ||
+    const redirectUri = process.env.META_CALLBACK_URL ||
+      process.env.FACEBOOK_CALLBACK_URL ||
       `${process.env.FRONTEND_URL}/api/auth/facebook/callback`;
 
     if (!redirectUri) {
-      throw new Error('Meta callback URL not configured. Set FACEBOOK_CALLBACK_URL, META_CALLBACK_URL, or FRONTEND_URL.');
+      throw new Error('Meta callback URL not configured. Please set META_CALLBACK_URL, FACEBOOK_CALLBACK_URL, or FRONTEND_URL in your environment variables.');
     }
 
     return redirectUri;
@@ -133,7 +131,8 @@ class MetaAuthService {
         'pages_read_engagement',
         'pages_read_user_content',
         'pages_manage_engagement',
-        'business_management'  // Required when Pages are linked to a Facebook Business Account
+        'business_management',  // Required when Pages are linked to a Facebook Business Account
+        'instagram_basic'       // Required so GET /me/accounts returns instagram_business_account for linked Pages
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
@@ -228,20 +227,14 @@ class MetaAuthService {
       console.log('✅ [Token Exchange] Successfully exchanged code for token');
       return response.data.access_token;
     } catch (error) {
-      const apiError = error.response?.data?.error;
-      const message = apiError?.message || error.message;
-      const errorCode = apiError?.code;
-      const type = apiError?.type;
-      console.error('❌ [Token Exchange] Error:', {
-        message,
-        code: errorCode,
-        type,
-        redirectUri,
-        full: error.response?.data
-      });
-      // Surface Meta's error so user can fix (e.g. redirect_uri_mismatch, invalid grant)
-      if (message) {
-        throw new Error(`Failed to exchange code for token: ${message}${errorCode ? ` (code ${errorCode})` : ''}`);
+      console.error('❌ [Token Exchange] Error:', error.response?.data || error.message);
+      if (error.response?.data?.error) {
+        console.error('❌ [Token Exchange] Error details:', {
+          message: error.response.data.error.message,
+          type: error.response.data.error.type,
+          code: error.response.data.error.code,
+          redirectUri: redirectUri
+        });
       }
       throw new Error('Failed to exchange code for token');
     }
