@@ -130,7 +130,8 @@ class MetaAuthService {
         'pages_show_list',
         'pages_read_engagement',
         'pages_read_user_content',
-        'pages_manage_engagement'
+        'pages_manage_engagement',
+        'business_management'  // Required when Pages are linked to a Facebook Business Account
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
@@ -179,7 +180,8 @@ class MetaAuthService {
         'instagram_manage_messages',
         'instagram_content_publish',  // Create and publish posts to Instagram
         'pages_show_list',
-        'pages_read_engagement'
+        'pages_read_engagement',
+        'business_management'  // Required when Pages are linked to a Facebook Business Account
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
@@ -274,6 +276,7 @@ class MetaAuthService {
 
   /**
    * Get user's Facebook pages
+   * Requires pages_show_list (and business_management when Pages are in a Business Account).
    */
   async getUserPages(accessToken) {
     try {
@@ -288,6 +291,17 @@ class MetaAuthService {
 
       const pages = response.data.data || [];
       console.log(`📄 [Meta] Found ${pages.length} pages`);
+      if (pages.length === 0) {
+        // Log token scopes to help debug "no pages" (e.g. missing business_management for Business-linked Pages)
+        try {
+          const debug = await this.verifyAccessToken(accessToken);
+          if (debug && debug.scopes) {
+            console.log('📄 [Meta] Token scopes:', debug.scopes.join(', '));
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
       return pages;
     } catch (error) {
       console.error('❌ [Meta] Get pages error:', error.response?.data || error.message);

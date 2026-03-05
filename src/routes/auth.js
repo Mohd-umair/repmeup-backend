@@ -80,6 +80,12 @@ router.get('/facebook/callback', async (req, res) => {
       );
     }
 
+    // Meta may send a GET to validate the callback URL (no code/state). Respond 200 so validation succeeds.
+    if (!code && !state) {
+      res.status(200).send('OK');
+      return;
+    }
+
     // Check for required parameters
     if (!code) {
       console.error('❌ [Facebook Callback] Missing authorization code');
@@ -151,8 +157,11 @@ router.get('/facebook/callback', async (req, res) => {
     const pages = await metaAuth.getUserPages(tokenData.accessToken);
     
     if (pages.length === 0) {
+      const msg = encodeURIComponent(
+        'No pages found. Ensure you have a Facebook Page with Admin/Editor role, grant all permissions (including Business Account access if your Page is linked to a Business), or create a Page at facebook.com/pages'
+      );
       return res.redirect(
-        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=No pages found`
+        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${msg}`
       );
     }
 
@@ -194,6 +203,28 @@ router.get('/instagram', protect, checkConnectionLimit, async (req, res, next) =
 router.get('/instagram/callback', async (req, res) => {
   try {
     const { code, state, error, error_description } = req.query;
+    // Meta webhook verification (hub.mode=subscribe or hub_mode=subscribe)
+    const hubMode = req.query['hub.mode'] || req.query.hub_mode;
+    const hubChallenge = req.query['hub.challenge'] || req.query.hub_challenge;
+    const hubVerifyToken = req.query['hub.verify_token'] || req.query.hub_verify_token;
+
+    if (hubMode === 'subscribe' && hubChallenge != null) {
+      const expectedToken = process.env.META_VERIFY_TOKEN || 'REP_ME_UP';
+      if (hubVerifyToken === expectedToken) {
+        console.log('✅ [Meta] Webhook verification successful (Instagram callback)');
+        res.status(200).send(String(hubChallenge));
+        return;
+      }
+      console.warn('⚠️ [Meta] Webhook verify_token mismatch');
+      res.status(403).send('Forbidden');
+      return;
+    }
+
+    // Meta may send a GET to validate the callback URL (no code/state). Respond 200 so validation succeeds.
+    if (!code && !state && !error) {
+      res.status(200).send('OK');
+      return;
+    }
 
     // Handle OAuth errors
     if (error) {
