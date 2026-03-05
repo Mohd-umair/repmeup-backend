@@ -131,7 +131,8 @@ class MetaAuthService {
         'pages_read_engagement',
         'pages_read_user_content',
         'pages_manage_engagement',
-        'business_management'  // Required when Pages are linked to a Facebook Business Account
+        'business_management',  // Required when Pages are linked to a Facebook Business Account
+        'instagram_basic'       // Required so GET /me/accounts returns instagram_business_account for linked Pages
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
