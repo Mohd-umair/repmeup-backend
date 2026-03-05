@@ -30,6 +30,20 @@ router.get('/meta/callback', (req, res) => {
   res.status(200).send('OK');
 });
 
+// Meta webhook events (public - POST from Meta for Facebook/Instagram events)
+router.post('/meta/callback', (req, res, next) => {
+  const webhookController = require('../controllers/webhookController');
+  const obj = req.body?.object;
+  if (obj === 'page') {
+    return webhookController.handleFacebookWebhook(req, res);
+  }
+  if (obj === 'instagram') {
+    return webhookController.handleInstagramWebhook(req, res);
+  }
+  // Unknown object or empty body - still respond 200 so Meta doesn't retry
+  res.status(200).send();
+});
+
 // All other routes require authentication
 router.use(protect);
 
