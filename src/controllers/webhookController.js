@@ -327,6 +327,11 @@ exports.handleInstagramWebhook = async (req, res) => {
       return;
     }
 
+    // Debug: log what Meta sent in entry (no message content)
+    const entryKeys = entry ? Object.keys(entry) : [];
+    const messagingLen = entry.messaging ? entry.messaging.length : 0;
+    console.log('[Instagram Webhook] entry keys:', entryKeys.join(', '), '| messaging length:', messagingLen);
+
     const instagramId = entry.id;
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
