@@ -177,7 +177,10 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
 async function handleInstagramWebhook(payload, organizationId) {
   try {
     const entry = payload.entry?.[0];
-    if (!entry) return null;
+    if (!entry) {
+      logger.warn('[processWebhook] Instagram: no entry in payload');
+      return null;
+    }
 
     // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
     const igAccountId = entry.id;
@@ -188,27 +191,53 @@ async function handleInstagramWebhook(payload, organizationId) {
         organization: organizationId,
         platform: 'instagram',
         platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) },
-        status: 'connected',
+        status: { $in: ['connected', 'available'] },
         isActive: true
       }).select('_id accessToken').lean();
       if (conn) {
         platformConnectionId = conn._id;
         dmReceiverConnection = conn;
+      } else {
+        logger.warn('[processWebhook] Instagram: no connection found', { igAccountId, organizationId });
       }
     }
 
     // --- Instagram Messaging (DMs) format: entry.messaging[] ---
+    const messaging = entry.messaging || [];
+    if (messaging.length === 0) {
+      logger.info('[processWebhook] Instagram: entry.messaging empty or missing', {
+        entryId: entry.id,
+        hasChanges: !!(entry.changes && entry.changes.length)
+      });
+    }
     // One conversation thread per sender: platformId = dm_igAccountId_senderId (not per-message mid)
     const messaging = entry.messaging || [];
     for (const event of messaging) {
       const message = event.message;
-      if (!message) continue;
-      if (message.is_echo || message.is_deleted || message.is_unsupported) continue;
+      if (!message) {
+        logger.info('[processWebhook] Instagram: event has no message (e.g. reaction/read)', {
+          hasReaction: !!event.reaction,
+          hasRead: !!event.read,
+          hasPostback: !!event.postback
+        });
+        continue;
+      }
+      if (message.is_echo || message.is_deleted || message.is_unsupported) {
+        logger.info('[processWebhook] Instagram: skipping message', {
+          is_echo: !!message.is_echo,
+          is_deleted: !!message.is_deleted,
+          is_unsupported: !!message.is_unsupported
+        });
+        continue;
+      }
 
       const senderId = event.sender?.id;
       const mid = message.mid;
       const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
-      if (!mid || !senderId) continue;
+      if (!mid || !senderId) {
+        logger.warn('[processWebhook] Instagram: message missing mid or senderId', { mid: !!mid, senderId: !!senderId });
+        continue;
+      }
 
       // Webhook only sends sender.id; fetch username/name/profile_pic from Instagram User Profile API.
       // Must use the token of the IG account that *received* the DM (Meta requirement).
@@ -338,6 +367,11 @@ async function handleInstagramWebhook(payload, organizationId) {
       }
     }
 
+    logger.warn('[processWebhook] Instagram: no interaction created (no matching messaging or changes)', {
+      entryId: entry.id,
+      messagingCount: messaging.length,
+      changesCount: (entry.changes || []).length
+    });
     return null;
   } catch (error) {
     console.error('Instagram webhook handler error:', error);

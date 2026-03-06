@@ -3,7 +3,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const RedisStore = require('rate-limit-redis');
+const rateLimitRedis = require('rate-limit-redis');
+const RedisStore = rateLimitRedis.RedisStore || rateLimitRedis.default || rateLimitRedis;
 const { getRedisClient } = require('./config/redis');
 const errorHandler = require('./middlewares/errorHandler');
 
@@ -126,18 +127,18 @@ app.use(errorHandler);
 const upgradeRateLimiting = () => {
   try {
     const redisClient = getRedisClient();
+    // rate-limit-redis v4 expects sendCommand; node-redis v4 uses client.sendCommand(args)
+    const sendCommand = (...args) => redisClient.sendCommand(args);
     limiter = rateLimit({
       windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-      max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 100 to 1000
+      max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000,
       standardHeaders: true,
       legacyHeaders: false,
       skip: (req) => {
-        // Skip rate limiting for health check
-        return req.path === '/health';
+        return req.path === '/health' || req.path.startsWith('/api/posts/media/');
       },
       store: new RedisStore({
-        // @ts-expect-error - rate-limit-redis expects Redis v4 client
-        client: redisClient,
+        sendCommand,
         prefix: 'rl:',
       }),
       message: { success: false, error: 'Too many requests from this IP, please try again later' }
