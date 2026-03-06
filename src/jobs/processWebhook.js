@@ -211,7 +211,6 @@ async function handleInstagramWebhook(payload, organizationId) {
       });
     }
     // One conversation thread per sender: platformId = dm_igAccountId_senderId (not per-message mid)
-    const messaging = entry.messaging || [];
     for (const event of messaging) {
       const message = event.message;
       if (!message) {
