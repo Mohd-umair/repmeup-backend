@@ -18,8 +18,6 @@ module.exports = async function processWebhook(job) {
   try {
     const { platform, payload, organizationId } = job.data;
 
-    jobLogger.info('Processing webhook', { platform });
-
     let interaction = null;
 
     switch (platform) {
@@ -52,20 +50,17 @@ module.exports = async function processWebhook(job) {
     }
 
     if (interaction) {
-      jobLogger.info('Interaction created', {
+      jobLogger.debug('Interaction created', {
         interactionId: interaction._id.toString(),
         platform: interaction.platform,
-        type: interaction.type,
-        contentPreview: interaction.content?.substring(0, 100)
+        type: interaction.type
       });
       
-      // IMPORTANT: Check if interaction already has replies
-      // If it does, skip auto-reply queueing (it's already been replied to)
       const hasReplies = interaction.replies && interaction.replies.length > 0;
       const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
       
       if (hasReplies || isAlreadyReplied) {
-        console.log(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+        // Skip AI/auto-reply for already-replied threads
       } else {
         // Trigger AI processing (only for new, unreplied interactions)
         await aiQueue.add({
@@ -76,8 +71,6 @@ module.exports = async function processWebhook(job) {
           jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
         });
 
-        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
-
         // Queue auto-reply if webhook mode is enabled
         const autoReplyScheduler = require('../services/autoReplyScheduler');
         const queued = await autoReplyScheduler.queueImmediateAutoReply(
@@ -85,14 +78,12 @@ module.exports = async function processWebhook(job) {
           organizationId
         );
 
-        if (queued) {
-          console.log(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
-        } else {
-          console.log(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
+        if (!queued) {
+          jobLogger.debug('Auto-reply not queued (trigger mode or settings)', { interactionId: interaction._id });
         }
       }
     } else {
-      console.log(`⚠️  [Webhook] No interaction created from ${platform} webhook`);
+      jobLogger.debug('No interaction created (read/reaction/duplicate or no message events)', { platform });
     }
 
     return {
@@ -125,10 +116,10 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId, accessToken
         isActive: true
       }).select('accessToken');
       token = connection?.accessToken;
-    } catch (e) {
-      console.warn('[processWebhook] fetchInstagramAuthorProfile: connection lookup failed', e.message);
-      return {};
-    }
+  } catch (e) {
+    logger.debug('[processWebhook] fetchInstagramAuthorProfile: connection lookup failed', { message: e.message });
+    return {};
+  }
   }
   if (!token) return {};
   try {
@@ -141,7 +132,7 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId, accessToken
       avatarUrl
     };
   } catch (e) {
-    console.warn('[processWebhook] fetchInstagramAuthorProfile failed for igUserId=', igUserId, e.message);
+    logger.debug('[processWebhook] fetchInstagramAuthorProfile failed', { igUserId, message: e.message });
     return {};
   }
 }
@@ -202,27 +193,28 @@ async function handleInstagramWebhook(payload, organizationId) {
       }
     }
 
-    // --- Instagram Messaging (DMs) format: entry.messaging[] ---
+    // --- Instagram Messaging (DMs): entry.messaging[] and entry.standby[] ---
+    // standby = customer sent message (or edit/reaction) but app wasn't "in control". Process items with .message as incoming DMs; skip .message_edit, .reaction, .read.
     const messaging = entry.messaging || [];
-    if (messaging.length === 0) {
-      logger.info('[processWebhook] Instagram: entry.messaging empty or missing', {
+    const standby = entry.standby || [];
+    const allMessageEvents = [...messaging, ...standby];
+
+    if (allMessageEvents.length === 0) {
+      logger.debug('[processWebhook] Instagram: no messaging or standby events', {
         entryId: entry.id,
         hasChanges: !!(entry.changes && entry.changes.length)
       });
     }
+
     // One conversation thread per sender: platformId = dm_igAccountId_senderId (not per-message mid)
-    for (const event of messaging) {
+    for (const event of allMessageEvents) {
       const message = event.message;
       if (!message) {
-        logger.info('[processWebhook] Instagram: event has no message (e.g. reaction/read)', {
-          hasReaction: !!event.reaction,
-          hasRead: !!event.read,
-          hasPostback: !!event.postback
-        });
+        // message_edit, reaction, read, etc. — skip (or could update thread in future)
         continue;
       }
       if (message.is_echo || message.is_deleted || message.is_unsupported) {
-        logger.info('[processWebhook] Instagram: skipping message', {
+        logger.debug('[processWebhook] Instagram: skipping message', {
           is_echo: !!message.is_echo,
           is_deleted: !!message.is_deleted,
           is_unsupported: !!message.is_unsupported
@@ -246,12 +238,13 @@ async function handleInstagramWebhook(payload, organizationId) {
         dmReceiverConnection?.accessToken || null
       );
       if (!profile.username && !profile.name && !profile.avatarUrl) {
-        console.warn('[processWebhook] Instagram DM: no profile for senderId=', senderId, 'hasReceiverToken=', !!dmReceiverConnection?.accessToken);
+        // Expected when app lacks Advanced Access; interaction is still created with platformId
+        logger.debug('[processWebhook] Instagram DM: no profile for senderId', { senderId, hasReceiverToken: !!dmReceiverConnection?.accessToken });
       }
       const author = {
         platformId: senderId,
         username: profile.username,
-        name: profile.name
+        name: profile.name || profile.username || 'Instagram User'
       };
       if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
@@ -366,9 +359,9 @@ async function handleInstagramWebhook(payload, organizationId) {
       }
     }
 
-    logger.warn('[processWebhook] Instagram: no interaction created (no matching messaging or changes)', {
+    logger.debug('[processWebhook] Instagram: no interaction created', {
       entryId: entry.id,
-      messagingCount: messaging.length,
+      messagingCount: allMessageEvents.length,
       changesCount: (entry.changes || []).length
     });
     return null;
@@ -567,7 +560,7 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
       profilePic: data.profile_pic || undefined
     };
   } catch (err) {
-    console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid, err.response?.data?.error?.message || err.message);
+    logger.debug('[processWebhook] fetchFacebookSenderProfile failed', { psid, message: err.response?.data?.error?.message || err.message });
     return {};
   }
 }
@@ -682,14 +675,9 @@ async function handleYouTubeWebhook(payload, organizationId) {
  */
 async function handleLinkedInWebhook(payload, organizationId) {
   try {
-    console.log('💼 [LinkedIn Webhook] Processing payload:', JSON.stringify(payload, null, 2));
-    
     const { eventType, data } = payload;
 
-    if (!eventType || !data) {
-      console.log('⚠️  [LinkedIn Webhook] Missing eventType or data');
-      return null;
-    }
+    if (!eventType || !data) return null;
 
     // Handle different LinkedIn event types
     switch (eventType) {
@@ -698,15 +686,13 @@ async function handleLinkedInWebhook(payload, organizationId) {
         return await handleLinkedInComment(data, organizationId);
       
       case 'SHARE_CREATED':
-        console.log('💼 [LinkedIn Webhook] New share created (informational only)');
         return null; // We don't create interactions for our own posts
       
       case 'SHARE_LIKE_CREATED':
-        console.log('💼 [LinkedIn Webhook] Post liked (informational only)');
         return null; // We might want to track likes in the future
       
       default:
-        console.log(`⚠️  [LinkedIn Webhook] Unknown event type: ${eventType}`);
+        logger.debug('[processWebhook] LinkedIn: unknown event type', { eventType });
         return null;
     }
 
@@ -737,12 +723,7 @@ async function handleLinkedInComment(data, organizationId) {
     const shareId = shareUrn?.split(':').pop();
     const authorId = authorUrn?.split(':').pop();
 
-    if (!commentId || !commentText) {
-      console.log('⚠️  [LinkedIn Webhook] Missing required comment data');
-      return null;
-    }
-
-    console.log(`💼 [LinkedIn Webhook] Processing comment: ${commentId}`);
+    if (!commentId || !commentText) return null;
 
     // Find the platform connection
     const connection = await PlatformConnection.findOne({
@@ -751,10 +732,7 @@ async function handleLinkedInComment(data, organizationId) {
       isActive: true
     });
 
-    if (!connection) {
-      console.log('⚠️  [LinkedIn Webhook] No active LinkedIn connection found');
-      return null;
-    }
+    if (!connection) return null;
 
     // Create or update the interaction
     const interaction = await Interaction.findOneAndUpdate(
@@ -787,8 +765,6 @@ async function handleLinkedInComment(data, organizationId) {
       },
       { upsert: true, new: true }
     );
-
-    console.log(`✅ [LinkedIn Webhook] Interaction created/updated: ${interaction._id}`);
 
     return interaction;
   } catch (error) {

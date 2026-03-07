@@ -36,7 +36,17 @@ class InstagramService {
       } catch (err) {
         const msg = err.response?.data?.error?.message || err.message;
         const code = err.response?.data?.error?.code;
-        console.warn(`[Instagram] User profile ${name} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
+        // Expected without Advanced Access (instagram_manage_messages) or with invalid token (190)
+        if (code === 200 || code === 190) {
+          // Log once per userId at debug level to avoid noise on every webhook
+          if (!this._profileFailLogged) this._profileFailLogged = new Set();
+          if (!this._profileFailLogged.has(userId)) {
+            this._profileFailLogged.add(userId);
+            console.warn(`[Instagram] User profile unavailable for userId=${userId} (code ${code}). Normal until instagram_manage_messages has Advanced Access.`);
+          }
+        } else {
+          console.warn(`[Instagram] User profile ${name} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
+        }
         // Try next URL or return null
       }
     }
