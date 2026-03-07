@@ -47,11 +47,13 @@ app.use(express.urlencoded({ extended: true }));
 const requestLogger = require('./middlewares/requestLogger');
 app.use(requestLogger);
 
-// Logging middleware (HTTP format logging)
-if (process.env.NODE_ENV === 'development') {
-  app.use(morgan('dev'));
-} else {
-  app.use(morgan('combined'));
+// HTTP request logging (morgan) - disabled to reduce console noise; set LOG_HTTP=1 to enable
+if (process.env.LOG_HTTP === '1') {
+  if (process.env.NODE_ENV === 'development') {
+    app.use(morgan('dev'));
+  } else {
+    app.use(morgan('combined'));
+  }
 }
 
 // Rate limiting - will be initialized after Redis connects

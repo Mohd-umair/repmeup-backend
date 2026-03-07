@@ -3,8 +3,8 @@ const { randomUUID } = require('crypto');
 
 /**
  * Request Logger Middleware
- * Adds request ID and logger instance to each request
- * Logs request start and completion with duration
+ * Adds request ID and logger instance to each request.
+ * Logs request start/completion only when LOG_HTTP=1 (to reduce console noise).
  */
 const requestLogger = (req, res, next) => {
   // Generate or use existing request ID
@@ -21,9 +21,10 @@ const requestLogger = (req, res, next) => {
   
   // Capture request start time
   const startTime = Date.now();
+  const shouldLogRequests = process.env.LOG_HTTP === '1';
   
-  // Log request start (only for non-health checks)
-  if (req.path !== '/health') {
+  // Log request start only when LOG_HTTP=1 (skip health checks either way)
+  if (shouldLogRequests && req.path !== '/health') {
     req.log.info('Request started', {
       method: req.method,
       url: req.originalUrl,
@@ -39,8 +40,8 @@ const requestLogger = (req, res, next) => {
     // Add request ID to response headers
     res.setHeader('X-Request-Id', requestId);
     
-    // Log response (skip health checks)
-    if (req.path !== '/health') {
+    // Log response only when LOG_HTTP=1 (skip health checks either way)
+    if (shouldLogRequests && req.path !== '/health') {
       const logLevel = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info';
       
       req.log.log(logLevel, 'Request completed', {

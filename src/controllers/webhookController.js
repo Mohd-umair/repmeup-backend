@@ -72,7 +72,6 @@ exports.handleGoogleWebhook = async (req, res, next) => {
           }
         });
 
-        console.log('Google webhook queued for processing');
       } catch (error) {
         console.error('Error processing Google webhook:', error);
       }
@@ -106,8 +105,6 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
     const messageData = JSON.parse(Buffer.from(message.data, 'base64').toString());
     const { videoId, commentId, eventType } = messageData;
 
-    console.log('YouTube webhook received:', { videoId, commentId, eventType });
-
     // Find platform connection by channel
     const connection = await PlatformConnection.findOne({
       platform: 'youtube',
@@ -115,7 +112,6 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
     });
 
     if (!connection) {
-      console.log('No active YouTube connection found');
       return res.status(200).json({ success: true, message: 'No connection found' });
     }
 
@@ -141,7 +137,6 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
           }
         });
 
-        console.log('YouTube webhook queued for processing');
       } catch (error) {
         console.error('Error processing YouTube webhook:', error);
       }
@@ -219,12 +214,9 @@ exports.verifyFacebookWebhook = (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('Facebook webhook verification request:', { mode, token });
-
   if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
-    console.log('Facebook webhook verified successfully');
-    res.status(200).send(challenge);
-  } else {
+      res.status(200).send(challenge);
+    } else {
     console.error('Facebook webhook verification failed');
     res.sendStatus(403);
   }
@@ -236,26 +228,13 @@ exports.verifyFacebookWebhook = (req, res) => {
  */
 exports.handleFacebookWebhook = async (req, res) => {
   try {
-    // Log immediately so we can see if Meta is hitting this endpoint at all
-    console.log('[Facebook Webhook] POST received', {
-      hasBody: !!req.body,
-      object: req.body?.object,
-      entryCount: req.body?.entry?.length ?? 0
-    });
-
     const { webhookQueue } = require('../config/queue');
-    
-    console.log('Facebook webhook received:', JSON.stringify(req.body, null, 2));
 
     // Acknowledge receipt immediately
     res.sendStatus(200);
 
-    // Process webhook asynchronously
     const entry = req.body.entry?.[0];
-    if (!entry) {
-      console.log('No entry in Facebook webhook payload');
-      return;
-    }
+    if (!entry) return;
 
     // Determine organization from page ID
     const pageId = entry.id;
@@ -266,10 +245,7 @@ exports.handleFacebookWebhook = async (req, res) => {
       isActive: true
     });
 
-    if (!connection) {
-      console.log(`No active Facebook connection found for page: ${pageId}`);
-      return;
-    }
+    if (!connection) return;
 
     // Queue webhook for processing
     await webhookQueue.add({
@@ -284,7 +260,6 @@ exports.handleFacebookWebhook = async (req, res) => {
       }
     });
 
-    console.log('Facebook webhook queued for processing');
   } catch (error) {
     console.error('Facebook webhook handler error:', error);
     // Don't send error response as we already sent 200
@@ -300,10 +275,7 @@ exports.verifyInstagramWebhook = (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('Instagram webhook verification request:', { mode, token });
-
   if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
-    console.log('Instagram webhook verified successfully');
     res.status(200).send(challenge);
   } else {
     console.error('Instagram webhook verification failed');
@@ -322,15 +294,14 @@ exports.handleInstagramWebhook = async (req, res) => {
     res.sendStatus(200);
 
     const entry = req.body.entry?.[0];
-    if (!entry) {
-      console.log('No entry in Instagram webhook payload');
+    if (!entry) return;
+
+    // Don't skip when standby has messages — we'll process standby in the job (same as incoming DMs)
+    const hasMessaging = entry.messaging && entry.messaging.length > 0;
+    const hasStandby = entry.standby && entry.standby.length > 0;
+    if (!hasMessaging && !hasStandby) {
       return;
     }
-
-    // Debug: log what Meta sent in entry (no message content)
-    const entryKeys = entry ? Object.keys(entry) : [];
-    const messagingLen = entry.messaging ? entry.messaging.length : 0;
-    console.log('[Instagram Webhook] entry keys:', entryKeys.join(', '), '| messaging length:', messagingLen);
 
     const instagramId = entry.id;
     const PlatformConnection = require('../models/PlatformConnection');
@@ -340,21 +311,17 @@ exports.handleInstagramWebhook = async (req, res) => {
       isActive: true
     });
 
-    if (!connection) {
-      console.log(`No active Instagram connection found for account: ${instagramId}`);
-      return;
-    }
+    if (!connection) return;
 
     const organizationId = connection.organization.toString();
 
     // Save DM to DB immediately so inbox polling shows it without Sync
     const processWebhook = require('../jobs/processWebhook');
     try {
-      await processWebhook({
+      const result = await processWebhook({
         data: { platform: 'instagram', payload: req.body, organizationId },
         id: 'instagram-' + Date.now()
       });
-      console.log('Instagram webhook processed and DM saved to database');
     } catch (processErr) {
       console.error('Instagram webhook processing error:', processErr.message);
     }
@@ -381,13 +348,6 @@ exports.verifyLinkedInWebhook = (req, res) => {
     const challengeCode = req.query['challengeCode'];
     const applicationId = req.query['applicationId']; // For parent-child apps
 
-    console.log('💼 [LinkedIn Webhook] Verification request:', { 
-      challengeCode: challengeCode ? 'present' : 'missing',
-      applicationId: applicationId || 'none',
-      clientSecretSet: !!process.env.LINKEDIN_CLIENT_SECRET
-    });
-
-    // Check if client secret is configured
     if (!process.env.LINKEDIN_CLIENT_SECRET) {
       console.error('❌ [LinkedIn Webhook] LINKEDIN_CLIENT_SECRET not set in environment');
       return res.status(500).json({
@@ -413,8 +373,6 @@ exports.verifyLinkedInWebhook = (req, res) => {
       .update(challengeCode)
       .digest('hex');
 
-    console.log('✅ [LinkedIn Webhook] Challenge response computed');
-
     // Return JSON response with both challengeCode and challengeResponse
     // Must respond within 3 seconds with 200 OK and content-type: application/json
     const response = {
@@ -424,11 +382,6 @@ exports.verifyLinkedInWebhook = (req, res) => {
 
     res.setHeader('Content-Type', 'application/json');
     res.status(200).json(response);
-
-    console.log('✅ [LinkedIn Webhook] Verification response sent', {
-      challengeCode: challengeCode.substring(0, 8) + '...',
-      responseLength: JSON.stringify(response).length
-    });
   } catch (error) {
     console.error('❌ [LinkedIn Webhook] Verification error:', error);
     res.status(500).json({
@@ -452,8 +405,6 @@ exports.handleLinkedInWebhook = async (req, res) => {
   try {
     const { webhookQueue } = require('../config/queue');
     const crypto = require('crypto');
-    
-    console.log('💼 [LinkedIn Webhook] Received:', JSON.stringify(req.body, null, 2));
 
     // Verify webhook signature for security
     // LinkedIn uses X-LI-Signature header with format: hmacsha256=<hash>
@@ -483,10 +434,6 @@ exports.handleLinkedInWebhook = async (req, res) => {
         });
         return res.sendStatus(403);
       }
-      
-      console.log('✅ [LinkedIn Webhook] Signature verified');
-    } else {
-      console.warn('⚠️  [LinkedIn Webhook] No X-LI-Signature header present');
     }
 
     // Acknowledge receipt immediately
@@ -495,20 +442,14 @@ exports.handleLinkedInWebhook = async (req, res) => {
     // Process webhook asynchronously
     const { eventType, organizationUrn, data } = req.body;
     
-    if (!eventType || !data) {
-      console.log('⚠️  [LinkedIn Webhook] Invalid payload structure');
-      return;
-    }
+    if (!eventType || !data) return;
 
-    // Extract organization ID from URN (format: urn:li:organization:12345)
+    // Extract organization ID
     const orgId = organizationUrn?.split(':').pop();
     
-    if (!orgId) {
-      console.log('⚠️  [LinkedIn Webhook] No organization ID in payload');
-      return;
-    }
+    if (!orgId) return;
 
-    // Find platform connection by organization URN or platform page ID
+    // Find platform connection
     const connection = await PlatformConnection.findOne({
       platform: 'linkedin',
       $or: [
@@ -519,14 +460,9 @@ exports.handleLinkedInWebhook = async (req, res) => {
       isActive: true
     });
 
-    if (!connection) {
-      console.log(`⚠️  [LinkedIn Webhook] No active connection found for org: ${orgId}`);
-      return;
-    }
+    if (!connection) return;
 
-    console.log(`✅ [LinkedIn Webhook] Found connection for org: ${connection.platformName}`);
-
-    // Queue webhook for processing based on event type
+    // Queue webhook for processing
     await webhookQueue.add({
       platform: 'linkedin',
       eventType,
@@ -541,7 +477,6 @@ exports.handleLinkedInWebhook = async (req, res) => {
       }
     });
 
-    console.log(`✅ [LinkedIn Webhook] Queued ${eventType} for processing`);
   } catch (error) {
     console.error('❌ [LinkedIn Webhook] Handler error:', error);
     // Don't send error response as we already sent 200
@@ -559,20 +494,12 @@ exports.verifyWhatsAppWebhook = (req, res) => {
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
 
-    console.log('💬 [WhatsApp Webhook] Verification request:', { 
-      mode, 
-      tokenProvided: !!token,
-      challengeProvided: !!challenge 
-    });
-
-    // Verify the token and mode
-    if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
-      console.log('✅ [WhatsApp Webhook] Verification successful');
-      res.status(200).send(challenge);
-    } else {
-      console.error('❌ [WhatsApp Webhook] Verification failed');
-      res.sendStatus(403);
-    }
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    console.error('❌ [WhatsApp Webhook] Verification failed');
+    res.sendStatus(403);
+  }
   } catch (error) {
     console.error('❌ [WhatsApp Webhook] Verification error:', error);
     res.sendStatus(500);
@@ -591,13 +518,6 @@ exports.handleWhatsAppWebhook = async (req, res) => {
     const PlatformConnection = require('../models/PlatformConnection');
     const Interaction = require('../models/Interaction');
 
-    console.log('💬 [WhatsApp Webhook] Received event');
-    console.log('📦 [WhatsApp Webhook] Request body:', JSON.stringify(req.body, null, 2));
-    console.log('📋 [WhatsApp Webhook] Headers:', {
-      'x-hub-signature-256': req.headers['x-hub-signature-256'] ? 'present' : 'missing',
-      'content-type': req.headers['content-type']
-    });
-
     // Verify webhook signature (Meta signature verification)
     const signature = req.headers['x-hub-signature-256'];
     if (signature && process.env.META_APP_SECRET) {
@@ -613,30 +533,15 @@ exports.handleWhatsAppWebhook = async (req, res) => {
         console.error('   Received:', signature);
         return res.sendStatus(403);
       }
-      console.log('✅ [WhatsApp Webhook] Signature verified');
-    } else {
-      console.log('⚠️  [WhatsApp Webhook] Signature verification skipped (no signature or META_APP_SECRET)');
     }
 
     // Acknowledge receipt immediately
     res.sendStatus(200);
 
     // Check if it's a WhatsApp Business Account event
-    if (req.body.object !== 'whatsapp_business_account') {
-      console.log('⏭️  [WhatsApp Webhook] Not a WhatsApp business account event');
-      console.log('   Object type:', req.body.object);
-      console.log('   Expected: whatsapp_business_account');
-      return;
-    }
+    if (req.body.object !== 'whatsapp_business_account') return;
 
-    // Check if there are entries
-    if (!req.body.entry || req.body.entry.length === 0) {
-      console.log('⏭️  [WhatsApp Webhook] No entries in webhook');
-      console.log('   Entry count:', req.body.entry ? req.body.entry.length : 0);
-      return;
-    }
-
-    console.log(`📥 [WhatsApp Webhook] Processing ${req.body.entry.length} entry/entries`);
+    if (!req.body.entry || req.body.entry.length === 0) return;
 
     // Process each entry
     for (const entry of req.body.entry) {
@@ -652,11 +557,6 @@ exports.handleWhatsAppWebhook = async (req, res) => {
           const message = value.messages[0];
           const phoneNumberId = value.metadata.phone_number_id;
 
-          console.log(`💬 [WhatsApp Webhook] New message from ${message.from}`);
-
-          // Find platform connection by phone number ID
-          console.log(`🔍 [WhatsApp Webhook] Looking for connection with phoneNumberId: ${phoneNumberId}`);
-          
           const connection = await PlatformConnection.findOne({
             platform: 'whatsapp',
             'platformData.phoneNumberId': phoneNumberId,
@@ -664,20 +564,8 @@ exports.handleWhatsAppWebhook = async (req, res) => {
           }).populate('organization');
 
           if (!connection) {
-            console.log(`⚠️  [WhatsApp Webhook] No active connection found for phone: ${phoneNumberId}`);
-            console.log(`   Checking all WhatsApp connections...`);
-            
-            // Debug: List all WhatsApp connections
-            const allConnections = await PlatformConnection.find({ platform: 'whatsapp' });
-            console.log(`   Found ${allConnections.length} WhatsApp connection(s) in database:`);
-            allConnections.forEach((conn, idx) => {
-              console.log(`   [${idx + 1}] ID: ${conn._id}, PhoneNumberId: ${conn.platformData?.phoneNumberId}, Active: ${conn.isActive}`);
-            });
-            
             continue;
           }
-
-          console.log(`✅ [WhatsApp Webhook] Found connection for: ${connection.platformData.verifiedName}`);
 
           // Process the message
           const messageData = await whatsappService.processWebhookMessage(req.body);
@@ -692,7 +580,6 @@ exports.handleWhatsAppWebhook = async (req, res) => {
 
             // Save interaction
             const savedInteraction = await Interaction.create(interaction);
-            console.log(`✅ [WhatsApp] Interaction saved: ${savedInteraction._id}`);
 
             // AUTOMATIC SENTIMENT ANALYSIS: Analyze immediately for real-time filtering
             if (savedInteraction.content && !savedInteraction.sentiment) {
@@ -703,7 +590,6 @@ exports.handleWhatsAppWebhook = async (req, res) => {
                 savedInteraction.sentimentScore = sentimentResult.sentimentScore;
                 savedInteraction.sentimentConfidence = sentimentResult.sentimentConfidence;
                 await savedInteraction.save();
-                console.log(`🎭 [WhatsApp] Sentiment analyzed: ${sentimentResult.sentiment} for ${savedInteraction._id}`);
               } catch (sentError) {
                 console.error(`⚠️ [WhatsApp] Sentiment analysis failed:`, sentError.message);
               }
@@ -732,7 +618,6 @@ exports.handleWhatsAppWebhook = async (req, res) => {
                     delay: 2000
                   }
                 });
-                console.log(`✅ [WhatsApp] Queued for auto-reply: ${savedInteraction._id}`);
               } catch (queueError) {
                 console.error('❌ [WhatsApp] Failed to queue auto-reply:', queueError.message);
               }
@@ -742,7 +627,6 @@ exports.handleWhatsAppWebhook = async (req, res) => {
         // Handle message status updates (optional)
         else if (change.field === 'messages' && value.statuses && value.statuses.length > 0) {
           const status = value.statuses[0];
-          console.log(`📊 [WhatsApp Webhook] Message status update: ${status.status} for ${status.id}`);
           
           // Update interaction status in database
           await Interaction.updateOne(
