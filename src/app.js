@@ -57,26 +57,39 @@ if (process.env.LOG_HTTP === '1') {
 }
 
 // Rate limiting - will be initialized after Redis connects
-// For now, use in-memory rate limiting as fallback
+// Set RATE_LIMIT_DISABLED=true to turn off (e.g. dev or when all traffic shares one IP behind a proxy)
+const rateLimitDisabled = process.env.RATE_LIMIT_DISABLED === 'true';
 const rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000; // 15 minutes
-const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000;
+const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || (
+  process.env.NODE_ENV === 'development' ? 10000 : 1000
+);
 let limiter = rateLimit({
   windowMs: rateLimitWindowMs,
   max: rateLimitMax,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limiting for health check and media serving
+    if (rateLimitDisabled) return true;
     if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
-    // Skip for webhooks (external services like Meta send many requests from few IPs)
     if (req.path.startsWith('/api/webhooks/')) return true;
     return false;
   },
-  message: { success: false, error: 'Too many requests from this IP, please try again later' }
+  message: { success: false, error: 'Too many requests from this IP, please try again later' },
+  handler: (req, res, next, options) => {
+    console.warn('[Rate limit] Too many requests', { ip: req.ip, path: req.path });
+    res.status(429).json(options.message);
+  }
 });
 
 // Middleware wrapper that uses the current limiter
-app.use('/api/', (req, res, next) => limiter(req, res, next));
+app.use('/api/', (req, res, next) => {
+  if (rateLimitDisabled) return next();
+  return limiter(req, res, next);
+});
+
+if (rateLimitDisabled) {
+  console.log('⚠️  Rate limiting is DISABLED (RATE_LIMIT_DISABLED=true). Enable it in production.');
+}
 
 // Health check route
 app.get('/health', (req, res) => {
@@ -141,6 +154,7 @@ const upgradeRateLimiting = () => {
       standardHeaders: true,
       legacyHeaders: false,
       skip: (req) => {
+        if (rateLimitDisabled) return true;
         if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
         if (req.path.startsWith('/api/webhooks/')) return true;
         return false;
@@ -149,9 +163,13 @@ const upgradeRateLimiting = () => {
         sendCommand,
         prefix: 'rl:',
       }),
-      message: { success: false, error: 'Too many requests from this IP, please try again later' }
+      message: { success: false, error: 'Too many requests from this IP, please try again later' },
+      handler: (req, res, next, options) => {
+        console.warn('[Rate limit] Too many requests', { ip: req.ip, path: req.path });
+        res.status(429).json(options.message);
+      }
     });
-    console.log(`✅ Rate limiting upgraded to Redis-backed store (${rateLimitMax} req/${rateLimitWindowMs / 60000}min)`);
+    console.log(`✅ Rate limiting upgraded to Redis-backed store (${rateLimitMax} req/${rateLimitWindowMs / 60000}min)${rateLimitDisabled ? ' [DISABLED by RATE_LIMIT_DISABLED]' : ''}`);
   } catch (error) {
     console.warn('⚠️  Could not upgrade to Redis-backed rate limiting, using in-memory fallback:', error.message);
   }
