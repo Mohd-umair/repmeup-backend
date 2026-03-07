@@ -9,6 +9,7 @@ const User = require('../models/User');
 const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const axios = require('axios');
+const logger = require('../config/logger');
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
@@ -507,13 +508,23 @@ exports.replyToInteraction = async (req, res, next) => {
         const instagramService = require('../integrations/meta/instagramService');
         let result;
         if (interaction.type === 'dm') {
-          // Send API requires Facebook Page ID (not Instagram business account ID)
-          const pageId = connection.platformPageId || connection.platformData?.pageId;
+          // Send API requires the Facebook Page ID that owns the Instagram thread (thread owner).
+          // Resolve from token so we always use the token's Page and avoid "not the thread owner" (#100).
+          let pageId = connection.platformPageId || connection.platformData?.pageId;
+          const resolvedFromToken = await instagramService.getPageIdFromToken(connection.accessToken);
+          if (resolvedFromToken) pageId = resolvedFromToken;
           const recipientId = interaction.author?.platformId;
+          logger.info('[Inbox Reply] Instagram DM send', {
+            igAccountId,
+            platformUserId: connection.platformUserId,
+            storedPageId: connection.platformPageId || connection.platformData?.pageId,
+            resolvedFromToken: resolvedFromToken || null,
+            pageId
+          });
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
-            errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect Instagram in Settings so we have the Facebook Page ID.';
-            console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId });
+            errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
+            console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId, igAccountId });
           } else {
             result = await instagramService.sendMessage(
               recipientId,
@@ -632,7 +643,12 @@ exports.replyToInteraction = async (req, res, next) => {
         console.error('Platform API response:', JSON.stringify(platformError.response.data));
       }
       replyStatus = 'failed';
-      errorMessage = metaUserMsg || platformError.message || 'Failed to post reply to platform';
+      // Friendly message for Instagram "not the thread owner" (code 100, subcode 2534037)
+      if (metaError?.code === 100 && metaError?.error_subcode === 2534037) {
+        errorMessage = 'This conversation belongs to a different Instagram account. Reconnect the Instagram account that receives these DMs in Settings → Platforms, then try again.';
+      } else {
+        errorMessage = metaUserMsg || platformError.message || 'Failed to post reply to platform';
+      }
     }
 
     // Add reply to database with platform response ID
