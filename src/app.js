@@ -58,15 +58,19 @@ if (process.env.LOG_HTTP === '1') {
 
 // Rate limiting - will be initialized after Redis connects
 // For now, use in-memory rate limiting as fallback
+const rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000; // 15 minutes
+const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000;
 let limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // Increased from 100 to 1000
+  windowMs: rateLimitWindowMs,
+  max: rateLimitMax,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
     // Skip rate limiting for health check and media serving
-    // Media endpoints need to be accessible by Instagram/Facebook/LinkedIn without rate limits
-    return req.path === '/health' || req.path.startsWith('/api/posts/media/');
+    if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
+    // Skip for webhooks (external services like Meta send many requests from few IPs)
+    if (req.path.startsWith('/api/webhooks/')) return true;
+    return false;
   },
   message: { success: false, error: 'Too many requests from this IP, please try again later' }
 });
@@ -132,12 +136,14 @@ const upgradeRateLimiting = () => {
     // rate-limit-redis v4 expects sendCommand; node-redis v4 uses client.sendCommand(args)
     const sendCommand = (...args) => redisClient.sendCommand(args);
     limiter = rateLimit({
-      windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-      max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000,
+      windowMs: rateLimitWindowMs,
+      max: rateLimitMax,
       standardHeaders: true,
       legacyHeaders: false,
       skip: (req) => {
-        return req.path === '/health' || req.path.startsWith('/api/posts/media/');
+        if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
+        if (req.path.startsWith('/api/webhooks/')) return true;
+        return false;
       },
       store: new RedisStore({
         sendCommand,
@@ -145,7 +151,7 @@ const upgradeRateLimiting = () => {
       }),
       message: { success: false, error: 'Too many requests from this IP, please try again later' }
     });
-    console.log('✅ Rate limiting upgraded to Redis-backed store (1000 req/15min)');
+    console.log(`✅ Rate limiting upgraded to Redis-backed store (${rateLimitMax} req/${rateLimitWindowMs / 60000}min)`);
   } catch (error) {
     console.warn('⚠️  Could not upgrade to Redis-backed rate limiting, using in-memory fallback:', error.message);
   }
