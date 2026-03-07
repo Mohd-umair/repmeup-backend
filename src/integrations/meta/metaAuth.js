@@ -340,33 +340,49 @@ class MetaAuthService {
   }
 
   /**
-   * Verify access token
+   * Verify access token. Tries each configured Meta app (META, INSTAGRAM, FACEBOOK) so that
+   * tokens issued by any of them can be verified (fixes "App_id in the input_token did not match the Viewing App").
    */
   async verifyAccessToken(accessToken) {
-    try {
-      const appId = process.env.META_APP_ID ||
-        process.env.INSTAGRAM_APP_ID ||
-        process.env.FACEBOOK_APP_ID;
-      const appSecret = process.env.META_APP_SECRET ||
-        process.env.INSTAGRAM_APP_SECRET ||
-        process.env.FACEBOOK_APP_SECRET;
+    if (!accessToken) return null;
+    const appCreds = [
+      [process.env.META_APP_ID, process.env.META_APP_SECRET],
+      [process.env.INSTAGRAM_APP_ID, process.env.INSTAGRAM_APP_SECRET],
+      [process.env.FACEBOOK_APP_ID, process.env.FACEBOOK_APP_SECRET]
+    ].filter(([id, secret]) => id && secret);
 
-      if (!appId || !appSecret) {
-        throw new Error('Meta App ID or Secret not configured. Please check your environment variables.');
-      }
-
-      const response = await axios.get(`${this.graphURL}/debug_token`, {
-        params: {
-          input_token: accessToken,
-          access_token: `${appId}|${appSecret}`
-        }
-      });
-
-      return response.data.data;
-    } catch (error) {
-      console.error('Token verification error:', error.response?.data || error.message);
+    if (appCreds.length === 0) {
+      console.error('Token verification: no Meta app ID/Secret configured (META_*, INSTAGRAM_*, or FACEBOOK_*).');
       return null;
     }
+
+    for (let i = 0; i < appCreds.length; i++) {
+      const [appId, appSecret] = appCreds[i];
+      try {
+        const response = await axios.get(`${this.graphURL}/debug_token`, {
+          params: {
+            input_token: accessToken,
+            access_token: `${appId}|${appSecret}`
+          },
+          timeout: 5000
+        });
+        const data = response.data?.data;
+        if (data && data.is_valid !== false) return data;
+        if (response.data?.error?.code === 100 && response.data?.error?.message?.includes('Viewing App')) continue;
+        return data || null;
+      } catch (error) {
+        const code = error.response?.data?.error?.code;
+        const msg = (error.response?.data?.error?.message || '').toString();
+        if (code === 100 && msg.includes('Viewing App')) continue;
+        if (i === appCreds.length - 1) {
+          console.error('Token verification error:', error.response?.data || error.message);
+          if (code === 190) {
+            console.warn('[Meta] Code 190 = invalid app credentials or app not found. Ensure META_APP_ID/SECRET (or INSTAGRAM_*/FACEBOOK_*) match the app where you connected Instagram and where the webhook is subscribed.');
+          }
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -522,6 +538,7 @@ class MetaAuthService {
         existingConnection.status = 'connected';
         existingConnection.isActive = true;
         existingConnection.lastSyncAt = new Date();
+        existingConnection.platformPageId = pageData.id; // Required for Send API (thread owner)
         // Ensure platformData is set
         if (!existingConnection.platformData) {
           existingConnection.platformData = {};

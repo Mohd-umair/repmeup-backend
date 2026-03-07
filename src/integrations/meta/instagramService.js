@@ -586,6 +586,40 @@ class InstagramService {
   }
 
   /**
+   * Resolve the Facebook Page ID that this access token belongs to.
+   * Only returns a value for PAGE tokens; for USER tokens /me would be the user ID, not the thread owner.
+   * When token verification fails (e.g. app mismatch), returns null so caller uses stored platformPageId.
+   * @param {string} accessToken - Page or User access token
+   * @returns {Promise<string|null>} Page ID or null on error / when token is USER / when verify fails
+   */
+  async getPageIdFromToken(accessToken) {
+    if (!accessToken) return null;
+    try {
+      const metaAuth = require('./metaAuth');
+      const debug = await metaAuth.verifyAccessToken(accessToken);
+      if (debug && debug.type === 'PAGE' && debug.profile_id) {
+        return String(debug.profile_id);
+      }
+      if (debug && debug.type === 'USER') {
+        console.warn('[Instagram] getPageIdFromToken: token is USER type; use stored platformPageId for send.');
+        return null;
+      }
+      if (!debug) {
+        console.warn('[Instagram] getPageIdFromToken: token verification failed (e.g. app mismatch). Using stored platformPageId.');
+        return null;
+      }
+      const res = await axios.get(`${this.baseUrl}/me`, {
+        params: { fields: 'id', access_token: accessToken },
+        timeout: 5000
+      });
+      return res.data?.id || null;
+    } catch (err) {
+      console.warn('[Instagram] getPageIdFromToken failed:', err.response?.data?.error?.message || err.message);
+      return null;
+    }
+  }
+
+  /**
    * Send Instagram DM (Messaging API).
    * Uses HUMAN_AGENT message tag when useHumanAgentTag is true (default), per Meta App Review requirements.
    * @param {string} recipientId - Instagram recipient user ID (PSID)
@@ -595,6 +629,7 @@ class InstagramService {
    * @param {boolean} [useHumanAgentTag=true] - Send with MESSAGE_TAG + HUMAN_AGENT for human agent replies
    */
   async sendMessage(recipientId, message, accessToken, pageId, useHumanAgentTag = true) {
+    let tokenPageId = null;
     try {
       const body = {
         recipient: { id: recipientId },
@@ -603,6 +638,20 @@ class InstagramService {
       if (useHumanAgentTag) {
         body.messaging_type = 'MESSAGE_TAG';
         body.tag = 'HUMAN_AGENT';
+      }
+      try {
+        const meRes = await axios.get(`${this.baseUrl}/me`, {
+          params: { fields: 'id', access_token: accessToken },
+          timeout: 3000
+        });
+        tokenPageId = meRes.data?.id ? String(meRes.data.id) : null;
+        if (tokenPageId && tokenPageId !== String(pageId)) {
+          console.warn('[Instagram] sendMessage: token belongs to Page', tokenPageId, 'but sending with pageId', pageId, '- "not the thread owner" likely. Reconnect this Instagram from Settings using the same Meta App as the webhook.');
+        }
+      } catch (meErr) {
+        const code = meErr.response?.data?.error?.code;
+        const msg = meErr.response?.data?.error?.message || meErr.message;
+        console.warn('[Instagram] sendMessage: /me check failed (code', code, '). Cannot confirm token matches pageId.', msg?.substring(0, 80));
       }
       const response = await axios.post(
         `${this.baseUrl}/${pageId}/messages`,
@@ -624,6 +673,15 @@ class InstagramService {
       let userMsg = apiError?.error_user_msg || apiError?.message || error.message;
       if (apiError?.code === 200 && userMsg && userMsg.includes('instagram_manage_messages')) {
         userMsg = 'Instagram messaging requires Advanced Access for instagram_manage_messages (App Review). Until approved, you can only reply to users who are Testers on your Meta app. Add the recipient as a Tester in your app’s Roles, or complete App Review for Advanced Access.';
+      }
+      if (apiError?.code === 100 && apiError?.error_subcode === 2534037) {
+        userMsg = 'This conversation belongs to a different Instagram account. Reconnect the Instagram account that receives these DMs in Settings → Platforms.';
+        const tokenMatchesPage = tokenPageId && String(tokenPageId) === String(pageId);
+        if (tokenMatchesPage) {
+          console.warn('[Instagram] Thread owner (2534037) but token Page matches pageId. The webhook is likely subscribed to a DIFFERENT Meta App than the one used to connect Instagram. Fix: In Meta for Developers use ONE app for both (1) Instagram product + webhook subscription and (2) your app\'s Instagram login. Put that app\'s App ID and Secret in .env (META_APP_ID / META_APP_SECRET).');
+        } else {
+          console.warn('[Instagram] Thread owner error (2534037). Ensure the same Meta App is used for (1) Instagram webhook subscription and (2) connecting Instagram in Settings. Token\'s Page from /me:', tokenPageId || 'unknown', '| pageId used:', pageId);
+        }
       }
       console.error('Instagram send message error:', userMsg);
       if (data) {
