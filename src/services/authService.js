@@ -1,7 +1,9 @@
+const crypto = require('crypto');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { generateToken, generateRefreshToken } = require('../middlewares/auth');
 const googleAuthService = require('../integrations/google/googleAuthService');
+const emailService = require('./emailService');
 
 class AuthService {
   /**
@@ -229,6 +231,14 @@ class AuthService {
       let user = await User.findOne({ email }).populate('organization');
 
       if (user) {
+        // Block sign-in if RISC reported this Google account as disabled
+        if (user.risc && user.risc.googleSignInDisabled) {
+          throw new Error(
+            'Google sign-in has been temporarily disabled for this account due to a security event. ' +
+            'Please contact support or use your email and password to log in.'
+          );
+        }
+
         // User exists - update OAuth info and login
         user.oauth = {
           provider: 'google',
@@ -297,6 +307,52 @@ class AuthService {
       console.error('Google auth error:', error);
       throw error;
     }
+  }
+
+  /**
+   * Request password reset — generate token, save to user, send email
+   */
+  async forgotPassword(email) {
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    // Always respond generically so we don't reveal whether email exists
+    if (!user) return;
+
+    // Generate a random token
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    user.passwordResetToken = hashedToken;
+    user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    await user.save({ validateBeforeSave: false });
+
+    await emailService.sendPasswordResetEmail(user, rawToken);
+  }
+
+  /**
+   * Reset password using the token from the email link
+   */
+  async resetPassword(rawToken, newPassword) {
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    const user = await User.findOne({
+      passwordResetToken: hashedToken,
+      passwordResetExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      throw new Error('Password reset token is invalid or has expired');
+    }
+
+    user.password = newPassword;
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+    await user.save();
+
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    return { token, refreshToken };
   }
 }
 

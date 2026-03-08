@@ -1,7 +1,9 @@
 const axios = require('axios');
 const KnowledgeBase = require('../models/KnowledgeBase');
+const BrandConfig = require('../models/BrandConfig');
 const aiCreditService = require('./aiCreditService');
 const logger = require('../config/logger');
+const { escapeRegex } = require('../utils/sanitize');
 
 class AIService {
   constructor() {
@@ -12,6 +14,7 @@ class AIService {
     // OpenAI configuration (for production)
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openaiApiUrl = 'https://api.openai.com/v1/chat/completions';
+    this.openaiImagesUrl = 'https://api.openai.com/v1/images/generations';
     this.openaiModel = process.env.OPENAI_MODEL || 'gpt-4';
 
     // Provider selection: Auto-detect based on availability
@@ -56,6 +59,7 @@ class AIService {
       // If no results from text search, try keyword matching
       if (results.length === 0) {
         const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+        const escapedForRegex = queryWords.map(w => escapeRegex(w));
 
         if (queryWords.length > 0) {
           const keywordResults = await KnowledgeBase.find({
@@ -63,7 +67,7 @@ class AIService {
             isActive: true,
             $or: [
               { keywords: { $in: queryWords } },
-              { title: { $regex: queryWords.join('|'), $options: 'i' } }
+              { title: { $regex: escapedForRegex.join('|'), $options: 'i' } }
             ]
           })
             .select('title content category priority keywords')
@@ -87,17 +91,20 @@ class AIService {
    * @param {Array} platforms - Array of platform names ['instagram', 'facebook', 'linkedin']
    * @param {String} mode - 'same' for same post across all, 'custom' for different per platform
    * @param {String} postType - 'post', 'story', 'reel', 'short'
+   * @param {String} [organizationId] - Optional org ID for brand context (tone, banned words, hashtags)
    * @returns {Promise<Object>} Generated post(s) and credits used
    */
-  async generatePost(prompt, platforms, mode = 'same', postType = 'post') {
+  async generatePost(prompt, platforms, mode = 'same', postType = 'post', organizationId = null) {
     try {
       console.log(`✍️ [AI] Generating ${mode} post for platforms:`, platforms);
       console.log(`📝 [AI] Prompt: "${prompt}"`);
       console.log(`📋 [AI] Post type: ${postType}`);
 
+      const brandContext = organizationId ? await this._getBrandContext(organizationId) : null;
+
       if (mode === 'same') {
         // Generate ONE post for all platforms
-        const post = await this._generateSinglePost(prompt, platforms, postType);
+        const post = await this._generateSinglePost(prompt, platforms, postType, brandContext);
         return {
           mode: 'same',
           posts: { all: post },
@@ -107,7 +114,7 @@ class AIService {
         // Generate CUSTOM post for EACH platform
         const posts = {};
         for (const platform of platforms) {
-          posts[platform] = await this._generateSinglePost(prompt, [platform], postType);
+          posts[platform] = await this._generateSinglePost(prompt, [platform], postType, brandContext);
         }
         return {
           mode: 'custom',
@@ -122,17 +129,48 @@ class AIService {
   }
 
   /**
+   * Get brand context string for prompt injection (tone, banned words, approved hashtags)
+   * @private
+   */
+  async _getBrandContext(organizationId) {
+    if (!organizationId) return null;
+    try {
+      const config = await BrandConfig.findOne({ organization: organizationId }).lean();
+      if (!config) return null;
+      const parts = [];
+      parts.push(`Brand tone: ${config.toneOfVoice || 'professional'}.`);
+      if (config.personalityTags && config.personalityTags.length > 0) {
+        parts.push(`Brand personality: ${config.personalityTags.join(', ')}.`);
+      }
+      if (config.bannedWords && config.bannedWords.length > 0) {
+        parts.push(`Never use these words: ${config.bannedWords.join(', ')}.`);
+      }
+      if (config.approvedHashtags && config.approvedHashtags.length > 0) {
+        parts.push(`Prefer these hashtags when relevant: ${config.approvedHashtags.join(', ')}.`);
+      }
+      if (config.legalDisclaimers && config.legalDisclaimers.trim()) {
+        parts.push(`Include this disclaimer when relevant: ${config.legalDisclaimers.trim()}`);
+      }
+      return parts.length ? parts.join(' ') : null;
+    } catch (err) {
+      logger.warn('Brand context fetch failed', { organizationId, err: err.message });
+      return null;
+    }
+  }
+
+  /**
    * Generate a single post optimized for specific platform(s)
    * @private
    */
-  async _generateSinglePost(prompt, platforms, postType) {
+  async _generateSinglePost(prompt, platforms, postType, brandContext = null) {
     const platformNames = platforms.join(', ');
     const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
+    const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
 
     const systemPrompt = `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
 
 ${platformGuidelines}
-
+${brandSection}
 Guidelines:
 - Be authentic and engaging
 - Use appropriate emojis sparingly
@@ -186,6 +224,87 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
   }
 
   /**
+   * Generate N text variants for Content Studio (e.g. 3 options to choose from).
+   */
+  async generatePostVariants(prompt, platforms, options = {}) {
+    const count = Math.min(Number(options.count) || 3, 5);
+    const organizationId = options.organizationId || null;
+    const postType = options.postType || 'post';
+    const audience = options.audience || '';
+    const intent = options.intent || '';
+    const includeTrend = options.includeTrend;
+    let userPrompt = prompt;
+    if (audience) userPrompt += ` Target audience: ${audience}.`;
+    if (intent) userPrompt += ` Content intent: ${intent}.`;
+    if (includeTrend) userPrompt += ' Weave in a relevant current trend or seasonal angle.';
+
+    const brandContext = organizationId ? await this._getBrandContext(organizationId) : null;
+    const variants = [];
+    const temperatures = [0.7, 0.85, 0.95].slice(0, count);
+    for (let i = 0; i < count; i++) {
+      const content = await this._generateSinglePostWithTemperature(
+        userPrompt,
+        platforms,
+        postType,
+        brandContext,
+        temperatures[i] || 0.8
+      );
+      variants.push({ content: content || '' });
+    }
+    return { variants };
+  }
+
+  async _generateSinglePostWithTemperature(prompt, platforms, postType, brandContext, temperature = 0.8) {
+    const platformNames = platforms.join(', ');
+    const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
+    const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
+    const systemPrompt = `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
+${platformGuidelines}
+${brandSection}
+Guidelines:
+- Be authentic and engaging. Use appropriate emojis sparingly.
+- Include relevant hashtags (3-5 for Instagram, 1-2 for others).
+- Generate ONLY the post content. No explanations or meta-commentary.`;
+
+    if (this.provider === 'openai') {
+      const response = await axios.post(
+        this.openaiApiUrl,
+        {
+          model: this.openaiModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+          ],
+          temperature: Math.min(1, Math.max(0, temperature)),
+          max_tokens: 500
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.openaiApiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+      return response.data.choices[0].message.content.trim();
+    } else {
+      const response = await axios.post(
+        `${this.ollamaUrl}/api/chat`,
+        {
+          model: this.ollamaModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+          ],
+          stream: false
+        },
+        { timeout: 30000 }
+      );
+      return response.data.message.content.trim();
+    }
+  }
+
+  /**
    * Get platform-specific guidelines for post generation
    * @private
    */
@@ -217,6 +336,58 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     }
 
     return guidelines.join('\n');
+  }
+
+  /**
+   * Generate an image from a text prompt using OpenAI DALL-E (when provider is OpenAI).
+   * @param {string} prompt - Description of the image to generate (e.g. post topic or caption)
+   * @returns {Promise<Buffer|null>} Image buffer or null if not supported / error
+   */
+  async generateImage(prompt) {
+    if (this.provider !== 'openai' || !this.openaiApiKey) {
+      return null;
+    }
+    try {
+      const imagePrompt = typeof prompt === 'string' && prompt.length > 0
+        ? prompt.substring(0, 1000)
+        : 'Professional social media post image, modern, high quality';
+      const model = process.env.OPENAI_IMAGE_MODEL || 'dall-e-2';
+      const isDallE3 = model.startsWith('dall-e-3');
+      const body = {
+        model,
+        prompt: imagePrompt,
+        n: 1,
+        size: isDallE3 ? '1024x1024' : '1024x1024',
+        response_format: 'url'
+      };
+      if (isDallE3) {
+        body.quality = 'standard';
+      }
+      const response = await axios.post(
+        this.openaiImagesUrl,
+        body,
+        {
+          headers: {
+            Authorization: `Bearer ${this.openaiApiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 60000
+        }
+      );
+      const imageUrl = response.data?.data?.[0]?.url;
+      if (!imageUrl) return null;
+      const imgResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+      return Buffer.from(imgResponse.data);
+    } catch (error) {
+      const status = error.response?.status;
+      const data = error.response?.data;
+      logger.warn('AI image generation failed', {
+        error: error.message,
+        status,
+        openaiError: data?.error?.message || data?.message
+      });
+      return null;
+    }
   }
 
   /**

@@ -3,10 +3,13 @@ const router = express.Router();
 const authController = require('../controllers/authController');
 const { protect, authorize } = require('../middlewares/auth');
 const { validateRegistration, validateLogin } = require('../middlewares/validation');
+const riscController = require('../controllers/riscController');
 
 // Public routes
 router.post('/register', validateRegistration, authController.register);
 router.post('/login', validateLogin, authController.login);
+router.post('/forgot-password', authController.forgotPassword);
+router.post('/reset-password', authController.resetPassword);
 
 // Protected routes
 router.get('/me', protect, authController.getMe);
@@ -33,16 +36,20 @@ const linkedinAuth = require('../integrations/linkedin/linkedinAuth');
 const googleAuthService = require('../integrations/google/googleAuthService');
 
 // Facebook OAuth - check plan limit before starting OAuth
+// Query: auth_type=reauthorize to force Meta to show the consent screen (for App Review screencast)
 router.get('/facebook', protect, checkConnectionLimit, async (req, res, next) => {
   try {
+    const options = {};
+    if (req.query.auth_type === 'reauthorize') options.auth_type = 'reauthorize';
     const authURL = metaAuth.getFacebookAuthURL(
       req.user.id,
-      req.user.organization._id || req.user.organization
+      req.user.organization._id || req.user.organization,
+      options
     );
-    
-    res.json({ 
-      success: true, 
-      authUrl: authURL 
+
+    res.json({
+      success: true,
+      authUrl: authURL
     });
   } catch (error) {
     next(error);
@@ -71,6 +78,12 @@ router.get('/facebook/callback', async (req, res) => {
       return res.redirect(
         `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${encodeURIComponent(errorMsg)}`
       );
+    }
+
+    // Meta may send a  to validate the callback URL (no code/state). Respond 200 so validation succeeds.
+    if (!code && !state) {
+      res.status(200).send('OK');
+      return;
     }
 
     // Check for required parameters
@@ -144,8 +157,11 @@ router.get('/facebook/callback', async (req, res) => {
     const pages = await metaAuth.getUserPages(tokenData.accessToken);
     
     if (pages.length === 0) {
+      const msg = encodeURIComponent(
+        'No pages found. Ensure you have a Facebook Page with Admin/Editor role, grant all permissions (including Business Account access if your Page is linked to a Business), or create a Page at facebook.com/pages'
+      );
       return res.redirect(
-        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=No pages found`
+        `${process.env.FRONTEND_URL}/app/settings?connection=facebook&status=error&message=${msg}`
       );
     }
 
@@ -164,16 +180,20 @@ router.get('/facebook/callback', async (req, res) => {
 });
 
 // Instagram OAuth - check plan limit before starting OAuth
+// Query: auth_type=reauthorize to force Meta to show the consent screen (for App Review screencast)
 router.get('/instagram', protect, checkConnectionLimit, async (req, res, next) => {
   try {
+    const options = {};
+    if (req.query.auth_type === 'reauthorize') options.auth_type = 'reauthorize';
     const authURL = metaAuth.getInstagramAuthURL(
       req.user.id,
-      req.user.organization._id || req.user.organization
+      req.user.organization._id || req.user.organization,
+      options
     );
-    
-    res.json({ 
-      success: true, 
-      authUrl: authURL 
+
+    res.json({
+      success: true,
+      authUrl: authURL
     });
   } catch (error) {
     next(error);
@@ -183,6 +203,28 @@ router.get('/instagram', protect, checkConnectionLimit, async (req, res, next) =
 router.get('/instagram/callback', async (req, res) => {
   try {
     const { code, state, error, error_description } = req.query;
+    // Meta webhook verification (hub.mode=subscribe or hub_mode=subscribe)
+    const hubMode = req.query['hub.mode'] || req.query.hub_mode;
+    const hubChallenge = req.query['hub.challenge'] || req.query.hub_challenge;
+    const hubVerifyToken = req.query['hub.verify_token'] || req.query.hub_verify_token;
+
+    if (hubMode === 'subscribe' && hubChallenge != null) {
+      const expectedToken = process.env.META_VERIFY_TOKEN || 'REP_ME_UP';
+      if (hubVerifyToken === expectedToken) {
+        console.log('✅ [Meta] Webhook verification successful (Instagram callback)');
+        res.status(200).send(String(hubChallenge));
+        return;
+      }
+      console.warn('⚠️ [Meta] Webhook verify_token mismatch');
+      res.status(403).send('Forbidden');
+      return;
+    }
+
+    // Meta may send a GET to validate the callback URL (no code/state). Respond 200 so validation succeeds.
+    if (!code && !state && !error) {
+      res.status(200).send('OK');
+      return;
+    }
 
     // Handle OAuth errors
     if (error) {
@@ -355,7 +397,22 @@ router.get('/linkedin/callback', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Google Cross-Account Protection (RISC) endpoints
+// ---------------------------------------------------------------------------
+
+// Raw body parser for RISC SETs (Content-Type: application/secevent+jwt)
+const riscRawBody = express.text({ type: ['application/secevent+jwt', 'text/plain', 'application/json'] });
+
+// POST /api/auth/risc/receiver — public, called by Google
+router.post('/risc/receiver', riscRawBody, riscController.receiveSecurityEvent);
+
+// GET /api/auth/risc/status — admin only
+router.get('/risc/status', protect, authorize('admin'), riscController.getStatus);
+
+// ---------------------------------------------------------------------------
 // Google OAuth for Login/Signup (not platform connection)
+// ---------------------------------------------------------------------------
 router.get('/google', async (req, res, next) => {
   try {
     const authURL = googleAuthService.getAuthURL();
@@ -373,22 +430,13 @@ router.get('/google/callback', async (req, res) => {
   try {
     const { code, state, error, error_description } = req.query;
 
-    console.log('📥 [Google Auth Callback] Received callback:', {
-      hasCode: !!code,
-      hasState: !!state,
-      error: error
-    });
-
-    // Handle OAuth errors
     if (error) {
-      console.error('❌ [Google Auth] OAuth error:', error, error_description);
       return res.redirect(
         `${process.env.FRONTEND_URL}/login?status=error&message=${encodeURIComponent(error_description || error)}`
       );
     }
 
     if (!code) {
-      console.error('❌ [Google Auth] Missing authorization code');
       return res.redirect(
         `${process.env.FRONTEND_URL}/login?status=error&message=Missing authorization code`
       );
@@ -398,29 +446,18 @@ router.get('/google/callback', async (req, res) => {
     try {
       googleAuthService.verifyState(state);
     } catch (error) {
-      console.error('❌ [Google Auth] State verification failed:', error.message);
       return res.redirect(
         `${process.env.FRONTEND_URL}/login?status=error&message=Invalid state parameter`
       );
     }
 
-    // Exchange code for tokens
     const tokens = await googleAuthService.getTokens(code);
-    console.log('✅ [Google Auth] Tokens obtained');
-
-    // Get user profile
     const profile = await googleAuthService.getUserProfile(tokens.access_token);
-    console.log('✅ [Google Auth] Profile obtained:', profile.email);
-
-    // Login or signup user
     const result = await authController.googleAuth(profile);
 
-    // Redirect to frontend with token
     const redirectUrl = `${process.env.FRONTEND_URL}/auth/google-callback?token=${result.token}&refreshToken=${result.refreshToken}&isNewUser=${result.isNewUser}`;
-    
     res.redirect(redirectUrl);
   } catch (error) {
-    console.error('❌ [Google Auth] Callback error:', error);
     res.redirect(
       `${process.env.FRONTEND_URL}/login?status=error&message=${encodeURIComponent(error.message || 'Authentication failed')}`
     );

@@ -236,7 +236,17 @@ const interactionSchema = new mongoose.Schema({
     postUrl: String,
     postAuthor: String,
     
-    // For reviews
+    // For Instagram DM thread: history of incoming messages (chat-style)
+    incomingMessages: [{
+      mid: String,
+      text: String,
+      timestamp: Number
+    }],
+    lastMid: String,
+    instagramAccountId: String,
+
+    // For Facebook Messenger DM thread
+    facebookPageId: String,
     rating: {
       type: Number,
       min: 1,

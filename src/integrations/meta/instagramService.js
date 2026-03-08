@@ -14,24 +14,43 @@ class InstagramService {
    */
   async _fetchInstagramUserProfile(accessToken, userId) {
     if (!userId) return null;
-    try {
-      const response = await axios.get(
-        `${this.instagramGraphUrl}/${userId}`,
-        {
-          params: {
-            fields: 'name,username,profile_pic',
-            access_token: accessToken,
-          },
+    const token = typeof accessToken === 'string' ? accessToken.trim() : null;
+    if (!token) return null;
+    // Try graph.facebook.com first (same token works for comments there); graph.instagram.com for messaging
+    const urlsToTry = [
+      { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fields: 'name,username,profile_pic,profile_picture_url' },
+      { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fields: 'name,username,profile_pic' }
+    ];
+    for (const { url, name, fields } of urlsToTry) {
+      try {
+        const response = await axios.get(url, {
+          params: { fields, access_token: token },
           timeout: 5000,
+        });
+        const data = response.data || null;
+        const picUrl = data && (data.profile_pic || data.profile_picture_url);
+        if (data) {
+          if (picUrl) data.profile_pic = data.profile_pic || data.profile_picture_url;
+          return data;
         }
-      );
-      return response.data || null;
-    } catch (err) {
-      if (err.response?.status !== 400 && err.response?.status !== 404) {
-        console.warn(`[Instagram] Could not fetch profile for user ${userId}:`, err.message);
+      } catch (err) {
+        const msg = err.response?.data?.error?.message || err.message;
+        const code = err.response?.data?.error?.code;
+        // Expected without Advanced Access (instagram_manage_messages) or with invalid token (190)
+        if (code === 200 || code === 190) {
+          // Log once per userId at debug level to avoid noise on every webhook
+          if (!this._profileFailLogged) this._profileFailLogged = new Set();
+          if (!this._profileFailLogged.has(userId)) {
+            this._profileFailLogged.add(userId);
+            console.warn(`[Instagram] User profile unavailable for userId=${userId} (code ${code}). Normal until instagram_manage_messages has Advanced Access.`);
+          }
+        } else {
+          console.warn(`[Instagram] User profile ${name} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
+        }
+        // Try next URL or return null
       }
-      return null;
     }
+    return null;
   }
 
   /**
@@ -39,8 +58,43 @@ class InstagramService {
    * Falls back to platformUserId if platformData.businessAccountId is not set
    */
   _getBusinessAccountId(platformConnection) {
-    return platformConnection.platformData?.businessAccountId || 
+    return platformConnection.platformData?.businessAccountId ||
            platformConnection.platformUserId;
+  }
+
+  /**
+   * Fetch Instagram media (posts, reels) only. Used for Content / platform posts listing.
+   * @param {Object} platformConnection - Must have accessToken and business account ID
+   * @returns {Promise<Array>} Array of { id, caption, media_type, timestamp, permalink, media_url }
+   */
+  async getMedia(platformConnection) {
+    const accessToken = platformConnection.accessToken || platformConnection.access_token;
+    const businessAccountId = this._getBusinessAccountId(platformConnection);
+    if (!businessAccountId) {
+      throw new Error('Instagram Business Account ID not found in connection');
+    }
+    let allMedia = [];
+    let nextPage = `${this.baseUrl}/${businessAccountId}/media`;
+    let pageCount = 0;
+    const maxPages = 10;
+    while (nextPage && pageCount < maxPages) {
+      try {
+        const mediaResponse = await axios.get(nextPage, {
+          params: {
+            access_token: accessToken,
+            fields: 'id,caption,media_type,timestamp,permalink,media_url',
+            limit: 25
+          }
+        });
+        allMedia = allMedia.concat(mediaResponse.data.data || []);
+        nextPage = mediaResponse.data.paging?.next;
+        pageCount++;
+      } catch (error) {
+        console.error(`[Instagram] getMedia error:`, error.message);
+        break;
+      }
+    }
+    return allMedia;
   }
 
   /**
@@ -49,7 +103,7 @@ class InstagramService {
    */
   async fetchComments(platformConnection) {
     try {
-      const { accessToken } = platformConnection;
+      const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       if (!businessAccountId) {
@@ -134,10 +188,8 @@ class InstagramService {
               author: {
                 platformId: comment.from?.id,
                 username: comment.username || comment.from?.username || 'unknown',
-                name: comment.from?.username || comment.username || 'Unknown User',
-                avatarUrl: comment.from?.id
-                  ? `${this.baseUrl}/${comment.from.id}/picture?type=normal`
-                  : undefined
+                name: comment.from?.username || comment.username || 'Unknown User'
+                // avatarUrl set below from Instagram User Profile API (not Facebook /picture)
               },
               metadata: {
                 postId: media.id,
@@ -169,6 +221,7 @@ class InstagramService {
                     platformId: reply.from?.id,
                     username: reply.username || reply.from?.username || 'unknown',
                     name: reply.from?.username || reply.username || 'Unknown User'
+                    // avatarUrl set below from Instagram User Profile API
                   },
                   metadata: {
                     postId: media.id,
@@ -192,17 +245,40 @@ class InstagramService {
         }
       }
 
+      // Fetch user profile (profile_pic) for comment/reply authors so inbox can show avatar
+      const authorIds = [...new Set(interactions.map(i => i.author?.platformId).filter(Boolean))];
+      const tokenOk = typeof accessToken === 'string' && accessToken.trim().length > 0;
+      const profilePicByAuthor = new Map();
+      for (const authorId of authorIds) {
+        const profile = tokenOk ? await this._fetchInstagramUserProfile(accessToken, authorId) : null;
+        const pic = profile?.profile_pic || profile?.profile_picture_url;
+        if (pic) profilePicByAuthor.set(authorId, pic);
+      }
+      let withAvatar = 0;
+      for (const interaction of interactions) {
+        if (interaction.author?.platformId && profilePicByAuthor.has(interaction.author.platformId)) {
+          interaction.author.avatarUrl = profilePicByAuthor.get(interaction.author.platformId);
+          withAvatar++;
+        }
+      }
+
       console.log(`📸 [Instagram] Found ${interactions.length} total comments (including replies)`);
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Instagram] Saved ${interactions.length} comments to database`);
@@ -227,14 +303,19 @@ class InstagramService {
    */
   async fetchMessages(platformConnection) {
     try {
-      const { accessToken } = platformConnection;
+      const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       if (!businessAccountId) {
         throw new Error('Instagram Business Account ID not found in connection');
       }
 
-      console.log(`💬 [Instagram] Fetching DMs for account: ${businessAccountId}`);
+      // Log which token is used (masked) for debugging "capability" errors
+      const tokenPreview = accessToken
+        ? `${String(accessToken).slice(0, 8)}...${String(accessToken).slice(-4)}`
+        : '(missing)';
+      console.log(`💬 [Instagram] Fetching DMs for account: ${businessAccountId} (Page ID: ${platformConnection.platformPageId || 'n/a'})`);
+      console.log(`💬 [Instagram] Using token: ${tokenPreview} (from PlatformConnection.accessToken – Page access token for the Facebook Page linked to this IG account)`);
 
       // Get conversations
       let allConversations = [];
@@ -417,13 +498,19 @@ class InstagramService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Instagram] Saved ${interactions.length} DMs to database`);
@@ -499,17 +586,76 @@ class InstagramService {
   }
 
   /**
-   * Send Instagram DM
-   * Note: Requires Instagram Messaging API
+   * Resolve the Facebook Page ID that this access token belongs to.
+   * Only returns a value for PAGE tokens; for USER tokens /me would be the user ID, not the thread owner.
+   * When token verification fails (e.g. app mismatch), returns null so caller uses stored platformPageId.
+   * @param {string} accessToken - Page or User access token
+   * @returns {Promise<string|null>} Page ID or null on error / when token is USER / when verify fails
    */
-  async sendMessage(recipientId, message, accessToken, pageId) {
+  async getPageIdFromToken(accessToken) {
+    if (!accessToken) return null;
     try {
+      const metaAuth = require('./metaAuth');
+      const debug = await metaAuth.verifyAccessToken(accessToken);
+      if (debug && debug.type === 'PAGE' && debug.profile_id) {
+        return String(debug.profile_id);
+      }
+      if (debug && debug.type === 'USER') {
+        console.warn('[Instagram] getPageIdFromToken: token is USER type; use stored platformPageId for send.');
+        return null;
+      }
+      if (!debug) {
+        console.warn('[Instagram] getPageIdFromToken: token verification failed (e.g. app mismatch). Using stored platformPageId.');
+        return null;
+      }
+      const res = await axios.get(`${this.baseUrl}/me`, {
+        params: { fields: 'id', access_token: accessToken },
+        timeout: 5000
+      });
+      return res.data?.id || null;
+    } catch (err) {
+      console.warn('[Instagram] getPageIdFromToken failed:', err.response?.data?.error?.message || err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Send Instagram DM (Messaging API).
+   * Uses HUMAN_AGENT message tag when useHumanAgentTag is true (default), per Meta App Review requirements.
+   * @param {string} recipientId - Instagram recipient user ID (PSID)
+   * @param {string} message - Text to send
+   * @param {string} accessToken - Page access token
+   * @param {string} pageId - Facebook Page ID (owns the Instagram account)
+   * @param {boolean} [useHumanAgentTag=true] - Send with MESSAGE_TAG + HUMAN_AGENT for human agent replies
+   */
+  async sendMessage(recipientId, message, accessToken, pageId, useHumanAgentTag = true) {
+    let tokenPageId = null;
+    try {
+      const body = {
+        recipient: { id: recipientId },
+        message: { text: message }
+      };
+      if (useHumanAgentTag) {
+        body.messaging_type = 'MESSAGE_TAG';
+        body.tag = 'HUMAN_AGENT';
+      }
+      try {
+        const meRes = await axios.get(`${this.baseUrl}/me`, {
+          params: { fields: 'id', access_token: accessToken },
+          timeout: 3000
+        });
+        tokenPageId = meRes.data?.id ? String(meRes.data.id) : null;
+        if (tokenPageId && tokenPageId !== String(pageId)) {
+          console.warn('[Instagram] sendMessage: token belongs to Page', tokenPageId, 'but sending with pageId', pageId, '- "not the thread owner" likely. Reconnect this Instagram from Settings using the same Meta App as the webhook.');
+        }
+      } catch (meErr) {
+        const code = meErr.response?.data?.error?.code;
+        const msg = meErr.response?.data?.error?.message || meErr.message;
+        console.warn('[Instagram] sendMessage: /me check failed (code', code, '). Cannot confirm token matches pageId.', msg?.substring(0, 80));
+      }
       const response = await axios.post(
         `${this.baseUrl}/${pageId}/messages`,
-        {
-          recipient: { id: recipientId },
-          message: { text: message }
-        },
+        body,
         {
           params: {
             access_token: accessToken
@@ -522,11 +668,29 @@ class InstagramService {
         platformResponseId: response.data.message_id
       };
     } catch (error) {
-      console.error('Instagram send message error:', error.message);
-      if (error.response) {
-        console.error('API Response:', error.response.data);
+      const data = error.response?.data;
+      const apiError = data?.error;
+      let userMsg = apiError?.error_user_msg || apiError?.message || error.message;
+      if (apiError?.code === 200 && userMsg && userMsg.includes('instagram_manage_messages')) {
+        userMsg = 'Instagram messaging requires Advanced Access for instagram_manage_messages (App Review). Until approved, you can only reply to users who are Testers on your Meta app. Add the recipient as a Tester in your app’s Roles, or complete App Review for Advanced Access.';
       }
-      throw error;
+      if (apiError?.code === 100 && apiError?.error_subcode === 2534037) {
+        userMsg = 'This conversation belongs to a different Instagram account. Reconnect the Instagram account that receives these DMs in Settings → Platforms.';
+        const tokenMatchesPage = tokenPageId && String(tokenPageId) === String(pageId);
+        if (tokenMatchesPage) {
+          console.warn('[Instagram] Thread owner (2534037) but token Page matches pageId. The webhook is likely subscribed to a DIFFERENT Meta App than the one used to connect Instagram. Fix: In Meta for Developers use ONE app for both (1) Instagram product + webhook subscription and (2) your app\'s Instagram login. Put that app\'s App ID and Secret in .env (META_APP_ID / META_APP_SECRET).');
+        } else {
+          console.warn('[Instagram] Thread owner error (2534037). Ensure the same Meta App is used for (1) Instagram webhook subscription and (2) connecting Instagram in Settings. Token\'s Page from /me:', tokenPageId || 'unknown', '| pageId used:', pageId);
+        }
+      }
+      console.error('Instagram send message error:', userMsg);
+      if (data) {
+        console.error('Instagram API response:', JSON.stringify(data));
+      }
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
     }
   }
   /**
@@ -898,6 +1062,10 @@ class InstagramService {
         validateStatus: (status) => status === 200
       });
       
+
+
+
+
       console.log(`✅ [Instagram] URL is accessible (${response.status})`);
       console.log(`📊 [Instagram] Content-Type: ${response.headers['content-type']}, Size: ${response.headers['content-length']} bytes`);
       
@@ -933,6 +1101,7 @@ class InstagramService {
       const businessAccountId = this._getBusinessAccountId(platformConnection);
 
       console.log(`🎬 [Instagram] Starting reel creation for account: ${businessAccountId}`);
+      console.log(`📹 [Instagram] Video URL: ${mediaUrl}`);
 
       // Pre-check: Verify URL is publicly accessible before sending to Instagram
       await this.verifyMediaUrlAccessible(mediaUrl);
@@ -946,7 +1115,11 @@ class InstagramService {
         share_to_feed: true // Also share to main feed
       };
 
-      console.log(`📹 [Instagram] Creating reel container`);
+      console.log(`📹 [Instagram] Creating reel container with params:`, {
+        media_type: params.media_type,
+        video_url: params.video_url,
+        share_to_feed: params.share_to_feed
+      });
       const containerResponse = await axios.post(
         `${this.baseUrl}/${businessAccountId}/media`,
         null,

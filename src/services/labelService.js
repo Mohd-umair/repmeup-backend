@@ -1,4 +1,5 @@
 const Label = require('../models/Label');
+const { escapeRegex } = require('../utils/sanitize');
 
 /**
  * Ensure default labels exist for an organization
@@ -89,8 +90,9 @@ exports.getOrCreateLeadLabel = async (organizationId, createdBy) => {
  * Get label by name for an organization
  */
 exports.getLabelByName = async (organizationId, name) => {
+  const escaped = escapeRegex(String(name || '').trim());
   return await Label.findOne({
     organization: organizationId,
-    name: { $regex: new RegExp(`^${name}$`, 'i') } // Case-insensitive
+    name: { $regex: new RegExp(`^${escaped}$`, 'i') } // Case-insensitive
   });
 };

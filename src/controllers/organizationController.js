@@ -92,6 +92,30 @@ exports.updateOrganization = async (req, res, next) => {
       });
     }
 
+    // Handle inboxSettings (merge nested object)
+    if (req.body.inboxSettings !== undefined) {
+      if (!organization.inboxSettings) {
+        organization.inboxSettings = {};
+      }
+      Object.keys(req.body.inboxSettings).forEach(key => {
+        if (req.body.inboxSettings[key] !== undefined) {
+          organization.inboxSettings[key] = req.body.inboxSettings[key];
+        }
+      });
+    }
+
+    // Handle escalationSettings (e.g. autoAssign for new conversations)
+    if (req.body.escalationSettings !== undefined) {
+      if (!organization.escalationSettings) {
+        organization.escalationSettings = {};
+      }
+      Object.keys(req.body.escalationSettings).forEach(key => {
+        if (req.body.escalationSettings[key] !== undefined) {
+          organization.escalationSettings[key] = req.body.escalationSettings[key];
+        }
+      });
+    }
+
     await organization.save();
 
     // Update scheduled jobs after saving (so we have the updated organization)

@@ -1,6 +1,8 @@
 const axios = require('axios');
 const PlatformConnection = require('../../models/PlatformConnection');
 const Interaction = require('../../models/Interaction');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Facebook Service
@@ -10,6 +12,77 @@ class FacebookService {
   constructor() {
     this.apiVersion = 'v18.0';
     this.baseURL = `https://graph.facebook.com/${this.apiVersion}`;
+  }
+
+  /**
+   * Fetch Page feed posts only (no comments). Used for Content / platform posts listing.
+   * @param {Object} platformConnection - Must have accessToken, platformPageId
+   * @returns {Promise<Array>} Array of { id, message, created_time, full_picture?, permalink_url? }
+   */
+  async getPagePosts(platformConnection) {
+    const { accessToken, platformPageId } = platformConnection;
+    if (!platformPageId) {
+      throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
+    }
+    let allPosts = [];
+    let nextPage = `${this.baseURL}/${platformPageId}/feed`;
+    let pageCount = 0;
+    const maxPages = 10;
+    const fields = 'id,message,created_time,full_picture,permalink_url,attachments{media_type,type}';
+    while (nextPage && pageCount < maxPages) {
+      try {
+        const response = await axios.get(nextPage, {
+          params: { fields, limit: 25, access_token: accessToken }
+        });
+        const posts = response.data.data || [];
+        allPosts = allPosts.concat(posts);
+        nextPage = response.data.paging?.next;
+        pageCount++;
+      } catch (error) {
+        console.error(`[Facebook] getPagePosts error:`, error.message);
+        break;
+      }
+    }
+    return allPosts;
+  }
+
+  /**
+   * Send a Messenger (Page DM) message to a user.
+   * @param {string} recipientPsid - Page-scoped ID of the recipient (person who messaged the Page)
+   * @param {string} text - Message text
+   * @param {string} accessToken - Page access token
+   * @param {string} pageId - Facebook Page ID
+   * @param {boolean} useHumanAgentTag - If true, send with messaging_type MESSAGE_TAG and tag HUMAN_AGENT (for outside 24h window)
+   * @returns {Promise<{ success: boolean, platformResponseId?: string, error?: string }>}
+   */
+  async sendMessage(recipientPsid, text, accessToken, pageId, useHumanAgentTag = false) {
+    if (!pageId || !recipientPsid || !accessToken) {
+      return { success: false, error: 'Missing pageId, recipientPsid, or accessToken' };
+    }
+    try {
+      const body = {
+        recipient: { id: String(recipientPsid) },
+        message: { text: String(text) }
+      };
+      if (useHumanAgentTag) {
+        body.messaging_type = 'MESSAGE_TAG';
+        body.tag = 'HUMAN_AGENT';
+      } else {
+        body.messaging_type = 'RESPONSE';
+      }
+      const response = await axios.post(
+        `${this.baseURL}/${pageId}/messages`,
+        body,
+        { params: { access_token: accessToken }, timeout: 15000 }
+      );
+      const messageId = response.data?.message_id;
+      return { success: true, platformResponseId: messageId };
+    } catch (err) {
+      const apiError = err.response?.data?.error;
+      const message = apiError?.message || err.message;
+      console.error('[Facebook] sendMessage error:', message, apiError?.code);
+      return { success: false, error: message };
+    }
   }
 
   /**
@@ -186,13 +259,19 @@ class FacebookService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Facebook] Saved ${interactions.length} comments to database`);
@@ -268,13 +347,19 @@ class FacebookService {
 
       // Bulk upsert
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Facebook] Saved ${interactions.length} reviews to database`);
@@ -492,6 +577,11 @@ class FacebookService {
         console.log(`📤 [Facebook] Uploading photo directly to: ${endpoint}`);
       } else if (url) {
         // Photo post with URL (fallback)
+        console.log(`📷 [Facebook] Photo URL: ${url}`);
+        
+        // Pre-check: Verify URL is publicly accessible
+        await this.verifyMediaUrlAccessible(url);
+        
         endpoint = `${this.baseURL}/${platformPageId}/photos`;
         requestData = null;
         config = {
@@ -668,6 +758,41 @@ class FacebookService {
   }
 
   /**
+   * Verify that a media URL is publicly accessible
+   * This prevents Facebook error 389/1363057 (cannot fetch video/image from URL)
+   */
+  async verifyMediaUrlAccessible(mediaUrl) {
+    try {
+      console.log(`🔍 [Facebook] Verifying URL is accessible: ${mediaUrl}`);
+      
+      const response = await axios.head(mediaUrl, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: (status) => status === 200
+      });
+      
+      console.log(`✅ [Facebook] URL is accessible (${response.status})`);
+      console.log(`📊 [Facebook] Content-Type: ${response.headers['content-type']}, Size: ${response.headers['content-length']} bytes`);
+      
+      return true;
+    } catch (error) {
+      console.error(`❌ [Facebook] URL is NOT accessible:`, error.message);
+      
+      if (error.code === 'ECONNREFUSED') {
+        throw new Error(`URL is not accessible: Connection refused. Check if your server is running and accessible from the internet (not just localhost).`);
+      } else if (error.code === 'ENOTFOUND') {
+        throw new Error(`URL is not accessible: Domain not found. Check your BASE_URL in .env file.`);
+      } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+        throw new Error(`URL is not accessible: Connection timeout. Check firewall settings and ensure public access.`);
+      } else if (error.response) {
+        throw new Error(`URL is not accessible: Server returned ${error.response.status}. Ensure the /api/posts/media/ endpoint is public (no auth required).`);
+      } else {
+        throw new Error(`URL is not accessible: ${error.message}`);
+      }
+    }
+  }
+
+  /**
    * Create a Reel (Short) on Facebook Page
    * Reels are short-form vertical videos
    * @param {Object} platformConnection - Platform connection object
@@ -691,59 +816,158 @@ class FacebookService {
       }
 
       console.log(`🎬 [Facebook] Creating reel on page: ${platformPageId}`);
+      console.log(`📹 [Facebook] Video URL: ${videoUrl}`);
 
-      // Facebook Reels use the video endpoint with specific parameters
-      const endpoint = `${this.baseURL}/${platformPageId}/video_reels`;
+      // Pre-check: Verify URL is publicly accessible
+      await this.verifyMediaUrlAccessible(videoUrl);
+
+      // Facebook Reels API requires direct file upload, not URL
+      // Download/load the video file
+      let videoBuffer;
       
-      const params = {
-        upload_phase: 'start',
-        access_token: accessToken
-      };
+      try {
+        // Check if it's our own media URL
+        const isOwnMedia = videoUrl.includes('/api/posts/media/');
+        
+        if (isOwnMedia) {
+          const filename = videoUrl.split('/').pop();
+          const videoFilePath = path.join(__dirname, '../../../uploads/posts', filename);
+          
+          if (fs.existsSync(videoFilePath)) {
+            console.log(`📁 [Facebook] Reading local video file: ${filename}`);
+            videoBuffer = fs.readFileSync(videoFilePath);
+          } else {
+            throw new Error(`Local file not found: ${videoFilePath}`);
+          }
+        } else {
+          console.log(`📥 [Facebook] Downloading video from URL`);
+          const response = await axios.get(videoUrl, {
+            responseType: 'arraybuffer',
+            timeout: 60000 // 60 seconds
+          });
+          videoBuffer = Buffer.from(response.data);
+        }
+        
+        console.log(`✅ [Facebook] Video loaded, size: ${videoBuffer.length} bytes`);
+      } catch (downloadError) {
+        console.error(`❌ [Facebook] Failed to load video file:`, downloadError.message);
+        throw new Error(`Cannot load video file for reel upload: ${downloadError.message}`);
+      }
 
-      // Start the upload session
-      console.log(`📤 [Facebook] Starting reel upload session`);
-      const startResponse = await axios.post(endpoint, null, { params });
+      // Facebook Reel API requires three-phase upload:
+      // Phase 1: START - Initialize and get upload_url + video_id (graph-video.facebook.com)
+      // Phase 2: UPLOAD - Upload file to upload_url 
+      // Phase 3: FINISH - Finalize and publish (graph.facebook.com)
       
-      const videoId = startResponse.data.video_id;
-      console.log(`✅ [Facebook] Reel upload session started: ${videoId}`);
+      const videoApiUrl = `https://graph-video.facebook.com/${this.apiVersion}`;
+      const startEndpoint = `${videoApiUrl}/${platformPageId}/video_reels`;
+      
+      // Phase 1: Start upload session - get upload_url and video_id
+      console.log(`📤 [Facebook] Phase 1: Starting reel upload session`);
+      const startResponse = await axios.post(startEndpoint, null, {
+        params: {
+          upload_phase: 'start',
+          access_token: accessToken,
+          file_size: videoBuffer.length // Required for START phase
+        }
+      });
+      
+      const { video_id: videoId, upload_url: uploadUrl } = startResponse.data;
+      console.log(`✅ [Facebook] Upload session started`);
+      console.log(`   Video ID: ${videoId}`);
+      console.log(`   Upload URL: ${uploadUrl ? 'received' : 'not provided'}`);
 
-      // Upload the video file
-      const uploadParams = {
-        access_token: accessToken,
-        upload_phase: 'transfer',
-        video_id: videoId,
-        file_url: videoUrl
-      };
+      // Phase 2: Upload video file to the upload_url
+      const FormData = require('form-data');
+      const form = new FormData();
+      
+      form.append('video_file_chunk', videoBuffer, {
+        filename: 'reel.mp4',
+        contentType: 'video/mp4'
+      });
 
-      console.log(`📤 [Facebook] Uploading reel video`);
-      await axios.post(endpoint, null, { params: uploadParams });
+      console.log(`📤 [Facebook] Phase 2: Uploading video file (${videoBuffer.length} bytes)`);
+      
+      try {
+        if (uploadUrl) {
+          // Use the provided upload_url and add access_token (required for auth)
+          console.log(`   Uploading to provided upload_url`);
+          
+          // Add access_token to the upload_url
+          const uploadUrlWithAuth = uploadUrl.includes('?') 
+            ? `${uploadUrl}&access_token=${accessToken}`
+            : `${uploadUrl}?access_token=${accessToken}`;
+          
+          // Add required headers for chunked/resumable upload
+          const formHeaders = form.getHeaders();
+          await axios.post(uploadUrlWithAuth, form, {
+            headers: {
+              ...formHeaders,
+              'offset': '0', // Byte offset (start of file)
+              'file_size': videoBuffer.length.toString() // Total file size
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 120000 // 2 minutes
+          });
+        } else {
+          // Fallback: upload to video endpoint with transfer phase
+          console.log(`   No upload_url provided, using video endpoint`);
+          const uploadEndpoint = `${videoApiUrl}/${platformPageId}/videos`;
+          await axios.post(uploadEndpoint, form, {
+            params: {
+              access_token: accessToken,
+              upload_phase: 'transfer',
+              video_id: videoId
+            },
+            headers: {
+              ...form.getHeaders(),
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 120000
+          });
+        }
+        
+        console.log(`✅ [Facebook] Video file uploaded successfully`);
+      } catch (uploadError) {
+        console.error(`❌ [Facebook] Phase 2 upload failed:`, uploadError.response?.data || uploadError.message);
+        throw uploadError;
+      }
 
-      // Finish the upload
-      const finishParams = {
-        access_token: accessToken,
-        upload_phase: 'finish',
-        video_id: videoId,
-        description: description || '',
-        title: title || 'Reel'
-      };
+      // Phase 3: Finish - Finalize and publish the reel
+      const finishEndpoint = `${this.baseURL}/${platformPageId}/video_reels`;
+      
+      console.log(`📤 [Facebook] Phase 3: Finalizing reel`);
+      const finishResponse = await axios.post(finishEndpoint, null, {
+        params: {
+          upload_phase: 'finish',
+          video_id: videoId,
+          description: description || title || '',
+          access_token: accessToken
+        }
+      });
 
-      console.log(`📤 [Facebook] Finishing reel upload`);
-      const finishResponse = await axios.post(endpoint, null, { params: finishParams });
+      const reelId = finishResponse.data.id || videoId;
+      console.log(`✅ [Facebook] Reel created successfully: ${reelId}`);
 
-      console.log(`✅ [Facebook] Reel created successfully:`, finishResponse.data);
-
-      const reelUrl = `https://www.facebook.com/reel/${videoId}`;
+      const reelUrl = `https://www.facebook.com/reel/${reelId}`;
 
       return {
-        postId: videoId,
+        postId: reelId,
         postUrl: reelUrl,
         success: true
       };
     } catch (error) {
-      console.error('❌ [Facebook] Create reel error:', error.response?.data || error.message);
+      const errorData = error.response?.data?.error || error.response?.data;
+      console.error('❌ [Facebook] Create reel error:', errorData || error.message);
       
-      // Facebook Reels API might not be available for all pages
-      // Fallback to regular video post
+      // Log full error details for debugging
+      if (error.response) {
+        console.error('   Status:', error.response.status);
+        console.error('   Response:', JSON.stringify(error.response.data, null, 2));
+      }
+      
       console.warn('⚠️ [Facebook] Reel creation failed, falling back to regular video post');
       
       try {
@@ -751,8 +975,12 @@ class FacebookService {
           videoUrl: reelData.videoUrl,
           description: reelData.description || reelData.title
         });
+        
+        console.log('✅ [Facebook] Posted as regular video instead of reel');
         return videoPost;
       } catch (fallbackError) {
+        console.error('❌ [Facebook] Video post fallback also failed:', fallbackError.response?.data || fallbackError.message);
+        
         const errorMessage = error.response?.data?.error?.message || error.message;
         const errorCode = error.response?.data?.error?.code;
         
@@ -760,8 +988,8 @@ class FacebookService {
           message: errorMessage,
           code: errorCode,
           platformError: {
-            title: 'Facebook Reel Creation Failed',
-            message: errorMessage + ' (Reel API not available - tried video post fallback)',
+            title: 'Facebook Video Post Failed',
+            message: 'Both reel and video post creation failed. ' + errorMessage,
             code: errorCode
           }
         };
@@ -783,27 +1011,104 @@ class FacebookService {
       const { videoUrl, description } = videoData;
 
       console.log(`🎥 [Facebook] Creating video post on page: ${platformPageId}`);
+      console.log(`📹 [Facebook] Video URL: ${videoUrl}`);
 
+      // Pre-check: Verify URL is publicly accessible
+      await this.verifyMediaUrlAccessible(videoUrl);
+
+      // Try URL-based upload first (simpler and faster)
       const endpoint = `${this.baseURL}/${platformPageId}/videos`;
       
-      const response = await axios.post(endpoint, null, {
-        params: {
-          file_url: videoUrl,
-          description: description || '',
-          access_token: accessToken
+      try {
+        console.log(`📤 [Facebook] Attempting URL-based video upload`);
+        const response = await axios.post(endpoint, null, {
+          params: {
+            file_url: videoUrl,
+            description: description || '',
+            access_token: accessToken
+          }
+        });
+
+        console.log(`✅ [Facebook] Video post created successfully (URL method):`, response.data);
+
+        const videoId = response.data.id;
+        const videoUrl_result = `https://www.facebook.com/${videoId}`;
+
+        return {
+          postId: videoId,
+          postUrl: videoUrl_result,
+          success: true
+        };
+      } catch (urlError) {
+        // Check if it's the "Unable to fetch video file from URL" error
+        const errorCode = urlError.response?.data?.error?.code;
+        const errorSubcode = urlError.response?.data?.error?.error_subcode;
+        
+        if (errorCode === 389 && errorSubcode === 1363057) {
+          console.warn(`⚠️ [Facebook] URL-based upload failed (error 389/1363057)`);
+          console.log(`📤 [Facebook] Retrying with direct file upload`);
+          
+          // Fallback to direct file upload
+          let videoBuffer;
+          const isOwnMedia = videoUrl.includes('/api/posts/media/');
+          
+          if (isOwnMedia) {
+            const filename = videoUrl.split('/').pop();
+            const videoFilePath = path.join(__dirname, '../../../uploads/posts', filename);
+            
+            if (fs.existsSync(videoFilePath)) {
+              console.log(`📁 [Facebook] Reading local video file: ${filename}`);
+              videoBuffer = fs.readFileSync(videoFilePath);
+            } else {
+              throw new Error(`Local file not found: ${videoFilePath}`);
+            }
+          } else {
+            console.log(`📥 [Facebook] Downloading video from URL`);
+            const response = await axios.get(videoUrl, {
+              responseType: 'arraybuffer',
+              timeout: 60000
+            });
+            videoBuffer = Buffer.from(response.data);
+          }
+          
+          console.log(`✅ [Facebook] Video loaded, size: ${videoBuffer.length} bytes`);
+          
+          // Upload video with direct file upload
+          const FormData = require('form-data');
+          const form = new FormData();
+          
+          form.append('source', videoBuffer, {
+            filename: 'video.mp4',
+            contentType: 'video/mp4'
+          });
+          form.append('description', description || '');
+          form.append('access_token', accessToken);
+          
+          console.log(`📤 [Facebook] Uploading video with direct file upload`);
+          const uploadResponse = await axios.post(endpoint, form, {
+            headers: {
+              ...form.getHeaders(),
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 120000
+          });
+          
+          console.log(`✅ [Facebook] Video post created successfully (direct upload):`, uploadResponse.data);
+          
+          const videoId = uploadResponse.data.id;
+          const videoUrl_result = `https://www.facebook.com/${videoId}`;
+          
+          return {
+            postId: videoId,
+            postUrl: videoUrl_result,
+            success: true
+          };
+        } else {
+          // Re-throw if it's a different error
+          throw urlError;
         }
-      });
-
-      console.log(`✅ [Facebook] Video post created successfully:`, response.data);
-
-      const videoId = response.data.id;
-      const videoUrl_result = `https://www.facebook.com/${videoId}`;
-
-      return {
-        postId: videoId,
-        postUrl: videoUrl_result,
-        success: true
-      };
+      }
     } catch (error) {
       console.error('❌ [Facebook] Create video post error:', error.response?.data || error.message);
       

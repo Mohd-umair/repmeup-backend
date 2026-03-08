@@ -53,6 +53,28 @@ exports.getMenus = async (req, res, next) => {
     
     console.log(`✅ [Menu] User has access to ${accessibleMenus.length} menus`);
 
+    // Ensure Content menu exists (for apps that were seeded before Content was added)
+    const hasContentMenu = accessibleMenus.some(m => m.route === '/app/content');
+    const canAccessContent = ['admin', 'manager', 'agent'].includes(user.role);
+    if (!hasContentMenu && canAccessContent) {
+      const contentMenu = {
+        _id: 'content-default',
+        label: 'Content',
+        icon: '📄',
+        route: '/app/content',
+        requiredRoles: ['admin', 'manager', 'agent'],
+        order: 5,
+        group: 'main',
+        isActive: true,
+        badge: { enabled: false, source: 'none' }
+      };
+      accessibleMenus.push(contentMenu);
+      accessibleMenus.sort((a, b) => {
+        const g = (m) => (m.group === 'main' ? 0 : m.group === 'management' ? 1 : 2);
+        return g(a) - g(b) || (a.order || 0) - (b.order || 0);
+      });
+    }
+
     // Group menus by group
     const groupedMenus = {
       main: [],
@@ -267,10 +289,18 @@ exports.seedMenus = async (req, res, next) => {
         requiredRoles: ['admin', 'manager', 'agent']
       },
       {
+        label: 'Content',
+        icon: '📄',
+        route: '/app/content',
+        order: 5,
+        group: 'main',
+        requiredRoles: ['admin', 'manager', 'agent']
+      },
+      {
         label: 'Knowledge Base',
         icon: '🧠',
         route: '/app/knowledge-base',
-        order: 5,
+        order: 6,
         group: 'main',
         requiredRoles: ['admin', 'manager'],
         requiresFeature: 'knowledge_base'
@@ -279,7 +309,7 @@ exports.seedMenus = async (req, res, next) => {
         label: 'Analytics',
         icon: '📈',
         route: '/app/analytics',
-        order: 6,
+        order: 7,
         group: 'main',
         requiredRoles: ['admin', 'manager'],
         requiresFeature: 'analytics'
@@ -288,7 +318,7 @@ exports.seedMenus = async (req, res, next) => {
         label: 'Agents',
         icon: '👥',
         route: '/app/agents',
-        order: 7,
+        order: 8,
         group: 'management',
         requiredRoles: ['admin', 'manager'],
         requiresFeature: 'agents'
@@ -297,7 +327,7 @@ exports.seedMenus = async (req, res, next) => {
         label: 'Settings',
         icon: '⚙️',
         route: '/app/settings',
-        order: 8,
+        order: 9,
         group: 'settings',
         requiredRoles: ['admin', 'manager']
       }

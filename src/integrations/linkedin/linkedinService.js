@@ -47,12 +47,16 @@ class LinkedInService {
       let savedCount = 0;
       for (const interactionData of allInteractions) {
         try {
+          const { status, isRead, sentiment, ...platformFields } = interactionData;
           await Interaction.findOneAndUpdate(
             {
               platformId: interactionData.platformId,
               organization: connection.organization
             },
-            interactionData,
+            {
+              $set: platformFields,
+              $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+            },
             {
               upsert: true,
               new: true,

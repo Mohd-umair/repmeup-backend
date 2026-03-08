@@ -48,6 +48,11 @@ const scheduledPostSchema = new mongoose.Schema({
   mediaStoragePath: {
     type: String // Local storage path before upload (single media)
   },
+  // Reference to media in library (if using library media)
+  mediaLibraryId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Media'
+  },
   // Support for carousel posts (multiple media)
   mediaStoragePaths: [{
     type: String // Array of local storage paths
@@ -56,16 +61,31 @@ const scheduledPostSchema = new mongoose.Schema({
     type: String,
     enum: ['image', 'video']
   }],
+  // References to media library items for carousel
+  mediaLibraryIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Media'
+  }],
   scheduledFor: {
     type: Date,
     index: true
   },
   status: {
     type: String,
-    enum: ['draft', 'scheduled', 'publishing', 'published', 'failed'],
+    enum: ['draft', 'pending_approval', 'scheduled', 'publishing', 'published', 'failed', 'rejected'],
     default: 'draft',
     index: true
   },
+  // Approval workflow
+  approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  approvedAt: { type: Date },
+  rejectedReason: { type: String },
+  rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  rejectedAt: { type: Date },
+  originalContent: { type: String }, // For diff view (AI suggestion before edit)
+  riskScore: { type: Number, min: 0, max: 100 },
+  complianceFlags: [{ type: String }],
+  generatedBy: { type: String, enum: ['ai', 'human'], default: 'human' },
   publishedAt: {
     type: Date
   },

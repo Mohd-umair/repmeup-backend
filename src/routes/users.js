@@ -12,6 +12,7 @@ const {
   getAICreditUsageHistory
 } = require('../controllers/userController');
 const { protect } = require('../middlewares/auth');
+const { validateUserCreate, validateUserUpdate } = require('../middlewares/validation');
 
 // All routes require authentication
 router.use(protect);
@@ -32,14 +33,14 @@ router.get('/:id/stats', getUserStats);
 // POST /api/users - Create new user
 router.route('/')
   .get(getUsers)
-  .post(createUser);
+  .post(validateUserCreate, createUser);
 
 // GET /api/users/:id - Get single user
 // PUT /api/users/:id - Update user
 // DELETE /api/users/:id - Delete user
 router.route('/:id')
   .get(getUserById)
-  .put(updateUser)
+  .put(validateUserUpdate, updateUser)
   .delete(deleteUser);
 
 module.exports = router;

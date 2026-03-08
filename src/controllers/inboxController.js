@@ -9,6 +9,7 @@ const User = require('../models/User');
 const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const axios = require('axios');
+const logger = require('../config/logger');
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
@@ -24,6 +25,7 @@ exports.getInteractions = async (req, res, next) => {
       assignedTo,
       label,
       viewMode,
+      postId,
       page = 1,
       limit = 50,
       sortBy = 'createdAt',
@@ -39,6 +41,7 @@ exports.getInteractions = async (req, res, next) => {
 
     if (platform) query.platform = platform;
     if (type) query.type = type;
+    if (postId) query['metadata.postId'] = postId;
     if (sentiment) query.sentiment = sentiment;
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
@@ -48,7 +51,7 @@ exports.getInteractions = async (req, res, next) => {
       query.labels = label; // MongoDB will match if label ID exists in the labels array
     }
 
-    // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA)
+    // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA), archived
     const SLA_HOURS = 24;
     const slaCutoff = new Date(Date.now() - SLA_HOURS * 60 * 60 * 1000);
     let effectiveSortBy = sortBy;
@@ -64,6 +67,21 @@ exports.getInteractions = async (req, res, next) => {
       query.platformCreatedAt = { $lt: slaCutoff };
       effectiveSortBy = 'platformCreatedAt';
       effectiveSortOrder = 'asc';
+    } else if (viewMode === 'archived') {
+      // Show only archived conversations
+      query.status = 'archived';
+    }
+    
+    // For non-archived views, explicitly exclude archived conversations
+    // unless the user has specifically filtered by archived status
+    if (viewMode !== 'archived' && !status) {
+      if (query.status && typeof query.status === 'object' && query.status.$nin) {
+        // If status is already an object with $nin, add 'archived' to it
+        query.status.$nin.push('archived');
+      } else if (!query.status) {
+        // If no status filter exists, exclude archived
+        query.status = { $ne: 'archived' };
+      }
     }
     
     // Build search condition - escape special regex characters
@@ -156,6 +174,7 @@ exports.getInteractions = async (req, res, next) => {
       sentiment,
       status,
       label, // Include label in cache key to prevent wrong cached results
+      postId: postId || '',
       viewMode: viewMode || '',
       search: cacheSearchKey,
       page,
@@ -395,17 +414,85 @@ exports.replyToInteraction = async (req, res, next) => {
 
     // Send actual reply to platform via integration service
     try {
-      // Check if platform connection exists and is active
-      if (!interaction.platformConnection) {
+      // Resolve platform connection (may be missing if interaction was created via webhook without it)
+      let connection = null;
+      const isInstagramDm = interaction.platform === 'instagram' && interaction.type === 'dm';
+      let igAccountId = interaction.metadata?.instagramAccountId;
+      if (isInstagramDm && !igAccountId && interaction.platformId && interaction.platformId.startsWith('dm_')) {
+        const parts = interaction.platformId.split('_');
+        if (parts.length >= 3) igAccountId = parts[1];
+      }
+
+      const isFacebookDm = interaction.platform === 'facebook' && interaction.type === 'dm';
+      let facebookPageId = interaction.metadata?.facebookPageId;
+      if (isFacebookDm && !facebookPageId && interaction.platformId && interaction.platformId.startsWith('dm_')) {
+        const parts = interaction.platformId.split('_');
+        if (parts.length >= 3) facebookPageId = parts[1];
+      }
+
+      if (isInstagramDm && igAccountId) {
+        const threadOwnerConn = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: 'instagram',
+          platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
+          status: 'connected',
+          isActive: true
+        }).lean();
+        if (threadOwnerConn) connection = threadOwnerConn;
+      }
+      if (!connection) connection = interaction.platformConnection;
+      if (!connection && interaction.platform && interaction.organization && !isInstagramDm) {
+        const conn = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: interaction.platform,
+          status: 'connected',
+          isActive: true
+        }).lean();
+        if (conn) connection = conn;
+      }
+      if (isFacebookDm && facebookPageId && (!connection || String(connection.platformPageId) !== String(facebookPageId))) {
+        const pageConn = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: 'facebook',
+          platformPageId: { $in: [String(facebookPageId), facebookPageId] },
+          status: 'connected',
+          isActive: true
+        }).lean();
+        if (pageConn) connection = pageConn;
+      }
+      if (connection && isInstagramDm && igAccountId) {
+        const connectionIgId = connection.platformUserId != null ? String(connection.platformUserId) : '';
+        if (connectionIgId !== String(igAccountId)) {
+          const threadOwnerConn = await PlatformConnection.findOne({
+            organization: interaction.organization,
+            platform: 'instagram',
+            platformUserId: { $in: [igAccountId, String(igAccountId)] },
+            status: 'connected',
+            isActive: true
+          }).lean();
+          connection = threadOwnerConn || null;
+        }
+      }
+      if (!connection) {
         replyStatus = 'failed';
-        errorMessage = 'Platform connection not found. Please reconnect your YouTube account in Settings.';
-      } else if (interaction.platformConnection.status !== 'connected' || !interaction.platformConnection.isActive) {
+        if (isInstagramDm) {
+          errorMessage = igAccountId
+            ? 'Could not find the Instagram account for this conversation. Please reconnect it in Settings.'
+            : 'This conversation is not linked to an Instagram account. Sync the Instagram that receives these DMs from Settings, then try again.';
+        } else if (isFacebookDm) {
+          errorMessage = facebookPageId
+            ? 'Could not find the Facebook Page for this conversation. Please reconnect it in Settings.'
+            : 'This conversation is not linked to a Facebook Page. Reconnect the Page that receives these messages in Settings.';
+        } else {
+          errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
+        }
+      } else if (connection.status !== 'connected' || !connection.isActive) {
         replyStatus = 'failed';
-        errorMessage = 'Platform connection is not active. Please reconnect your YouTube account in Settings.';
+        errorMessage = 'Platform connection is not active. Please reconnect this account in Settings.';
       } else if (interaction.platform === 'youtube') {
         const youtubeService = require('../integrations/google/youtubeService');
         const result = await youtubeService.replyToComment(
-          interaction.platformConnection,
+          connection,
           interaction.platformId,
           replyContent
         );
@@ -419,38 +506,84 @@ exports.replyToInteraction = async (req, res, next) => {
         }
       } else if (interaction.platform === 'instagram') {
         const instagramService = require('../integrations/meta/instagramService');
-        const result = await instagramService.replyToComment(
-          interaction.platformId,
-          replyContent,
-          interaction.platformConnection.accessToken
-        );
-        
-        if (result.success && result.platformResponseId) {
+        let result;
+        if (interaction.type === 'dm') {
+          // Send API requires the Facebook Page ID that owns the Instagram thread (thread owner).
+          // Resolve from token so we always use the token's Page and avoid "not the thread owner" (#100).
+          let pageId = connection.platformPageId || connection.platformData?.pageId;
+          const resolvedFromToken = await instagramService.getPageIdFromToken(connection.accessToken);
+          if (resolvedFromToken) pageId = resolvedFromToken;
+          const recipientId = interaction.author?.platformId;
+          logger.info('[Inbox Reply] Instagram DM send', {
+            igAccountId,
+            platformUserId: connection.platformUserId,
+            storedPageId: connection.platformPageId || connection.platformData?.pageId,
+            resolvedFromToken: resolvedFromToken || null,
+            pageId
+          });
+          if (!pageId || !recipientId) {
+            replyStatus = 'failed';
+            errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
+            console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId, igAccountId });
+          } else {
+            result = await instagramService.sendMessage(
+              recipientId,
+              replyContent,
+              connection.accessToken,
+              pageId,
+              true
+            );
+          }
+        } else {
+          result = await instagramService.replyToComment(
+            interaction.platformId,
+            replyContent,
+            connection.accessToken
+          );
+        }
+        if (result && result.success && result.platformResponseId) {
           platformResponseId = result.platformResponseId;
           replyStatus = 'sent';
-        } else {
+        } else if (replyStatus !== 'failed') {
           replyStatus = 'failed';
-          errorMessage = result.error || 'Failed to post reply to Instagram';
+          errorMessage = (result && result.error) || 'Failed to post reply to Instagram';
         }
       } else if (interaction.platform === 'facebook') {
         const facebookService = require('../integrations/meta/facebookService');
-        const result = await facebookService.replyToComment(
-          interaction.platformConnection,
-          interaction.platformId,
-          replyContent
-        );
-        
-        if (result.success && result.commentId) {
-          platformResponseId = result.commentId;
-          replyStatus = 'sent';
+        let result;
+        if (interaction.type === 'dm') {
+          const pageId = connection.platformPageId || connection.platformData?.pageId;
+          const recipientId = interaction.author?.platformId;
+          if (!pageId || !recipientId) {
+            replyStatus = 'failed';
+            errorMessage = 'Missing Page or recipient for Facebook Messenger reply. Reconnect the Page in Settings.';
+          } else {
+            result = await facebookService.sendMessage(
+              recipientId,
+              replyContent,
+              connection.accessToken,
+              pageId,
+              true
+            );
+          }
         } else {
+          result = await facebookService.replyToComment(
+            connection,
+            interaction.platformId,
+            replyContent
+          );
+        }
+        if (result && result.success && (result.platformResponseId || result.commentId)) {
+          platformResponseId = result.platformResponseId || result.commentId;
+          replyStatus = 'sent';
+        } else if (replyStatus !== 'failed') {
           replyStatus = 'failed';
-          errorMessage = result.error || 'Failed to post reply to Facebook';
+          errorMessage = (result && result.error) || 'Failed to post reply to Facebook';
         }
       } else if (interaction.platform === 'linkedin') {
         const linkedinService = require('../integrations/linkedin/linkedinService');
         const result = await linkedinService.replyToComment(
-          interaction.platformConnection,
+          connection,
           interaction._id,
           replyContent
         );
@@ -484,9 +617,9 @@ exports.replyToInteraction = async (req, res, next) => {
           errorMessage = 'Missing location or review ID for Google review reply.';
         } else {
           try {
-            await googleService.ensureValidToken(interaction.platformConnection);
+            await googleService.ensureValidToken(connection);
             await googleService.replyToReview(
-              interaction.platformConnection,
+              connection,
               locationId,
               reviewId,
               replyContent
@@ -503,9 +636,19 @@ exports.replyToInteraction = async (req, res, next) => {
         errorMessage = `Replies for ${interaction.platform} are not yet implemented`;
       }
     } catch (platformError) {
-      console.error('Error posting reply to platform:', platformError.response?.data || platformError.message);
+      const metaError = platformError.response?.data?.error || platformError.platformError;
+      const metaUserMsg = metaError?.error_user_msg || metaError?.message;
+      console.error('Error posting reply to platform:', metaUserMsg || platformError.message);
+      if (platformError.response?.data) {
+        console.error('Platform API response:', JSON.stringify(platformError.response.data));
+      }
       replyStatus = 'failed';
-      errorMessage = platformError.response?.data?.error?.message || platformError.message || 'Failed to post reply to platform';
+      // Friendly message for Instagram "not the thread owner" (code 100, subcode 2534037)
+      if (metaError?.code === 100 && metaError?.error_subcode === 2534037) {
+        errorMessage = 'This conversation belongs to a different Instagram account. Reconnect the Instagram account that receives these DMs in Settings → Platforms, then try again.';
+      } else {
+        errorMessage = metaUserMsg || platformError.message || 'Failed to post reply to platform';
+      }
     }
 
     // Add reply to database with platform response ID
@@ -559,6 +702,7 @@ exports.replyToInteraction = async (req, res, next) => {
         message: 'Reply sent successfully to YouTube'
       });
     } else {
+      console.error('[Inbox Reply] Failed to send to platform:', errorMessage || 'Unknown error');
       res.status(500).json({
         success: false,
         error: errorMessage || 'Failed to send reply to platform',
@@ -568,6 +712,82 @@ exports.replyToInteraction = async (req, res, next) => {
     }
   } catch (error) {
     console.error('Error in replyToInteraction:', error);
+    next(error);
+  }
+};
+
+// @desc    Delete a Facebook comment (from Facebook and from DB)
+// @route   DELETE /api/inbox/:id
+// @access  Private
+exports.deleteInteraction = async (req, res, next) => {
+  try {
+    const interaction = await Interaction.findById(req.params.id)
+      .populate('platformConnection');
+
+    if (!interaction) {
+      return res.status(404).json({
+        success: false,
+        error: 'Interaction not found'
+      });
+    }
+
+    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+
+    // Only Facebook comments can be deleted on the platform; we still remove from DB for any type if needed later
+    const isFacebookComment = interaction.platform === 'facebook' && interaction.type === 'comment';
+
+    if (isFacebookComment) {
+      let connection = interaction.platformConnection;
+      if (!connection && interaction.organization) {
+        connection = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: 'facebook',
+          status: 'connected',
+          isActive: true
+        }).lean();
+      }
+      if (!connection || connection.status !== 'connected' || !connection.isActive) {
+        return res.status(400).json({
+          success: false,
+          error: 'Facebook Page connection not found or inactive. Reconnect the Page in Settings to delete comments on Facebook.'
+        });
+      }
+      const facebookService = require('../integrations/meta/facebookService');
+      const result = await facebookService.deleteComment(connection, interaction.platformId);
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          error: result.error || 'Failed to delete comment on Facebook'
+        });
+      }
+    }
+
+    // Delete child interactions (replies that reference this interaction)
+    await Interaction.deleteMany({
+      organization: interaction.organization,
+      $or: [
+        { parentId: interaction._id.toString() },
+        { parentId: interaction.platformId }
+      ]
+    });
+
+    await Interaction.findByIdAndDelete(interaction._id);
+
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    return res.status(200).json({
+      success: true,
+      message: isFacebookComment
+        ? 'Comment deleted from Facebook and from inbox.'
+        : 'Interaction removed from inbox.'
+    });
+  } catch (error) {
+    console.error('Error in deleteInteraction:', error);
     next(error);
   }
 };
@@ -1456,13 +1676,12 @@ exports.getAvailableAgents = async (req, res, next) => {
       isActive: true
     }).select('firstName lastName email role').sort({ role: 1, firstName: 1 });
 
-    // Get workload for each agent
+    // Get workload for each agent (count all assigned conversations not yet resolved/archived)
     const agentsWithWorkload = await Promise.all(
       agents.map(async (agent) => {
         const assignedCount = await Interaction.countDocuments({
           assignedTo: agent._id,
-          status: 'assigned',
-          requiresHumanResponse: true
+          status: { $nin: ['resolved', 'archived', 'closed'] }
         });
 
         return {
@@ -1516,7 +1735,10 @@ exports.bulkAssignInteractions = async (req, res, next) => {
       });
     }
 
-    // Update all interactions
+    const assignedAt = new Date();
+
+    // Update all interactions — also push to assignmentHistory so the
+    // "Assigned to X by Y" timeline banner appears in the detail view.
     const result = await Interaction.updateMany(
       {
         _id: { $in: interactionIds },
@@ -1526,9 +1748,17 @@ exports.bulkAssignInteractions = async (req, res, next) => {
         $set: {
           assignedTo: userId,
           assignedBy: req.user._id,
-          assignedAt: new Date(),
+          assignedAt,
           assignmentReason: 'manual',
           status: 'assigned'
+        },
+        $push: {
+          assignmentHistory: {
+            assignedTo: userId,
+            assignedBy: req.user._id,
+            assignedAt,
+            reason: 'manual'
+          }
         }
       }
     );

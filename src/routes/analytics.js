@@ -2,6 +2,13 @@ const express = require('express');
 const router = express.Router();
 const analyticsController = require('../controllers/analyticsController');
 const { protect } = require('../middlewares/auth');
+const {
+  validateAnalyticsDashboard,
+  validateAnalyticsExport,
+  validateAnalyticsAgents,
+  validateAnalyticsEngagement,
+  validateAnalyticsPlatform
+} = require('../middlewares/validation');
 
 /**
  * Analytics Routes
@@ -12,13 +19,23 @@ const { protect } = require('../middlewares/auth');
 router.use(protect);
 
 // Get analytics dashboard
-router.post('/dashboard', analyticsController.getDashboard);
+router.post('/dashboard', validateAnalyticsDashboard, analyticsController.getDashboard);
 
 // Get platform-specific analytics
-router.post('/platform/:platform', analyticsController.getPlatformAnalytics);
+router.post('/platform/:platform', validateAnalyticsPlatform, analyticsController.getPlatformAnalytics);
 
 // Export analytics data
-router.post('/export', analyticsController.exportData);
+router.post('/export', validateAnalyticsExport, analyticsController.exportData);
+
+// Agent analytics
+router.post('/agents', validateAnalyticsAgents, analyticsController.getAgentAnalytics);
+
+// Engagement analytics
+router.post('/engagement', validateAnalyticsEngagement, analyticsController.getEngagementAnalytics);
+
+// Content performance (AI vs Human) and suggested improvements
+router.get('/content-performance', analyticsController.getContentPerformance);
+router.get('/suggested-improvements', analyticsController.getSuggestedImprovements);
 
 module.exports = router;
 

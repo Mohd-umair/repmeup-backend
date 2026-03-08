@@ -236,6 +236,13 @@ exports.verifyFacebookWebhook = (req, res) => {
  */
 exports.handleFacebookWebhook = async (req, res) => {
   try {
+    // Log immediately so we can see if Meta is hitting this endpoint at all
+    console.log('[Facebook Webhook] POST received', {
+      hasBody: !!req.body,
+      object: req.body?.object,
+      entryCount: req.body?.entry?.length ?? 0
+    });
+
     const { webhookQueue } = require('../config/queue');
     
     console.log('Facebook webhook received:', JSON.stringify(req.body, null, 2));
@@ -255,7 +262,7 @@ exports.handleFacebookWebhook = async (req, res) => {
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'facebook',
-      platformPageId: pageId,
+      platformPageId: { $in: [String(pageId), pageId].filter(Boolean) },
       isActive: true
     });
 
@@ -307,51 +314,54 @@ exports.verifyInstagramWebhook = (req, res) => {
 /**
  * Handle Instagram webhook events
  * POST /api/webhooks/instagram
+ * Saves DM to DB immediately in this request so it shows in inbox (with polling) without clicking Sync.
  */
 exports.handleInstagramWebhook = async (req, res) => {
   try {
-    const { webhookQueue } = require('../config/queue');
-    
-    console.log('Instagram webhook received:', JSON.stringify(req.body, null, 2));
-
-    // Acknowledge receipt immediately
+    // Acknowledge receipt immediately so Meta doesn't retry
     res.sendStatus(200);
 
-    // Process webhook asynchronously
     const entry = req.body.entry?.[0];
     if (!entry) {
       console.log('No entry in Instagram webhook payload');
       return;
     }
 
-    // Determine organization from Instagram account ID
+    // Don't skip when standby has messages — we'll process standby in the job (same as incoming DMs)
+    const hasMessaging = entry.messaging && entry.messaging.length > 0;
+    const hasStandby = entry.standby && entry.standby.length > 0;
+    if (!hasMessaging && !hasStandby) {
+      return;
+    }
+
     const instagramId = entry.id;
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
-      platformUserId: instagramId,
+      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
       isActive: true
     });
 
     if (!connection) {
-      console.log(`No active Instagram connection found for account: ${instagramId}`);
+      console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. DM was sent to this IG account — connect it in Settings → Page Manager to receive DMs here.`);
       return;
     }
 
-    // Queue webhook for processing
-    await webhookQueue.add({
-      platform: 'instagram',
-      payload: req.body,
-      organizationId: connection.organization.toString()
-    }, {
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 2000
-      }
-    });
+    const organizationId = connection.organization.toString();
 
-    console.log('Instagram webhook queued for processing');
+    // Save DM to DB immediately so inbox polling shows it without Sync
+    const processWebhook = require('../jobs/processWebhook');
+    try {
+      const result = await processWebhook({
+        data: { platform: 'instagram', payload: req.body, organizationId },
+        id: 'instagram-' + Date.now()
+      });
+      if (result && result.interactionId) {
+        console.log('Instagram webhook processed and DM saved to database');
+      }
+    } catch (processErr) {
+      console.error('Instagram webhook processing error:', processErr.message);
+    }
   } catch (error) {
     console.error('Instagram webhook handler error:', error);
     // Don't send error response as we already sent 200

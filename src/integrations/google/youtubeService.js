@@ -294,13 +294,19 @@ class YouTubeService {
 
       // Bulk upsert interactions (insert new, update existing)
       if (interactions.length > 0) {
-        const bulkOps = interactions.map(interaction => ({
-          updateOne: {
-            filter: { platformId: interaction.platformId },
-            update: { $set: interaction },
-            upsert: true
-          }
-        }));
+        const bulkOps = interactions.map(interaction => {
+          const { status, isRead, sentiment, ...platformFields } = interaction;
+          return {
+            updateOne: {
+              filter: { platformId: interaction.platformId },
+              update: {
+                $set: platformFields,
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              },
+              upsert: true
+            }
+          };
+        });
         
         await Interaction.bulkWrite(bulkOps, { ordered: false });
       }

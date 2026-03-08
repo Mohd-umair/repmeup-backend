@@ -241,12 +241,89 @@ exports.getPlatformConnections = async (req, res, next) => {
       req.user.organization._id
     );
 
+    // Normalize so frontend always gets platformProfilePicture when we have it (root or metadata)
+    const connections = (result.connections || []).map((c) => {
+      const doc = c.toObject ? c.toObject() : { ...c };
+      if (!doc.platformProfilePicture && doc.metadata?.profilePicture) {
+        doc.platformProfilePicture = doc.metadata.profilePicture;
+      }
+      return doc;
+    });
+
     res.status(200).json({
       success: true,
-      data: result.connections,
+      data: connections,
       // Include usage and limits so frontend can show "X of Y" and disable "Add account"
       usage: result.usage,
       limits: result.limits
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Refresh profile pictures for existing Meta (Facebook/Instagram) connections
+ *          Uses current Meta API data to backfill platformProfilePicture / metadata.profilePicture
+ * @route   POST /api/platforms/refresh-profile-pictures
+ * @access  Private
+ */
+exports.refreshProfilePictures = async (req, res, next) => {
+  try {
+    const metaAuth = require('../integrations/meta/metaAuth');
+    const organizationId = req.user.organization._id || req.user.organization;
+
+    const userConnection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'facebook',
+      'metadata.type': 'user_token',
+      isActive: true
+    }).select('accessToken');
+    if (!userConnection?.accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'No Facebook user connection found. Connect a Facebook account first.'
+      });
+    }
+
+    const pages = await metaAuth.getUserPages(userConnection.accessToken);
+    let updated = 0;
+    for (const page of pages) {
+      const pagePictureUrl = page.picture?.data?.url || (typeof page.picture === 'string' ? page.picture : null) || null;
+      const fbConn = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'facebook',
+        platformUserId: page.id,
+        isActive: true
+      });
+      if (fbConn && pagePictureUrl) {
+        fbConn.platformProfilePicture = pagePictureUrl;
+        if (!fbConn.metadata) fbConn.metadata = {};
+        fbConn.metadata.profilePicture = pagePictureUrl;
+        await fbConn.save();
+        updated++;
+      }
+      const ig = page.instagram_business_account;
+      if (ig?.profile_picture_url) {
+        const igConn = await PlatformConnection.findOne({
+          organization: organizationId,
+          platform: 'instagram',
+          platformUserId: ig.id,
+          isActive: true
+        });
+        if (igConn) {
+          igConn.platformProfilePicture = ig.profile_picture_url;
+          if (!igConn.metadata) igConn.metadata = {};
+          igConn.metadata.profilePicture = ig.profile_picture_url;
+          await igConn.save();
+          updated++;
+        }
+      }
+    }
+    res.status(200).json({
+      success: true,
+      message: `Refreshed profile pictures for ${updated} connection(s)`,
+      updated
     });
   } catch (error) {
     next(error);
@@ -423,8 +500,13 @@ exports.syncPlatform = async (req, res, next) => {
         });
       }
     } else if (connection.platform === 'facebook') {
-      // Fetch both comments and reviews
-      result = await facebookService.fetchAllInteractions(connection);
+      // User-level Facebook connections (platformPageId null) are for listing pages only; they cannot sync comments
+      if (!connection.platformPageId) {
+        console.warn('⚠️ [Sync] Facebook connection has no Page ID (user-level connection). Sync comments from a connected Page in Page Manager.');
+        result = { count: 0, interactions: [] };
+      } else {
+        result = await facebookService.fetchAllInteractions(connection);
+      }
     } else if (connection.platform === 'linkedin') {
       try {
         // Fetch LinkedIn posts and comments

@@ -54,9 +54,10 @@ DISABLE_WORKERS=true  # For production (workers run separately)
 # Redis
 REDIS_URL=redis://localhost:6379
 
-# Rate Limiting
+# Rate Limiting (use 5000+ for production; 100 is too low for dashboard polling)
 RATE_LIMIT_WINDOW_MS=900000
-RATE_LIMIT_MAX_REQUESTS=100
+RATE_LIMIT_MAX_REQUESTS=5000
+# Or disable if all traffic shares one IP: RATE_LIMIT_DISABLED=true
 ```
 
 ## Development Mode
@@ -261,14 +262,27 @@ AI_CONCURRENCY=20
 pm2 reload orm-worker
 ```
 
-### Rate Limit Issues
-```bash
-# Check Redis connection
-redis-cli ping
+### Rate limit / 429 "Too many requests" errors
+If logs show `[Rate limit] Too many requests` and users get 429 errors:
 
-# Adjust rate limits in .env
-RATE_LIMIT_MAX_REQUESTS=200
-```
+1. **Raise the limit** in `.env` on the server (then restart PM2):
+   ```env
+   RATE_LIMIT_MAX_REQUESTS=5000
+   RATE_LIMIT_WINDOW_MS=900000
+   ```
+   A dashboard that polls inbox, stats, notifications, etc. can exceed 1000 requests per 15 minutes per IP.
+
+2. **Or disable rate limiting** (e.g. if all traffic comes from one IP behind a proxy):
+   ```env
+   RATE_LIMIT_DISABLED=true
+   ```
+   Restart: `pm2 restart orm-api` (and any other API instances).
+
+3. **Clear Redis rate-limit keys** (optional, to reset the counter for all IPs):
+   ```bash
+   redis-cli KEYS "rl:*"
+   redis-cli DEL $(redis-cli KEYS "rl:*")
+   ```
 
 ### MongoDB Connection Issues
 ```bash

@@ -2,7 +2,18 @@ const express = require('express');
 const router = express.Router();
 const inboxController = require('../controllers/inboxController');
 const { protect, authorize } = require('../middlewares/auth');
-const { validateReply } = require('../middlewares/validation');
+const {
+  validateReply,
+  validateInboxAssign,
+  validateInboxAddLabel,
+  validateInboxAddNote,
+  validateInboxUpdateStatus,
+  validateInboxBulkAssign,
+  validateInboxBulkStatus,
+  validateInboxBulkLabel,
+  validateInboxAutoReplyGenerate,
+  validateInboxEscalate
+} = require('../middlewares/validation');
 
 // All inbox routes require authentication
 router.use(protect);
@@ -51,6 +62,7 @@ router.post('/:id/suggest-reply', inboxController.suggestReply);
 router.post(
   '/auto-reply/generate',
   authorize('admin', 'manager'),
+  validateInboxAutoReplyGenerate,
   inboxController.generateAutoReplies
 );
 
@@ -65,35 +77,40 @@ router.post(
 router.put(
   '/:id/assign',
   authorize('admin', 'manager'),
+  validateInboxAssign,
   inboxController.assignInteraction
 );
 
 // Add label to interaction
-router.put('/:id/labels', inboxController.addLabel);
+router.put('/:id/labels', validateInboxAddLabel, inboxController.addLabel);
 
 // Add internal note
-router.post('/:id/notes', inboxController.addNote);
+router.post('/:id/notes', validateInboxAddNote, inboxController.addNote);
 
 // Update status
-router.put('/:id/status', inboxController.updateStatus);
+router.put('/:id/status', validateInboxUpdateStatus, inboxController.updateStatus);
+
+// Delete interaction (Facebook comment: deletes on Facebook and in DB; others: DB only)
+router.delete('/:id', inboxController.deleteInteraction);
 
 
 // Bulk assign interactions (Manager/Admin only)
 router.post(
   '/assign-bulk',
   authorize('admin', 'manager'),
+  validateInboxBulkAssign,
   inboxController.bulkAssignInteractions
 );
 
 // Bulk update status
-router.post('/status-bulk', inboxController.bulkUpdateStatus);
+router.post('/status-bulk', validateInboxBulkStatus, inboxController.bulkUpdateStatus);
 
 // Bulk add label
-router.post('/labels-bulk', inboxController.bulkAddLabel);
+router.post('/labels-bulk', validateInboxBulkLabel, inboxController.bulkAddLabel);
 
 
 // Manually escalate interaction to human agent
-router.post('/:id/escalate', inboxController.escalateInteractionManually);
+router.post('/:id/escalate', validateInboxEscalate, inboxController.escalateInteractionManually);
 
 module.exports = router;
 
