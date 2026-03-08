@@ -134,7 +134,8 @@ class MetaAuthService {
         'pages_manage_posts',   // Publish posts, stories, reels to the Page
         'business_management',   // Required when Pages are linked to a Facebook Business Account
         'instagram_basic',      // Required so GET /me/accounts returns instagram_business_account for linked Pages
-        'instagram_manage_comments'  // Required to reply to Instagram comments from the app
+        'instagram_manage_comments',  // Required to reply to Instagram comments from the app
+        'instagram_content_publish'  // Required to publish to Instagram when connecting via Facebook / Page Manager
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
@@ -552,6 +553,7 @@ class MetaAuthService {
           if (!existingConnection.metadata) existingConnection.metadata = {};
           existingConnection.metadata.profilePicture = instagramAccount.profile_picture_url;
         }
+        existingConnection.scopes = ['instagram_basic', 'instagram_manage_comments', 'instagram_content_publish', 'pages_show_list'];
         await existingConnection.save();
         console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
         return existingConnection;
@@ -576,7 +578,7 @@ class MetaAuthService {
         accessToken: pageAccessToken,
         refreshToken: null,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
-        scopes: ['instagram_basic', 'instagram_manage_comments', 'pages_show_list'],
+        scopes: ['instagram_basic', 'instagram_manage_comments', 'instagram_content_publish', 'pages_show_list'],
         status: 'connected',
         isActive: true,
         platformData: {
