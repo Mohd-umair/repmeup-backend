@@ -13,7 +13,6 @@ const logger = require('../config/logger');
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
-// @access  Private
 exports.getInteractions = async (req, res, next) => {
   try {
     const {
