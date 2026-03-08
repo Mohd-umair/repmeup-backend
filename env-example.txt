@@ -72,9 +72,10 @@ SENDGRID_API_KEY=your_sendgrid_api_key
 FROM_EMAIL=noreply@yourdomain.com
 FROM_NAME=ORM System
 
-# Rate Limiting
-RATE_LIMIT_WINDOW_MS=900000
-RATE_LIMIT_MAX_REQUESTS=100
+# Rate limiting (optional; defaults: 1000 req/15 min per IP, or 10000 in development)
+# RATE_LIMIT_MAX_REQUESTS=5000
+# RATE_LIMIT_WINDOW_MS=900000
+# To disable rate limiting (e.g. all users behind one IP): RATE_LIMIT_DISABLED=true
 
 # File Upload
 MAX_FILE_SIZE=5242880
