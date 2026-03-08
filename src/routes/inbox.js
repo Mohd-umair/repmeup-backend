@@ -90,6 +90,9 @@ router.post('/:id/notes', validateInboxAddNote, inboxController.addNote);
 // Update status
 router.put('/:id/status', validateInboxUpdateStatus, inboxController.updateStatus);
 
+// Delete interaction (Facebook comment: deletes on Facebook and in DB; others: DB only)
+router.delete('/:id', inboxController.deleteInteraction);
+
 
 // Bulk assign interactions (Manager/Admin only)
 router.post(

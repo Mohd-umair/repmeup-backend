@@ -13,7 +13,6 @@ const logger = require('../config/logger');
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
-// @access  Private
 exports.getInteractions = async (req, res, next) => {
   try {
     const {
@@ -712,6 +711,82 @@ exports.replyToInteraction = async (req, res, next) => {
     }
   } catch (error) {
     console.error('Error in replyToInteraction:', error);
+    next(error);
+  }
+};
+
+// @desc    Delete a Facebook comment (from Facebook and from DB)
+// @route   DELETE /api/inbox/:id
+// @access  Private
+exports.deleteInteraction = async (req, res, next) => {
+  try {
+    const interaction = await Interaction.findById(req.params.id)
+      .populate('platformConnection');
+
+    if (!interaction) {
+      return res.status(404).json({
+        success: false,
+        error: 'Interaction not found'
+      });
+    }
+
+    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+
+    // Only Facebook comments can be deleted on the platform; we still remove from DB for any type if needed later
+    const isFacebookComment = interaction.platform === 'facebook' && interaction.type === 'comment';
+
+    if (isFacebookComment) {
+      let connection = interaction.platformConnection;
+      if (!connection && interaction.organization) {
+        connection = await PlatformConnection.findOne({
+          organization: interaction.organization,
+          platform: 'facebook',
+          status: 'connected',
+          isActive: true
+        }).lean();
+      }
+      if (!connection || connection.status !== 'connected' || !connection.isActive) {
+        return res.status(400).json({
+          success: false,
+          error: 'Facebook Page connection not found or inactive. Reconnect the Page in Settings to delete comments on Facebook.'
+        });
+      }
+      const facebookService = require('../integrations/meta/facebookService');
+      const result = await facebookService.deleteComment(connection, interaction.platformId);
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          error: result.error || 'Failed to delete comment on Facebook'
+        });
+      }
+    }
+
+    // Delete child interactions (replies that reference this interaction)
+    await Interaction.deleteMany({
+      organization: interaction.organization,
+      $or: [
+        { parentId: interaction._id.toString() },
+        { parentId: interaction.platformId }
+      ]
+    });
+
+    await Interaction.findByIdAndDelete(interaction._id);
+
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    return res.status(200).json({
+      success: true,
+      message: isFacebookComment
+        ? 'Comment deleted from Facebook and from inbox.'
+        : 'Interaction removed from inbox.'
+    });
+  } catch (error) {
+    console.error('Error in deleteInteraction:', error);
     next(error);
   }
 };
