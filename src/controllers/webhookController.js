@@ -237,28 +237,38 @@ exports.verifyFacebookWebhook = (req, res) => {
 exports.handleFacebookWebhook = async (req, res) => {
   try {
     // Log immediately so we can see if Meta is hitting this endpoint at all
+    const hasBody = !!req.body;
+    const obj = req.body?.object;
+    const entryCount = req.body?.entry?.length ?? 0;
+    const firstEntry = req.body?.entry?.[0];
+    const pageId = firstEntry?.id;
+    const hasMessaging = !!(firstEntry?.messaging && firstEntry.messaging.length > 0);
+
     console.log('[Facebook Webhook] POST received', {
-      hasBody: !!req.body,
-      object: req.body?.object,
-      entryCount: req.body?.entry?.length ?? 0
+      hasBody,
+      object: obj,
+      entryCount,
+      pageId: pageId || '(no entry.id)',
+      hasMessaging,
+      messagingCount: firstEntry?.messaging?.length ?? 0
     });
 
     const { webhookQueue } = require('../config/queue');
-    
-    console.log('Facebook webhook received:', JSON.stringify(req.body, null, 2));
 
     // Acknowledge receipt immediately
     res.sendStatus(200);
 
-    // Process webhook asynchronously
-    const entry = req.body.entry?.[0];
-    if (!entry) {
-      console.log('No entry in Facebook webhook payload');
+    if (!firstEntry) {
+      console.log('[Facebook Webhook] No entry in payload – nothing to process');
       return;
     }
 
-    // Determine organization from page ID
-    const pageId = entry.id;
+    // For debugging: if this is a messaging event but we'll skip, log why
+    if (hasMessaging) {
+      console.log('[Facebook Webhook] Messenger DM event: pageId=%s, sender=%s', pageId, firstEntry.messaging?.[0]?.sender?.id);
+    }
+
+    // Determine organization from page ID (must match a connected Page in the app)
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'facebook',
@@ -267,7 +277,7 @@ exports.handleFacebookWebhook = async (req, res) => {
     });
 
     if (!connection) {
-      console.log(`No active Facebook connection found for page: ${pageId}`);
+      console.log('[Facebook Webhook] No active Facebook connection found for pageId:', pageId, '- Ensure this Page is connected in the app (Settings → Connect Facebook → Page Manager) and that the Page you messaged is the same one.');
       return;
     }
 
@@ -284,7 +294,7 @@ exports.handleFacebookWebhook = async (req, res) => {
       }
     });
 
-    console.log('Facebook webhook queued for processing');
+    console.log('[Facebook Webhook] Queued for processing, pageId=%s', pageId);
   } catch (error) {
     console.error('Facebook webhook handler error:', error);
     // Don't send error response as we already sent 200

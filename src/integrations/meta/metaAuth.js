@@ -132,6 +132,7 @@ class MetaAuthService {
         'pages_read_user_content',
         'pages_manage_engagement',
         'pages_manage_posts',   // Publish posts, stories, reels to the Page
+        'pages_messaging',      // Receive and send Facebook Page DMs (Messenger) in Inbox
         'business_management',   // Required when Pages are linked to a Facebook Business Account
         'instagram_basic',      // Required so GET /me/accounts returns instagram_business_account for linked Pages
         'instagram_manage_comments',  // Required to reply to Instagram comments from the app
