@@ -426,8 +426,8 @@ async function handleFacebookWebhook(payload, organizationId) {
       const profile = await fetchFacebookSenderProfile(organizationId, pageId, senderId, pageConnection?.accessToken);
       const author = {
         platformId: senderId,
-        username: profile.name,
-        name: profile.name
+        username: profile.name || 'Messenger User',
+        name: profile.name || 'Messenger User'
       };
       if (profile.profilePic) author.avatarUrl = profile.profilePic;
 
@@ -560,12 +560,13 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
     const axios = require('axios');
     const baseUrl = `https://graph.facebook.com/v18.0`;
     const res = await axios.get(`${baseUrl}/${psid}`, {
-      params: { fields: 'name,profile_pic', access_token: token },
+      params: { fields: 'name,first_name,last_name,profile_pic', access_token: token },
       timeout: 5000
     });
     const data = res.data || {};
+    const name = data.name || (data.first_name && data.last_name ? `${data.first_name} ${data.last_name}`.trim() : data.first_name || data.last_name);
     return {
-      name: data.name || undefined,
+      name: name || undefined,
       profilePic: data.profile_pic || undefined
     };
   } catch (err) {

@@ -213,19 +213,35 @@ exports.webhookHealth = async (req, res) => {
 /**
  * Verify Facebook webhook
  * GET /api/webhooks/facebook
+ * Meta sends: hub.mode=subscribe&hub.verify_token=YOUR_TOKEN&hub.challenge=CHALLENGE
+ * We must respond 200 with body = challenge if token matches META_WEBHOOK_VERIFY_TOKEN.
  */
 exports.verifyFacebookWebhook = (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('Facebook webhook verification request:', { mode, token });
+  const expectedToken = process.env.META_WEBHOOK_VERIFY_TOKEN;
+  const tokenMatches = !!expectedToken && token === expectedToken;
 
-  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+  console.log('Facebook webhook verification request:', {
+    mode,
+    hasToken: !!token,
+    tokenLength: token?.length,
+    hasChallenge: !!challenge,
+    tokenMatches
+  });
+
+  if (mode === 'subscribe' && tokenMatches && challenge) {
     console.log('Facebook webhook verified successfully');
     res.status(200).send(challenge);
   } else {
-    console.error('Facebook webhook verification failed');
+    const reason = !mode || mode !== 'subscribe' ? 'mode not subscribe'
+      : !expectedToken ? 'META_WEBHOOK_VERIFY_TOKEN not set in env'
+      : !tokenMatches ? 'verify token does not match META_WEBHOOK_VERIFY_TOKEN'
+      : !challenge ? 'missing hub.challenge'
+      : 'unknown';
+    console.error('Facebook webhook verification failed:', reason);
     res.sendStatus(403);
   }
 };
@@ -235,9 +251,13 @@ exports.verifyFacebookWebhook = (req, res) => {
  * POST /api/webhooks/facebook
  */
 exports.handleFacebookWebhook = async (req, res) => {
+  // Log every POST immediately (even empty body) so we know if Meta is calling
+  console.log('[Facebook Webhook] POST hit – Meta is calling this URL');
+
   try {
-    // Log immediately so we can see if Meta is hitting this endpoint at all
+    // If we get a body but no entry/object, log raw keys to debug Meta's payload format
     const hasBody = !!req.body;
+    const bodyKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
     const obj = req.body?.object;
     const entryCount = req.body?.entry?.length ?? 0;
     const firstEntry = req.body?.entry?.[0];
@@ -253,10 +273,21 @@ exports.handleFacebookWebhook = async (req, res) => {
       messagingCount: firstEntry?.messaging?.length ?? 0
     });
 
+    // When Meta sends something but entry is empty, show what we got so we can fix parsing
+    if (hasBody && (entryCount === 0 || !obj)) {
+      console.log('[Facebook Webhook] Payload keys:', bodyKeys.join(', '), '| body.entry type:', Array.isArray(req.body?.entry) ? 'array' : typeof req.body?.entry);
+    }
+
     const { webhookQueue } = require('../config/queue');
 
     // Acknowledge receipt immediately
     res.sendStatus(200);
+
+    // Only process Page webhooks (messages, feed, etc.). Ignore others (e.g. object: 'permissions')
+    if (obj !== 'page') {
+      if (obj) console.log('[Facebook Webhook] Ignoring non-page object:', obj);
+      return;
+    }
 
     if (!firstEntry) {
       console.log('[Facebook Webhook] No entry in payload – nothing to process');
