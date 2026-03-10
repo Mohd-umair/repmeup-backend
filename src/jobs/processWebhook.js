@@ -278,20 +278,31 @@ async function handleInstagramWebhook(payload, organizationId) {
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
-      const interaction = await Interaction.findOneAndUpdate(
+      // Step 1: Upsert the thread (create or update non-message fields)
+      await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
         {
           $set: updateFields,
-          $setOnInsert: { status: 'unread', isRead: false },
+          $setOnInsert: { status: 'unread', isRead: false }
+        },
+        { upsert: true }
+      );
+
+      // Step 2: Only append message if this mid is not already in the array.
+      // This prevents duplicates when Meta retries the same webhook event.
+      await Interaction.updateOne(
+        { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
+        {
           $push: {
             'metadata.incomingMessages': {
               $each: [{ mid, text, timestamp: event.timestamp }],
               $slice: -100
             }
           }
-        },
-        { upsert: true, new: true }
+        }
       );
+
+      const interaction = await Interaction.findOne({ platformId: threadPlatformId });
       return interaction;
     }
 

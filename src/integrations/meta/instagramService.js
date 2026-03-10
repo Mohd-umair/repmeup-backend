@@ -534,19 +534,24 @@ class InstagramService {
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Instagram] Saved ${interactions.length} DMs to database`);
+      }
 
-        // Remove legacy duplicate: sync used to create one row per message (platformId = message.id).
-        // Now we use one row per conversation (platformId = dm_igAccountId_senderId). Delete old
-        // per-message rows so the same conversation does not appear twice in the inbox.
+      // Always clean up legacy per-message rows (platformId not starting with "dm_").
+      // Old sync code created one row per message (platformId = message.id like "m_xxx").
+      // New code uses one row per conversation (platformId = dm_igAccountId_senderId).
+      // $not: /^dm_/ correctly matches anything NOT starting with "dm_".
+      try {
         const deleted = await Interaction.deleteMany({
-          organization: interactions[0]?.organization,
+          organization: platformConnection.organization,
           platform: 'instagram',
           type: 'dm',
-          platformId: { $regex: /^(?!dm_)/ }
+          platformId: { $not: /^dm_/ }
         });
         if (deleted.deletedCount > 0) {
           console.log(`✅ [Instagram] Removed ${deleted.deletedCount} legacy per-message DM rows to prevent duplicates`);
         }
+      } catch (cleanupErr) {
+        console.warn('[Instagram] Legacy DM cleanup failed (non-critical):', cleanupErr.message);
       }
 
       return {
