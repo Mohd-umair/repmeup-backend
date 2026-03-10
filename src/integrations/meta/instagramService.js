@@ -404,10 +404,21 @@ class InstagramService {
       const interactionMap = new Map();
       const profileCache = new Map();
 
-      // For each conversation, get messages
+      // One interaction per conversation (same as webhook: platformId = dm_igAccountId_senderId)
+      // so we don't create duplicate inbox entries when both webhook and sync run.
       for (const conversation of allConversations) {
         try {
-          // Get messages for this conversation
+          const participants = conversation.participants?.data || [];
+          const otherParticipant = participants.find(p => String(p?.id) !== String(businessAccountId));
+          const otherParticipantId = otherParticipant?.id;
+          if (!otherParticipantId) {
+            console.warn(`[Instagram] Skipping conversation ${conversation.id}: could not determine other participant`);
+            continue;
+          }
+
+          // Same thread ID format as webhook so sync and webhook update the same interaction
+          const threadPlatformId = `dm_${String(businessAccountId)}_${String(otherParticipantId)}`;
+
           let allMessages = [];
           let messagesNextPage = `${this.baseUrl}/${conversation.id}/messages`;
           let messagesPageCount = 0;
@@ -432,59 +443,67 @@ class InstagramService {
             }
           }
 
-          // Process messages (only incoming messages, not sent by us)
+          // Collect only incoming messages (from the other participant) for this conversation
+          const incomingMessages = [];
+          let latestIncoming = null;
           for (const message of allMessages) {
-            // Check if message is from someone else (not from our business account)
-            const isFromUs = message.from?.id === businessAccountId || 
+            const isFromUs = message.from?.id === businessAccountId ||
                             message.from?.id === platformConnection.platformPageId;
-
             if (!isFromUs && message.message) {
-              let authorName = message.from?.name || message.from?.username || 'Unknown User';
-              let avatarUrl = undefined;
-              if (message.from?.id) {
-                if (!profileCache.has(message.from.id)) {
-                  const profile = await this._fetchInstagramUserProfile(accessToken, message.from.id);
-                  profileCache.set(message.from.id, profile);
-                }
-                const profile = profileCache.get(message.from.id);
-                if (profile) {
-                  if (profile.profile_pic) avatarUrl = profile.profile_pic;
-                  if (profile.name) authorName = profile.name;
-                }
-                if (!avatarUrl) {
-                  avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
-                }
+              const ts = message.created_time;
+              const timestamp = typeof ts === 'number' ? ts : (new Date(ts).getTime() / 1000);
+              incomingMessages.push({
+                mid: message.id,
+                text: message.message,
+                timestamp
+              });
+              if (!latestIncoming || new Date(message.created_time) > new Date(latestIncoming.created_time)) {
+                latestIncoming = message;
               }
-              const interaction = {
-                organization: platformConnection.organization,
-                platformConnection: platformConnection._id,
-                platform: 'instagram',
-                type: 'dm',
-                platformId: message.id,
-                threadId: conversation.id,
-                platformUrl: `https://www.instagram.com/direct/inbox/`,
-                content: message.message,
-                author: {
-                  platformId: message.from?.id,
-                  username: message.from?.username || 'unknown',
-                  name: authorName,
-                  avatarUrl
-                },
-                metadata: {
-                  conversationId: conversation.id,
-                  participants: conversation.participants?.data || [],
-                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0),
-                  instagramAccountId: businessAccountId
-                },
-                platformCreatedAt: new Date(message.created_time),
-                status: 'unread',
-                sentiment: null
-              };
-
-              interactions.push(interaction);
-              interactionMap.set(message.id, interaction);
             }
           }
+
+          if (incomingMessages.length === 0) continue;
+
+          const authorId = otherParticipantId;
+          if (!profileCache.has(authorId)) {
+            const profile = await this._fetchInstagramUserProfile(accessToken, authorId);
+            profileCache.set(authorId, profile);
+          }
+          const profile = profileCache.get(authorId);
+          let authorName = profile?.name || otherParticipant?.username || 'Unknown User';
+          let avatarUrl = profile?.profile_pic || profile?.profile_picture_url;
+          if (!avatarUrl) avatarUrl = `${this.baseUrl}/${authorId}/picture?type=normal`;
+
+          const interaction = {
+            organization: platformConnection.organization,
+            platformConnection: platformConnection._id,
+            platform: 'instagram',
+            type: 'dm',
+            platformId: threadPlatformId,
+            threadId: otherParticipantId,
+            platformUrl: 'https://www.instagram.com/direct/inbox/',
+            content: latestIncoming.message,
+            author: {
+              platformId: authorId,
+              username: otherParticipant?.username || 'unknown',
+              name: authorName,
+              avatarUrl
+            },
+            metadata: {
+              conversationId: conversation.id,
+              participants: participants,
+              instagramAccountId: businessAccountId,
+              incomingMessages: incomingMessages.slice(-100),
+              lastMid: latestIncoming.id
+            },
+            platformCreatedAt: new Date(latestIncoming.created_time),
+            status: 'unread',
+            sentiment: null
+          };
+
+          interactions.push(interaction);
+          interactionMap.set(threadPlatformId, interaction);
         } catch (error) {
           console.error(`Error processing conversation ${conversation.id}:`, error.message);
           continue;
@@ -515,6 +534,19 @@ class InstagramService {
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Instagram] Saved ${interactions.length} DMs to database`);
+
+        // Remove legacy duplicate: sync used to create one row per message (platformId = message.id).
+        // Now we use one row per conversation (platformId = dm_igAccountId_senderId). Delete old
+        // per-message rows so the same conversation does not appear twice in the inbox.
+        const deleted = await Interaction.deleteMany({
+          organization: interactions[0]?.organization,
+          platform: 'instagram',
+          type: 'dm',
+          platformId: { $regex: /^(?!dm_)/ }
+        });
+        if (deleted.deletedCount > 0) {
+          console.log(`✅ [Instagram] Removed ${deleted.deletedCount} legacy per-message DM rows to prevent duplicates`);
+        }
       }
 
       return {
