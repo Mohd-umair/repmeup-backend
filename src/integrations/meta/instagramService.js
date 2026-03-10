@@ -473,7 +473,8 @@ class InstagramService {
                 metadata: {
                   conversationId: conversation.id,
                   participants: conversation.participants?.data || [],
-                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0)
+                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0),
+                  instagramAccountId: businessAccountId
                 },
                 platformCreatedAt: new Date(message.created_time),
                 status: 'unread',
