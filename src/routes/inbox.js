@@ -112,5 +112,26 @@ router.post('/labels-bulk', validateInboxBulkLabel, inboxController.bulkAddLabel
 // Manually escalate interaction to human agent
 router.post('/:id/escalate', validateInboxEscalate, inboxController.escalateInteractionManually);
 
+// One-time cleanup: remove legacy per-message Instagram DM duplicates (Admin/Manager only)
+router.post(
+  '/cleanup/instagram-dm-duplicates',
+  authorize('admin', 'manager'),
+  async (req, res) => {
+    try {
+      const Interaction = require('../models/Interaction');
+      const org = req.user.organization._id;
+      const deleted = await Interaction.deleteMany({
+        organization: org,
+        platform: 'instagram',
+        type: 'dm',
+        platformId: { $not: /^dm_/ }
+      });
+      return res.json({ success: true, deleted: deleted.deletedCount });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+);
+
 module.exports = router;
 
