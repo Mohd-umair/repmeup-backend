@@ -134,7 +134,7 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
-        'instagram_content_publishing'
+        'instagram_content_publish'
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
@@ -181,7 +181,7 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
-        'instagram_content_publishing',
+        'instagram_content_publish',
         'pages_show_list',
         'pages_read_engagement',
         'business_management'
