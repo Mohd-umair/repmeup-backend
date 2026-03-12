@@ -129,14 +129,12 @@ class MetaAuthService {
       scope: [
         'pages_show_list',
         'pages_read_engagement',
-        'pages_read_user_content',
-        'pages_manage_engagement',
-        'pages_manage_posts',   // Publish posts, stories, reels to the Page
-        'pages_messaging',      // Receive and send Facebook Page DMs (Messenger) in Inbox
-        'business_management',   // Required when Pages are linked to a Facebook Business Account
-        'instagram_basic',      // Required so GET /me/accounts returns instagram_business_account for linked Pages
-        'instagram_manage_comments',  // Required to reply to Instagram comments from the app
-        'instagram_content_publish'  // Required to publish to Instagram when connecting via Facebook / Page Manager
+        'pages_messaging',
+        'business_management',
+        'instagram_basic',
+        'instagram_manage_comments',
+        'instagram_manage_messages',
+        'instagram_content_publishing'
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
@@ -183,10 +181,10 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
-        'instagram_content_publish',  // Create and publish posts to Instagram
+        'instagram_content_publishing',
         'pages_show_list',
         'pages_read_engagement',
-        'business_management'  // Required when Pages are linked to a Facebook Business Account
+        'business_management'
       ].join(','),
       response_type: 'code',
       auth_type: 'reauthorize',
