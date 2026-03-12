@@ -514,9 +514,7 @@ class MetaAuthService {
   }
 
   /**
-   * Subscribe a Facebook Page to this app's webhook so Meta delivers
-   * Instagram DMs (and Page events) to our Callback URL.
-   * Must be called with the Page Access Token after connecting Instagram.
+   * Subscribe a Facebook Page to this app's webhook (for Messenger/Page events).
    */
   async subscribePageToWebhook(pageId, pageAccessToken) {
     const fields = [
@@ -546,7 +544,41 @@ class MetaAuthService {
       }
     } catch (err) {
       const msg = err.response?.data?.error?.message || err.message;
-      console.warn(`⚠️  [MetaAuth] Could not subscribe page ${pageId} to webhook (DMs may not arrive): ${msg}`);
+      console.warn(`⚠️  [MetaAuth] Could not subscribe page ${pageId} to webhook: ${msg}`);
+    }
+  }
+
+  /**
+   * Subscribe an Instagram Business Account to this app's webhook so Meta
+   * delivers Instagram DMs to our Callback URL.
+   * Must be called with the Page Access Token after connecting Instagram.
+   */
+  async subscribeInstagramToWebhook(igUserId, pageAccessToken) {
+    const fields = [
+      'messages',
+      'messaging_seen',
+      'messaging_postbacks',
+      'standby',
+      'message_reactions',
+      'comments'
+    ].join(',');
+
+    try {
+      const url = `${this.graphURL}/${igUserId}/subscribed_apps`;
+      const response = await axios.post(url, null, {
+        params: {
+          subscribed_fields: fields,
+          access_token: pageAccessToken
+        }
+      });
+      if (response.data?.success) {
+        console.log(`✅ [MetaAuth] Instagram account ${igUserId} subscribed to webhook fields: ${fields}`);
+      } else {
+        console.warn(`⚠️  [MetaAuth] Instagram subscription returned unexpected response:`, response.data);
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.warn(`⚠️  [MetaAuth] Could not subscribe Instagram ${igUserId} to webhook (DMs may not arrive): ${msg}`);
     }
   }
 
@@ -592,8 +624,8 @@ class MetaAuthService {
         existingConnection.scopes = ['instagram_basic', 'instagram_manage_comments', 'instagram_content_publish', 'pages_show_list'];
         await existingConnection.save();
         console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
-        // Re-subscribe page to ensure webhook delivers DMs to this app
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
+        await this.subscribeInstagramToWebhook(instagramAccount.id, pageAccessToken);
         return existingConnection;
       }
 
@@ -636,8 +668,8 @@ class MetaAuthService {
       await platformConnectionService.incrementConnectionCount(organizationId);
 
       console.log(`✅ [MetaAuth] Instagram connection saved for account: ${instagramAccount.username}`);
-      // Subscribe page to webhook so Meta delivers Instagram DMs to our Callback URL
       await this.subscribePageToWebhook(pageData.id, pageAccessToken);
+      await this.subscribeInstagramToWebhook(instagramAccount.id, pageAccessToken);
       return connection;
     } catch (error) {
       console.error('❌ [MetaAuth] Save Instagram connection error:', error.message);
