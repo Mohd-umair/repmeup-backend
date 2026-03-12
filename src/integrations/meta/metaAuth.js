@@ -522,10 +522,13 @@ class MetaAuthService {
     const fields = [
       'messages',
       'messaging_postbacks',
-      'messaging_seen',
       'message_deliveries',
+      'message_echoes',
+      'message_reads',
       'standby',
-      'message_echoes'
+      'messaging_handovers',
+      'messaging_optins',
+      'messaging_referrals'
     ].join(',');
 
     try {
