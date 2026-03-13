@@ -524,7 +524,9 @@ class MetaAuthService {
       'message_echoes',
       'message_reads',
       'messaging_optins',
-      'messaging_referrals'
+      'messaging_referrals',
+      'standby',
+      'messaging_handovers'
     ].join(',');
 
     try {

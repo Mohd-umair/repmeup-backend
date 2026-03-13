@@ -390,6 +390,28 @@ exports.handleInstagramWebhook = async (req, res) => {
       return;
     }
 
+    // If DM arrived in standby, take thread control immediately so we can reply later.
+    // "Take control of conversations" must be ON in the Page's app settings for this to work.
+    if (hasStandby && !hasMessaging) {
+      const axios = require('axios');
+      const pageId = connection.platformPageId || connection.platformData?.pageId;
+      const accessToken = connection.accessToken;
+      if (pageId && accessToken) {
+        for (const event of entry.standby) {
+          const senderId = event.sender?.id;
+          if (!senderId) continue;
+          try {
+            await axios.post(`https://graph.facebook.com/v19.0/${pageId}/take_thread_control`, null, {
+              params: { recipient_id: senderId, access_token: accessToken }
+            });
+            console.log(`[Instagram Webhook] ✅ Took thread control for standby sender ${senderId}`);
+          } catch (ttcErr) {
+            console.warn(`[Instagram Webhook] ⚠️ take_thread_control failed for ${senderId}:`, ttcErr.response?.data?.error?.message || ttcErr.message);
+          }
+        }
+      }
+    }
+
     const organizationId = connection.organization.toString();
 
     // Save DM to DB immediately so inbox polling shows it without Sync
