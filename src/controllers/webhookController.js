@@ -362,6 +362,8 @@ exports.handleInstagramWebhook = async (req, res) => {
     // Acknowledge receipt immediately so Meta doesn't retry
     res.sendStatus(200);
 
+    console.log('📩 [Instagram Webhook] Received POST:', JSON.stringify(req.body, null, 2));
+
     const entry = req.body.entry?.[0];
     if (!entry) {
       console.log('No entry in Instagram webhook payload');
