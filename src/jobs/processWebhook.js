@@ -259,10 +259,21 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       // One thread per conversation (IG account + sender), not per message
       const threadPlatformId = `dm_${String(igAccountId)}_${String(senderId)}`;
-      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author').lean();
       if (existing && existing.metadata?.lastMid === mid) {
         return await Interaction.findById(existing._id);
       }
+
+      // Always update author so profile pic / username show up once the API returns them.
+      // If the profile fetch returned richer data than what's stored, overwrite.
+      const existingAuthor = existing?.author || {};
+      const mergedAuthor = {
+        platformId: senderId,
+        username: profile.username || existingAuthor.username || undefined,
+        name: profile.name || existingAuthor.name || profile.username || existingAuthor.username || 'Instagram User'
+      };
+      if (profile.avatarUrl) mergedAuthor.avatarUrl = profile.avatarUrl;
+      else if (existingAuthor.avatarUrl) mergedAuthor.avatarUrl = existingAuthor.avatarUrl;
 
       const updateFields = {
         organization: organizationId,
@@ -270,7 +281,7 @@ async function handleInstagramWebhook(payload, organizationId) {
         type: 'dm',
         platformId: threadPlatformId,
         content: text,
-        author,
+        author: mergedAuthor,
         threadId: senderId,
         platformCreatedAt: new Date(event.timestamp),
         'metadata.lastMid': mid,
