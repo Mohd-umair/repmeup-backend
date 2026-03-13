@@ -27,7 +27,7 @@ exports.getInteractions = async (req, res, next) => {
       postId,
       page = 1,
       limit = 50,
-      sortBy = 'createdAt',
+      sortBy = 'updatedAt',
       sortOrder = 'desc'
     } = req.query;
 
