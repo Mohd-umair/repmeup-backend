@@ -305,21 +305,30 @@ class InstagramService {
     try {
       const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
+      // Facebook Login flow: conversations must be fetched via the Page ID,
+      // not the Instagram Business Account ID (which requires Instagram Login).
+      const pageId = platformConnection.platformPageId ||
+        platformConnection.platformData?.pageId ||
+        businessAccountId;
 
       if (!businessAccountId) {
         throw new Error('Instagram Business Account ID not found in connection');
+      }
+
+      if (!platformConnection.platformPageId && !platformConnection.platformData?.pageId) {
+        console.warn('⚠️  [Instagram] platformPageId missing — falling back to IG account ID for conversations. Reconnect Instagram to fix this.');
       }
 
       // Log which token is used (masked) for debugging "capability" errors
       const tokenPreview = accessToken
         ? `${String(accessToken).slice(0, 8)}...${String(accessToken).slice(-4)}`
         : '(missing)';
-      console.log(`💬 [Instagram] Fetching DMs for account: ${businessAccountId} (Page ID: ${platformConnection.platformPageId || 'n/a'})`);
-      console.log(`💬 [Instagram] Using token: ${tokenPreview} (from PlatformConnection.accessToken – Page access token for the Facebook Page linked to this IG account)`);
+      console.log(`💬 [Instagram] Fetching DMs via Page ID: ${pageId} (IG account: ${businessAccountId})`);
+      console.log(`💬 [Instagram] Using token: ${tokenPreview}`);
 
-      // Get conversations
+      // Get conversations using Page ID (Facebook Login flow requires /{page-id}/conversations?platform=instagram)
       let allConversations = [];
-      let nextPage = `${this.baseUrl}/${businessAccountId}/conversations`;
+      let nextPage = `${this.baseUrl}/${pageId}/conversations`;
       let pageCount = 0;
       const maxPages = 10;
 
