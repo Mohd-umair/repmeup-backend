@@ -523,8 +523,6 @@ class MetaAuthService {
       'message_deliveries',
       'message_echoes',
       'message_reads',
-      'standby',
-      'messaging_handovers',
       'messaging_optins',
       'messaging_referrals'
     ].join(',');
