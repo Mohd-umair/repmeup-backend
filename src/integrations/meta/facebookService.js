@@ -59,22 +59,40 @@ class FacebookService {
     if (!pageId || !recipientPsid || !accessToken) {
       return { success: false, error: 'Missing pageId, recipientPsid, or accessToken' };
     }
-    try {
+
+    const attemptSend = async (useTag) => {
       const body = {
         recipient: { id: String(recipientPsid) },
         message: { text: String(text) }
       };
-      if (useHumanAgentTag) {
+      if (useTag) {
         body.messaging_type = 'MESSAGE_TAG';
         body.tag = 'HUMAN_AGENT';
       } else {
         body.messaging_type = 'RESPONSE';
       }
-      const response = await axios.post(
+      return axios.post(
         `${this.baseURL}/${pageId}/messages`,
         body,
         { params: { access_token: accessToken }, timeout: 15000 }
       );
+    };
+
+    try {
+      let response;
+      try {
+        response = await attemptSend(useHumanAgentTag);
+      } catch (tagErr) {
+        const tagErrCode = tagErr.response?.data?.error?.code;
+        const tagErrMsg = tagErr.response?.data?.error?.message || '';
+        // Error 100 = HUMAN_AGENT tag not approved — fall back to RESPONSE messaging type
+        if (tagErrCode === 100 || tagErrMsg.toLowerCase().includes('human agent')) {
+          console.warn('[Facebook] HUMAN_AGENT tag not approved, retrying with RESPONSE messaging_type');
+          response = await attemptSend(false);
+        } else {
+          throw tagErr;
+        }
+      }
       const messageId = response.data?.message_id;
       return { success: true, platformResponseId: messageId };
     } catch (err) {
