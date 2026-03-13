@@ -678,14 +678,18 @@ class InstagramService {
   async sendMessage(recipientId, message, accessToken, pageId, useHumanAgentTag = true) {
     let tokenPageId = null;
     try {
-      const body = {
-        recipient: { id: recipientId },
-        message: { text: message }
-      };
-      if (useHumanAgentTag) {
-        body.messaging_type = 'MESSAGE_TAG';
-        body.tag = 'HUMAN_AGENT';
+      // Take thread control before replying — required when app receives DMs via standby channel.
+      // This makes our app the thread owner so the reply succeeds.
+      try {
+        await axios.post(`${this.baseUrl}/${pageId}/take_thread_control`, null, {
+          params: { recipient_id: recipientId, access_token: accessToken }
+        });
+        console.log('[Instagram] Thread control taken for recipient:', recipientId);
+      } catch (ttcErr) {
+        // Non-fatal: if we're already the thread owner this may fail or be a no-op
+        console.warn('[Instagram] take_thread_control failed (may already be owner):', ttcErr.response?.data?.error?.message || ttcErr.message);
       }
+
       try {
         const meRes = await axios.get(`${this.baseUrl}/me`, {
           params: { fields: 'id', access_token: accessToken },
@@ -700,15 +704,39 @@ class InstagramService {
         const msg = meErr.response?.data?.error?.message || meErr.message;
         console.warn('[Instagram] sendMessage: /me check failed (code', code, '). Cannot confirm token matches pageId.', msg?.substring(0, 80));
       }
-      const response = await axios.post(
-        `${this.baseUrl}/${pageId}/messages`,
-        body,
-        {
-          params: {
-            access_token: accessToken
-          }
+
+      // Try sending; if HUMAN_AGENT tag is not approved (error 10), fall back to RESPONSE.
+      const attemptSend = async (useTag) => {
+        const body = {
+          recipient: { id: recipientId },
+          message: { text: message }
+        };
+        if (useTag) {
+          body.messaging_type = 'MESSAGE_TAG';
+          body.tag = 'HUMAN_AGENT';
+        } else {
+          body.messaging_type = 'RESPONSE';
         }
-      );
+        return axios.post(
+          `${this.baseUrl}/${pageId}/messages`,
+          body,
+          { params: { access_token: accessToken } }
+        );
+      };
+
+      let response;
+      try {
+        response = await attemptSend(useHumanAgentTag);
+      } catch (tagErr) {
+        const tagErrCode = tagErr.response?.data?.error?.code;
+        const tagErrMsg = tagErr.response?.data?.error?.message || '';
+        if (tagErrCode === 10 || tagErrMsg.toLowerCase().includes('human agent')) {
+          console.warn('[Instagram] HUMAN_AGENT tag not approved, retrying with RESPONSE messaging_type');
+          response = await attemptSend(false);
+        } else {
+          throw tagErr;
+        }
+      }
 
       return {
         success: true,
