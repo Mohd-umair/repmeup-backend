@@ -16,38 +16,45 @@ class InstagramService {
     if (!userId) return null;
     const token = typeof accessToken === 'string' ? accessToken.trim() : null;
     if (!token) return null;
-    // Try graph.facebook.com first (same token works for comments there); graph.instagram.com for messaging
-    const urlsToTry = [
-      { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fields: 'name,username,profile_pic,profile_picture_url' },
-      { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fields: 'name,username,profile_pic' }
+
+    // For Instagram DM senders (IGSID), name+profile_pic works without Advanced Access.
+    // username requires instagram_manage_messages Advanced Access — try it, but fall back gracefully.
+    const attemptsPerUrl = [
+      { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fieldSets: ['name,profile_pic,username', 'name,profile_pic'] },
+      { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fieldSets: ['name,username,profile_pic', 'name,profile_pic'] }
     ];
-    for (const { url, name, fields } of urlsToTry) {
-      try {
-        const response = await axios.get(url, {
-          params: { fields, access_token: token },
-          timeout: 5000,
-        });
-        const data = response.data || null;
-        const picUrl = data && (data.profile_pic || data.profile_picture_url);
-        if (data) {
-          if (picUrl) data.profile_pic = data.profile_pic || data.profile_picture_url;
-          return data;
-        }
-      } catch (err) {
-        const msg = err.response?.data?.error?.message || err.message;
-        const code = err.response?.data?.error?.code;
-        // Expected without Advanced Access (instagram_manage_messages) or with invalid token (190)
-        if (code === 200 || code === 190) {
-          // Log once per userId at debug level to avoid noise on every webhook
-          if (!this._profileFailLogged) this._profileFailLogged = new Set();
-          if (!this._profileFailLogged.has(userId)) {
-            this._profileFailLogged.add(userId);
-            console.warn(`[Instagram] User profile unavailable for userId=${userId} (code ${code}). Normal until instagram_manage_messages has Advanced Access.`);
+
+    for (const { url, name: urlName, fieldSets } of attemptsPerUrl) {
+      for (const fields of fieldSets) {
+        try {
+          const response = await axios.get(url, {
+            params: { fields, access_token: token },
+            timeout: 5000
+          });
+          const data = response.data || null;
+          if (data && (data.name || data.username || data.profile_pic)) {
+            // Normalize: always expose profile_pic as the avatar field
+            if (!data.profile_pic && data.profile_picture_url) {
+              data.profile_pic = data.profile_picture_url;
+            }
+            return data;
           }
-        } else {
-          console.warn(`[Instagram] User profile ${name} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
+        } catch (err) {
+          const msg = err.response?.data?.error?.message || err.message;
+          const code = err.response?.data?.error?.code;
+          if (code === 200 || code === 190 || code === 100) {
+            // Permissions or token issue — try the reduced field set next
+            if (!this._profileFailLogged) this._profileFailLogged = new Set();
+            const logKey = `${userId}_${fields}`;
+            if (!this._profileFailLogged.has(logKey)) {
+              this._profileFailLogged.add(logKey);
+              console.warn(`[Instagram] Profile fetch failed for userId=${userId} fields="${fields}" (code ${code}): ${msg?.substring(0, 80)}`);
+            }
+          } else {
+            console.warn(`[Instagram] User profile ${urlName} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
+          }
+          // Try next field set or next URL
         }
-        // Try next URL or return null
       }
     }
     return null;
