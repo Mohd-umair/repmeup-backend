@@ -27,19 +27,27 @@ const io = socketIO(server, {
   }
 });
 
-// Make io accessible to routes
+// Make io accessible to routes and share via singleton emitter
 app.set('io', io);
+const socketEmitter = require('./utils/socketEmitter');
+socketEmitter.setIO(io);
 
 // Socket.IO connection handler
 io.on('connection', (socket) => {
   logger.debug('Socket client connected', { socketId: socket.id });
 
-  socket.on('join-organization', (organizationId) => {
-    socket.join(`org-${organizationId}`);
-    logger.debug('Socket joined organization', { 
-      socketId: socket.id, 
-      organizationId 
-    });
+  // Frontend emits: emit('join_organization', { organizationId })
+  socket.on('join_organization', (data) => {
+    const orgId = typeof data === 'string' ? data : data?.organizationId;
+    if (orgId) {
+      socket.join(`org-${orgId}`);
+      logger.debug('Socket joined organization room', { socketId: socket.id, orgId });
+    }
+  });
+
+  socket.on('leave_organization', (data) => {
+    const orgId = typeof data === 'string' ? data : data?.organizationId;
+    if (orgId) socket.leave(`org-${orgId}`);
   });
 
   socket.on('disconnect', () => {

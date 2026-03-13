@@ -3,6 +3,7 @@ const PlatformConnection = require('../models/PlatformConnection');
 const { aiQueue } = require('../config/queue');
 const logger = require('../config/logger');
 const instagramService = require('../integrations/meta/instagramService');
+const { emitToOrg } = require('../utils/socketEmitter');
 
 /**
  * Process webhook events from social media platforms
@@ -314,6 +315,14 @@ async function handleInstagramWebhook(payload, organizationId) {
       );
 
       const interaction = await Interaction.findOne({ platformId: threadPlatformId });
+
+      // Emit real-time socket event so the frontend inbox updates instantly
+      if (interaction && organizationId) {
+        emitToOrg(organizationId.toString(), 'new_interaction', {
+          interaction: interaction.toObject()
+        });
+      }
+
       return interaction;
     }
 
@@ -352,6 +361,12 @@ async function handleInstagramWebhook(payload, organizationId) {
           },
           { upsert: true, new: true }
         );
+
+        if (interaction && organizationId) {
+          emitToOrg(organizationId.toString(), 'new_interaction', {
+            interaction: interaction.toObject()
+          });
+        }
 
         return interaction;
       }
