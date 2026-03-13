@@ -34,6 +34,7 @@ router.get('/meta/callback', (req, res) => {
 router.post('/meta/callback', (req, res, next) => {
   const webhookController = require('../controllers/webhookController');
   const obj = req.body?.object;
+  console.log('📩 [Meta Callback] Received POST, object:', obj, JSON.stringify(req.body, null, 2));
   if (obj === 'page') {
     return webhookController.handleFacebookWebhook(req, res);
   }
