@@ -341,6 +341,14 @@ async function handleInstagramWebhook(payload, organizationId) {
         };
         if (avatarUrl) author.avatarUrl = avatarUrl;
 
+        // Instagram may send timestamp as seconds, ms, or under different key; ensure valid Date
+        const rawTs = comment.timestamp ?? comment.created_time ?? entry.time;
+        let platformCreatedAt = new Date();
+        if (rawTs != null) {
+          const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+          if (Number.isFinite(ms)) platformCreatedAt = new Date(ms);
+        }
+
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.id },
           {
@@ -355,7 +363,7 @@ async function handleInstagramWebhook(payload, organizationId) {
                 postId: comment.media?.id,
                 postUrl: `https://www.instagram.com/p/${comment.media?.id}`
               },
-              platformCreatedAt: new Date(comment.timestamp)
+              platformCreatedAt
             },
             $setOnInsert: { status: 'unread', isRead: false }
           },
@@ -383,6 +391,13 @@ async function handleInstagramWebhook(payload, organizationId) {
         };
         if (avatarUrl) author.avatarUrl = avatarUrl;
 
+        const rawTs = message.timestamp ?? entry.time;
+        let msgPlatformCreatedAt = new Date();
+        if (rawTs != null) {
+          const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+          if (Number.isFinite(ms)) msgPlatformCreatedAt = new Date(ms);
+        }
+
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
@@ -394,7 +409,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               content: message.message?.text || message.text,
               author,
               threadId: message.conversation_id,
-              platformCreatedAt: new Date(message.timestamp)
+              platformCreatedAt: msgPlatformCreatedAt
             },
             $setOnInsert: { status: 'unread', isRead: false }
           },
