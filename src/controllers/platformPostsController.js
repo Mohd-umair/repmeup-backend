@@ -169,8 +169,41 @@ exports.syncPlatformPosts = async (req, res, next) => {
       try {
         if (platform === 'facebook') {
           if (!connection.platformPageId) continue;
-          const rawPosts = await facebookService.getPagePosts(connection);
-          for (const p of rawPosts) {
+          let rawPosts;
+          try {
+            rawPosts = await facebookService.getPagePosts(connection);
+          } catch (permErr) {
+            if (permErr.code === 'FACEBOOK_PERMISSION_MISSING') {
+              const pageIdStr = String(connection.platformPageId || '');
+              const pageIdNum = Number(pageIdStr);
+              const pageIds = [pageIdStr].concat(isNaN(pageIdNum) ? [] : [pageIdNum]);
+              const fallback = await PlatformConnection.findOne({
+                organization: organizationId,
+                isActive: true,
+                status: 'connected',
+                platform: 'instagram',
+                $or: [
+                  { platformPageId: { $in: pageIds } },
+                  { 'metadata.facebookPageId': { $in: pageIds } }
+                ]
+              })
+                .select('accessToken platformPageId metadata')
+                .lean();
+              if (fallback?.accessToken) {
+                console.log(`[PlatformPosts] Using Instagram connection token for Facebook Page ${pageIdStr} (pages_read_engagement fallback)`);
+                rawPosts = await facebookService.getPagePosts({
+                  ...connection,
+                  accessToken: fallback.accessToken,
+                  platformPageId: pageIdStr
+                });
+              } else {
+                throw permErr;
+              }
+            } else {
+              throw permErr;
+            }
+          }
+          for (const p of rawPosts || []) {
             normalized.push(normalizeFacebookPost(p, connection));
           }
         } else if (platform === 'instagram') {
@@ -188,6 +221,7 @@ exports.syncPlatformPosts = async (req, res, next) => {
             code: err.code
           });
         }
+        // Other errors (e.g. network) don't abort the whole sync; we just skip this connection
       }
     }
 
