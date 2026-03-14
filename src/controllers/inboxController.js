@@ -25,6 +25,8 @@ exports.getInteractions = async (req, res, next) => {
       label,
       viewMode,
       postId,
+      dateFrom,
+      dateTo,
       page = 1,
       limit = 50,
       sortBy = 'updatedAt',
@@ -44,7 +46,19 @@ exports.getInteractions = async (req, res, next) => {
     if (sentiment) query.sentiment = sentiment;
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
-    
+
+    // Date range filter on platformCreatedAt
+    if (dateFrom || dateTo) {
+      query.platformCreatedAt = {};
+      if (dateFrom) query.platformCreatedAt.$gte = new Date(dateFrom);
+      if (dateTo) {
+        // Include the full end day (23:59:59.999)
+        const end = new Date(dateTo);
+        end.setHours(23, 59, 59, 999);
+        query.platformCreatedAt.$lte = end;
+      }
+    }
+
     // Label filter - check if label exists in labels array
     if (label) {
       query.labels = label; // MongoDB will match if label ID exists in the labels array
