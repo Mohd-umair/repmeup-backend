@@ -24,26 +24,44 @@ class FacebookService {
     if (!platformPageId) {
       throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
     }
-    let allPosts = [];
-    let nextPage = `${this.baseURL}/${platformPageId}/feed`;
-    let pageCount = 0;
     const maxPages = 10;
-    const fields = 'id,message,created_time,full_picture,permalink_url,attachments{media_type,type}';
-    while (nextPage && pageCount < maxPages) {
+    // Start with full fields; fallback to minimal fields if API returns 400 (e.g. permission on attachments)
+    const fieldsSets = [
+      'id,message,created_time,full_picture,permalink_url,attachments{media_type,type}',
+      'id,message,created_time,full_picture,permalink_url'
+    ];
+    for (const fields of fieldsSets) {
+      let allPosts = [];
+      let nextPage = `${this.baseURL}/${platformPageId}/feed`;
+      let pageCount = 0;
       try {
-        const response = await axios.get(nextPage, {
-          params: { fields, limit: 25, access_token: accessToken }
-        });
-        const posts = response.data.data || [];
-        allPosts = allPosts.concat(posts);
-        nextPage = response.data.paging?.next;
-        pageCount++;
+        while (nextPage && pageCount < maxPages) {
+          const response = await axios.get(nextPage, {
+            params: { fields, limit: 25, access_token: accessToken }
+          });
+          const posts = response.data.data || [];
+          allPosts = allPosts.concat(posts);
+          nextPage = response.data.paging?.next;
+          pageCount++;
+        }
+        return allPosts;
       } catch (error) {
-        console.error(`[Facebook] getPagePosts error:`, error.message);
+        const fbError = error.response?.data?.error;
+        const code = fbError?.code;
+        const message = fbError?.message || error.message;
+        const subcode = fbError?.error_subcode;
+        console.error('[Facebook] getPagePosts error:', message, code != null ? `(code ${code})` : '', subcode != null ? `subcode ${subcode}` : '');
+        if (error.response?.data && !fbError) {
+          console.error('[Facebook] getPagePosts response:', JSON.stringify(error.response.data).slice(0, 400));
+        }
+        if (error.response?.status === 400 && fieldsSets.indexOf(fields) < fieldsSets.length - 1) {
+          console.warn('[Facebook] getPagePosts retrying with minimal fields');
+          continue;
+        }
         break;
       }
     }
-    return allPosts;
+    return [];
   }
 
   /**
