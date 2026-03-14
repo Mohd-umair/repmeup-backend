@@ -129,6 +129,7 @@ class MetaAuthService {
       scope: [
         'pages_show_list',
         'pages_read_engagement',
+        'pages_manage_posts',
         'pages_messaging',
         'business_management',
         'instagram_basic',
@@ -184,6 +185,7 @@ class MetaAuthService {
         'instagram_content_publish',
         'pages_show_list',
         'pages_read_engagement',
+        'pages_manage_posts',
         'business_management'
       ].join(','),
       response_type: 'code',
@@ -427,7 +429,7 @@ class MetaAuthService {
         platformPageId: null, // User-level connection
         accessToken: userAccessToken,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
-        scopes: ['pages_show_list', 'pages_read_engagement'],
+        scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'],
         status: 'connected',
         isActive: true,
         usesAccountSlot: false, // User-level token does not count toward plan limit
@@ -491,7 +493,7 @@ class MetaAuthService {
         accessToken: pageAccessToken,
         refreshToken: null,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000), // 60 days
-        scopes: ['pages_show_list', 'pages_read_engagement'],
+        scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'],
         status: 'connected',
         isActive: true,
         metadata: {
