@@ -181,6 +181,13 @@ exports.syncPlatformPosts = async (req, res, next) => {
         }
       } catch (err) {
         console.error(`[PlatformPosts] Sync error for ${platform} ${connection._id}:`, err.message);
+        if (err.code === 'FACEBOOK_PERMISSION_MISSING') {
+          return res.status(403).json({
+            success: false,
+            error: err.message,
+            code: err.code
+          });
+        }
       }
     }
 
