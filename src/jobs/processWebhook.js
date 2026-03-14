@@ -330,8 +330,11 @@ async function handleInstagramWebhook(payload, organizationId) {
     const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'comments') {
-        // New comment: fetch commenter profile for inbox avatar
+        // New comment or reply: fetch commenter profile for inbox avatar
         const comment = change.value;
+        const parentCommentId = comment.parent_id != null && comment.parent_id !== '' ? String(comment.parent_id) : null;
+        const isReply = !!parentCommentId;
+
         const authorId = comment.from?.id;
         const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, authorId);
         const author = {
@@ -349,31 +352,50 @@ async function handleInstagramWebhook(payload, organizationId) {
           if (Number.isFinite(ms)) platformCreatedAt = new Date(ms);
         }
 
+        const updatePayload = {
+          organization: organizationId,
+          platform: 'instagram',
+          type: 'comment',
+          platformId: comment.id,
+          content: comment.text,
+          author,
+          metadata: {
+            postId: comment.media?.id,
+            postUrl: `https://www.instagram.com/p/${comment.media?.id}`
+          },
+          platformCreatedAt
+        };
+        if (isReply && parentCommentId) {
+          updatePayload.parentId = parentCommentId; // So this reply shows in the parent thread, not as new conversation
+        }
+
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.id },
           {
-            $set: {
-              organization: organizationId,
-              platform: 'instagram',
-              type: 'comment',
-              platformId: comment.id,
-              content: comment.text,
-              author,
-              metadata: {
-                postId: comment.media?.id,
-                postUrl: `https://www.instagram.com/p/${comment.media?.id}`
-              },
-              platformCreatedAt
-            },
+            $set: updatePayload,
             $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
 
         if (interaction && organizationId) {
-          emitToOrg(organizationId.toString(), 'new_interaction', {
-            interaction: interaction.toObject()
-          });
+          if (isReply && parentCommentId) {
+            // Reply: bump parent to top; do not emit this reply as a new conversation
+            const parent = await Interaction.findOne({
+              platformId: parentCommentId,
+              organization: organizationId
+            }).lean();
+            if (parent) {
+              emitToOrg(organizationId.toString(), 'new_interaction', {
+                interaction: parent
+              });
+            }
+          } else {
+            // Top-level comment: emit so it appears in the list
+            emitToOrg(organizationId.toString(), 'new_interaction', {
+              interaction: interaction.toObject()
+            });
+          }
         }
 
         return interaction;
