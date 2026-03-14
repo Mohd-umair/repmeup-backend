@@ -54,6 +54,13 @@ class FacebookService {
         if (error.response?.data && !fbError) {
           console.error('[Facebook] getPagePosts response:', JSON.stringify(error.response.data).slice(0, 400));
         }
+        // Code 10 = permission required (e.g. pages_read_engagement). Retrying with minimal fields won't help.
+        if (code === 10 && (message || '').toLowerCase().includes('pages_read_engagement')) {
+          const err = new Error('This Page was connected without the "pages_read_engagement" permission. Please reconnect your Facebook Page in Settings → Manage Pages & Accounts so we can read its posts.');
+          err.code = 'FACEBOOK_PERMISSION_MISSING';
+          err.fbCode = 10;
+          throw err;
+        }
         if (error.response?.status === 400 && fieldsSets.indexOf(fields) < fieldsSets.length - 1) {
           console.warn('[Facebook] getPagePosts retrying with minimal fields');
           continue;
