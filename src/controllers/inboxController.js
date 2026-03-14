@@ -125,20 +125,14 @@ exports.getInteractions = async (req, res, next) => {
 
     const activeConnectionIds = activeConnections.map(conn => conn._id);
 
-    // Build platform connection filter: only show from active connections OR no connection (website interactions)
-    // This ensures disconnected platform interactions are hidden
+    // Only show conversations for connected accounts. If no account is connected, show none.
     const platformConnectionFilter = activeConnectionIds.length > 0 ? {
       $or: [
         { platformConnection: { $in: activeConnectionIds } },
         { platformConnection: { $exists: false } },
         { platformConnection: null }
       ]
-    } : {
-      $or: [
-        { platformConnection: { $exists: false } },
-        { platformConnection: null }
-      ]
-    };
+    } : { _id: { $in: [] } }; // No connections → match nothing, inbox empty
 
     // Build agent condition: agents see only chats assigned to them OR previously assigned to them
     const agentCondition = req.user.role === 'agent' ? {
@@ -1026,13 +1020,23 @@ exports.getStats = async (req, res, next) => {
     const orgId = req.user.organization._id;
     const { platform } = req.query;
 
+    // Only count interactions for connected accounts; when none connected, stats are zero
+    const activeConnectionsForStats = await PlatformConnection.find({
+      organization: orgId,
+      isActive: true,
+      status: 'connected'
+    }).select('_id');
+    const activeIds = activeConnectionsForStats.map(c => c._id);
+    const connectionFilter = activeIds.length > 0
+      ? { $or: [{ platformConnection: { $in: activeIds } }, { platformConnection: null }, { platformConnection: { $exists: false } }] }
+      : { _id: { $in: [] } };
+
     // Match parent interactions only (exclude replies), same as inbox list
     const matchStage = {
       organization: orgId,
-      $or: [
-        { parentId: { $exists: false } },
-        { parentId: null },
-        { parentId: '' }
+      $and: [
+        { $or: [{ parentId: { $exists: false } }, { parentId: null }, { parentId: '' }] },
+        connectionFilter
       ]
     };
     if (platform) matchStage.platform = platform;
