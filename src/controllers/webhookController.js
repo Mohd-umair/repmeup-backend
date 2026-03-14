@@ -370,10 +370,12 @@ exports.handleInstagramWebhook = async (req, res) => {
       return;
     }
 
-    // Don't skip when standby has messages — we'll process standby in the job (same as incoming DMs)
+    // Process DMs (messaging/standby) or comments (changes with field "comments")
     const hasMessaging = entry.messaging && entry.messaging.length > 0;
     const hasStandby = entry.standby && entry.standby.length > 0;
-    if (!hasMessaging && !hasStandby) {
+    const hasChanges = entry.changes && entry.changes.length > 0;
+    const hasCommentChange = hasChanges && entry.changes.some(c => c.field === 'comments');
+    if (!hasMessaging && !hasStandby && !hasCommentChange) {
       return;
     }
 
