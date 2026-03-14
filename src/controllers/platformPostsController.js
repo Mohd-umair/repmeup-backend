@@ -170,38 +170,74 @@ exports.syncPlatformPosts = async (req, res, next) => {
         if (platform === 'facebook') {
           if (!connection.platformPageId) continue;
           let rawPosts;
-          try {
-            rawPosts = await facebookService.getPagePosts(connection);
-          } catch (permErr) {
-            if (permErr.code === 'FACEBOOK_PERMISSION_MISSING') {
-              const pageIdStr = String(connection.platformPageId || '');
-              const pageIdNum = Number(pageIdStr);
-              const pageIds = [pageIdStr].concat(isNaN(pageIdNum) ? [] : [pageIdNum]);
-              const fallback = await PlatformConnection.findOne({
+          // Helper: try fetching posts with a given token, returning null on #10 permission errors
+          const tryFetch = async (token) => {
+            try {
+              return await facebookService.getPagePosts({ ...connection, accessToken: token });
+            } catch (e) {
+              if (e.code === 'FACEBOOK_PERMISSION_MISSING' || e.fbCode === 10) return null;
+              throw e;
+            }
+          };
+
+          const pageIdStr = String(connection.platformPageId || '');
+
+          // Attempt 1: Facebook Page connection token
+          rawPosts = await tryFetch(connection.accessToken);
+
+          // Attempt 2: Instagram connection token for the same Facebook Page
+          if (rawPosts === null) {
+            const pageIdNum = Number(pageIdStr);
+            const pageIds = [pageIdStr].concat(isNaN(pageIdNum) ? [] : [pageIdNum]);
+            const igFallback = await PlatformConnection.findOne({
+              organization: organizationId,
+              isActive: true,
+              status: 'connected',
+              platform: 'instagram',
+              $or: [
+                { platformPageId: { $in: pageIds } },
+                { 'metadata.facebookPageId': { $in: pageIds } }
+              ]
+            }).select('accessToken').lean();
+
+            if (igFallback?.accessToken) {
+              console.log(`[PlatformPosts] Attempt 2: using Instagram token for Page ${pageIdStr}`);
+              rawPosts = await tryFetch(igFallback.accessToken);
+            }
+          }
+
+          // Attempt 3: user-level Facebook token (user access token with pages_read_engagement)
+          if (rawPosts === null) {
+            // Try with metadata.type filter first, then without as a wider fallback
+            let userConn = await PlatformConnection.findOne({
+              organization: organizationId,
+              isActive: true,
+              status: 'connected',
+              platform: 'facebook',
+              platformPageId: null,
+              'metadata.type': 'user_token'
+            }).select('accessToken').lean();
+
+            if (!userConn) {
+              // Broader fallback: any facebook connection with no platformPageId
+              userConn = await PlatformConnection.findOne({
                 organization: organizationId,
                 isActive: true,
                 status: 'connected',
-                platform: 'instagram',
-                $or: [
-                  { platformPageId: { $in: pageIds } },
-                  { 'metadata.facebookPageId': { $in: pageIds } }
-                ]
-              })
-                .select('accessToken platformPageId metadata')
-                .lean();
-              if (fallback?.accessToken) {
-                console.log(`[PlatformPosts] Using Instagram connection token for Facebook Page ${pageIdStr} (pages_read_engagement fallback)`);
-                rawPosts = await facebookService.getPagePosts({
-                  ...connection,
-                  accessToken: fallback.accessToken,
-                  platformPageId: pageIdStr
-                });
-              } else {
-                throw permErr;
-              }
-            } else {
-              throw permErr;
+                platform: 'facebook',
+                $or: [{ platformPageId: null }, { platformPageId: { $exists: false } }]
+              }).select('accessToken').lean();
             }
+
+            if (userConn?.accessToken) {
+              console.log(`[PlatformPosts] Attempt 3: using user-level Facebook token for Page ${pageIdStr}`);
+              rawPosts = await tryFetch(userConn.accessToken);
+            }
+          }
+
+          if (rawPosts === null) {
+            console.warn(`[PlatformPosts] All tokens lack pages_read_engagement for Page ${pageIdStr}. Reconnect the Facebook Page.`);
+            rawPosts = [];
           }
           for (const p of rawPosts || []) {
             normalized.push(normalizeFacebookPost(p, connection));
@@ -214,14 +250,6 @@ exports.syncPlatformPosts = async (req, res, next) => {
         }
       } catch (err) {
         console.error(`[PlatformPosts] Sync error for ${platform} ${connection._id}:`, err.message);
-        if (err.code === 'FACEBOOK_PERMISSION_MISSING') {
-          return res.status(403).json({
-            success: false,
-            error: err.message,
-            code: err.code
-          });
-        }
-        // Other errors (e.g. network) don't abort the whole sync; we just skip this connection
       }
     }
 
