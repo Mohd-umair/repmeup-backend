@@ -382,11 +382,25 @@ class MetaAuthService {
       const apiError = error.response?.data?.error;
       if (apiError?.code === META_CODE_RATE_LIMIT || apiError?.is_transient) {
         console.warn('[Meta] Get user info rate limited:', apiError?.message);
-        throw new Error('Facebook is temporarily limiting requests. Please try again in a few minutes.');
+        const err = new Error('Facebook is temporarily limiting requests. Please try again in a few minutes.');
+        err.isRateLimit = true;
+        throw err;
       }
       console.error('Get user info error:', error.response?.data || error.message);
       throw new Error('Failed to get user info');
     }
+  }
+
+  /**
+   * Get minimal user { id, name } from token via debug_token (used when /me is rate limited).
+   * Returns null if debug_token fails or rate limited.
+   */
+  async getMinimalUserFromToken(accessToken) {
+    const data = await this.verifyAccessToken(accessToken);
+    if (data && data.user_id) {
+      return { id: data.user_id, name: 'Facebook User', email: undefined };
+    }
+    return null;
   }
 
   /**
