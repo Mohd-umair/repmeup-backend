@@ -250,7 +250,8 @@ exports.getInteraction = async (req, res, next) => {
       .populate('assignmentHistory.assignedBy', 'firstName lastName email')
       .populate('labels')
       .populate('replies.sentBy', 'firstName lastName avatar')
-      .populate('internalNotes.addedBy', 'firstName lastName avatar');
+      .populate('internalNotes.addedBy', 'firstName lastName avatar')
+      .populate('platformConnection', 'platform platformUsername platformDisplayName platformProfilePicture metadata');
 
     if (!interaction) {
       return res.status(404).json({
