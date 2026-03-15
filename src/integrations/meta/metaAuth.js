@@ -535,6 +535,7 @@ class MetaAuthService {
           existingConnection.metadata.profilePicture = pagePictureUrl;
         }
         await existingConnection.save();
+        await this.subscribePageToWebhook(pageData.id, pageAccessToken);
         return existingConnection;
       }
 
@@ -569,6 +570,7 @@ class MetaAuthService {
       await platformConnectionService.incrementConnectionCount(organizationId);
 
       console.log(`Facebook connection saved for page: ${pageData.name}`);
+      await this.subscribePageToWebhook(pageData.id, pageAccessToken);
       return connection;
     } catch (error) {
       console.error('Save Facebook connection error:', error);
