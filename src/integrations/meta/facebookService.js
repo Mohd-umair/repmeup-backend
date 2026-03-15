@@ -129,6 +129,63 @@ class FacebookService {
   }
 
   /**
+   * Send an attachment (image, video, or file) via Messenger.
+   */
+  async sendMessageWithAttachment(recipientPsid, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = false) {
+    if (!pageId || !recipientPsid || !accessToken || !attachmentType || !attachmentUrl) {
+      return { success: false, error: 'Missing pageId, recipientPsid, accessToken, attachmentType, or attachmentUrl' };
+    }
+    const allowedTypes = ['image', 'video', 'file', 'audio'];
+    if (!allowedTypes.includes(attachmentType)) {
+      return { success: false, error: `attachmentType must be one of: ${allowedTypes.join(', ')}` };
+    }
+    try {
+      const buildBody = (useTag) => {
+        const body = {
+          recipient: { id: String(recipientPsid) },
+          messaging_type: useTag ? 'MESSAGE_TAG' : 'RESPONSE',
+          tag: useTag ? 'HUMAN_AGENT' : undefined,
+          message: {
+            attachment: {
+              type: attachmentType,
+              payload: { url: String(attachmentUrl), is_reusable: false }
+            }
+          }
+        };
+        if (!useTag) delete body.tag;
+        return body;
+      };
+      let response;
+      try {
+        response = await axios.post(
+          `${this.baseURL}/${pageId}/messages`,
+          buildBody(useHumanAgentTag),
+          { params: { access_token: accessToken }, timeout: 15000 }
+        );
+      } catch (tagErr) {
+        if (tagErr.response?.data?.error?.code === 100 || (tagErr.response?.data?.error?.message || '').toLowerCase().includes('human agent')) {
+          response = await axios.post(
+            `${this.baseURL}/${pageId}/messages`,
+            buildBody(false),
+            { params: { access_token: accessToken }, timeout: 15000 }
+          );
+        } else {
+          throw tagErr;
+        }
+      }
+      if (caption && caption.trim()) {
+        await this.sendMessage(recipientPsid, caption.trim(), accessToken, pageId, false);
+      }
+      return { success: true, platformResponseId: response.data?.message_id };
+    } catch (err) {
+      const apiError = err.response?.data?.error;
+      const message = apiError?.message || err.message;
+      console.error('[Facebook] sendMessageWithAttachment error:', message);
+      return { success: false, error: message };
+    }
+  }
+
+  /**
    * Fetch all posts and comments from Facebook Page
    * Updated to match new Interaction schema (similar to Instagram)
    */

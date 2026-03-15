@@ -775,6 +775,63 @@ class InstagramService {
       throw err;
     }
   }
+
+  /**
+   * Send an attachment (image, video, or file) to an Instagram DM recipient.
+   */
+  async sendMessageWithAttachment(recipientId, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = true) {
+    if (!recipientId || !attachmentType || !attachmentUrl || !accessToken || !pageId) {
+      return { success: false, error: 'Missing recipientId, attachmentType, attachmentUrl, accessToken, or pageId' };
+    }
+    const allowedTypes = ['image', 'video', 'file'];
+    if (!allowedTypes.includes(attachmentType)) {
+      return { success: false, error: `attachmentType must be one of: ${allowedTypes.join(', ')}` };
+    }
+    try {
+      await axios.post(`${this.baseUrl}/${pageId}/take_thread_control`, null, {
+        params: { recipient_id: recipientId, access_token: accessToken }
+      }).catch(() => {});
+      const buildBody = (useTag) => {
+        const body = {
+          recipient: { id: recipientId },
+          messaging_type: useTag ? 'MESSAGE_TAG' : 'RESPONSE',
+          tag: useTag ? 'HUMAN_AGENT' : undefined,
+          message: {
+            attachment: {
+              type: attachmentType,
+              payload: { url: attachmentUrl, is_reusable: false }
+            }
+          }
+        };
+        if (!useTag) delete body.tag;
+        return body;
+      };
+      let response;
+      try {
+        response = await axios.post(`${this.baseUrl}/${pageId}/messages`, buildBody(useHumanAgentTag), {
+          params: { access_token: accessToken }
+        });
+      } catch (tagErr) {
+        if (tagErr.response?.data?.error?.code === 10 || (tagErr.response?.data?.error?.message || '').toLowerCase().includes('human agent')) {
+          response = await axios.post(`${this.baseUrl}/${pageId}/messages`, buildBody(false), {
+            params: { access_token: accessToken }
+          });
+        } else {
+          throw tagErr;
+        }
+      }
+      if (caption && caption.trim()) {
+        await this.sendMessage(recipientId, caption.trim(), accessToken, pageId, false);
+      }
+      return { success: true, platformResponseId: response.data?.message_id };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const msg = apiError?.error_user_msg || apiError?.message || error.message;
+      console.error('[Instagram] sendMessageWithAttachment error:', msg);
+      return { success: false, error: msg };
+    }
+  }
+
   /**
    * Create Instagram Media Container
    * Step 1 of publishing process

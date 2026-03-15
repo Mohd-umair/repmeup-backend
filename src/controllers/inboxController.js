@@ -373,7 +373,7 @@ exports.getInteraction = async (req, res, next) => {
 // @access  Private
 exports.replyToInteraction = async (req, res, next) => {
   try {
-    const { content, useTemplate, templateId, templateVariables } = req.body;
+    const { content, useTemplate, templateId, templateVariables, attachmentUrl, attachmentType } = req.body;
 
     const interaction = await Interaction.findById(req.params.id)
       .populate('platformConnection');
@@ -533,6 +533,16 @@ exports.replyToInteraction = async (req, res, next) => {
             replyStatus = 'failed';
             errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
             console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId, igAccountId });
+          } else if (attachmentUrl && attachmentType) {
+            result = await instagramService.sendMessageWithAttachment(
+              recipientId,
+              attachmentType,
+              attachmentUrl,
+              replyContent || undefined,
+              connection.accessToken,
+              pageId,
+              true
+            );
           } else {
             result = await instagramService.sendMessage(
               recipientId,
@@ -565,6 +575,16 @@ exports.replyToInteraction = async (req, res, next) => {
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
             errorMessage = 'Missing Page or recipient for Facebook Messenger reply. Reconnect the Page in Settings.';
+          } else if (attachmentUrl && attachmentType) {
+            result = await facebookService.sendMessageWithAttachment(
+              recipientId,
+              attachmentType,
+              attachmentUrl,
+              replyContent || undefined,
+              connection.accessToken,
+              pageId,
+              true
+            );
           } else {
             result = await facebookService.sendMessage(
               recipientId,
