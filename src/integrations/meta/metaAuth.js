@@ -2,6 +2,34 @@ const axios = require('axios');
 const PlatformConnection = require('../../models/PlatformConnection');
 const crypto = require('crypto');
 
+/** Meta Graph API error code: application request limit (transient). */
+const META_CODE_RATE_LIMIT = 4;
+
+/**
+ * Run an async fn; on Meta transient rate limit (code 4), retry with backoff.
+ * @param {Function} fn - async () => Promise<T>
+ * @param {{ maxRetries?: number, baseMs?: number }} opts - maxRetries default 3, baseMs 1000
+ * @returns {Promise<T>}
+ */
+async function withRetryOnRateLimit(fn, opts = {}) {
+  const { maxRetries = 3, baseMs = 1000 } = opts;
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      const code = err.response?.data?.error?.code;
+      const isTransient = err.response?.data?.error?.is_transient === true || code === META_CODE_RATE_LIMIT;
+      if (!isTransient || attempt === maxRetries) throw err;
+      const delayMs = baseMs * Math.pow(2, attempt);
+      console.warn(`[Meta] Rate limit (code ${code}), retry in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Meta Auth Service
  * Handles OAuth authentication for Facebook and Instagram
@@ -251,59 +279,67 @@ class MetaAuthService {
   }
 
   /**
-   * Exchange short-lived token for long-lived token (60 days)
+   * Exchange short-lived token for long-lived token (60 days).
+   * Retries on Meta rate limit (code 4) with backoff.
    */
   async getLongLivedToken(shortLivedToken) {
+    const appId = process.env.META_APP_ID ||
+      process.env.INSTAGRAM_APP_ID ||
+      process.env.FACEBOOK_APP_ID;
+    const appSecret = process.env.META_APP_SECRET ||
+      process.env.INSTAGRAM_APP_SECRET ||
+      process.env.FACEBOOK_APP_SECRET;
+
+    if (!appId || !appSecret) {
+      throw new Error('Meta App ID or Secret not configured. Please check your environment variables.');
+    }
+
     try {
-      const appId = process.env.META_APP_ID ||
-        process.env.INSTAGRAM_APP_ID ||
-        process.env.FACEBOOK_APP_ID;
-      const appSecret = process.env.META_APP_SECRET ||
-        process.env.INSTAGRAM_APP_SECRET ||
-        process.env.FACEBOOK_APP_SECRET;
-
-      if (!appId || !appSecret) {
-        throw new Error('Meta App ID or Secret not configured. Please check your environment variables.');
-      }
-
-      const response = await axios.get(this.tokenURL, {
-        params: {
-          grant_type: 'fb_exchange_token',
-          client_id: appId,
-          client_secret: appSecret,
-          fb_exchange_token: shortLivedToken
-        }
-      });
-
-      return {
-        accessToken: response.data.access_token,
-        expiresIn: response.data.expires_in || 5184000 // 60 days default
-      };
+      return await withRetryOnRateLimit(async () => {
+        const response = await axios.get(this.tokenURL, {
+          params: {
+            grant_type: 'fb_exchange_token',
+            client_id: appId,
+            client_secret: appSecret,
+            fb_exchange_token: shortLivedToken
+          },
+          timeout: 10000
+        });
+        return {
+          accessToken: response.data.access_token,
+          expiresIn: response.data.expires_in || 5184000
+        };
+      }, { maxRetries: 3, baseMs: 1500 });
     } catch (error) {
+      if (error.response?.data?.error?.code === META_CODE_RATE_LIMIT || error.response?.data?.error?.is_transient) {
+        throw new Error('Facebook is temporarily limiting requests. Please try again in a few minutes.');
+      }
       console.error('Long-lived token error:', error.response?.data || error.message);
       throw new Error('Failed to get long-lived token');
     }
   }
 
   /**
-   * Get user's Facebook pages
+   * Get user's Facebook pages.
    * Requires pages_show_list (and business_management when Pages are in a Business Account).
+   * Retries on Meta rate limit (code 4) with backoff.
    */
   async getUserPages(accessToken) {
     try {
-      console.log('📄 [Meta] Fetching user pages from Facebook API...');
+      const pages = await withRetryOnRateLimit(async () => {
+        console.log('📄 [Meta] Fetching user pages from Facebook API...');
+        const response = await axios.get(`${this.graphURL}/me/accounts`, {
+          params: {
+            access_token: accessToken,
+            fields: 'id,name,access_token,picture,instagram_business_account{id,username,profile_picture_url}'
+          },
+          timeout: 10000
+        });
+        return response.data.data || [];
+      }, { maxRetries: 3, baseMs: 1500 });
 
-      const response = await axios.get(`${this.graphURL}/me/accounts`, {
-        params: {
-          access_token: accessToken,
-          fields: 'id,name,access_token,picture,instagram_business_account{id,username,profile_picture_url}'
-        }
-      });
-
-      const pages = response.data.data || [];
       console.log(`📄 [Meta] Found ${pages.length} pages`);
       if (pages.length === 0) {
-        // Log token scopes to help debug "no pages" (e.g. missing business_management for Business-linked Pages)
         try {
           const debug = await this.verifyAccessToken(accessToken);
           if (debug && debug.scopes) {
@@ -315,34 +351,39 @@ class MetaAuthService {
       }
       return pages;
     } catch (error) {
-      console.error('❌ [Meta] Get pages error:', error.response?.data || error.message);
-
-      // Return detailed error message
       const apiError = error.response?.data?.error;
-      if (apiError) {
-        const errorMsg = `Facebook API Error: ${apiError.message} (Code: ${apiError.code}, Type: ${apiError.type})`;
-        console.error('API Error Details:', apiError);
-        throw new Error(errorMsg);
+      if (apiError?.code === META_CODE_RATE_LIMIT || apiError?.is_transient) {
+        throw new Error('Facebook is temporarily limiting requests. Please try again in a few minutes.');
       }
-
+      console.error('❌ [Meta] Get pages error:', error.response?.data || error.message);
+      if (apiError) {
+        throw new Error(`Facebook API Error: ${apiError.message} (Code: ${apiError.code})`);
+      }
       throw new Error(`Failed to get user pages: ${error.message}`);
     }
   }
 
   /**
-   * Get user info
+   * Get user info. Retries on Meta rate limit (code 4) with backoff.
    */
   async getUserInfo(accessToken) {
     try {
-      const response = await axios.get(`${this.graphURL}/me`, {
-        params: {
-          access_token: accessToken,
-          fields: 'id,name,email,picture'
-        }
-      });
-
-      return response.data;
+      return await withRetryOnRateLimit(async () => {
+        const response = await axios.get(`${this.graphURL}/me`, {
+          params: {
+            access_token: accessToken,
+            fields: 'id,name,email,picture'
+          },
+          timeout: 10000
+        });
+        return response.data;
+      }, { maxRetries: 3, baseMs: 1500 });
     } catch (error) {
+      const apiError = error.response?.data?.error;
+      if (apiError?.code === META_CODE_RATE_LIMIT || apiError?.is_transient) {
+        console.warn('Get user info rate limited:', apiError?.message || error.message);
+        throw new Error('Facebook is temporarily limiting requests. Please try again in a few minutes.');
+      }
       console.error('Get user info error:', error.response?.data || error.message);
       throw new Error('Failed to get user info');
     }
