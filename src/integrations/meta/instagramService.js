@@ -783,7 +783,7 @@ class InstagramService {
     if (!recipientId || !attachmentType || !attachmentUrl || !accessToken || !pageId) {
       return { success: false, error: 'Missing recipientId, attachmentType, attachmentUrl, accessToken, or pageId' };
     }
-    const allowedTypes = ['image', 'video', 'file'];
+    const allowedTypes = ['image', 'video', 'file', 'audio'];
     if (!allowedTypes.includes(attachmentType)) {
       return { success: false, error: `attachmentType must be one of: ${allowedTypes.join(', ')}` };
     }

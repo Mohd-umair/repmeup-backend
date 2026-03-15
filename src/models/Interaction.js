@@ -300,7 +300,7 @@ const interactionSchema = new mongoose.Schema({
       default: 'sent'
     },
     attachmentUrl: String,
-    attachmentType: { type: String, enum: ['image', 'video', 'file'] }
+    attachmentType: { type: String, enum: ['image', 'video', 'file', 'audio'] }
   }],
   
   responseCount: {

@@ -25,7 +25,9 @@ exports.uploadMedia = async (req, res) => {
     const file = req.file;
 
     // Determine media type
-    const mediaType = file.mimetype.startsWith('image/') ? 'image' : 'video';
+    let mediaType = 'video';
+    if (file.mimetype.startsWith('image/')) mediaType = 'image';
+    else if (file.mimetype.startsWith('audio/') || file.mimetype === 'audio/mpeg' || file.mimetype === 'audio/mp3') mediaType = 'audio';
 
     // Generate public URL
     const baseUrl = process.env.BASE_URL || 'https://repmeup.in';
