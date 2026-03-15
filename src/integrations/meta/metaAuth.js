@@ -130,12 +130,13 @@ class MetaAuthService {
         'pages_show_list',
         'pages_read_engagement',
         'pages_manage_posts',
+        'pages_manage_engagement',
         'pages_messaging',
         'business_management',
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
-        'instagram_content_publish', 
+        'instagram_content_publish',
         'pages_read_user_content'
       ].join(','),
       response_type: 'code',
@@ -187,6 +188,7 @@ class MetaAuthService {
         'pages_show_list',
         'pages_read_engagement',
         'pages_manage_posts',
+        'pages_manage_engagement',
         'pages_read_user_content',
         'business_management'
       ].join(','),
