@@ -57,8 +57,10 @@ if (process.env.LOG_HTTP === '1') {
 }
 
 // Rate limiting - will be initialized after Redis connects
-// Set RATE_LIMIT_DISABLED=true to turn off (e.g. dev or when all traffic shares one IP behind a proxy)
-const rateLimitDisabled = process.env.RATE_LIMIT_DISABLED === 'true';
+// In development: disabled by default so dashboard/inbox/analytics don't hit 429. Set RATE_LIMIT_ENABLED=true to test.
+// In production: enabled. Set RATE_LIMIT_DISABLED=true to turn off (e.g. when all traffic shares one IP behind a proxy).
+const rateLimitDisabled = process.env.RATE_LIMIT_DISABLED === 'true' ||
+  (process.env.NODE_ENV === 'development' && process.env.RATE_LIMIT_ENABLED !== 'true');
 const rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000; // 15 minutes
 const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || (
   process.env.NODE_ENV === 'development' ? 10000 : 1000
@@ -72,6 +74,8 @@ let limiter = rateLimit({
     if (rateLimitDisabled) return true;
     if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
     if (req.path.startsWith('/api/webhooks/')) return true;
+    // Inbox avatar/attachment proxies (many small requests when loading inbox; all authenticated)
+    if (req.path.includes('inbox/avatar/') || req.path.includes('inbox/attachment')) return true;
     return false;
   },
   message: { success: false, error: 'Too many requests from this IP, please try again later' },
@@ -88,7 +92,9 @@ app.use('/api/', (req, res, next) => {
 });
 
 if (rateLimitDisabled) {
-  console.log('⚠️  Rate limiting is DISABLED (RATE_LIMIT_DISABLED=true). Enable it in production.');
+  console.log(process.env.NODE_ENV === 'development'
+    ? '⚠️  Rate limiting is DISABLED in development. Set RATE_LIMIT_ENABLED=true to test limits.'
+    : '⚠️  Rate limiting is DISABLED (RATE_LIMIT_DISABLED=true). Enable it in production.');
 }
 
 // Health check route

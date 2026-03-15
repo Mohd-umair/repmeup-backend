@@ -236,11 +236,13 @@ const interactionSchema = new mongoose.Schema({
     postUrl: String,
     postAuthor: String,
     
-    // For Instagram DM thread: history of incoming messages (chat-style)
+    // For Instagram/Facebook DM thread: history of incoming messages (chat-style)
     incomingMessages: [{
       mid: String,
       text: String,
-      timestamp: Number
+      timestamp: Number,
+      attachmentUrl: String,  // e.g. Facebook Messenger image payload URL
+      attachmentType: String  // e.g. 'image', 'video'
     }],
     lastMid: String,
     instagramAccountId: String,

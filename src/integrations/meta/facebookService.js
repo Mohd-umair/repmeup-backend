@@ -195,8 +195,10 @@ class FacebookService {
             try {
               const commentsResponse = await axios.get(commentsNextPage, {
                 params: {
-                  fields: 'id,message,from,created_time,attachment,parent,permalink_url,comment_count',
-                  limit: 100, // Facebook allows up to 100 comments per request
+                  // from{picture{url}} fetches the commenter's actual CDN avatar URL so we never
+                  // have to store a graph.facebook.com redirect URL that requires auth in the browser.
+                  fields: 'id,message,from{id,name,picture{url}},created_time,attachment,parent,permalink_url,comment_count',
+                  limit: 100,
                   access_token: accessToken
                 }
               });
@@ -219,7 +221,7 @@ class FacebookService {
                       `${this.baseURL}/${comment.id}/comments`,
                       {
                         params: {
-                          fields: 'id,message,from,created_time,attachment,parent,permalink_url',
+                          fields: 'id,message,from{id,name,picture{url}},created_time,attachment,parent,permalink_url',
                           limit: 100,
                           access_token: accessToken
                         }
@@ -266,6 +268,11 @@ class FacebookService {
         // Determine parentId: use parentCommentId if it's a reply, otherwise use parent.id
         const parentId = comment.parentCommentId || comment.parent?.id || null;
 
+        // Extract the CDN avatar URL returned by from{picture{url}}.
+        // This is a publicly-accessible CDN URL (fbsbx.com / lookaside.fbsbx.com).
+        // Store as avatarUrl so the browser can display it without auth.
+        const authorAvatarUrl = comment.from?.picture?.data?.url || comment.from?.picture?.url || null;
+
         const interaction = {
           organization: organization,
           platformConnection: platformConnection._id,
@@ -278,16 +285,15 @@ class FacebookService {
             platformId: comment.from?.id,
             username: comment.from?.name || 'Unknown User',
             name: comment.from?.name || 'Unknown User',
-            profilePicture: comment.from?.id 
-              ? `https://graph.facebook.com/${comment.from.id}/picture?type=small`
-              : null
+            avatarUrl: authorAvatarUrl  // CDN URL — no auth required in browser
           },
           parentId: parentId, // For threaded comments (replies)
           metadata: {
             postId: comment.postId,
             postMessage: comment.postMessage,
             hasAttachment: !!comment.attachment,
-            isReply: !!parentId // Flag to indicate if this is a reply
+            isReply: !!parentId,
+            facebookPageId: platformConnection.platformPageId
           },
           platformCreatedAt: new Date(comment.created_time),
           status: 'unread',
@@ -346,7 +352,7 @@ class FacebookService {
         `${this.baseURL}/${platformPageId}/ratings`,
         {
           params: {
-            fields: 'created_time,recommendation_type,review_text,reviewer,rating,open_graph_story',
+            fields: 'created_time,recommendation_type,review_text,reviewer{id,name,picture{url}},rating,open_graph_story',
             limit: 50,
             access_token: accessToken
           }
@@ -371,9 +377,7 @@ class FacebookService {
             platformId: review.reviewer?.id,
             username: review.reviewer?.name || 'Unknown User',
             name: review.reviewer?.name || 'Unknown User',
-            profilePicture: review.reviewer?.id 
-              ? `https://graph.facebook.com/${review.reviewer.id}/picture?type=small`
-              : null
+            avatarUrl: review.reviewer?.picture?.data?.url || review.reviewer?.picture?.url || null
           },
           rating: review.rating || 0,
           metadata: {
