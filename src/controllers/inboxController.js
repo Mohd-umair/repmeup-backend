@@ -1971,7 +1971,7 @@ exports.escalateInteractionManually = async (req, res, next) => {
   }
 };
 
-// @desc    Get Facebook DM message attachment (image) - proxy so we fetch with page token
+// @desc    Get Facebook/Instagram DM message attachment (image) - proxy so we fetch with page/IG token
 // @route   GET /api/inbox/attachment?interactionId=...&mid=...
 // @access  Private
 exports.getAttachment = async (req, res, next) => {
@@ -1984,7 +1984,7 @@ exports.getAttachment = async (req, res, next) => {
     const interaction = await Interaction.findOne({
       _id: interactionId,
       organization: orgId,
-      platform: 'facebook',
+      platform: { $in: ['facebook', 'instagram'] },
       type: 'dm'
     }).lean();
     if (!interaction || !interaction.metadata?.incomingMessages) {
@@ -1994,16 +1994,28 @@ exports.getAttachment = async (req, res, next) => {
     if (!msg || !msg.attachmentUrl) {
       return res.status(404).json({ success: false, error: 'Attachment not found' });
     }
-    const pageId = interaction.metadata.facebookPageId;
-    const connection = await PlatformConnection.findOne({
-      organization: orgId,
-      platform: 'facebook',
-      platformPageId: pageId,
-      status: 'connected',
-      isActive: true
-    }).select('accessToken').lean();
+    let connection = null;
+    if (interaction.platform === 'facebook') {
+      const pageId = interaction.metadata.facebookPageId;
+      connection = await PlatformConnection.findOne({
+        organization: orgId,
+        platform: 'facebook',
+        platformPageId: pageId,
+        status: 'connected',
+        isActive: true
+      }).select('accessToken').lean();
+    } else if (interaction.platform === 'instagram') {
+      const igAccountId = interaction.metadata.instagramAccountId;
+      connection = await PlatformConnection.findOne({
+        organization: orgId,
+        platform: 'instagram',
+        platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
+        status: 'connected',
+        isActive: true
+      }).select('accessToken').lean();
+    }
     if (!connection || !connection.accessToken) {
-      return res.status(404).json({ success: false, error: 'Page connection not found' });
+      return res.status(404).json({ success: false, error: 'Connection not found' });
     }
     const url = msg.attachmentUrl.includes('?') ? `${msg.attachmentUrl}&access_token=${connection.accessToken}` : `${msg.attachmentUrl}?access_token=${connection.accessToken}`;
     const imgRes = await axios.get(url, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 10000 });

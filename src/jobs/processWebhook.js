@@ -242,7 +242,10 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       const senderId = event.sender?.id;
       const mid = message.mid;
-      const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
+      const attachment = message.attachments && message.attachments[0] ? message.attachments[0] : null;
+      const attachmentType = attachment ? (attachment.type || 'file') : null;
+      const attachmentUrl = attachment && attachment.payload && attachment.payload.url ? attachment.payload.url : null;
+      const text = message.text || (attachment ? `[${attachmentType}]` : '');
       if (!mid || !senderId) {
         logger.warn('[processWebhook] Instagram: message missing mid or senderId', { mid: !!mid, senderId: !!senderId });
         continue;
@@ -310,12 +313,15 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       // Step 2: Only append message if this mid is not already in the array.
       // This prevents duplicates when Meta retries the same webhook event.
+      const incomingMsg = { mid, text, timestamp: event.timestamp };
+      if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
+      if (attachmentType) incomingMsg.attachmentType = attachmentType;
       await Interaction.updateOne(
         { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
         {
           $push: {
             'metadata.incomingMessages': {
-              $each: [{ mid, text, timestamp: event.timestamp }],
+              $each: [incomingMsg],
               $slice: -100
             }
           }
