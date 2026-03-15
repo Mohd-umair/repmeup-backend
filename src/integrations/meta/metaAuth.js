@@ -155,6 +155,7 @@ class MetaAuthService {
       redirect_uri: redirectUri,
       state: state,
       scope: [
+        'public_profile',
         'pages_show_list',
         'pages_read_engagement',
         'pages_manage_posts',
@@ -210,6 +211,7 @@ class MetaAuthService {
       redirect_uri: redirectUri,
       state: state,
       scope: [
+        'public_profile',
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
@@ -339,6 +341,25 @@ class MetaAuthService {
       }, { maxRetries: 3, baseMs: 1500 });
 
       console.log(`📄 [Meta] Found ${pages.length} pages`);
+      // Trigger pages_read_engagement so Meta shows API test calls (required for App Review / dashboard)
+      if (pages.length > 0) {
+        try {
+          const firstPageId = pages[0].id;
+          await axios.get(`${this.graphURL}/${firstPageId}/feed`, {
+            params: {
+              access_token: accessToken,
+              limit: 1,
+              fields: 'id'
+            },
+            timeout: 5000
+          });
+        } catch (e) {
+          // Non-fatal: permission may be missing or page has no posts; don't fail the flow
+          if (e.response?.data?.error?.code !== 10) {
+            console.warn('[Meta] pages_read_engagement feed call (for API test count):', e.response?.data?.error?.message || e.message);
+          }
+        }
+      }
       if (pages.length === 0) {
         try {
           const debug = await this.verifyAccessToken(accessToken);
