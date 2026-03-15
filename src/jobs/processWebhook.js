@@ -330,8 +330,12 @@ async function handleInstagramWebhook(payload, organizationId) {
     const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'comments') {
-        // New comment or reply: fetch commenter profile for inbox avatar
         const comment = change.value;
+        // Skip our own replies: when the connected IG account replies, from.id equals the account id.
+        if (comment.from && String(comment.from.id) === String(igAccountId)) {
+          return null;
+        }
+
         const parentCommentId = comment.parent_id != null && comment.parent_id !== '' ? String(comment.parent_id) : null;
         const isReply = !!parentCommentId;
 
@@ -568,8 +572,15 @@ async function handleFacebookWebhook(payload, organizationId) {
     const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'feed' && change.value.item === 'comment') {
-        // New comment on post — fetch commenter profile for avatar
         const comment = change.value;
+        // Skip our own replies: when the Page replies to a comment, Facebook sends a webhook with
+        // comment.from.id = pageId. Do not create a new conversation for those — they already
+        // exist in the thread as interaction.replies.
+        if (comment.from && String(comment.from.id) === String(pageId)) {
+          return null;
+        }
+
+        // New comment on post (from a user) — fetch commenter profile for avatar
         const commenterProfile = await fetchFacebookSenderProfile(organizationId, pageId, comment.from?.id, pageConnection?.accessToken);
         const author = {
           platformId: comment.from.id,
