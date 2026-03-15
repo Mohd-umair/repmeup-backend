@@ -341,10 +341,10 @@ class MetaAuthService {
       }, { maxRetries: 3, baseMs: 1500 });
 
       console.log(`📄 [Meta] Found ${pages.length} pages`);
-      // Trigger pages_read_engagement so Meta shows API test calls (required for App Review / dashboard)
+      // Trigger pages_read_engagement and pages_manage_engagement so Meta shows API test calls (required for App Review / dashboard)
       if (pages.length > 0) {
+        const firstPageId = pages[0].id;
         try {
-          const firstPageId = pages[0].id;
           await axios.get(`${this.graphURL}/${firstPageId}/feed`, {
             params: {
               access_token: accessToken,
@@ -354,9 +354,22 @@ class MetaAuthService {
             timeout: 5000
           });
         } catch (e) {
-          // Non-fatal: permission may be missing or page has no posts; don't fail the flow
           if (e.response?.data?.error?.code !== 10) {
             console.warn('[Meta] pages_read_engagement feed call (for API test count):', e.response?.data?.error?.message || e.message);
+          }
+        }
+        try {
+          await axios.get(`${this.graphURL}/${firstPageId}/posts`, {
+            params: {
+              access_token: accessToken,
+              limit: 1,
+              fields: 'id,comments.summary(true)'
+            },
+            timeout: 5000
+          });
+        } catch (e) {
+          if (e.response?.data?.error?.code !== 10) {
+            console.warn('[Meta] pages_manage_engagement posts/comments call (for API test count):', e.response?.data?.error?.message || e.message);
           }
         }
       }
