@@ -48,6 +48,9 @@ router.get(
 // Get author avatar (must be before /:id) — proxy for Facebook/Instagram so img loads with token
 router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
 
+// Get Facebook DM attachment image (must be before /:id) — proxy with page token
+router.get('/attachment', inboxController.getAttachment);
+
 // Get single interaction
 router.get('/:id', inboxController.getInteraction);
 
@@ -130,6 +133,14 @@ router.post(
       return res.status(500).json({ success: false, error: err.message });
     }
   }
+);
+
+// One-time backfill: re-resolves stored `graph.facebook.com/{id}/picture` URLs to real CDN URLs.
+// Run once after deploying the avatar fix; safe to call again (skips already-resolved records).
+router.post(
+  '/backfill-avatars',
+  authorize('admin', 'manager'),
+  inboxController.backfillFacebookAvatars
 );
 
 module.exports = router;

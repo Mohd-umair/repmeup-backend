@@ -1970,22 +1970,87 @@ exports.escalateInteractionManually = async (req, res, next) => {
   }
 };
 
+// @desc    Get Facebook DM message attachment (image) - proxy so we fetch with page token
+// @route   GET /api/inbox/attachment?interactionId=...&mid=...
+// @access  Private
+exports.getAttachment = async (req, res, next) => {
+  try {
+    const { interactionId, mid } = req.query;
+    if (!interactionId || !mid) {
+      return res.status(400).json({ success: false, error: 'interactionId and mid required' });
+    }
+    const orgId = req.user.organization._id;
+    const interaction = await Interaction.findOne({
+      _id: interactionId,
+      organization: orgId,
+      platform: 'facebook',
+      type: 'dm'
+    }).lean();
+    if (!interaction || !interaction.metadata?.incomingMessages) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+    const msg = interaction.metadata.incomingMessages.find(m => m.mid === mid);
+    if (!msg || !msg.attachmentUrl) {
+      return res.status(404).json({ success: false, error: 'Attachment not found' });
+    }
+    const pageId = interaction.metadata.facebookPageId;
+    const connection = await PlatformConnection.findOne({
+      organization: orgId,
+      platform: 'facebook',
+      platformPageId: pageId,
+      status: 'connected',
+      isActive: true
+    }).select('accessToken').lean();
+    if (!connection || !connection.accessToken) {
+      return res.status(404).json({ success: false, error: 'Page connection not found' });
+    }
+    const url = msg.attachmentUrl.includes('?') ? `${msg.attachmentUrl}&access_token=${connection.accessToken}` : `${msg.attachmentUrl}?access_token=${connection.accessToken}`;
+    const imgRes = await axios.get(url, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 10000 });
+    res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.send(Buffer.from(imgRes.data));
+  } catch (error) {
+    if (error.response?.status === 404 || error.response?.status === 403) {
+      return res.status(404).json({ success: false, error: 'Attachment not available' });
+    }
+    console.error('getAttachment error:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to load attachment' });
+  }
+};
+
 // @desc    Get author avatar (profile picture) - proxy for Instagram/Facebook to avoid CORS
 // @route   GET /api/inbox/avatar/:platform/:userId
 // @access  Private
 exports.getAuthorAvatar = async (req, res, next) => {
   try {
     const { platform, userId } = req.params;
+    const pageId = req.query.pageId; // optional; for Facebook, pick the connection for this page
     if (!platform || !userId) {
       return res.status(400).json({ success: false, error: 'platform and userId required' });
     }
     const orgId = req.user.organization._id;
-    const connection = await PlatformConnection.findOne({
-      organization: orgId,
-      platform: platform.toLowerCase(),
-      isActive: true,
-      status: 'connected'
-    });
+    const platformKey = platform.toLowerCase();
+
+    // For Facebook, prefer the connection that owns the page (when pageId provided or single connection).
+    let connection;
+    if (platformKey === 'facebook') {
+      const filter = {
+        organization: orgId,
+        platform: 'facebook',
+        isActive: true,
+        status: 'connected'
+      };
+      if (pageId) filter.platformPageId = { $in: [String(pageId), pageId] };
+      connection = await PlatformConnection.findOne(filter).select('accessToken').lean();
+    } else {
+      connection = await PlatformConnection.findOne({
+        organization: orgId,
+        platform: platformKey,
+        isActive: true,
+        status: 'connected'
+      }).select('accessToken').lean();
+    }
+
     if (!connection || !connection.accessToken) {
       return res.status(404).json({ success: false, error: 'Platform connection not found' });
     }
@@ -2022,11 +2087,16 @@ exports.getAuthorAvatar = async (req, res, next) => {
     }
 
     if (platform.toLowerCase() === 'facebook') {
-      const picUrl = `https://graph.facebook.com/${apiVersion}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`;
-      const imgRes = await axios.get(picUrl, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 8000 });
-      res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
-      res.set('Cache-Control', 'private, max-age=3600');
-      res.send(Buffer.from(imgRes.data));
+      try {
+        const picUrl = `https://graph.facebook.com/${apiVersion}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`;
+        const imgRes = await axios.get(picUrl, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 8000, validateStatus: s => s === 200 });
+        res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
+        res.set('Cache-Control', 'private, max-age=3600');
+        res.send(Buffer.from(imgRes.data));
+      } catch (fbErr) {
+        // 403 = user privacy / page-token can't access; 404 = user not found. Both are expected.
+        return res.status(404).json({ success: false, error: 'Avatar not available', useDefault: true });
+      }
       return;
     }
 
@@ -2051,8 +2121,10 @@ exports.getAuthorAvatar = async (req, res, next) => {
       });
     }
     
-    // Only log unexpected errors
-    if (error.code !== 'ECONNABORTED' && error.response?.status !== 400) {
+    // 403/404/400 are expected (privacy settings, user not accessible) — suppress to avoid log spam.
+    // Only log truly unexpected errors.
+    const status = error.response?.status;
+    if (error.code !== 'ECONNABORTED' && status !== 400 && status !== 403 && status !== 404) {
       console.error('getAuthorAvatar error:', error.message);
     }
     
@@ -2064,3 +2136,93 @@ exports.getAuthorAvatar = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/inbox/backfill-avatars
+ *
+ * One-time migration: finds all Facebook interactions whose `author.avatarUrl`
+ * (or `author.profilePicture`) is still a `graph.facebook.com/{id}/picture` redirect URL
+ * and replaces it with the actual CDN URL by calling the Graph API.
+ *
+ * Safe to run multiple times — already-resolved CDN URLs are skipped.
+ * Should be called once after deploying the ingest-time CDN URL fix.
+ */
+exports.backfillFacebookAvatars = async (req, res) => {
+  try {
+    const orgId = req.user.organization._id;
+
+    // Find interactions that still have the old Graph redirect URL pattern.
+    const staleRecords = await Interaction.find({
+      organization: orgId,
+      platform: 'facebook',
+      $or: [
+        { 'author.avatarUrl': /^https:\/\/graph\.facebook\.com\// },
+        { 'author.profilePicture': /^https:\/\/graph\.facebook\.com\// }
+      ]
+    })
+      .select('_id author platformConnection')
+      .lean()
+      .limit(500); // safety cap per run
+
+    if (staleRecords.length === 0) {
+      return res.json({ success: true, updated: 0, message: 'Nothing to backfill.' });
+    }
+
+    // Load connections keyed by _id so we can find the right page token.
+    const connIds = [...new Set(staleRecords.map(r => String(r.platformConnection)).filter(Boolean))];
+    const connections = await PlatformConnection.find({
+      _id: { $in: connIds },
+      platform: 'facebook',
+      status: 'connected',
+      isActive: true
+    })
+      .select('_id accessToken')
+      .lean();
+    const connMap = Object.fromEntries(connections.map(c => [String(c._id), c.accessToken]));
+
+    const FB_API = 'https://graph.facebook.com/v18.0';
+    let updated = 0;
+    let skipped = 0;
+
+    for (const record of staleRecords) {
+      const platformId = record.author?.platformId;
+      const token = connMap[String(record.platformConnection)];
+      if (!platformId || !token) { skipped++; continue; }
+
+      try {
+        const { data } = await axios.get(`${FB_API}/${platformId}`, {
+          params: { fields: 'picture{url}', access_token: token },
+          timeout: 8000
+        });
+        const picData = Array.isArray(data.picture?.data) ? data.picture.data[0] : data.picture?.data;
+        const cdnUrl = picData?.url || data.picture?.url;
+        if (!cdnUrl) { skipped++; continue; }
+
+        await Interaction.updateOne(
+          { _id: record._id },
+          {
+            $set: {
+              'author.avatarUrl': cdnUrl,
+              'author.profilePicture': cdnUrl
+            }
+          }
+        );
+        updated++;
+      } catch {
+        skipped++;
+      }
+    }
+
+    return res.json({
+      success: true,
+      total: staleRecords.length,
+      updated,
+      skipped,
+      message: staleRecords.length === 500
+        ? 'Hit 500-record cap — run again to continue backfilling.'
+        : 'Backfill complete.'
+    });
+  } catch (error) {
+    console.error('backfillFacebookAvatars error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};

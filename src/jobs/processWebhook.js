@@ -494,7 +494,10 @@ async function handleFacebookWebhook(payload, organizationId) {
 
       const senderId = event.sender?.id;
       const mid = message.mid;
-      const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
+      const attachment = message.attachments && message.attachments[0] ? message.attachments[0] : null;
+      const attachmentType = attachment ? (attachment.type || 'file') : null;
+      const attachmentUrl = attachment && attachment.payload && attachment.payload.url ? attachment.payload.url : null;
+      const text = message.text || (attachment ? `[${attachmentType}]` : '');
       if (!mid || !senderId) continue;
 
       const profile = await fetchFacebookSenderProfile(organizationId, pageId, senderId, pageConnection?.accessToken);
@@ -503,13 +506,17 @@ async function handleFacebookWebhook(payload, organizationId) {
         username: profile.name || 'Messenger User',
         name: profile.name || 'Messenger User'
       };
-      if (profile.profilePic) author.avatarUrl = profile.profilePic;
+      if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
       const threadPlatformId = `dm_${String(pageId)}_${String(senderId)}`;
       const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
       if (existing && existing.metadata?.lastMid === mid) {
         return await Interaction.findById(existing._id);
       }
+
+      const incomingMsg = { mid, text, timestamp: event.timestamp };
+      if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
+      if (attachmentType) incomingMsg.attachmentType = attachmentType;
 
       const updateFields = {
         organization: organizationId,
@@ -532,7 +539,7 @@ async function handleFacebookWebhook(payload, organizationId) {
           $setOnInsert: { status: 'unread', isRead: false },
           $push: {
             'metadata.incomingMessages': {
-              $each: [{ mid, text, timestamp: event.timestamp }],
+              $each: [incomingMsg],
               $slice: -100
             }
           }
@@ -554,7 +561,7 @@ async function handleFacebookWebhook(payload, organizationId) {
           username: commenterProfile.name || comment.from.name || 'Facebook User',
           name: commenterProfile.name || comment.from.name || 'Facebook User'
         };
-        if (commenterProfile.profilePic) author.avatarUrl = commenterProfile.profilePic;
+        if (commenterProfile.avatarUrl) author.avatarUrl = commenterProfile.avatarUrl;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.comment_id },
@@ -568,7 +575,8 @@ async function handleFacebookWebhook(payload, organizationId) {
               author,
               metadata: {
                 postId: comment.post_id,
-                postUrl: `https://www.facebook.com/${comment.post_id}`
+                postUrl: `https://www.facebook.com/${comment.post_id}`,
+                facebookPageId: pageId
               },
               platformCreatedAt: new Date(comment.created_time)
             },
@@ -589,7 +597,7 @@ async function handleFacebookWebhook(payload, organizationId) {
           username: senderProfile.name || message.from.name || 'Facebook User',
           name: senderProfile.name || message.from.name || 'Facebook User'
         };
-        if (senderProfile.profilePic) author.avatarUrl = senderProfile.profilePic;
+        if (senderProfile.avatarUrl) author.avatarUrl = senderProfile.avatarUrl;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
@@ -621,9 +629,14 @@ async function handleFacebookWebhook(payload, organizationId) {
 }
 
 /**
- * Fetch Facebook user profile (name, picture) for PSID or commenter ID.
- * Uses Graph API GET /{user-id}?fields=name,picture with Page access token.
- * Returns { name, profilePic } so inbox can show sender/commenter avatar.
+ * Fetch Facebook user profile (name + CDN avatar URL) for a PSID or commenter user ID.
+ *
+ * Uses  GET /{id}?fields=name,first_name,last_name,picture{url}
+ * `picture{url}` asks Graph to return the actual CDN URL (fbsbx.com / lookaside) rather than
+ * the redirect endpoint, so we can store and display it in the browser without any auth.
+ *
+ * Returns { name, avatarUrl } — both may be undefined when the API call fails or the user
+ * has restricted their profile visibility.
  */
 async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTokenFromConnection = null) {
   if (!psid) return {};
@@ -643,18 +656,25 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
     const axios = require('axios');
     const baseUrl = 'https://graph.facebook.com/v18.0';
     const res = await axios.get(`${baseUrl}/${psid}`, {
-      params: { fields: 'name,first_name,last_name,picture', access_token: token },
+      // picture{url} returns the resolved CDN URL directly.
+      // picture.data.is_silhouette === true means no real photo (privacy / no photo set).
+      params: { fields: 'name,first_name,last_name,picture{url}', access_token: token },
       timeout: 5000
     });
     const data = res.data || {};
-    const name = data.name || (data.first_name && data.last_name ? `${data.first_name} ${data.last_name}`.trim() : data.first_name || data.last_name);
-    const profilePic = data.picture?.data?.url || data.picture?.url || undefined;
-    return {
-      name: name || undefined,
-      profilePic
-    };
+    const name = data.name || (data.first_name && data.last_name
+      ? `${data.first_name} ${data.last_name}`.trim()
+      : data.first_name || data.last_name);
+    // picture.data[0].url when using {url} sub-selection, or picture.data.url for plain picture
+    const picData = Array.isArray(data.picture?.data) ? data.picture.data[0] : data.picture?.data;
+    const avatarUrl = picData?.url || data.picture?.url || undefined;
+    return { name: name || undefined, avatarUrl };
   } catch (err) {
-    console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid, err.response?.data?.error?.message || err.message);
+    // Suppress the warning for 403 (privacy / no permission) — expected for many users.
+    if (err.response?.status !== 403) {
+      console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid,
+        err.response?.data?.error?.message || err.message);
+    }
     return {};
   }
 }
