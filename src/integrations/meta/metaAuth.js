@@ -577,7 +577,9 @@ class MetaAuthService {
   }
 
   /**
-   * Subscribe a Facebook Page to this app's webhook (for Messenger/Page events).
+   * Subscribe a Facebook Page to this app's webhook (for Messenger/Page events and feed comments).
+   * - messages, standby, etc.: Page DMs (Messenger).
+   * - feed: post comments and other feed activity (required for comment webhooks).
    */
   async subscribePageToWebhook(pageId, pageAccessToken) {
     const fields = [
@@ -589,7 +591,8 @@ class MetaAuthService {
       'messaging_optins',
       'messaging_referrals',
       'standby',
-      'messaging_handovers'
+      'messaging_handovers',
+      'feed'
     ].join(',');
 
     try {
