@@ -57,7 +57,7 @@ exports.validateReply = (req, res, next) => {
     templateId: objectId().optional(),
     templateVariables: Joi.object().optional(),
     attachmentUrl: Joi.string().uri().optional(),
-    attachmentType: Joi.string().valid('image', 'video', 'file').optional()
+    attachmentType: Joi.string().valid('image', 'video', 'file', 'audio').optional()
   });
 
   const { error } = schema.validate(req.body);

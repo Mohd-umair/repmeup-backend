@@ -24,7 +24,7 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  // Accept images and videos only
+  // Accept images, videos, and audio
   const allowedMimeTypes = [
     'image/jpeg',
     'image/jpg',
@@ -33,13 +33,21 @@ const fileFilter = (req, file, cb) => {
     'image/webp',
     'video/mp4',
     'video/quicktime',
-    'video/x-msvideo'
+    'video/x-msvideo',
+    'audio/mpeg',
+    'audio/mp3',
+    'audio/mp4',
+    'audio/ogg',
+    'audio/wav',
+    'audio/webm',
+    'audio/x-m4a',
+    'audio/aac'
   ];
 
   if (allowedMimeTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only images and videos are allowed.'), false);
+    cb(new Error('Invalid file type. Only images, videos, and audio are allowed.'), false);
   }
 };
 
