@@ -343,7 +343,9 @@ class MetaAuthService {
       console.log(`📄 [Meta] Found ${pages.length} pages`);
       // Trigger pages_read_engagement and pages_manage_engagement so Meta shows API test calls (required for App Review / dashboard)
       if (pages.length > 0) {
-        const firstPageId = pages[0].id;
+        const firstPage = pages[0];
+        const firstPageId = firstPage.id;
+        const pageAccessToken = firstPage.access_token;
         try {
           await axios.get(`${this.graphURL}/${firstPageId}/feed`, {
             params: {
@@ -358,18 +360,21 @@ class MetaAuthService {
             console.warn('[Meta] pages_read_engagement feed call (for API test count):', e.response?.data?.error?.message || e.message);
           }
         }
-        try {
-          await axios.get(`${this.graphURL}/${firstPageId}/posts`, {
-            params: {
-              access_token: accessToken,
-              limit: 1,
-              fields: 'id,comments.summary(true)'
-            },
-            timeout: 5000
-          });
-        } catch (e) {
-          if (e.response?.data?.error?.code !== 10) {
-            console.warn('[Meta] pages_manage_engagement posts/comments call (for API test count):', e.response?.data?.error?.message || e.message);
+        // Use PAGE access token so Meta attributes the call to pages_manage_engagement (required for "1 API call" in App Review)
+        if (pageAccessToken) {
+          try {
+            await axios.get(`${this.graphURL}/${firstPageId}/posts`, {
+              params: {
+                access_token: pageAccessToken,
+                limit: 1,
+                fields: 'id,comments.summary(true)'
+              },
+              timeout: 5000
+            });
+          } catch (e) {
+            if (e.response?.data?.error?.code !== 10) {
+              console.warn('[Meta] pages_manage_engagement (page token) for API test count:', e.response?.data?.error?.message || e.message);
+            }
           }
         }
       }
