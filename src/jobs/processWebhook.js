@@ -4,6 +4,7 @@ const { aiQueue } = require('../config/queue');
 const logger = require('../config/logger');
 const instagramService = require('../integrations/meta/instagramService');
 const { emitToOrg } = require('../utils/socketEmitter');
+const cacheService = require('../services/cacheService');
 
 /**
  * Process webhook events from social media platforms
@@ -59,7 +60,14 @@ module.exports = async function processWebhook(job) {
         type: interaction.type,
         contentPreview: interaction.content?.substring(0, 100)
       });
-      
+
+      // Invalidate inbox list cache so next GET /api/inbox returns this interaction (fixes DMs not showing until refresh/sync)
+      if (organizationId) {
+        cacheService.delPattern(`interactions:${organizationId}*`).catch(err => {
+          jobLogger.warn('Failed to invalidate inbox cache', { err: err?.message });
+        });
+      }
+
       // IMPORTANT: Check if interaction already has replies
       // If it does, skip auto-reply queueing (it's already been replied to)
       const hasReplies = interaction.replies && interaction.replies.length > 0;
