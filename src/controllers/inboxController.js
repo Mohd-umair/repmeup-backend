@@ -682,7 +682,7 @@ exports.replyToInteraction = async (req, res, next) => {
     // Add reply to database with platform response ID
     // Note: addReply sets status to 'replied', so we'll update it if failed
     const previousStatus = interaction.status;
-    await interaction.addReply(replyContent, req.user._id, platformResponseId);
+    await interaction.addReply(replyContent, req.user._id, platformResponseId, false, attachmentUrl || undefined, attachmentType || undefined);
     
     // Reload interaction to get the updated reply
     await interaction.populate('replies.sentBy', 'firstName lastName');
