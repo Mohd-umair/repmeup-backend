@@ -455,6 +455,21 @@ async function handleInstagramWebhook(payload, organizationId) {
 }
 
 /**
+ * Parse timestamp from Meta webhooks. Facebook often sends Unix seconds; convert to Date.
+ * @param {number|string} value - Unix seconds, ms, or ISO string
+ * @returns {Date}
+ */
+function parseMetaTimestamp(value) {
+  if (value == null) return new Date();
+  if (typeof value === 'number') {
+    const ms = value < 1e12 ? value * 1000 : value;
+    return new Date(ms);
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed) : new Date();
+}
+
+/**
  * Handle Facebook webhook
  * Supports:
  * 1. Messenger (Page DMs): entry.messaging[] - sender.id (PSID), message.mid, message.text
@@ -563,27 +578,40 @@ async function handleFacebookWebhook(payload, organizationId) {
         };
         if (commenterProfile.avatarUrl) author.avatarUrl = commenterProfile.avatarUrl;
 
+        // Facebook sends created_time in Unix seconds; parse so SLA/Overdue is correct
+        const platformCreatedAt = parseMetaTimestamp(comment.created_time);
+
+        const updateFields = {
+          organization: organizationId,
+          platform: 'facebook',
+          type: 'comment',
+          platformId: comment.comment_id,
+          content: comment.message,
+          author,
+          metadata: {
+            postId: comment.post_id,
+            postUrl: `https://www.facebook.com/${comment.post_id}`,
+            facebookPageId: pageId
+          },
+          platformCreatedAt
+        };
+        if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
+
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.comment_id },
           {
-            $set: {
-              organization: organizationId,
-              platform: 'facebook',
-              type: 'comment',
-              platformId: comment.comment_id,
-              content: comment.message,
-              author,
-              metadata: {
-                postId: comment.post_id,
-                postUrl: `https://www.facebook.com/${comment.post_id}`,
-                facebookPageId: pageId
-              },
-              platformCreatedAt: new Date(comment.created_time)
-            },
+            $set: updateFields,
             $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
+
+        // Emit so inbox list updates immediately without sync/poll
+        if (interaction && organizationId) {
+          emitToOrg(organizationId.toString(), 'new_interaction', {
+            interaction: interaction.toObject ? interaction.toObject() : interaction
+          });
+        }
 
         return interaction;
       }
@@ -610,7 +638,7 @@ async function handleFacebookWebhook(payload, organizationId) {
               content: message.message,
               author,
               threadId: message.thread_id,
-              platformCreatedAt: new Date(message.created_time)
+              platformCreatedAt: parseMetaTimestamp(message.created_time)
             },
             $setOnInsert: { status: 'unread', isRead: false }
           },
