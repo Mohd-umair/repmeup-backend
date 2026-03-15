@@ -546,8 +546,15 @@ async function handleFacebookWebhook(payload, organizationId) {
     const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'feed' && change.value.item === 'comment') {
-        // New comment on post
+        // New comment on post — fetch commenter profile for avatar
         const comment = change.value;
+        const commenterProfile = await fetchFacebookSenderProfile(organizationId, pageId, comment.from?.id, pageConnection?.accessToken);
+        const author = {
+          platformId: comment.from.id,
+          username: commenterProfile.name || comment.from.name || 'Facebook User',
+          name: commenterProfile.name || comment.from.name || 'Facebook User'
+        };
+        if (commenterProfile.profilePic) author.avatarUrl = commenterProfile.profilePic;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.comment_id },
@@ -558,10 +565,7 @@ async function handleFacebookWebhook(payload, organizationId) {
               type: 'comment',
               platformId: comment.comment_id,
               content: comment.message,
-              author: {
-                platformId: comment.from.id,
-                name: comment.from.name
-              },
+              author,
               metadata: {
                 postId: comment.post_id,
                 postUrl: `https://www.facebook.com/${comment.post_id}`
@@ -577,8 +581,15 @@ async function handleFacebookWebhook(payload, organizationId) {
       }
 
       if (change.field === 'conversations') {
-        // Legacy format: New message
+        // Legacy format: New message — fetch sender profile for avatar
         const message = change.value;
+        const senderProfile = await fetchFacebookSenderProfile(organizationId, pageId, message.from?.id, pageConnection?.accessToken);
+        const author = {
+          platformId: message.from.id,
+          username: senderProfile.name || message.from.name || 'Facebook User',
+          name: senderProfile.name || message.from.name || 'Facebook User'
+        };
+        if (senderProfile.profilePic) author.avatarUrl = senderProfile.profilePic;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
@@ -589,10 +600,7 @@ async function handleFacebookWebhook(payload, organizationId) {
               type: 'dm',
               platformId: message.id,
               content: message.message,
-              author: {
-                platformId: message.from.id,
-                name: message.from.name
-              },
+              author,
               threadId: message.thread_id,
               platformCreatedAt: new Date(message.created_time)
             },
@@ -613,8 +621,9 @@ async function handleFacebookWebhook(payload, organizationId) {
 }
 
 /**
- * Fetch Facebook Messenger sender profile (name, profile_pic) for PSID.
- * Uses Graph API GET /{psid}?fields=name,profile_pic with Page access token.
+ * Fetch Facebook user profile (name, picture) for PSID or commenter ID.
+ * Uses Graph API GET /{user-id}?fields=name,picture with Page access token.
+ * Returns { name, profilePic } so inbox can show sender/commenter avatar.
  */
 async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTokenFromConnection = null) {
   if (!psid) return {};
@@ -632,16 +641,17 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
   if (!token) return {};
   try {
     const axios = require('axios');
-    const baseUrl = `https://graph.facebook.com/v18.0`;
+    const baseUrl = 'https://graph.facebook.com/v18.0';
     const res = await axios.get(`${baseUrl}/${psid}`, {
-      params: { fields: 'name,first_name,last_name,profile_pic', access_token: token },
+      params: { fields: 'name,first_name,last_name,picture', access_token: token },
       timeout: 5000
     });
     const data = res.data || {};
     const name = data.name || (data.first_name && data.last_name ? `${data.first_name} ${data.last_name}`.trim() : data.first_name || data.last_name);
+    const profilePic = data.picture?.data?.url || data.picture?.url || undefined;
     return {
       name: name || undefined,
-      profilePic: data.profile_pic || undefined
+      profilePic
     };
   } catch (err) {
     console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid, err.response?.data?.error?.message || err.message);

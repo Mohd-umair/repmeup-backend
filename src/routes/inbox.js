@@ -45,9 +45,8 @@ router.get(
   inboxController.getEscalationStats
 );
 
-// Get author avatar (must be before /:id)
-// Avatar proxy endpoint removed - no longer needed (avatars are stored in interaction.author.avatarUrl)
-// router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
+// Get author avatar (must be before /:id) — proxy for Facebook/Instagram so img loads with token
+router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
 
 // Get single interaction
 router.get('/:id', inboxController.getInteraction);
