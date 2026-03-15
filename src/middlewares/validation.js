@@ -52,10 +52,12 @@ exports.validateLogin = (req, res, next) => {
 // Validate interaction reply
 exports.validateReply = (req, res, next) => {
   const schema = Joi.object({
-    content: Joi.string().required().max(10000),
+    content: Joi.string().allow('').max(10000).optional(),
     useTemplate: Joi.boolean().optional(),
     templateId: objectId().optional(),
-    templateVariables: Joi.object().optional()
+    templateVariables: Joi.object().optional(),
+    attachmentUrl: Joi.string().uri().optional(),
+    attachmentType: Joi.string().valid('image', 'video', 'file').optional()
   });
 
   const { error } = schema.validate(req.body);
@@ -64,6 +66,15 @@ exports.validateReply = (req, res, next) => {
     return res.status(400).json({
       success: false,
       error: error.details[0].message
+    });
+  }
+
+  const hasContent = typeof req.body.content === 'string' && req.body.content.trim().length > 0;
+  const hasAttachment = req.body.attachmentUrl && req.body.attachmentType;
+  if (!hasContent && !hasAttachment) {
+    return res.status(400).json({
+      success: false,
+      error: 'Either content or attachment (attachmentUrl + attachmentType) is required'
     });
   }
 
