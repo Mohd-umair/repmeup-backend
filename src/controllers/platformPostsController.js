@@ -75,6 +75,23 @@ exports.getPlatformPosts = async (req, res, next) => {
       });
     }
 
+    // Return empty if no active connection exists for this platform
+    const hasConnection = await PlatformConnection.exists({
+      organization: organizationId,
+      platform: platformFilter,
+      isActive: true,
+      status: 'connected',
+      platformPageId: { $ne: null }
+    });
+
+    if (!hasConnection) {
+      return res.status(200).json({
+        success: true,
+        posts: [],
+        meta: { total: 0, platformFilter, noConnection: true }
+      });
+    }
+
     const posts = await PlatformPost.find({
       organization: organizationId,
       platform: platformFilter
