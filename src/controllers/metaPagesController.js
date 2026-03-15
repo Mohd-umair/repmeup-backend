@@ -366,6 +366,60 @@ exports.connectSelectedPages = async (req, res, next) => {
 };
 
 /**
+ * @desc    Re-subscribe all connected Facebook Pages to the app webhook (including feed for comments).
+ *          Use this after deploying webhook changes so existing pages receive comment/DM events.
+ * @route   POST /api/meta/pages/resubscribe-webhooks
+ * @access  Private
+ */
+exports.resubscribeFacebookWebhooks = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id || req.user.organization;
+
+    const connections = await PlatformConnection.find({
+      organization: organizationId,
+      platform: 'facebook',
+      platformPageId: { $exists: true, $ne: null },
+      isActive: true,
+      status: 'connected'
+    }).select('platformPageId platformUsername accessToken').lean();
+
+    if (connections.length === 0) {
+      return res.json({
+        success: true,
+        data: { subscribed: 0, failed: 0, pages: [] },
+        message: 'No connected Facebook pages to resubscribe.'
+      });
+    }
+
+    const results = { subscribed: 0, failed: 0, pages: [] };
+    for (const conn of connections) {
+      try {
+        await metaAuth.subscribePageToWebhook(conn.platformPageId, conn.accessToken);
+        results.subscribed++;
+        results.pages.push({ pageId: conn.platformPageId, name: conn.platformUsername, ok: true });
+      } catch (err) {
+        results.failed++;
+        results.pages.push({
+          pageId: conn.platformPageId,
+          name: conn.platformUsername,
+          ok: false,
+          error: err.message || 'Subscription failed'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: results,
+      message: `Re-subscribed ${results.subscribed} page(s). ${results.failed} failed.`
+    });
+  } catch (error) {
+    console.error('❌ [Meta Pages] Error resubscribing webhooks:', error);
+    next(error);
+  }
+};
+
+/**
  * @desc    Disconnect a specific page
  * @route   DELETE /api/meta/pages/:pageId
  * @access  Private
