@@ -24,14 +24,23 @@ class LinkedInAuthService {
     // Advanced scopes that require LinkedIn approval
     // Only include if explicitly enabled via environment variable
     const advancedScopes = [];
-    
-    if (process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true') {
-      advancedScopes.push(
-        'w_member_social',        // Post on behalf of user (requires approval)
-        'r_organization_social',   // Read organization posts (requires approval)
-        'w_organization_social',  // Post on behalf of organization (requires approval)
-        'rw_organization_admin'   // Manage organization (requires approval)
-      );
+    const enableAdvanced = process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true';
+    const memberSocialOnly = process.env.LINKEDIN_MEMBER_SOCIAL_ONLY === 'true';
+
+    if (enableAdvanced) {
+      // Member-only: request only w_member_social (approved with Share on LinkedIn Default Tier).
+      // Use this when org scopes are not yet approved to avoid "scope not authorized" errors.
+      if (memberSocialOnly) {
+        advancedScopes.push('w_member_social');
+      } else {
+        // Full org access: requires Community Management API approval
+        advancedScopes.push(
+          'w_member_social',
+          'r_organization_social',
+          'w_organization_social',
+          'rw_organization_admin'
+        );
+      }
     }
 
     const scopes = [...basicScopes, ...advancedScopes];
@@ -50,7 +59,7 @@ class LinkedInAuthService {
     console.log('🔗 [LinkedIn] Client ID:', this.clientId?.substring(0, 10) + '...');
     console.log('🔗 [LinkedIn] Redirect URI:', this.redirectUri);
     console.log('🔗 [LinkedIn] Scopes:', scopes.join(', '));
-    console.log('🔗 [LinkedIn] Advanced scopes enabled:', process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true');
+    console.log('🔗 [LinkedIn] Advanced scopes enabled:', enableAdvanced, 'member-social-only:', memberSocialOnly);
     
     return authURL;
   }

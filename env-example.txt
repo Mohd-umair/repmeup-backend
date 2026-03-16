@@ -47,8 +47,12 @@ GOOGLE_REDIRECT_URI=http://localhost:3000/api/platforms/google/callback
 LINKEDIN_CLIENT_ID=your_linkedin_client_id
 LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
 LINKEDIN_REDIRECT_URI=http://localhost:3000/api/auth/linkedin/callback
-# Set to 'true' only after LinkedIn approves advanced scopes (posting/comments)
-LINKEDIN_ENABLE_ADVANCED_SCOPES=false
+# Repmeup use case: organizations post on their LinkedIn Company Page. That requires Community Management API approval.
+# Set to 'true' once LinkedIn approves Community Management API (org posting/comments).
+LINKEDIN_ENABLE_ADVANCED_SCOPES=true
+# Only set to 'true' as a temporary workaround: request only w_member_social so "Connect LinkedIn" doesn't error.
+# With this on, Company Page will NOT be available—orgs cannot post as their page until you set this back to false and have org approval.
+# LINKEDIN_MEMBER_SOCIAL_ONLY=true
 # Webhook configuration (requires special LinkedIn API access)
 LINKEDIN_WEBHOOK_VERIFY_TOKEN=your_secure_random_token_here
 LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here

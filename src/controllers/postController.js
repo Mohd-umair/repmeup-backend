@@ -3,6 +3,7 @@ const PlatformConnection = require('../models/PlatformConnection');
 const Media = require('../models/Media');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
+const linkedinService = require('../integrations/linkedin/linkedinService');
 const aiService = require('../services/aiService');
 const aiCreditService = require('../services/aiCreditService');
 const auditLogController = require('./auditLogController');
@@ -442,6 +443,9 @@ exports.publishPost = async (req, res) => {
             break;
           case 'facebook':
             result = await publishToFacebook(connection, post, req);
+            break;
+          case 'linkedin':
+            result = await publishToLinkedIn(connection, post);
             break;
           default:
             throw new Error(`Publishing to ${platform} not yet implemented`);
@@ -1270,6 +1274,22 @@ async function publishToFacebook(connection, post, req) {
 }
 
 /**
+ * Helper: Publish to LinkedIn (Company Page or personal profile)
+ */
+async function publishToLinkedIn(connection, post) {
+  const { content } = post;
+
+  console.log(`💼 [LinkedIn] Publishing post`);
+
+  const result = await linkedinService.createPost(connection, content || '');
+
+  return {
+    postId: result.postId,
+    postUrl: result.postUrl
+  };
+}
+
+/**
  * Execute publish for a single scheduled post (used by processScheduledPublish job).
  */
 exports.executePublishForScheduledPost = async function (postId) {
@@ -1296,6 +1316,8 @@ exports.executePublishForScheduledPost = async function (postId) {
       result = await publishToInstagram(connection, post, req);
     } else if (post.platform === 'facebook') {
       result = await publishToFacebook(connection, post, req);
+    } else if (post.platform === 'linkedin') {
+      result = await publishToLinkedIn(connection, post);
     } else {
       post.status = 'failed';
       post.error = 'Unsupported platform: ' + post.platform;

@@ -324,34 +324,47 @@ class LinkedInService {
   }
 
   /**
-   * Create a new LinkedIn post
+   * Create a new LinkedIn post.
+   * Supports both organization (Company Page) and member (personal profile) posting.
+   * Falls back to personUrn when organizationUrn is not available.
    */
   async createPost(connection, postText, mediaUrls = []) {
-    try {
-      const accessToken = connection.accessToken;
-      const organizationUrn = connection.platformData?.organizationUrn;
+    const accessToken = connection.accessToken;
+    const organizationUrn = connection.platformData?.organizationUrn;
+    const personUrn = connection.platformData?.personUrn
+      ? connection.platformData.personUrn
+      : `urn:li:person:${connection.platformUserId}`;
 
-      console.log('📝 [LinkedIn] Creating new post...');
+    const author = organizationUrn || personUrn;
+    if (!author) {
+      throw new Error('No LinkedIn author URN available. Reconnect your LinkedIn account.');
+    }
 
-      const postData = {
-        author: organizationUrn,
-        lifecycleState: 'PUBLISHED',
-        visibility: {
-          'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
-        },
-        commentary: postText
+    console.log(`📝 [LinkedIn] Creating post as ${author}...`);
+
+    const postData = {
+      author,
+      commentary: postText,
+      visibility: 'PUBLIC',
+      distribution: {
+        feedDistribution: 'MAIN_FEED',
+        targetEntities: [],
+        thirdPartyDistributionChannels: []
+      },
+      lifecycleState: 'PUBLISHED',
+      isReshareDisabledByAuthor: false
+    };
+
+    if (mediaUrls.length > 0) {
+      postData.content = {
+        media: {
+          title: postText.substring(0, 100),
+          id: mediaUrls[0]
+        }
       };
+    }
 
-      // Add media if provided
-      if (mediaUrls.length > 0) {
-        postData.content = {
-          media: {
-            title: postText.substring(0, 100),
-            id: mediaUrls[0] // Simplified - would need proper media upload flow
-          }
-        };
-      }
-
+    try {
       const response = await axios.post(
         `${this.apiURL}/posts`,
         postData,
@@ -366,20 +379,19 @@ class LinkedInService {
       );
 
       const postId = response.headers['x-restli-id'] || response.data.id;
-
       console.log('✅ [LinkedIn] Post created successfully:', postId);
 
       return {
-        status: 'sent',
-        platformResponseId: postId,
-        platformUrl: `https://www.linkedin.com/feed/update/${postId}`
+        postId,
+        postUrl: `https://www.linkedin.com/feed/update/${postId}`
       };
     } catch (error) {
       console.error('❌ [LinkedIn] Failed to create post:', error.response?.data || error.message);
-      return {
-        status: 'failed',
-        error: error.response?.data?.message || error.message
-      };
+      const msg = error.response?.data?.message
+        || error.response?.data?.error_description
+        || error.message
+        || 'Failed to create LinkedIn post';
+      throw new Error(msg);
     }
   }
 
