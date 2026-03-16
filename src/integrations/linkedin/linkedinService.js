@@ -436,6 +436,7 @@ class LinkedInService {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
+            'LinkedIn-Version': '202401',
             'Content-Type': 'application/json'
           }
         }
@@ -444,11 +445,20 @@ class LinkedInService {
       const postId = response.headers['x-restli-id'] || response.data.id;
       console.log('✅ [LinkedIn] Post created (UGC):', postId);
       return { postId, postUrl: `https://www.linkedin.com/feed/update/${postId}` };
-    } catch (error) {
-      console.error('❌ [LinkedIn] UGC Posts API error:', error.response?.data || error.message);
-      throw new Error(
-        error.response?.data?.message || error.response?.data?.error_description || error.message || 'Failed to create LinkedIn post'
-      );
+    } catch (ugcError) {
+      console.warn('⚠️  [LinkedIn] UGC API failed, trying REST Posts API as fallback...');
+      console.warn('⚠️  [LinkedIn] UGC error:', ugcError.response?.data || ugcError.message);
+
+      // Fallback: try REST Posts API (works if w_member_social covers /rest/posts on newer versions)
+      try {
+        return await this._createPostREST(accessToken, author, postText, mediaUrls);
+      } catch (restError) {
+        console.error('❌ [LinkedIn] REST fallback also failed:', restError.message);
+        // Throw the original UGC error as it's more relevant
+        throw new Error(
+          ugcError.response?.data?.message || ugcError.response?.data?.error_description || ugcError.message || 'Failed to create LinkedIn post'
+        );
+      }
     }
   }
 
