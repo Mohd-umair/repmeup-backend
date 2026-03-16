@@ -1,6 +1,9 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
 
+// Currently active Marketing API version (YYYYMM). Update when LinkedIn sunsets older versions.
+const LINKEDIN_API_VERSION = '202510';
+
 class LinkedInService {
   constructor() {
     this.apiURL = 'https://api.linkedin.com/v2';
@@ -123,7 +126,7 @@ class LinkedInService {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202401'
+            'LinkedIn-Version': LINKEDIN_API_VERSION
           }
         }
       );
@@ -149,7 +152,7 @@ class LinkedInService {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202401'
+            'LinkedIn-Version': LINKEDIN_API_VERSION
           }
         }
       );
@@ -253,7 +256,7 @@ class LinkedInService {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202401',
+            'LinkedIn-Version': LINKEDIN_API_VERSION,
             'Content-Type': 'application/json'
           }
         }
@@ -299,7 +302,7 @@ class LinkedInService {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202401',
+            'LinkedIn-Version': LINKEDIN_API_VERSION,
             'Content-Type': 'application/json'
           }
         }
@@ -349,7 +352,7 @@ class LinkedInService {
   /**
    * REST Posts API — single endpoint for member and organization posting.
    * POST https://api.linkedin.com/rest/posts
-   * Uses a supported LinkedIn-Version (202410+) to avoid NO_VERSION / sunset errors.
+   * Uses a supported LinkedIn-Version to avoid NO_VERSION / sunset errors.
    */
   async _createPostREST(accessToken, author, postText, mediaUrls = []) {
     const postData = {
@@ -371,7 +374,8 @@ class LinkedInService {
       };
     }
 
-    const versionsToTry = ['202410', '202401'];
+    // Use currently active Marketing API versions (YYYYMM). 202401/202410 are sunset.
+    const versionsToTry = [LINKEDIN_API_VERSION, '202511', '202509'];
     let lastError;
 
     for (const linkedInVersion of versionsToTry) {
@@ -395,8 +399,9 @@ class LinkedInService {
       } catch (error) {
         lastError = error;
         const code = error.response?.data?.code;
-        const message = error.response?.data?.message || '';
-        if (code === 'INVALID_VERSION' || message.includes('version')) {
+        const message = (error.response?.data?.message || '').toLowerCase();
+        const isVersionError = code === 'INVALID_VERSION' || code === 'NONEXISTENT_VERSION' || message.includes('version') || message.includes('not active');
+        if (isVersionError) {
           console.warn(`⚠️  [LinkedIn] Version ${linkedInVersion} failed, trying next...`);
           continue;
         }
@@ -428,7 +433,7 @@ class LinkedInService {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202401'
+            'LinkedIn-Version': LINKEDIN_API_VERSION
           }
         }
       );
@@ -458,7 +463,7 @@ class LinkedInService {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202401'
+            'LinkedIn-Version': LINKEDIN_API_VERSION
           }
         }
       );
