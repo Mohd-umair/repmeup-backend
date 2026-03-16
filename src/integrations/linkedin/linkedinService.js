@@ -325,8 +325,8 @@ class LinkedInService {
 
   /**
    * Create a new LinkedIn post.
-   * Supports both organization (Company Page) and member (personal profile) posting.
-   * Falls back to personUrn when organizationUrn is not available.
+   * - Organization (Company Page): uses REST Posts API (/rest/posts) — requires Community Management API approval.
+   * - Member (personal profile): uses UGC Posts API (/v2/ugcPosts) — works with Share on LinkedIn (w_member_social).
    */
   async createPost(connection, postText, mediaUrls = []) {
     const accessToken = connection.accessToken;
@@ -335,13 +335,26 @@ class LinkedInService {
       ? connection.platformData.personUrn
       : `urn:li:person:${connection.platformUserId}`;
 
-    const author = organizationUrn || personUrn;
+    const isOrgPost = !!organizationUrn;
+    const author = isOrgPost ? organizationUrn : personUrn;
+
     if (!author) {
       throw new Error('No LinkedIn author URN available. Reconnect your LinkedIn account.');
     }
 
-    console.log(`📝 [LinkedIn] Creating post as ${author}...`);
+    console.log(`📝 [LinkedIn] Creating post as ${author} (${isOrgPost ? 'organization' : 'member'})...`);
 
+    if (isOrgPost) {
+      return this._createPostREST(accessToken, author, postText, mediaUrls);
+    }
+    return this._createPostUGC(accessToken, author, postText, mediaUrls);
+  }
+
+  /**
+   * REST Posts API — for organization posting (requires Community Management API).
+   * Endpoint: POST https://api.linkedin.com/rest/posts
+   */
+  async _createPostREST(accessToken, author, postText, mediaUrls = []) {
     const postData = {
       author,
       commentary: postText,
@@ -357,16 +370,13 @@ class LinkedInService {
 
     if (mediaUrls.length > 0) {
       postData.content = {
-        media: {
-          title: postText.substring(0, 100),
-          id: mediaUrls[0]
-        }
+        media: { title: postText.substring(0, 100), id: mediaUrls[0] }
       };
     }
 
     try {
       const response = await axios.post(
-        `${this.apiURL}/posts`,
+        'https://api.linkedin.com/rest/posts',
         postData,
         {
           headers: {
@@ -379,19 +389,66 @@ class LinkedInService {
       );
 
       const postId = response.headers['x-restli-id'] || response.data.id;
-      console.log('✅ [LinkedIn] Post created successfully:', postId);
-
-      return {
-        postId,
-        postUrl: `https://www.linkedin.com/feed/update/${postId}`
-      };
+      console.log('✅ [LinkedIn] Post created (REST):', postId);
+      return { postId, postUrl: `https://www.linkedin.com/feed/update/${postId}` };
     } catch (error) {
-      console.error('❌ [LinkedIn] Failed to create post:', error.response?.data || error.message);
-      const msg = error.response?.data?.message
-        || error.response?.data?.error_description
-        || error.message
-        || 'Failed to create LinkedIn post';
-      throw new Error(msg);
+      console.error('❌ [LinkedIn] REST Posts API error:', error.response?.data || error.message);
+      throw new Error(
+        error.response?.data?.message || error.response?.data?.error_description || error.message || 'Failed to create LinkedIn post'
+      );
+    }
+  }
+
+  /**
+   * UGC Posts API — for member posting (works with Share on LinkedIn / w_member_social).
+   * Endpoint: POST https://api.linkedin.com/v2/ugcPosts
+   */
+  async _createPostUGC(accessToken, author, postText, mediaUrls = []) {
+    const ugcData = {
+      author,
+      lifecycleState: 'PUBLISHED',
+      specificContent: {
+        'com.linkedin.ugc.ShareContent': {
+          shareCommentary: { text: postText },
+          shareMediaCategory: 'NONE'
+        }
+      },
+      visibility: {
+        'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
+      }
+    };
+
+    // If media URLs provided, attach as article link (image upload requires separate asset registration)
+    if (mediaUrls.length > 0) {
+      ugcData.specificContent['com.linkedin.ugc.ShareContent'].shareMediaCategory = 'ARTICLE';
+      ugcData.specificContent['com.linkedin.ugc.ShareContent'].media = mediaUrls.map(url => ({
+        status: 'READY',
+        originalUrl: url,
+        title: { text: postText.substring(0, 100) }
+      }));
+    }
+
+    try {
+      const response = await axios.post(
+        `${this.apiURL}/ugcPosts`,
+        ugcData,
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'X-Restli-Protocol-Version': '2.0.0',
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      const postId = response.headers['x-restli-id'] || response.data.id;
+      console.log('✅ [LinkedIn] Post created (UGC):', postId);
+      return { postId, postUrl: `https://www.linkedin.com/feed/update/${postId}` };
+    } catch (error) {
+      console.error('❌ [LinkedIn] UGC Posts API error:', error.response?.data || error.message);
+      throw new Error(
+        error.response?.data?.message || error.response?.data?.error_description || error.message || 'Failed to create LinkedIn post'
+      );
     }
   }
 
