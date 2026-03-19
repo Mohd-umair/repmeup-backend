@@ -10,6 +10,82 @@ class LinkedInService {
   }
 
   /**
+   * URN used to list posts during sync (same author as where content lives).
+   * Company Page when org URN exists unless LINKEDIN_POST_AS_PERSON forces member;
+   * otherwise member/person URN so personal-only connections still sync.
+   */
+  resolveSyncAuthorUrn(connection) {
+    const organizationUrn = connection.platformData?.organizationUrn;
+    const personUrn =
+      connection.platformData?.personUrn ||
+      (connection.platformUserId ? `urn:li:person:${connection.platformUserId}` : null);
+    const postAsPerson = process.env.LINKEDIN_POST_AS_PERSON === 'true';
+    if (postAsPerson && personUrn) return personUrn;
+    if (organizationUrn) return organizationUrn;
+    return personUrn;
+  }
+
+  /**
+   * List posts by author — preferred API (LinkedIn docs: Find Posts by Authors).
+   * GET https://api.linkedin.com/rest/posts?q=author&author=…
+   */
+  async fetchPostsByAuthorREST(accessToken, authorUrn, limit = 50) {
+    const versionsToTry = [LINKEDIN_API_VERSION, '202511', '202509'];
+    let lastError;
+    for (const linkedInVersion of versionsToTry) {
+      try {
+        const response = await axios.get('https://api.linkedin.com/rest/posts', {
+          params: {
+            q: 'author',
+            author: authorUrn,
+            count: Math.min(limit, 100),
+            sortBy: 'LAST_MODIFIED'
+          },
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'X-Restli-Protocol-Version': '2.0.0',
+            'LinkedIn-Version': linkedInVersion
+          }
+        });
+        const elements = response.data?.elements || [];
+        if (elements.length > 0) {
+          console.log(`📊 [LinkedIn] REST posts finder: ${elements.length} post(s) for author`);
+        }
+        return elements;
+      } catch (error) {
+        lastError = error;
+        const code = error.response?.data?.code;
+        const message = (error.response?.data?.message || '').toLowerCase();
+        const isVersionError =
+          code === 'INVALID_VERSION' ||
+          code === 'NONEXISTENT_VERSION' ||
+          message.includes('version') ||
+          message.includes('not active');
+        if (isVersionError) {
+          console.warn(`⚠️  [LinkedIn] REST posts finder version ${linkedInVersion} failed, trying next...`);
+          continue;
+        }
+        console.warn(
+          '⚠️  [LinkedIn] REST posts finder failed:',
+          error.response?.data || error.message
+        );
+        break;
+      }
+    }
+    return [];
+  }
+
+  /**
+   * Post URN for socialActions (share or ugcPost) from a post element.
+   */
+  resolvePostUrn(post) {
+    const id = post?.id || post?.['$URN'];
+    if (!id) return null;
+    if (String(id).startsWith('urn:li:')) return id;
+    return null;
+  }
+
+  /**
    * Fetch all interactions (posts and comments) from LinkedIn
    */
   async fetchAllInteractions(connection) {
@@ -17,27 +93,46 @@ class LinkedInService {
       console.log('🔄 [LinkedIn] Starting sync for organization:', connection.platformData?.organizationName || 'Personal');
       
       const accessToken = connection.accessToken;
-      const organizationUrn = connection.platformData?.organizationUrn;
-      
-      if (!organizationUrn) {
-        console.log('⚠️  [LinkedIn] No organization URN found, skipping sync');
+      const authorUrn = this.resolveSyncAuthorUrn(connection);
+
+      if (!authorUrn) {
+        console.log('⚠️  [LinkedIn] No author URN (organization or person). Reconnect LinkedIn.');
         return { count: 0, interactions: [] };
       }
 
+      console.log(`🔄 [LinkedIn] Sync author URN: ${authorUrn}`);
+
       const allInteractions = [];
       
-      // Fetch organization posts
-      const posts = await this.fetchOrganizationPosts(accessToken, organizationUrn);
-      console.log(`📊 [LinkedIn] Found ${posts.length} posts`);
+      // Prefer REST Posts finder; fall back to legacy v2 finder if REST returns nothing
+      let posts = await this.fetchPostsByAuthorREST(accessToken, authorUrn);
+      if (posts.length === 0) {
+        posts = await this.fetchOrganizationPosts(accessToken, authorUrn);
+        if (posts.length > 0) {
+          console.log(`📊 [LinkedIn] Legacy v2 posts finder: ${posts.length} post(s)`);
+        }
+      }
+
+      if (posts.length === 0) {
+        console.warn(
+          '⚠️  [LinkedIn] No posts returned. Org posts need r_organization_social (Community Management). ' +
+            'Member posts need r_member_social (often restricted by LinkedIn). Reconnect after scopes are approved.'
+        );
+      } else {
+        console.log(`📊 [LinkedIn] Found ${posts.length} posts to scan for comments`);
+      }
       
       // For each post, fetch comments
       for (const post of posts) {
-        // Transform post to interaction
-        const postInteraction = await this.transformPostToInteraction(post, connection);
-        
+        const postUrn = this.resolvePostUrn(post);
+        if (!postUrn) {
+          console.warn('⚠️  [LinkedIn] Skipping post without URN id:', JSON.stringify(post).slice(0, 200));
+          continue;
+        }
+
         // Fetch comments for this post
-        const comments = await this.fetchPostComments(accessToken, post.id);
-        console.log(`💬 [LinkedIn] Found ${comments.length} comments for post ${post.id}`);
+        const comments = await this.fetchPostComments(accessToken, postUrn);
+        console.log(`💬 [LinkedIn] Found ${comments.length} comments for post ${postUrn}`);
         
         // Transform comments to interactions
         for (const comment of comments) {
@@ -139,24 +234,56 @@ class LinkedInService {
   }
 
   /**
-   * Fetch comments for a post
+   * Fetch comments for a post (share or ugcPost URN).
+   * Prefer REST socialActions (current LinkedIn docs); fall back to v2.
    */
   async fetchPostComments(accessToken, postUrn) {
+    const versionsToTry = [LINKEDIN_API_VERSION, '202511', '202509'];
+    const encoded = encodeURIComponent(postUrn);
+
+    for (const linkedInVersion of versionsToTry) {
+      try {
+        const response = await axios.get(
+          `https://api.linkedin.com/rest/socialActions/${encoded}/comments`,
+          {
+            params: { count: 100 },
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'X-Restli-Protocol-Version': '2.0.0',
+              'LinkedIn-Version': linkedInVersion
+            }
+          }
+        );
+        return response.data?.elements || [];
+      } catch (error) {
+        const code = error.response?.data?.code;
+        const message = (error.response?.data?.message || '').toLowerCase();
+        const isVersionError =
+          code === 'INVALID_VERSION' ||
+          code === 'NONEXISTENT_VERSION' ||
+          message.includes('version') ||
+          message.includes('not active');
+        if (isVersionError) continue;
+        console.warn(
+          '⚠️  [LinkedIn] REST comments failed, trying v2:',
+          error.response?.data?.message || error.message
+        );
+        break;
+      }
+    }
+
     try {
       const response = await axios.get(
         `${this.apiURL}/socialActions/${encodeURIComponent(postUrn)}/comments`,
         {
-          params: {
-            count: 100
-          },
+          params: { count: 100 },
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
             'LinkedIn-Version': LINKEDIN_API_VERSION
           }
         }
       );
-
       return response.data.elements || [];
     } catch (error) {
       console.error('❌ [LinkedIn] Failed to fetch comments:', error.response?.data || error.message);
@@ -199,9 +326,10 @@ class LinkedInService {
    * Transform LinkedIn comment to Interaction model
    */
   async transformCommentToInteraction(comment, post, connection) {
-    const commentId = comment.id || comment['$URN'];
-    const postId = post.id || post['$URN'];
-    
+    const postId = this.resolvePostUrn(post) || post.id || post['$URN'];
+    const commentId =
+      comment.commentUrn || comment.id || comment['$URN'] || `${postId}:${comment.id}`;
+
     return {
       platformId: commentId,
       platform: 'linkedin',
@@ -214,7 +342,9 @@ class LinkedInService {
         profilePicture: null
       },
       parentId: postId,
-      platformCreatedAt: new Date(comment.createdAt || comment.created?.time),
+      platformCreatedAt: new Date(
+        comment.created?.time || comment.createdAt || comment.lastModified?.time
+      ),
       platformUrl: `https://www.linkedin.com/feed/update/${postId}`,
       metadata: {
         likes: comment.likesSummary?.totalLikes || 0,
