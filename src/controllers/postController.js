@@ -1277,11 +1277,42 @@ async function publishToFacebook(connection, post, req) {
  * Helper: Publish to LinkedIn (Company Page or personal profile)
  */
 async function publishToLinkedIn(connection, post) {
-  const { content } = post;
+  const { content, mediaStoragePath, mediaStoragePaths, mediaType, mediaTypes } = post;
 
-  console.log(`💼 [LinkedIn] Publishing post`);
+  let storagePath = mediaStoragePath;
+  let resolvedType = mediaType;
+  if (!storagePath && mediaStoragePaths && mediaStoragePaths.length > 0) {
+    storagePath = mediaStoragePaths[0];
+    resolvedType = (mediaTypes && mediaTypes[0]) || 'image';
+  }
 
-  const result = await linkedinService.createPost(connection, content || '');
+  console.log(
+    `💼 [LinkedIn] Publishing post (media: ${storagePath ? resolvedType || 'file' : 'none'})`
+  );
+
+  let media = null;
+  if (storagePath) {
+    if (resolvedType === 'video') {
+      throw new Error(
+        'LinkedIn publishing with video is not supported yet. Use an image or text-only post.'
+      );
+    }
+    if (resolvedType === 'image') {
+      const imageBuffer = await fs.readFile(storagePath);
+      const ext = path.extname(storagePath).toLowerCase();
+      const contentType =
+        ext === '.png'
+          ? 'image/png'
+          : ext === '.gif'
+            ? 'image/gif'
+            : ext === '.webp'
+              ? 'image/webp'
+              : 'image/jpeg';
+      media = { imageBuffer, contentType };
+    }
+  }
+
+  const result = await linkedinService.createPost(connection, content || '', media);
 
   return {
     postId: result.postId,

@@ -4,6 +4,12 @@
 NODE_ENV=development
 PORT=3000
 
+# Super Admin (for scripts/createSuperAdmin.js and admin panel login)
+# SUPER_ADMIN_EMAIL=admin@repmeup.com
+# SUPER_ADMIN_PASSWORD=YourSecurePassword123
+# SUPER_ADMIN_FIRST_NAME=Super
+# SUPER_ADMIN_LAST_NAME=Admin
+
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017/orm_development
 
@@ -53,6 +59,12 @@ LINKEDIN_ENABLE_ADVANCED_SCOPES=true
 # Only set to 'true' as a temporary workaround: request only w_member_social so "Connect LinkedIn" doesn't error.
 # With this on, Company Page will NOT be available—orgs cannot post as their page until you set this back to false and have org approval.
 # LINKEDIN_MEMBER_SOCIAL_ONLY=true
+#
+# If publish returns 403 partnerApiPostsExternal.CREATE and you connected a Company Page:
+# - For Page posting: you need Community Management API approval from LinkedIn (no code fix).
+# - To post as the person's profile instead (while still having a page on the connection), set:
+# LINKEDIN_POST_AS_PERSON=true
+# Then restart API and reconnect LinkedIn so the token includes w_member_social.
 # Webhook configuration (requires special LinkedIn API access)
 LINKEDIN_WEBHOOK_VERIFY_TOKEN=your_secure_random_token_here
 LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here

@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "seed:menus": "node scripts/seedMenus.js",
     "seed:plans": "node scripts/seedPlans.js",
+    "create-super-admin": "node scripts/createSuperAdmin.js",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "lint": "eslint src/",
