@@ -21,20 +21,12 @@ router.use(protect);
 
 // Get all interactions
 router.get('/', inboxController.getInteractions);
-
 // Get inbox stats (must be before /:id)
 router.get('/stats', inboxController.getStats);
-
 // Get org labels (must be before /:id)
 router.get('/labels', inboxController.getLabels);
-
 // Get available agents for assignment (Manager/Admin only) (must be before /:id)
-router.get(
-  '/agents',
-  authorize('admin', 'manager'),
-  inboxController.getAvailableAgents
-);
-
+router.get( '/agents', authorize('admin', 'manager'), inboxController.getAvailableAgents);
 // Get escalated interactions requiring human response (must be before /:id)
 router.get('/escalated', inboxController.getEscalatedInteractions);
 

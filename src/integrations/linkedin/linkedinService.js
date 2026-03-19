@@ -327,18 +327,126 @@ class LinkedInService {
   }
 
   /**
+   * Upload an image for a feed post via Images API, then return urn:li:image:… for REST Posts.
+   * @see https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api
+   */
+  async uploadImageForFeedPost(accessToken, ownerUrn, imageBuffer, contentType = 'image/jpeg') {
+    const versionsToTry = [LINKEDIN_API_VERSION, '202511', '202509'];
+    let lastError;
+
+    for (const linkedInVersion of versionsToTry) {
+      try {
+        const initRes = await axios.post(
+          'https://api.linkedin.com/rest/images?action=initializeUpload',
+          { initializeUploadRequest: { owner: ownerUrn } },
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'X-Restli-Protocol-Version': '2.0.0',
+              'LinkedIn-Version': linkedInVersion,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        const value = initRes.data?.value || initRes.data;
+        const uploadUrl = value?.uploadUrl;
+        const imageUrn = value?.image;
+
+        if (!uploadUrl || !imageUrn) {
+          throw new Error(
+            `LinkedIn image init missing uploadUrl/image. Response: ${JSON.stringify(initRes.data).slice(0, 500)}`
+          );
+        }
+
+        console.log(`📤 [LinkedIn] Uploading image (${imageBuffer.length} bytes) → ${imageUrn}`);
+
+        try {
+          await axios.put(uploadUrl, imageBuffer, {
+            headers: { 'Content-Type': contentType },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+            timeout: 120000
+          });
+        } catch (putErr) {
+          const st = putErr.response?.status;
+          if (st === 400 || st === 415 || st === 406) {
+            const FormData = require('form-data');
+            const form = new FormData();
+            const ext =
+              contentType === 'image/png' ? 'png' : contentType === 'image/gif' ? 'gif' : 'jpg';
+            form.append('file', imageBuffer, { filename: `post.${ext}`, contentType });
+            await axios.put(uploadUrl, form, {
+              headers: form.getHeaders(),
+              maxBodyLength: Infinity,
+              maxContentLength: Infinity,
+              timeout: 120000
+            });
+          } else {
+            throw putErr;
+          }
+        }
+
+        console.log('✅ [LinkedIn] Image upload complete');
+        return imageUrn;
+      } catch (error) {
+        lastError = error;
+        const code = error.response?.data?.code;
+        const message = (error.response?.data?.message || '').toLowerCase();
+        const isVersionError =
+          code === 'INVALID_VERSION' ||
+          code === 'NONEXISTENT_VERSION' ||
+          message.includes('version') ||
+          message.includes('not active');
+        if (isVersionError) {
+          console.warn(`⚠️  [LinkedIn] Image init version ${linkedInVersion} failed, trying next...`);
+          continue;
+        }
+        break;
+      }
+    }
+
+    console.error('❌ [LinkedIn] Image upload failed:', lastError?.response?.data || lastError?.message);
+    const msg =
+      lastError?.response?.data?.message ||
+      lastError?.response?.data?.error_description ||
+      lastError?.message ||
+      'Failed to upload image to LinkedIn';
+    throw new Error(msg);
+  }
+
+  /**
    * Create a new LinkedIn post.
    * Uses REST Posts API only (ugcPosts is deprecated and returns NO_VERSION).
    * Supports both Person URN (w_member_social) and Organization URN (w_organization_social).
+   *
+   * @param {object|null} media - Optional `{ imageBuffer, contentType }` — image is uploaded to LinkedIn first.
+   *        Plain URLs are not accepted; LinkedIn requires urn:li:image:… from their upload flow.
    */
-  async createPost(connection, postText, mediaUrls = []) {
+  async createPost(connection, postText, media = null) {
     const accessToken = connection.accessToken;
     const organizationUrn = connection.platformData?.organizationUrn;
     const personUrn = connection.platformData?.personUrn
       ? connection.platformData.personUrn
       : `urn:li:person:${connection.platformUserId}`;
 
-    const author = organizationUrn || personUrn;
+    /**
+     * Default: post as Company Page when organizationUrn exists (RepMeUp org use case).
+     * LinkedIn returns ACCESS_DENIED partnerApiPostsExternal.CREATE until Community Management API is approved for org posting.
+     * Set LINKEDIN_POST_AS_PERSON=true to always use the member (person) as author when personUrn is available
+     * (Share on LinkedIn + w_member_social). Same flag helps when org is saved but you only have member scopes.
+     */
+    const postAsPerson = process.env.LINKEDIN_POST_AS_PERSON === 'true';
+    let author = organizationUrn || personUrn;
+    if (postAsPerson && personUrn) {
+      if (organizationUrn) {
+        console.log(
+          'ℹ️  [LinkedIn] LINKEDIN_POST_AS_PERSON=true — posting as member, not Company Page:',
+          personUrn
+        );
+      }
+      author = personUrn;
+    }
 
     if (!author) {
       throw new Error('No LinkedIn author URN available. Reconnect your LinkedIn account.');
@@ -346,7 +454,14 @@ class LinkedInService {
 
     console.log(`📝 [LinkedIn] Creating post as ${author}...`);
 
-    return this._createPostREST(accessToken, author, postText, mediaUrls);
+    let mediaUrns = [];
+    if (media?.imageBuffer && Buffer.isBuffer(media.imageBuffer)) {
+      const ct = media.contentType || 'image/jpeg';
+      const urn = await this.uploadImageForFeedPost(accessToken, author, media.imageBuffer, ct);
+      mediaUrns = [urn];
+    }
+
+    return this._createPostREST(accessToken, author, postText, mediaUrns);
   }
 
   /**
@@ -410,6 +525,27 @@ class LinkedInService {
     }
 
     console.error('❌ [LinkedIn] REST Posts API error:', lastError?.response?.data || lastError?.message);
+
+    const apiMessage = lastError?.response?.data?.message || '';
+    const isPermissionDenied = lastError?.response?.status === 403 ||
+      lastError?.response?.data?.code === 'ACCESS_DENIED' ||
+      apiMessage.includes('partnerApiPostsExternal') ||
+      apiMessage.includes('Not enough permissions');
+
+    if (isPermissionDenied) {
+      const isOrgAuthor = author && String(author).includes('urn:li:organization');
+      const hintOrg =
+        'Posting as a **Company Page** requires LinkedIn to approve **Community Management API** (and scopes like w_organization_social). ' +
+        'Apply in the Developer Portal → Products, or contact LinkedIn Developer Support.';
+      const hintMember =
+        'Posting as a **personal profile** needs the **Share on LinkedIn** product and **w_member_social** on the token. ' +
+        'Set LINKEDIN_POST_AS_PERSON=true in .env to force member posting when a page is connected, then reconnect OAuth so the token includes w_member_social.';
+      throw new Error(
+        `LinkedIn denied post creation (partnerApiPostsExternal). ${isOrgAuthor ? hintOrg : hintMember} ` +
+        `Details: ${apiMessage || 'ACCESS_DENIED'}`
+      );
+    }
+
     throw new Error(
       lastError?.response?.data?.message ||
       lastError?.response?.data?.error_description ||
