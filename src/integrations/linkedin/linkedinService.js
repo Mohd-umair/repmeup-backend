@@ -26,21 +26,70 @@ class LinkedInService {
   }
 
   /**
-   * List posts by author — preferred API (LinkedIn docs: Find Posts by Authors).
-   * GET https://api.linkedin.com/rest/posts?q=author&author=…
+   * Normalize a v2 ugcPosts element into the shape used by sync (id + commentary).
+   */
+  normalizeUgcPostElement(el) {
+    if (!el || typeof el !== 'object') return el;
+    let commentary = el.commentary;
+    const share = el.specificContent?.['com.linkedin.ugc.ShareContent'];
+    if (!commentary && share?.shareCommentary?.text) {
+      commentary = share.shareCommentary.text;
+    }
+    return {
+      ...el,
+      id: el.id,
+      commentary: commentary || ''
+    };
+  }
+
+  /**
+   * List posts by author via v2 ugcPosts finder (works for person and org when permitted).
+   * GET /v2/ugcPosts?q=authors&authors=List(urlEncodedUrn)
+   * @see https://learn.microsoft.com/en-us/linkedin/compliance/integrations/shares/ugc-post-api
+   */
+  async fetchPostsByAuthorUgcV2(accessToken, authorUrn, limit = 50) {
+    try {
+      const encodedUrn = encodeURIComponent(authorUrn);
+      const authorsParam = `List(${encodedUrn})`;
+      const count = Math.min(limit, 100);
+      const url = `${this.apiURL}/ugcPosts?q=authors&authors=${authorsParam}&count=${count}&sortBy=LAST_MODIFIED`;
+      const response = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'X-Restli-Protocol-Version': '2.0.0'
+        }
+      });
+      const elements = response.data?.elements || [];
+      const normalized = elements.map(e => this.normalizeUgcPostElement(e));
+      if (normalized.length > 0) {
+        console.log(`📊 [LinkedIn] v2 ugcPosts finder: ${normalized.length} post(s) for author`);
+      }
+      return normalized;
+    } catch (error) {
+      console.warn(
+        '⚠️  [LinkedIn] v2 ugcPosts finder failed:',
+        error.response?.data || error.message
+      );
+      return [];
+    }
+  }
+
+  /**
+   * List posts by author — REST Posts API (LinkedIn docs: Find Posts by Authors).
+   * Query param order matters for Rest.li: **author** must appear before **q=author**
+   * (axios `params` object order can produce ILLEGAL_ARGUMENT otherwise).
+   * Note: Some tenants return 400 for person URNs here; use ugcPosts for members in that case.
    */
   async fetchPostsByAuthorREST(accessToken, authorUrn, limit = 50) {
     const versionsToTry = [LINKEDIN_API_VERSION, '202511', '202509'];
+    const count = Math.min(limit, 100);
+    const encAuthor = encodeURIComponent(authorUrn);
     let lastError;
+
     for (const linkedInVersion of versionsToTry) {
       try {
-        const response = await axios.get('https://api.linkedin.com/rest/posts', {
-          params: {
-            q: 'author',
-            author: authorUrn,
-            count: Math.min(limit, 100),
-            sortBy: 'LAST_MODIFIED'
-          },
+        const url = `https://api.linkedin.com/rest/posts?author=${encAuthor}&q=author&count=${count}&sortBy=LAST_MODIFIED`;
+        const response = await axios.get(url, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
@@ -103,13 +152,27 @@ class LinkedInService {
       console.log(`🔄 [LinkedIn] Sync author URN: ${authorUrn}`);
 
       const allInteractions = [];
-      
-      // Prefer REST Posts finder; fall back to legacy v2 finder if REST returns nothing
-      let posts = await this.fetchPostsByAuthorREST(accessToken, authorUrn);
+
+      const isPersonAuthor = authorUrn.includes('urn:li:person:');
+
+      // Member/personal: /rest/posts often returns ILLEGAL_ARGUMENT; try ugcPosts first.
+      // Organization: REST with correct param order first, then ugcPosts, then legacy v2 /posts.
+      let posts = [];
+      if (isPersonAuthor) {
+        posts = await this.fetchPostsByAuthorUgcV2(accessToken, authorUrn);
+        if (posts.length === 0) {
+          posts = await this.fetchPostsByAuthorREST(accessToken, authorUrn);
+        }
+      } else {
+        posts = await this.fetchPostsByAuthorREST(accessToken, authorUrn);
+        if (posts.length === 0) {
+          posts = await this.fetchPostsByAuthorUgcV2(accessToken, authorUrn);
+        }
+      }
       if (posts.length === 0) {
         posts = await this.fetchOrganizationPosts(accessToken, authorUrn);
         if (posts.length > 0) {
-          console.log(`📊 [LinkedIn] Legacy v2 posts finder: ${posts.length} post(s)`);
+          console.log(`📊 [LinkedIn] Legacy v2 /posts finder: ${posts.length} post(s)`);
         }
       }
 
