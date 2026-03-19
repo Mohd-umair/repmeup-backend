@@ -32,6 +32,11 @@ class LinkedInAuthService {
       // Use this when org scopes are not yet approved to avoid "scope not authorized" errors.
       if (memberSocialOnly) {
         advancedScopes.push('w_member_social');
+        // Read member posts + comments for inbox sync (UGC finders, socialActions GET).
+        // Not on Default Tier by default — LinkedIn often requires approval for r_member_social.
+        if (process.env.LINKEDIN_INCLUDE_R_MEMBER_SOCIAL === 'true') {
+          advancedScopes.push('r_member_social');
+        }
       } else {
         // Full org access: requires Community Management API approval
         advancedScopes.push(
@@ -59,7 +64,14 @@ class LinkedInAuthService {
     console.log('🔗 [LinkedIn] Client ID:', this.clientId?.substring(0, 10) + '...');
     console.log('🔗 [LinkedIn] Redirect URI:', this.redirectUri);
     console.log('🔗 [LinkedIn] Scopes:', scopes.join(', '));
-    console.log('🔗 [LinkedIn] Advanced scopes enabled:', enableAdvanced, 'member-social-only:', memberSocialOnly);
+    console.log(
+      '🔗 [LinkedIn] Advanced scopes enabled:',
+      enableAdvanced,
+      'member-social-only:',
+      memberSocialOnly,
+      'r_member_social:',
+      process.env.LINKEDIN_INCLUDE_R_MEMBER_SOCIAL === 'true'
+    );
     
     return authURL;
   }

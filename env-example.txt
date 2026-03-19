@@ -60,6 +60,11 @@ LINKEDIN_ENABLE_ADVANCED_SCOPES=true
 # With this on, Company Page will NOT be available—orgs cannot post as their page until you set this back to false and have org approval.
 # LINKEDIN_MEMBER_SOCIAL_ONLY=true
 #
+# Member inbox (list YOUR posts + read comments): posting uses w_member_social; READ APIs need r_member_social.
+# Add r_member_social to your LinkedIn app (Products/scopes) if LinkedIn allows, then:
+# LINKEDIN_INCLUDE_R_MEMBER_SOCIAL=true
+# Reconnect LinkedIn. If OAuth errors on scope, request r_member_social access from LinkedIn Developer Support.
+#
 # If publish returns 403 partnerApiPostsExternal.CREATE and you connected a Company Page:
 # - For Page posting: you need Community Management API approval from LinkedIn (no code fix).
 # - To post as the person's profile instead (while still having a page on the connection), set:

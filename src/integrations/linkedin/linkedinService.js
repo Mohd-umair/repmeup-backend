@@ -45,33 +45,72 @@ class LinkedInService {
   /**
    * List posts by author via v2 ugcPosts finder (works for person and org when permitted).
    * GET /v2/ugcPosts?q=authors&authors=List(urlEncodedUrn)
+   * LinkedIn returns ugcPosts.FINDER-authors.NO_VERSION without LinkedIn-Version header.
    * @see https://learn.microsoft.com/en-us/linkedin/compliance/integrations/shares/ugc-post-api
    */
   async fetchPostsByAuthorUgcV2(accessToken, authorUrn, limit = 50) {
-    try {
-      const encodedUrn = encodeURIComponent(authorUrn);
-      const authorsParam = `List(${encodedUrn})`;
-      const count = Math.min(limit, 100);
-      const url = `${this.apiURL}/ugcPosts?q=authors&authors=${authorsParam}&count=${count}&sortBy=LAST_MODIFIED`;
-      const response = await axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'X-Restli-Protocol-Version': '2.0.0'
+    const encodedUrn = encodeURIComponent(authorUrn);
+    const authorsParam = `List(${encodedUrn})`;
+    const count = Math.min(limit, 100);
+    const url = `${this.apiURL}/ugcPosts?q=authors&authors=${authorsParam}&count=${count}&sortBy=LAST_MODIFIED`;
+    const versionsToTry = [LINKEDIN_API_VERSION, '202511', '202509', '202506', '202505'];
+    let lastError;
+
+    for (const linkedInVersion of versionsToTry) {
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'X-Restli-Protocol-Version': '2.0.0',
+            'LinkedIn-Version': linkedInVersion
+          }
+        });
+        const elements = response.data?.elements || [];
+        const normalized = elements.map(e => this.normalizeUgcPostElement(e));
+        if (normalized.length > 0) {
+          console.log(
+            `📊 [LinkedIn] v2 ugcPosts finder (${linkedInVersion}): ${normalized.length} post(s) for author`
+          );
         }
-      });
-      const elements = response.data?.elements || [];
-      const normalized = elements.map(e => this.normalizeUgcPostElement(e));
-      if (normalized.length > 0) {
-        console.log(`📊 [LinkedIn] v2 ugcPosts finder: ${normalized.length} post(s) for author`);
+        return normalized;
+      } catch (error) {
+        lastError = error;
+        const status = error.response?.status;
+        const code = error.response?.data?.code;
+        const message = (error.response?.data?.message || '').toLowerCase();
+        // 403 ACCESS_DENIED is a product/scope gate — do not spin versions (message may contain "NO_VERSION" as permission id)
+        if (status === 403 || code === 'ACCESS_DENIED') {
+          console.warn(
+            '⚠️  [LinkedIn] v2 ugcPosts finder denied (scopes/product).',
+            error.response?.data || error.message
+          );
+          break;
+        }
+        const isVersionError =
+          code === 'INVALID_VERSION' ||
+          code === 'NONEXISTENT_VERSION' ||
+          message.includes('not active') ||
+          message.includes('is not active');
+        if (isVersionError) {
+          console.warn(
+            `⚠️  [LinkedIn] ugcPosts finder version ${linkedInVersion} rejected, trying next...`
+          );
+          continue;
+        }
+        console.warn(
+          '⚠️  [LinkedIn] v2 ugcPosts finder failed:',
+          error.response?.data || error.message
+        );
+        break;
       }
-      return normalized;
-    } catch (error) {
-      console.warn(
-        '⚠️  [LinkedIn] v2 ugcPosts finder failed:',
-        error.response?.data || error.message
-      );
-      return [];
     }
+    if (lastError && lastError.response?.status !== 403) {
+      console.warn(
+        '⚠️  [LinkedIn] v2 ugcPosts finder exhausted versions:',
+        lastError.response?.data || lastError.message
+      );
+    }
+    return [];
   }
 
   /**
@@ -103,13 +142,21 @@ class LinkedInService {
         return elements;
       } catch (error) {
         lastError = error;
+        const status = error.response?.status;
         const code = error.response?.data?.code;
         const message = (error.response?.data?.message || '').toLowerCase();
+        if (status === 403 || code === 'ACCESS_DENIED') {
+          console.warn(
+            '⚠️  [LinkedIn] REST posts finder denied (partnerApiPostsExternal / Community Management).',
+            error.response?.data || error.message
+          );
+          break;
+        }
         const isVersionError =
           code === 'INVALID_VERSION' ||
           code === 'NONEXISTENT_VERSION' ||
-          message.includes('version') ||
-          message.includes('not active');
+          message.includes('not active') ||
+          message.includes('is not active');
         if (isVersionError) {
           console.warn(`⚠️  [LinkedIn] REST posts finder version ${linkedInVersion} failed, trying next...`);
           continue;
@@ -171,15 +218,16 @@ class LinkedInService {
       }
       if (posts.length === 0) {
         posts = await this.fetchOrganizationPosts(accessToken, authorUrn);
-        if (posts.length > 0) {
-          console.log(`📊 [LinkedIn] Legacy v2 /posts finder: ${posts.length} post(s)`);
-        }
       }
 
       if (posts.length === 0) {
         console.warn(
-          '⚠️  [LinkedIn] No posts returned. Org posts need r_organization_social (Community Management). ' +
-            'Member posts need r_member_social (often restricted by LinkedIn). Reconnect after scopes are approved.'
+          '⚠️  [LinkedIn] No posts to sync — check logs above for 403/400.\n' +
+            '  • partnerApiPostsExternal.FINDER-author (403) → Community Management API approval + org token scopes (e.g. r_organization_social).\n' +
+            '  • ugcPosts.FINDER-authors… (403) → LinkedIn is denying the authors finder; same tier/scopes as listing UGC (org or member read).\n' +
+            '    (".NO_VERSION" in the message is LinkedIn’s permission id, not “missing header” — requests already send LinkedIn-Version.)\n' +
+            '  • ILLEGAL_ARGUMENT on v2/posts → legacy finder rejected; harmless if REST/ugc work after approval.\n' +
+            'Reconnect LinkedIn after LinkedIn enables products/scopes on your app.'
         );
       } else {
         console.log(`📊 [LinkedIn] Found ${posts.length} posts to scan for comments`);
@@ -268,32 +316,46 @@ class LinkedInService {
   }
 
   /**
-   * Fetch organization posts
+   * Legacy v2 /posts finder (last resort). Same Rest.li rule: author before q=author.
    */
-  async fetchOrganizationPosts(accessToken, organizationUrn, limit = 50) {
-    try {
-      const response = await axios.get(
-        `${this.apiURL}/posts`,
-        {
-          params: {
-            author: organizationUrn,
-            q: 'author',
-            count: limit,
-            sortBy: 'LAST_MODIFIED'
-          },
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': LINKEDIN_API_VERSION
-          }
-        }
-      );
+  async fetchOrganizationPosts(accessToken, authorUrn, limit = 50) {
+    const count = Math.min(limit, 100);
+    const encAuthor = encodeURIComponent(authorUrn);
+    const url = `${this.apiURL}/posts?author=${encAuthor}&q=author&count=${count}&sortBy=LAST_MODIFIED`;
+    const versionsToTry = [LINKEDIN_API_VERSION, '202511', '202509'];
+    let lastError;
 
-      return response.data.elements || [];
-    } catch (error) {
-      console.error('❌ [LinkedIn] Failed to fetch posts:', error.response?.data || error.message);
-      return [];
+    for (const linkedInVersion of versionsToTry) {
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'X-Restli-Protocol-Version': '2.0.0',
+            'LinkedIn-Version': linkedInVersion
+          }
+        });
+        const elements = response.data?.elements || [];
+        if (elements.length > 0) {
+          console.log(`📊 [LinkedIn] Legacy v2 /posts: ${elements.length} post(s)`);
+        }
+        return elements;
+      } catch (error) {
+        lastError = error;
+        const status = error.response?.status;
+        const code = error.response?.data?.code;
+        const message = (error.response?.data?.message || '').toLowerCase();
+        if (status === 403 || code === 'ACCESS_DENIED') break;
+        const isVersionError =
+          code === 'INVALID_VERSION' ||
+          code === 'NONEXISTENT_VERSION' ||
+          message.includes('not active') ||
+          message.includes('is not active');
+        if (isVersionError) continue;
+        console.error('❌ [LinkedIn] Legacy v2 /posts failed:', error.response?.data || error.message);
+        break;
+      }
     }
+    return [];
   }
 
   /**
