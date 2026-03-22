@@ -74,6 +74,10 @@ class AuthService {
         throw new Error('Invalid credentials');
       }
 
+      if (user.deletedAt) {
+        throw new Error('This account is no longer available.');
+      }
+
       // Check if user is active
       if (!user.isActive) {
         throw new Error('Account is deactivated. Please contact support.');
@@ -231,6 +235,12 @@ class AuthService {
       let user = await User.findOne({ email }).populate('organization');
 
       if (user) {
+        if (user.deletedAt) {
+          throw new Error('This account is no longer available.');
+        }
+        if (!user.isActive) {
+          throw new Error('Account is deactivated. Please contact support.');
+        }
         // Block sign-in if RISC reported this Google account as disabled
         if (user.risc && user.risc.googleSignInDisabled) {
           throw new Error(

@@ -1,5 +1,6 @@
 const authService = require('../services/authService');
 const emailService = require('../services/emailService');
+const userActivityLogService = require('../services/userActivityLogService');
 
 // @desc    Register user & organization
 // @route   POST /api/auth/register
@@ -7,6 +8,19 @@ const emailService = require('../services/emailService');
 exports.register = async (req, res, next) => {
   try {
     const result = await authService.register(req.body);
+
+    const orgId =
+      result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'register',
+      path: '/api/auth/register',
+      method: 'POST',
+      statusCode: 201,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
 
     // Send welcome email
     await emailService.sendWelcomeEmail(result.user);
@@ -33,6 +47,19 @@ exports.login = async (req, res, next) => {
     const { email, password } = req.body;
 
     const result = await authService.login(email, password);
+
+    const orgId =
+      result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'login',
+      path: '/api/auth/login',
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
 
     res.status(200).json({
       success: true,

@@ -57,6 +57,11 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  /** Soft delete — user cannot sign in; hidden from default super-admin lists */
+  deletedAt: {
+    type: Date,
+    default: null
+  },
   isEmailVerified: {
     type: Boolean,
     default: false
@@ -123,6 +128,7 @@ const userSchema = new mongoose.Schema({
 // Indexes
 // Note: email index is automatically created by unique: true
 userSchema.index({ organization: 1, role: 1 });
+userSchema.index({ deletedAt: 1 });
 
 // Hash password before saving (skip for OAuth users without password)
 userSchema.pre('save', async function(next) {

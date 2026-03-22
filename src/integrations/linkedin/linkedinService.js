@@ -4,6 +4,13 @@ const Interaction = require('../../models/Interaction');
 // Currently active Marketing API version (YYYYMM). Update when LinkedIn sunsets older versions.
 const LINKEDIN_API_VERSION = '202510';
 
+/** Shown in sync API when LinkedIn returns 403 on all post-listing finders (read access missing). */
+const LINKEDIN_SYNC_HINT_MEMBER =
+  'LinkedIn returned 403 when listing your posts (ugcPosts / REST finders). Posting still works with w_member_social, but reading posts and comments requires read access (typically r_member_social). Add r_member_social to your LinkedIn app if available, set LINKEDIN_INCLUDE_R_MEMBER_SOCIAL=true in .env, reconnect LinkedIn, or request access via LinkedIn Developer Support. See docs/LINKEDIN_API_GUIDE.md.';
+
+const LINKEDIN_SYNC_HINT_ORG =
+  'LinkedIn returned 403 when listing Company Page posts (partnerApiPostsExternal / ugcPosts). Approve Community Management API for your app and use a token with r_organization_social (and reconnect). See docs/LINKEDIN_API_GUIDE.md.';
+
 class LinkedInService {
   constructor() {
     this.apiURL = 'https://api.linkedin.com/v2';
@@ -193,7 +200,12 @@ class LinkedInService {
 
       if (!authorUrn) {
         console.log('⚠️  [LinkedIn] No author URN (organization or person). Reconnect LinkedIn.');
-        return { count: 0, interactions: [] };
+        return {
+          count: 0,
+          interactions: [],
+          linkedInSyncHint:
+            'No LinkedIn author URN on this connection. Disconnect and reconnect LinkedIn from Settings.'
+        };
       }
 
       console.log(`🔄 [LinkedIn] Sync author URN: ${authorUrn}`);
@@ -279,13 +291,21 @@ class LinkedInService {
       }
 
       console.log(`✅ [LinkedIn] Sync complete: ${savedCount} interactions saved`);
+
+      const linkedInSyncHint =
+        posts.length === 0
+          ? isPersonAuthor
+            ? LINKEDIN_SYNC_HINT_MEMBER
+            : LINKEDIN_SYNC_HINT_ORG
+          : undefined;
       
       // Update connection stats
       await connection.updateSyncStats(savedCount, true);
       
       return {
         count: savedCount,
-        interactions: allInteractions
+        interactions: allInteractions,
+        ...(linkedInSyncHint && { linkedInSyncHint })
       };
     } catch (error) {
       console.error('❌ [LinkedIn] Sync error:', error.message);

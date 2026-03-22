@@ -1,0 +1,28 @@
+/**
+ * Super Admin API — isolated under /api/super-admin
+ * Requires JWT + role super_admin or admin (panel operators).
+ */
+const express = require('express');
+const router = express.Router();
+const { protect } = require('../../middlewares/auth');
+const { requireSuperAdminAccess } = require('../../middlewares/superAdminAccess');
+const superAdminController = require('../../controllers/superAdminController');
+
+router.use(protect);
+router.use(requireSuperAdminAccess);
+
+router.get('/plans', superAdminController.listPlans);
+router.get('/dashboard/stats', superAdminController.getDashboardStats);
+router.get('/organizations', superAdminController.listOrganizations);
+router.post(
+  '/organizations/:organizationId/users',
+  superAdminController.createOrganizationUser
+);
+router.get('/organizations/:id', superAdminController.getOrganization);
+router.get('/users', superAdminController.listUsers);
+router.get('/users/:id/activity', superAdminController.getUserActivity);
+router.get('/users/:id', superAdminController.getUser);
+router.patch('/users/:id/status', superAdminController.setUserActive);
+router.delete('/users/:id', superAdminController.softDeleteUser);
+
+module.exports = router;
