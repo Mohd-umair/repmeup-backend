@@ -3,6 +3,7 @@ const Organization = require('../models/Organization');
 const Subscription = require('../models/Subscription');
 const Interaction = require('../models/Interaction');
 const { escapeRegex } = require('../utils/sanitize');
+const userActivityLogService = require('../services/userActivityLogService');
 
 // @desc    Get all users in organization
 // @route   GET /api/users
@@ -12,8 +13,8 @@ exports.getUsers = async (req, res, next) => {
     const { role, status, search } = req.query;
     const organizationId = req.user.organization._id;
 
-    // Build query
-    const query = { organization: organizationId };
+    // Build query (exclude soft-deleted)
+    const query = { organization: organizationId, deletedAt: null };
 
     if (role) {
       query.role = role;
@@ -76,7 +77,8 @@ exports.getUserById = async (req, res, next) => {
   try {
     const user = await User.findOne({
       _id: req.params.id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     }).select('-password');
 
     if (!user) {
@@ -217,7 +219,8 @@ exports.updateUser = async (req, res, next) => {
     // Check if user exists in same organization
     const userToUpdate = await User.findOne({
       _id: id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     });
 
     if (!userToUpdate) {
@@ -306,7 +309,8 @@ exports.deleteUser = async (req, res, next) => {
     // Check if user exists in same organization
     const userToDelete = await User.findOne({
       _id: id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     });
 
     if (!userToDelete) {
@@ -366,7 +370,8 @@ exports.getUserStats = async (req, res, next) => {
     // Check if user exists in same organization
     const user = await User.findOne({
       _id: id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     }).select('-password');
 
     if (!user) {
@@ -534,6 +539,7 @@ exports.getAvailableAgents = async (req, res, next) => {
     // Get all active agents and managers
     const agents = await User.find({
       organization: organizationId,
+      deletedAt: null,
       isActive: true,
       role: { $in: ['agent', 'manager', 'admin'] }
     })
@@ -570,6 +576,35 @@ exports.getAvailableAgents = async (req, res, next) => {
     });
   } catch (error) {
     console.error('Get available agents error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    SPA navigation beacon (page / route views)
+ * @route   POST /api/users/me/activity
+ * @access  Private
+ */
+exports.recordClientNavigation = async (req, res, next) => {
+  try {
+    const route = typeof req.body?.route === 'string' ? req.body.route.trim() : '';
+    if (!route || route.length > 512) {
+      return res.status(400).json({
+        success: false,
+        error: 'route is required (max 512 characters)'
+      });
+    }
+    const title =
+      typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 200) : undefined;
+    const referrer =
+      typeof req.body?.referrer === 'string' ? req.body.referrer.trim().slice(0, 512) : undefined;
+    const meta = {};
+    if (title) meta.title = title;
+    if (referrer) meta.referrer = referrer;
+
+    userActivityLogService.recordNavigation(req, route, meta);
+    return res.status(204).send();
+  } catch (error) {
     next(error);
   }
 };

@@ -1,5 +1,6 @@
 require('dotenv').config();
 const app = require('./app');
+const { getCorsOriginOption } = require('./config/corsOrigins');
 const connectDB = require('./config/database');
 const { connectRedis } = require('./config/redis');
 const http = require('http');
@@ -22,8 +23,9 @@ const server = http.createServer(app);
 // Initialize Socket.IO
 const io = socketIO(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:4200',
-    methods: ['GET', 'POST']
+    origin: getCorsOriginOption(),
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 

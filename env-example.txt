@@ -9,6 +9,7 @@ PORT=3000
 # SUPER_ADMIN_PASSWORD=YourSecurePassword123
 # SUPER_ADMIN_FIRST_NAME=Super
 # SUPER_ADMIN_LAST_NAME=Admin
+# Super Admin Panel APIs: /api/super-admin/* (JWT + role super_admin|admin). See docs/SUPER_ADMIN_API.md
 
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017/orm_development
@@ -30,6 +31,7 @@ JWT_REFRESH_EXPIRE=30d
 
 # Frontend
 FRONTEND_URL=http://localhost:4200
+# Comma-separate for super admin panel (port 4201): http://localhost:4200,http://localhost:4201
 CORS_ORIGIN=http://localhost:4200
 
 # Meta/Facebook/Instagram/WhatsApp

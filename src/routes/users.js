@@ -9,7 +9,8 @@ const {
   getUserStats,
   getAvailableAgents,
   getAICredits,
-  getAICreditUsageHistory
+  getAICreditUsageHistory,
+  recordClientNavigation
 } = require('../controllers/userController');
 const { protect } = require('../middlewares/auth');
 const { validateUserCreate, validateUserUpdate } = require('../middlewares/validation');
@@ -25,6 +26,9 @@ router.get('/ai-credits/usage', getAICreditUsageHistory);
 
 // GET /api/users/agents/available - Get available agents for assignment
 router.get('/agents/available', getAvailableAgents);
+
+// POST /api/users/me/activity — SPA page-view beacon (must be before /:id routes)
+router.post('/me/activity', recordClientNavigation);
 
 // GET /api/users/:id/stats - Get user statistics
 router.get('/:id/stats', getUserStats);

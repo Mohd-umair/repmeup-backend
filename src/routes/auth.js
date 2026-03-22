@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const userActivityLogService = require('../services/userActivityLogService');
 const { protect, authorize } = require('../middlewares/auth');
 const { validateRegistration, validateLogin } = require('../middlewares/validation');
 const riscController = require('../controllers/riscController');
@@ -467,6 +468,23 @@ router.get('/google/callback', async (req, res) => {
     const tokens = await googleAuthService.getTokens(code);
     const profile = await googleAuthService.getUserProfile(tokens.access_token);
     const result = await authController.googleAuth(profile);
+
+    const u = result.user;
+    const uid = u._id || u.id;
+    const org = u.organization;
+    const orgId =
+      org && typeof org === 'object' && org._id ? org._id : org;
+    userActivityLogService.recordAuthEvent({
+      userId: uid,
+      organizationId: orgId,
+      action: 'google_oauth_login',
+      path: '/api/auth/google/callback',
+      method: 'GET',
+      statusCode: 302,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent'],
+      metadata: { isNewUser: Boolean(result.isNewUser) }
+    });
 
     const redirectUrl = `${process.env.FRONTEND_URL}/auth/google-callback?token=${result.token}&refreshToken=${result.refreshToken}&isNewUser=${result.isNewUser}`;
     res.redirect(redirectUrl);

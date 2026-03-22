@@ -7,6 +7,7 @@ const rateLimitRedis = require('rate-limit-redis');
 const RedisStore = rateLimitRedis.RedisStore || rateLimitRedis.default || rateLimitRedis;
 const { getRedisClient } = require('./config/redis');
 const errorHandler = require('./middlewares/errorHandler');
+const { getCorsOriginList, getCorsOriginOption } = require('./config/corsOrigins');
 
 const app = express();
 
@@ -14,7 +15,8 @@ const app = express();
 app.set('trust proxy', 1);
 
 // Security middleware: CSP, XSS, and other safe headers
-const frontendOrigin = process.env.CORS_ORIGIN || process.env.FRONTEND_URL || 'http://localhost:4200';
+const corsOrigins = getCorsOriginList();
+const connectSrc = ["'self'", ...corsOrigins];
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -22,7 +24,7 @@ app.use(helmet({
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", frontendOrigin],
+      connectSrc,
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       frameSrc: ["'none'"],
@@ -33,9 +35,9 @@ app.use(helmet({
   hsts: process.env.NODE_ENV === 'production' ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false
 }));
 
-// CORS
+// CORS (comma-separated CORS_ORIGIN for main app + super admin panel, etc.)
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:4200',
+  origin: getCorsOriginOption(),
   credentials: true
 }));
 
@@ -46,6 +48,10 @@ app.use(express.urlencoded({ extended: true }));
 // Request logger middleware (adds req.log and requestId)
 const requestLogger = require('./middlewares/requestLogger');
 app.use(requestLogger);
+
+// User activity (authenticated API calls) — non-blocking; see UserActivityLog model
+const userActivityLogger = require('./middlewares/userActivityLogger');
+app.use('/api', userActivityLogger);
 
 // HTTP request logging (morgan) - disabled to reduce console noise; set LOG_HTTP=1 to enable
 if (process.env.LOG_HTTP === '1') {
@@ -131,6 +137,7 @@ app.use('/api/menus', require('./routes/menus'));
 app.use('/api/subscription', require('./routes/subscription'));
 app.use('/api/social-accounts', require('./routes/socialAccounts'));
 app.use('/api/plans', require('./routes/plans'));
+app.use('/api/super-admin', require('./routes/super-admin'));
 app.use('/api/brand-config', require('./routes/brandConfig'));
 app.use('/api/trends', require('./routes/trends'));
 app.use('/api/audit-logs', require('./routes/auditLog'));

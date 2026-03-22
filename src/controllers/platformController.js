@@ -611,14 +611,21 @@ exports.syncPlatform = async (req, res, next) => {
       console.log(`🗑️  [Cache] Invalidated interaction cache: ${cachePattern}`);
     }
       
+    const linkedInHint = result.linkedInSyncHint;
+    const message =
+      result.count > 0
+        ? `Sync completed. Found ${result.count} new interactions. ${autoReplyQueued} auto-replies queued.`
+        : linkedInHint
+          ? 'Sync completed. No new interactions. LinkedIn did not allow listing posts (read access)—see data.linkedInSyncHint or server logs.'
+          : 'Sync completed. No new interactions found.';
+
     res.status(200).json({
       success: true,
-      message: result.count > 0 
-        ? `Sync completed. Found ${result.count} new interactions. ${autoReplyQueued} auto-replies queued.` 
-        : 'Sync completed. No new interactions found.',
+      message,
       data: {
         interactionsAdded: result.count,
-        autoRepliesQueued: autoReplyQueued
+        autoRepliesQueued: autoReplyQueued,
+        ...(linkedInHint && { linkedInSyncHint })
       }
     });
   } catch (error) {
