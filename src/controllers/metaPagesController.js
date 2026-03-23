@@ -1,7 +1,6 @@
 const PlatformConnection = require('../models/PlatformConnection');
 const metaAuth = require('../integrations/meta/metaAuth');
 const platformConnectionService = require('../services/platformConnectionService');
-const axios = require('axios');
 
 /**
  * Meta Pages Controller (Step 8)
@@ -389,7 +388,7 @@ exports.resubscribeFacebookWebhooks = async (req, res, next) => {
       platform: 'instagram',
       platformUserId: { $exists: true, $ne: null },
       isActive: true,
-      status: { $in: ['connected', 'available'] }
+      status: 'connected'
     }).select('platformUserId platformUsername accessToken').lean();
 
     if (fbConnections.length === 0 && igConnections.length === 0) {
@@ -440,102 +439,6 @@ exports.resubscribeFacebookWebhooks = async (req, res, next) => {
     });
   } catch (error) {
     console.error('❌ [Meta Pages] Error resubscribing webhooks:', error);
-    next(error);
-  }
-};
-
-/**
- * @desc    Diagnose Instagram mentions webhook readiness for connected accounts
- * @route   GET /api/meta/pages/mentions-readiness
- * @access  Private
- */
-exports.getMentionsReadiness = async (req, res, next) => {
-  try {
-    const organizationId = req.user.organization._id || req.user.organization;
-    const graphVersion = process.env.META_GRAPH_API_VERSION || 'v19.0';
-    const graphBase = `https://graph.facebook.com/${graphVersion}`;
-
-    const igConnections = await PlatformConnection.find({
-      organization: organizationId,
-      platform: 'instagram',
-      isActive: true,
-      status: { $in: ['connected', 'available'] }
-    })
-      .select('platformUserId platformPageId platformUsername platformDisplayName status accessToken platformData')
-      .lean();
-
-    if (igConnections.length === 0) {
-      return res.json({
-        success: true,
-        data: {
-          ready: false,
-          accounts: [],
-          summary: 'No active Instagram connections found for this organization.'
-        }
-      });
-    }
-
-    const accounts = [];
-    for (const conn of igConnections) {
-      const igUserId = conn.platformUserId || conn.platformData?.businessAccountId || null;
-      const account = {
-        platformUserId: conn.platformUserId || null,
-        platformPageId: conn.platformPageId || conn.platformData?.pageId || null,
-        businessAccountId: conn.platformData?.businessAccountId || null,
-        username: conn.platformUsername || conn.platformDisplayName || null,
-        status: conn.status,
-        mentionsSubscribed: false,
-        subscribedFields: [],
-        ready: false
-      };
-
-      if (!igUserId) {
-        account.error = 'Missing Instagram user id on connection (platformUserId/businessAccountId).';
-        accounts.push(account);
-        continue;
-      }
-
-      if (!conn.accessToken) {
-        account.error = 'Missing page access token on Instagram connection.';
-        accounts.push(account);
-        continue;
-      }
-
-      try {
-        const { data } = await axios.get(`${graphBase}/${igUserId}/subscribed_apps`, {
-          params: { access_token: conn.accessToken }
-        });
-        const appSubscription = Array.isArray(data?.data) ? data.data[0] : null;
-        const subscribedFields = Array.isArray(appSubscription?.subscribed_fields)
-          ? appSubscription.subscribed_fields
-          : [];
-
-        account.subscribedFields = subscribedFields;
-        account.mentionsSubscribed = subscribedFields.includes('mentions');
-        account.ready = account.mentionsSubscribed;
-        if (!account.ready) {
-          account.error = 'Instagram account is reachable but mentions is not in subscribed_fields.';
-        }
-      } catch (err) {
-        account.error = err.response?.data?.error?.message || err.message || 'Failed to query subscribed_apps';
-        account.graphError = err.response?.data?.error || null;
-      }
-
-      accounts.push(account);
-    }
-
-    const readyCount = accounts.filter(a => a.ready).length;
-    res.json({
-      success: true,
-      data: {
-        ready: readyCount > 0,
-        readyCount,
-        total: accounts.length,
-        accounts
-      }
-    });
-  } catch (error) {
-    console.error('❌ [Meta Pages] Error checking mentions readiness:', error);
     next(error);
   }
 };
