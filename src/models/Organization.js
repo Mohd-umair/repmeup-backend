@@ -109,7 +109,8 @@ const organizationSchema = new mongoose.Schema({
     },
     enabledTypes: {
       type: [String],
-      default: ['comment', 'review']
+      // Include dm so Instagram/Facebook Messenger auto-reply works without extra setup
+      default: ['comment', 'review', 'dm']
     },
     // Sentiment filter: control which sentiments to auto-reply to
     sentimentFilter: {
