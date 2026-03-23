@@ -21,6 +21,9 @@ router.post('/pages/connect', checkConnectionLimit, metaPagesController.connectS
 // Re-subscribe connected Facebook pages to webhook (feed + messages) — for existing pages after deploy
 router.post('/pages/resubscribe-webhooks', metaPagesController.resubscribeFacebookWebhooks);
 
+// Diagnose Instagram mentions webhook readiness
+router.get('/pages/mentions-readiness', metaPagesController.getMentionsReadiness);
+
 // Disconnect a specific page
 router.delete('/pages/:pageId', metaPagesController.disconnectPage);
 
