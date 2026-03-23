@@ -1,6 +1,7 @@
 const { autoReplyQueue } = require('../config/queue');
 const Organization = require('../models/Organization');
 const aiService = require('./aiService');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 /**
  * Auto-Reply Scheduler Service
@@ -146,22 +147,24 @@ class AutoReplyScheduler {
         return false;
       }
 
-      // Pre-check: Don't queue if interaction already has replies
       const Interaction = require('../models/Interaction');
-      const interaction = await Interaction.findById(interactionId).select('replies status');
-      
+      const interaction = await Interaction.findById(interactionId).select(
+        'replies status platform type platformId metadata.lastMid'
+      );
+
       if (!interaction) {
         console.log(`⚠️  [Auto-Reply Queue] Interaction ${interactionId} not found`);
         return false;
       }
 
-      // Skip if already replied or has replies
-      if (interaction.replies && interaction.replies.length > 0) {
-        return false; // Silently skip - already handled
-      }
-
-      if (interaction.status === 'replied' || interaction.status === 'resolved') {
-        return false; // Silently skip - already handled
+      const threadDm = isThreadStyleDm(interaction);
+      if (!threadDm) {
+        if (interaction.replies && interaction.replies.length > 0) {
+          return false;
+        }
+        if (interaction.status === 'replied' || interaction.status === 'resolved') {
+          return false;
+        }
       }
 
       // Respect platform / interaction-type settings (same rules as canAutoReply pre-check)
@@ -175,7 +178,12 @@ class AutoReplyScheduler {
         Number.isFinite(rawMin) && rawMin >= 0 ? rawMin : (delayMinutes ?? 5);
       const delayMs = Math.max(delay * 60 * 1000, 45 * 1000);
 
-      // Add job with delay and unique jobId to prevent duplicates
+      const mid = interaction.metadata?.lastMid;
+      const autoReplyJobId =
+        threadDm && mid
+          ? `auto-reply-${interactionId}-${mid}`
+          : `auto-reply-${interactionId}`;
+
       await autoReplyQueue.add(
         {
           type: 'single',
@@ -183,7 +191,7 @@ class AutoReplyScheduler {
           organizationId: organizationId
         },
         {
-          jobId: `auto-reply-${interactionId}`, // Unique ID prevents duplicate jobs for same interaction
+          jobId: autoReplyJobId,
           delay: delayMs,
           attempts: 3,
           backoff: {

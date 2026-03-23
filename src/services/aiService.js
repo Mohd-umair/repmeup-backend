@@ -4,6 +4,7 @@ const BrandConfig = require('../models/BrandConfig');
 const aiCreditService = require('./aiCreditService');
 const logger = require('../config/logger');
 const { escapeRegex } = require('../utils/sanitize');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 class AIService {
   constructor() {
@@ -826,14 +827,14 @@ Generate a response that addresses the customer's message appropriately.`;
    * Note: minConfidence in settings = minimum AI reply confidence (enforced in generateAutoReply), not sentiment score.
    */
   canAutoReply(interaction, organizationSettings = {}) {
-    // Check if already replied
-    if (interaction.status === 'replied' || interaction.status === 'resolved') {
-      return false;
-    }
-
-    // Check if it has replies
-    if (interaction.replies && interaction.replies.length > 0) {
-      return false;
+    // One document per DM thread (dm_*_*): replies[] is conversation history, not "already answered this turn"
+    if (!isThreadStyleDm(interaction)) {
+      if (interaction.status === 'replied' || interaction.status === 'resolved') {
+        return false;
+      }
+      if (interaction.replies && interaction.replies.length > 0) {
+        return false;
+      }
     }
 
     // IMPORTANT: Don't reply to replies that are replies to our own replies

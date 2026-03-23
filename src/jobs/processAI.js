@@ -5,6 +5,7 @@ const aiService = require('../services/aiService');
 const emailService = require('../services/emailService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 /**
  * Process AI analysis for an interaction
@@ -30,14 +31,14 @@ module.exports = async function processAI(job) {
       return { skipped: true, reason: 'Interaction not found' };
     }
 
-    // IMPORTANT: Skip if interaction already has replies (already been replied to)
-    if (interaction.replies && interaction.replies.length > 0) {
+    const threadDm = isThreadStyleDm(interaction);
+
+    if (!threadDm && interaction.replies && interaction.replies.length > 0) {
       jobLogger.debug('Skipping - interaction already has replies', { replyCount: interaction.replies.length });
       return { skipped: true, reason: 'Already has replies' };
     }
 
-    // Skip if already replied/resolved
-    if (interaction.status === 'replied' || interaction.status === 'resolved') {
+    if (!threadDm && (interaction.status === 'replied' || interaction.status === 'resolved')) {
       jobLogger.debug('Skipping - interaction status', { status: interaction.status });
       return { skipped: true, reason: `Status is ${interaction.status}` };
     }
