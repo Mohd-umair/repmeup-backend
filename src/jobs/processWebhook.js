@@ -317,12 +317,10 @@ async function handleInstagramWebhook(payload, organizationId) {
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
       // Step 1: Upsert the thread (create or update non-message fields)
+      // Do not put status/isRead in $setOnInsert — they are already in $set (MongoDB conflicts same path in both operators)
       await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
-        {
-          $set: updateFields,
-          $setOnInsert: { status: 'unread', isRead: false }
-        },
+        { $set: updateFields },
         { upsert: true }
       );
 
@@ -587,7 +585,6 @@ async function handleFacebookWebhook(payload, organizationId) {
         { platformId: threadPlatformId },
         {
           $set: updateFields,
-          $setOnInsert: { status: 'unread', isRead: false },
           $push: {
             'metadata.incomingMessages': {
               $each: [incomingMsg],
