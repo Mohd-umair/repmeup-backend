@@ -1,4 +1,27 @@
 const Menu = require('../models/Menu');
+const User = require('../models/User');
+const Group = require('../models/Group');
+
+async function resolveEffectiveGroupForMenuUser(user) {
+  if (user?.group && Array.isArray(user.group.permissions) && user.group.permissions.length > 0) {
+    return user.group;
+  }
+
+  const roleToSlug = {
+    super_admin: 'super-admin',
+    admin: 'admin',
+    manager: 'manager',
+    agent: 'agent',
+    viewer: 'viewer'
+  };
+
+  const slug = roleToSlug[user?.role];
+  if (!slug) return null;
+
+  return Group.findOne({ slug, isActive: true })
+    .populate('permissions', 'code')
+    .lean();
+}
 
 /**
  * @desc    Get user's accessible menus
@@ -7,15 +30,34 @@ const Menu = require('../models/Menu');
  */
 exports.getMenus = async (req, res, next) => {
   try {
-    const user = req.user;
+    const baseUser = req.user;
+    const user = await User.findById(baseUser._id)
+      .select('email role permissions group')
+      .populate({
+        path: 'group',
+        populate: { path: 'permissions', select: 'code' }
+      })
+      .lean();
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'User not found' });
+    }
+
+    const effectiveGroup = await resolveEffectiveGroupForMenuUser(user);
+    const groupCodes = Array.isArray(effectiveGroup?.permissions)
+      ? effectiveGroup.permissions.map((p) => (typeof p === 'object' ? p.code : p)).filter(Boolean)
+      : [];
+    const directCodes = Array.isArray(user.permissions) ? user.permissions.filter(Boolean) : [];
+    const permissionCodes = [...new Set([...groupCodes, ...directCodes])];
+    const permissionSet = new Set(permissionCodes);
+    const isBypassRole = user.role === 'super_admin';
     
     console.log('🔍 [Menu] User requesting menus:', {
       email: user.email,
       role: user.role,
-      permissions: user.permissions
+      permissions: permissionCodes
     });
 
-    // Fetch all active menus
+    // Fetch all active menus (single source of truth from DB config)
     const allMenus = await Menu.find({ isActive: true })
       .sort({ group: 1, order: 1 })
       .lean();
@@ -24,7 +66,11 @@ exports.getMenus = async (req, res, next) => {
 
     // Filter menus based on user permissions
     const accessibleMenus = allMenus.filter(menu => {
-      // Check role requirements
+      if (isBypassRole) {
+        return true;
+      }
+
+      // Role checks from menu configuration
       if (menu.requiredRoles && menu.requiredRoles.length > 0) {
         if (!menu.requiredRoles.includes(user.role)) {
           console.log(`❌ [Menu] ${menu.label} - Role '${user.role}' not in required roles: [${menu.requiredRoles.join(', ')}]`);
@@ -34,12 +80,12 @@ exports.getMenus = async (req, res, next) => {
 
       // Check permission requirements
       if (menu.requiredPermissions && menu.requiredPermissions.length > 0) {
-        if (!user.permissions || !Array.isArray(user.permissions)) {
+        if (permissionSet.size === 0) {
           return false;
         }
 
         const hasAllPermissions = menu.requiredPermissions.every(
-          permission => user.permissions.includes(permission)
+          permission => permissionSet.has(permission)
         );
 
         if (!hasAllPermissions) {
@@ -52,28 +98,6 @@ exports.getMenus = async (req, res, next) => {
     });
     
     console.log(`✅ [Menu] User has access to ${accessibleMenus.length} menus`);
-
-    // Ensure Content menu exists (for apps that were seeded before Content was added)
-    const hasContentMenu = accessibleMenus.some(m => m.route === '/app/content');
-    const canAccessContent = ['admin', 'manager', 'agent'].includes(user.role);
-    if (!hasContentMenu && canAccessContent) {
-      const contentMenu = {
-        _id: 'content-default',
-        label: 'Content',
-        icon: '📄',
-        route: '/app/content',
-        requiredRoles: ['admin', 'manager', 'agent'],
-        order: 5,
-        group: 'main',
-        isActive: true,
-        badge: { enabled: false, source: 'none' }
-      };
-      accessibleMenus.push(contentMenu);
-      accessibleMenus.sort((a, b) => {
-        const g = (m) => (m.group === 'main' ? 0 : m.group === 'management' ? 1 : 2);
-        return g(a) - g(b) || (a.order || 0) - (b.order || 0);
-      });
-    }
 
     // Group menus by group
     const groupedMenus = {
