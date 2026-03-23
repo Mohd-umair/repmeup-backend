@@ -5,6 +5,7 @@ const cacheService = require('../services/cacheService');
 const escalationService = require('../services/escalationService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 /**
  * Process auto-reply job
@@ -119,13 +120,13 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: 'Interaction not found' };
     }
 
-    // Check if already replied (IMPORTANT: This prevents duplicate auto-replies)
-    if (interaction.replies && interaction.replies.length > 0) {
+    const threadDm = isThreadStyleDm(interaction);
+
+    if (!threadDm && interaction.replies && interaction.replies.length > 0) {
       return { skipped: true, reason: 'Already has replies' };
     }
 
-    // Check if status is already replied/resolved
-    if (interaction.status === 'replied' || interaction.status === 'resolved') {
+    if (!threadDm && (interaction.status === 'replied' || interaction.status === 'resolved')) {
       return { skipped: true, reason: `Status is ${interaction.status}` };
     }
 
@@ -210,10 +211,11 @@ async function processSingleInteraction(interactionId, organization) {
     if (!interactionForReply) {
       return { skipped: true, reason: 'Interaction not found' };
     }
-    if (interactionForReply.replies && interactionForReply.replies.length > 0) {
+    const threadDmReply = isThreadStyleDm(interactionForReply);
+    if (!threadDmReply && interactionForReply.replies && interactionForReply.replies.length > 0) {
       return { skipped: true, reason: 'Already has replies' };
     }
-    if (interactionForReply.status === 'replied' || interactionForReply.status === 'resolved') {
+    if (!threadDmReply && (interactionForReply.status === 'replied' || interactionForReply.status === 'resolved')) {
       return { skipped: true, reason: `Status is ${interactionForReply.status}` };
     }
 
@@ -311,15 +313,15 @@ async function processBatchInteractions(organizationId, organization) {
     });
 
     for (const interaction of interactions) {
-      // IMPORTANT: Double-check if already replied (in case it was replied to between query and processing)
-      if (interaction.replies && interaction.replies.length > 0) {
+      const batchThreadDm = isThreadStyleDm(interaction);
+
+      if (!batchThreadDm && interaction.replies && interaction.replies.length > 0) {
         results.skipped++;
         results.details.push({ id: interaction._id, reason: 'Already has replies' });
         continue;
       }
 
-      // Check if status is already replied/resolved
-      if (interaction.status === 'replied' || interaction.status === 'resolved') {
+      if (!batchThreadDm && (interaction.status === 'replied' || interaction.status === 'resolved')) {
         results.skipped++;
         results.details.push({ id: interaction._id, reason: `Status is ${interaction.status}` });
         continue;
@@ -411,12 +413,13 @@ async function processBatchInteractions(organizationId, organization) {
         results.details.push({ id: interaction._id, reason: 'Interaction not found' });
         continue;
       }
-      if (interactionFresh.replies && interactionFresh.replies.length > 0) {
+      const freshThreadDm = isThreadStyleDm(interactionFresh);
+      if (!freshThreadDm && interactionFresh.replies && interactionFresh.replies.length > 0) {
         results.skipped++;
         results.details.push({ id: interaction._id, reason: 'Already has replies' });
         continue;
       }
-      if (interactionFresh.status === 'replied' || interactionFresh.status === 'resolved') {
+      if (!freshThreadDm && (interactionFresh.status === 'replied' || interactionFresh.status === 'resolved')) {
         results.skipped++;
         results.details.push({ id: interaction._id, reason: `Status is ${interactionFresh.status}` });
         continue;

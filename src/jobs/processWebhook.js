@@ -5,6 +5,7 @@ const logger = require('../config/logger');
 const instagramService = require('../integrations/meta/instagramService');
 const { emitToOrg } = require('../utils/socketEmitter');
 const cacheService = require('../services/cacheService');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 /**
  * Process webhook events from social media platforms
@@ -68,24 +69,34 @@ module.exports = async function processWebhook(job) {
         });
       }
 
-      // IMPORTANT: Check if interaction already has replies
-      // If it does, skip auto-reply queueing (it's already been replied to)
+      // Per-comment / per-message interactions: skip if we already answered that item.
+      // DM threads (platformId dm_*_*): one doc per conversation — replies[] is thread history; still queue AI for each new message.
       const hasReplies = interaction.replies && interaction.replies.length > 0;
       const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
-      
-      if (hasReplies || isAlreadyReplied) {
+      const threadDm = isThreadStyleDm(interaction);
+
+      if (!threadDm && (hasReplies || isAlreadyReplied)) {
         console.log(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
       } else {
-        // Trigger AI processing (only for new, unreplied interactions)
-        await aiQueue.add({
-          interactionId: interaction._id
-        }, {
-          attempts: 3,
-          backoff: 2000,
-          jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
-        });
+        // Thread DMs reuse one interaction id per conversation — jobId must include message id or each new message would be deduped by Bull
+        const mid = interaction.metadata?.lastMid;
+        const aiJobId =
+          threadDm && mid
+            ? `ai-${interaction._id}-${mid}`
+            : `ai-${interaction._id}`;
 
-        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
+        await aiQueue.add(
+          {
+            interactionId: interaction._id
+          },
+          {
+            attempts: 3,
+            backoff: 2000,
+            jobId: aiJobId
+          }
+        );
+
+        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}${threadDm && mid ? ` (mid ${mid})` : ''}`);
 
         // Queue auto-reply if webhook mode is enabled
         const autoReplyScheduler = require('../services/autoReplyScheduler');
@@ -273,7 +284,9 @@ async function handleInstagramWebhook(payload, organizationId) {
       const threadPlatformId = `dm_${String(igAccountId)}_${String(senderId)}`;
       const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author').lean();
       if (existing && existing.metadata?.lastMid === mid) {
-        return await Interaction.findById(existing._id);
+        // Meta webhook retry — do not re-queue AI / auto-reply
+        logger.debug('[processWebhook] Instagram DM duplicate mid (webhook retry)', { threadPlatformId, mid });
+        return null;
       }
 
       // Always update author so profile pic / username show up once the API returns them.
@@ -297,7 +310,9 @@ async function handleInstagramWebhook(payload, organizationId) {
         threadId: senderId,
         platformCreatedAt: new Date(event.timestamp),
         'metadata.lastMid': mid,
-        'metadata.instagramAccountId': igAccountId
+        'metadata.instagramAccountId': igAccountId,
+        status: 'unread',
+        isRead: false
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
@@ -544,7 +559,8 @@ async function handleFacebookWebhook(payload, organizationId) {
       const threadPlatformId = `dm_${String(pageId)}_${String(senderId)}`;
       const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
       if (existing && existing.metadata?.lastMid === mid) {
-        return await Interaction.findById(existing._id);
+        logger.debug('[processWebhook] Facebook DM duplicate mid (webhook retry)', { threadPlatformId, mid });
+        return null;
       }
 
       const incomingMsg = { mid, text, timestamp: event.timestamp };
@@ -561,7 +577,9 @@ async function handleFacebookWebhook(payload, organizationId) {
         threadId: senderId,
         platformCreatedAt: new Date(event.timestamp),
         'metadata.lastMid': mid,
-        'metadata.facebookPageId': pageId
+        'metadata.facebookPageId': pageId,
+        status: 'unread',
+        isRead: false
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
