@@ -31,46 +31,87 @@ class AIService {
   }
 
   /**
+   * Base filter for KB entries used in replies (DMs use the same path as comments).
+   */
+  _knowledgeBaseReplyFilter(organizationId) {
+    return {
+      organization: organizationId,
+      isActive: true,
+      isTrainingData: { $ne: false }
+    };
+  }
+
+  /**
    * Search relevant knowledge base entries for a given query
+   * (Short DMs like "hi" used to match nothing — keyword len>3 and no fallback — so we add broader matching + top-FAQ fallback.)
    */
   async searchKnowledgeBase(organizationId, query, limit = 5) {
     try {
-      // Use MongoDB text search for relevant entries
-      const results = await KnowledgeBase.find({
-        organization: organizationId,
-        isActive: true,
-        $text: { $search: query }
-      })
-        .select('title content category priority keywords')
-        .sort({ score: { $meta: 'textScore' }, priority: -1 })
-        .limit(limit);
+      const base = this._knowledgeBaseReplyFilter(organizationId);
+      const trimmed = (query && String(query).trim()) || '';
 
-      // If no results from text search, try keyword matching
-      if (results.length === 0) {
-        const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-        const escapedForRegex = queryWords.map(w => escapeRegex(w));
+      const topPriorityFallback = async () => {
+        return KnowledgeBase.find(base)
+          .select('title content category priority keywords trainingWeight')
+          .sort({ priority: -1, trainingWeight: -1, usageCount: -1 })
+          .limit(limit);
+      };
 
-        if (queryWords.length > 0) {
-          const keywordResults = await KnowledgeBase.find({
-            organization: organizationId,
-            isActive: true,
-            $or: [
-              { keywords: { $in: queryWords } },
-              { title: { $regex: escapedForRegex.join('|'), $options: 'i' } }
-            ]
-          })
-            .select('title content category priority keywords')
-            .sort({ priority: -1, usageCount: -1 })
-            .limit(limit);
+      if (!trimmed) {
+        const entries = await topPriorityFallback();
+        return { entries, fromFallback: true };
+      }
 
-          return keywordResults;
+      // MongoDB text search (needs text index on title/content/keywords)
+      let results = [];
+      try {
+        results = await KnowledgeBase.find({
+          ...base,
+          $text: { $search: trimmed }
+        })
+          .select('title content category priority keywords trainingWeight')
+          .sort({ score: { $meta: 'textScore' }, priority: -1 })
+          .limit(limit);
+      } catch (textErr) {
+        logger.warn('Knowledge base text search skipped', { message: textErr.message });
+      }
+
+      if (results.length > 0) {
+        return { entries: results, fromFallback: false };
+      }
+
+      // Keyword / title match: include 2+ char tokens so short DMs ("hi", "ok", "hii") can still match keywords
+      const queryWords = trimmed
+        .toLowerCase()
+        .split(/\s+/)
+        .map((w) => w.replace(/[^\w]/g, ''))
+        .filter((w) => w.length >= 2)
+        .slice(0, 12);
+
+      if (queryWords.length > 0) {
+        const escapedForRegex = queryWords.map((w) => escapeRegex(w));
+        const keywordResults = await KnowledgeBase.find({
+          ...base,
+          $or: [
+            { keywords: { $in: queryWords } },
+            { title: { $regex: escapedForRegex.join('|'), $options: 'i' } }
+          ]
+        })
+          .select('title content category priority keywords trainingWeight')
+          .sort({ priority: -1, usageCount: -1 })
+          .limit(limit);
+
+        if (keywordResults.length > 0) {
+          return { entries: keywordResults, fromFallback: false };
         }
       }
 
-      return results;
+      // Still nothing: inject highest-priority training articles so DMs/comments still get brand context
+      const fallbackEntries = await topPriorityFallback();
+      return { entries: fallbackEntries, fromFallback: true };
     } catch (error) {
       console.error('Knowledge base search error:', error.message);
-      return [];
+      return { entries: [], fromFallback: false };
     }
   }
 
@@ -520,6 +561,7 @@ Scoring:
    * Generate AI response using OpenAI
    */
   async generateResponseOpenAI(interaction, organizationId = null, knowledgeBase = null) {
+    let knowledgeBaseFallback = false;
     try {
       // Check if API key is configured
       if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
@@ -527,22 +569,28 @@ Scoring:
         throw new Error('OpenAI API key is not configured. Please contact your administrator.');
       }
 
-      // If knowledgeBase not provided, search for relevant entries
+      // If knowledgeBase not provided, search for relevant entries (same for DMs, comments, reviews)
       let relevantKB = knowledgeBase;
       if (!relevantKB && organizationId) {
-        relevantKB = await this.searchKnowledgeBase(organizationId, interaction.content, 5);
+        const { entries, fromFallback } = await this.searchKnowledgeBase(
+          organizationId,
+          interaction.content,
+          5
+        );
+        relevantKB = entries;
+        knowledgeBaseFallback = fromFallback;
 
-        // Increment usage count for used KB entries (with error handling)
-        for (const kb of relevantKB) {
-          try {
-            // Ensure usageCount is valid before incrementing
-            if (typeof kb.usageCount !== 'number' || isNaN(kb.usageCount)) {
-              kb.usageCount = 0;
+        // Count real matches only — avoid inflating usage when we inject top-priority fallback context
+        if (!fromFallback && relevantKB && relevantKB.length > 0) {
+          for (const kb of relevantKB) {
+            try {
+              if (typeof kb.usageCount !== 'number' || isNaN(kb.usageCount)) {
+                kb.usageCount = 0;
+              }
+              await kb.incrementUsage();
+            } catch (usageError) {
+              console.error('Error incrementing KB usage:', usageError);
             }
-            await kb.incrementUsage();
-          } catch (usageError) {
-            console.error('Error incrementing KB usage:', usageError);
-            // Continue processing even if usage increment fails
           }
         }
       }
@@ -560,11 +608,13 @@ IMPORTANT GUIDELINES:
 - Keep responses concise and clear (2-4 sentences)
 - Use a friendly and conversational tone
 - Address the customer's concern directly
-- If the knowledge base contains relevant information, use it to provide accurate answers
+- If knowledge base content is provided, ground your answer in that content and prioritize those facts over generic wording
+- Never say placeholders like "[List of services]"; provide real items from the knowledge base
+- If the user asks to list offerings/services/features, return a clear bullet list using names found in the knowledge base
 - If you don't have enough information, acknowledge it professionally
 - Do not make promises you can't keep
 - Match the tone to the platform (casual for social media, professional for reviews)
-${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
+${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
 
 Generate a response that addresses the customer's message appropriately.`;
 
@@ -596,9 +646,9 @@ Generate a response that addresses the customer's message appropriately.`;
       const generatedResponse = response.data.choices[0].message.content.trim();
 
       // Calculate confidence based on KB matches
-      let confidence = 0.7; // Default confidence
+      let confidence = 0.78; // Default confidence
       if (relevantKB && relevantKB.length > 0) {
-        confidence = Math.min(0.95, 0.7 + (relevantKB.length * 0.05));
+        confidence = Math.min(0.95, 0.78 + (relevantKB.length * 0.04));
       }
 
       return {
@@ -606,7 +656,8 @@ Generate a response that addresses the customer's message appropriately.`;
         confidence: confidence,
         generatedAt: new Date(),
         usedKnowledgeBase: relevantKB && relevantKB.length > 0,
-        knowledgeBaseCount: relevantKB ? relevantKB.length : 0
+        knowledgeBaseCount: relevantKB ? relevantKB.length : 0,
+        knowledgeBaseFallback: knowledgeBaseFallback
       };
     } catch (error) {
       // Handle specific OpenAI API errors

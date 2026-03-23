@@ -236,6 +236,15 @@ async function processSingleInteraction(interactionId, organization) {
       sentiment: interactionForReply.sentiment,
       length: autoReply.response.content.length
     });
+    logger.info('[Auto-reply] Generated reply details', {
+      interactionId: interactionForReply._id?.toString(),
+      platform: interactionForReply.platform,
+      type: interactionForReply.type,
+      usedKnowledgeBase: !!autoReply.response.usedKnowledgeBase,
+      knowledgeBaseCount: autoReply.response.knowledgeBaseCount || 0,
+      knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback,
+      confidence: autoReply.response.confidence
+    });
 
     // Check escalation after generating reply (to check AI confidence)
     const postReplyEscalationCheck = await escalationService.shouldEscalate(
