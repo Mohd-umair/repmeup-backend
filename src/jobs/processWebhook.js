@@ -207,10 +207,16 @@ async function handleInstagramWebhook(payload, organizationId) {
     let platformConnectionId = null;
     let dmReceiverConnection = null;
     if (igAccountId) {
+      const accountIds = [String(igAccountId), igAccountId].filter(Boolean);
       const conn = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'instagram',
-        platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) },
+        $or: [
+          { platformUserId: { $in: accountIds } },
+          { platformPageId: { $in: accountIds } },
+          { 'platformData.businessAccountId': { $in: accountIds } },
+          { 'platformData.pageId': { $in: accountIds } }
+        ],
         status: { $in: ['connected', 'available'] },
         isActive: true
       }).select('_id accessToken').lean();
