@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
+const Group = require('../models/Group');
 const { generateToken, generateRefreshToken } = require('../middlewares/auth');
 const googleAuthService = require('../integrations/google/googleAuthService');
 const emailService = require('./emailService');
@@ -94,7 +95,11 @@ class AuthService {
       const refreshToken = generateRefreshToken(user._id);
 
       const userObj = user.toJSON();
-      userObj.resolvedPermissions = this._extractPermissionCodes(user);
+      const effectiveGroup = await this._resolveEffectiveGroup(user);
+      if (!userObj.group && effectiveGroup) {
+        userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+      }
+      userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
 
       return {
         user: userObj,
@@ -118,7 +123,11 @@ class AuthService {
         throw new Error('User not found');
       }
       const userObj = user.toJSON();
-      userObj.resolvedPermissions = this._extractPermissionCodes(user);
+      const effectiveGroup = await this._resolveEffectiveGroup(user);
+      if (!userObj.group && effectiveGroup) {
+        userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+      }
+      userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
       return userObj;
     } catch (error) {
       throw error;
@@ -365,9 +374,29 @@ class AuthService {
     return { token, refreshToken };
   }
 
-  _extractPermissionCodes(user) {
-    if (user.group && user.group.permissions && user.group.permissions.length > 0) {
-      return user.group.permissions.map(p => typeof p === 'object' ? p.code : p).filter(Boolean);
+  async _resolveEffectiveGroup(user) {
+    if (user?.group) return user.group;
+    const roleToSlug = {
+      super_admin: 'super-admin',
+      admin: 'admin',
+      manager: 'manager',
+      agent: 'agent',
+      viewer: 'viewer'
+    };
+    const fallbackSlug = roleToSlug[user?.role];
+    if (!fallbackSlug) return null;
+    return Group.findOne({ slug: fallbackSlug, isActive: true })
+      .populate('permissions', 'code name category actions')
+      .lean();
+  }
+
+  _extractPermissionCodes(user, effectiveGroup = null) {
+    const sourceGroup = user.group || effectiveGroup;
+    if (sourceGroup && sourceGroup.permissions && sourceGroup.permissions.length > 0) {
+      return sourceGroup.permissions.map(p => typeof p === 'object' ? p.code : p).filter(Boolean);
+    }
+    if (Array.isArray(user.permissions) && user.permissions.length > 0) {
+      return user.permissions.filter(Boolean);
     }
     return [];
   }

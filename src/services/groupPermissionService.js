@@ -27,6 +27,17 @@ function slugify(name) {
     .replace(/^-|-$/g, '');
 }
 
+function roleForSystemGroupSlug(slug) {
+  const map = {
+    'super-admin': 'super_admin',
+    'admin': 'admin',
+    'manager': 'manager',
+    'agent': 'agent',
+    'viewer': 'viewer'
+  };
+  return map[slug] || null;
+}
+
 class GroupPermissionService {
 
   // ─── Permissions ───
@@ -141,6 +152,19 @@ class GroupPermissionService {
     const countMap = {};
     userCounts.forEach(r => { countMap[String(r._id)] = r.count; });
 
+    // Include legacy users who still use role-only assignment (group is null).
+    for (const g of items) {
+      if (!g.isSystem) continue;
+      const legacyRole = roleForSystemGroupSlug(g.slug);
+      if (!legacyRole) continue;
+      const legacyCount = await User.countDocuments({
+        role: legacyRole,
+        deletedAt: null,
+        $or: [{ group: null }, { group: { $exists: false } }]
+      });
+      countMap[String(g._id)] = (countMap[String(g._id)] || 0) + legacyCount;
+    }
+
     const enriched = items.map(g => ({
       ...g,
       userCount: countMap[String(g._id)] || 0
@@ -160,7 +184,18 @@ class GroupPermissionService {
       .lean();
     if (!group) throw makeError('Group not found', 404);
 
-    const userCount = await User.countDocuments({ group: id, deletedAt: null });
+    let userCount = await User.countDocuments({ group: id, deletedAt: null });
+    if (group.isSystem) {
+      const legacyRole = roleForSystemGroupSlug(group.slug);
+      if (legacyRole) {
+        const legacyCount = await User.countDocuments({
+          role: legacyRole,
+          deletedAt: null,
+          $or: [{ group: null }, { group: { $exists: false } }]
+        });
+        userCount += legacyCount;
+      }
+    }
     return { ...group, userCount };
   }
 
