@@ -667,7 +667,8 @@ class MetaAuthService {
       'messaging_postbacks',
       'standby',
       'message_reactions',
-      'comments'
+      'comments',
+      'mentions'
     ].join(',');
 
     try {
@@ -732,6 +733,7 @@ class MetaAuthService {
         await existingConnection.save();
         console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
+        await this.subscribeInstagramToWebhook(instagramAccount.id, pageAccessToken);
         return existingConnection;
       }
 
@@ -775,6 +777,7 @@ class MetaAuthService {
 
       console.log(`✅ [MetaAuth] Instagram connection saved for account: ${instagramAccount.username}`);
       await this.subscribePageToWebhook(pageData.id, pageAccessToken);
+      await this.subscribeInstagramToWebhook(instagramAccount.id, pageAccessToken);
       return connection;
     } catch (error) {
       console.error('❌ [MetaAuth] Save Instagram connection error:', error.message);
