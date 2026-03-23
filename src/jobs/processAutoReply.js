@@ -204,9 +204,22 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: 'Escalated to human agent' };
     }
 
+    // Reload interaction so sentiment / intent from processAI match org filters (sentimentFilter, replyToComplaints, etc.)
+    const interactionForReply = await Interaction.findById(interactionId)
+      .populate('platformConnection');
+    if (!interactionForReply) {
+      return { skipped: true, reason: 'Interaction not found' };
+    }
+    if (interactionForReply.replies && interactionForReply.replies.length > 0) {
+      return { skipped: true, reason: 'Already has replies' };
+    }
+    if (interactionForReply.status === 'replied' || interactionForReply.status === 'resolved') {
+      return { skipped: true, reason: `Status is ${interactionForReply.status}` };
+    }
+
     // Generate auto-reply
     const autoReply = await aiService.generateAutoReply(
-      interaction,
+      interactionForReply,
       organization._id,
       organization
     );
@@ -216,22 +229,22 @@ async function processSingleInteraction(interactionId, organization) {
     }
     
     logEvents.autoReply.generated({
-      interactionId: interaction._id,
+      interactionId: interactionForReply._id,
       confidence: autoReply.response.confidence,
-      sentiment: interaction.sentiment,
+      sentiment: interactionForReply.sentiment,
       length: autoReply.response.content.length
     });
 
     // Check escalation after generating reply (to check AI confidence)
     const postReplyEscalationCheck = await escalationService.shouldEscalate(
-      interaction,
+      interactionForReply,
       organization,
       autoReply.response // Pass AI response with confidence
     );
 
     if (postReplyEscalationCheck.shouldEscalate) {
       await escalationService.escalateInteraction(
-        interaction,
+        interactionForReply,
         organization,
         postReplyEscalationCheck.reasons,
         'ai_confidence',
@@ -243,11 +256,11 @@ async function processSingleInteraction(interactionId, organization) {
 
     // Send if autoSend is enabled and no approval required
     if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
-      const sent = await sendReplyToPlatform(interaction, autoReply.response.content, organization);
+      const sent = await sendReplyToPlatform(interactionForReply, autoReply.response.content, organization);
       if (sent) {
         logEvents.autoReply.sent({
-          interactionId: interaction._id,
-          platform: interaction.platform
+          interactionId: interactionForReply._id,
+          platform: interactionForReply.platform
         });
       }
       return { sent: sent };
@@ -390,9 +403,28 @@ async function processBatchInteractions(organizationId, organization) {
         }
       }
 
+      // Fresh doc so batch jobs respect sentiment / intent after processAI
+      const interactionFresh = await Interaction.findById(interaction._id)
+        .populate('platformConnection');
+      if (!interactionFresh) {
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: 'Interaction not found' });
+        continue;
+      }
+      if (interactionFresh.replies && interactionFresh.replies.length > 0) {
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: 'Already has replies' });
+        continue;
+      }
+      if (interactionFresh.status === 'replied' || interactionFresh.status === 'resolved') {
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: `Status is ${interactionFresh.status}` });
+        continue;
+      }
+
       // Generate auto-reply
       const autoReply = await aiService.generateAutoReply(
-        interaction,
+        interactionFresh,
         organizationId,
         organization
       );
@@ -404,20 +436,20 @@ async function processBatchInteractions(organizationId, organization) {
       }
 
       logEvents.autoReply.generated({
-        interactionId: interaction._id,
+        interactionId: interactionFresh._id,
         confidence: autoReply.response.confidence,
-        sentiment: interaction.sentiment,
+        sentiment: interactionFresh.sentiment,
         length: autoReply.response.content.length
       });
       results.processed++;
 
       // Send if autoSend is enabled
       if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
-        const sent = await sendReplyToPlatform(interaction, autoReply.response.content, organization);
+        const sent = await sendReplyToPlatform(interactionFresh, autoReply.response.content, organization);
         if (sent) {
           logEvents.autoReply.sent({
-            interactionId: interaction._id,
-            platform: interaction.platform
+            interactionId: interactionFresh._id,
+            platform: interactionFresh.platform
           });
           results.sent++;
           organization.autoReplySettings.repliesCountToday++;
@@ -524,7 +556,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
             content,
             connection.accessToken,
             pageId,
-            false
+            true
           );
         }
       }
@@ -551,7 +583,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
             content,
             connection.accessToken,
             pageId,
-            false
+            true
           );
         }
       }

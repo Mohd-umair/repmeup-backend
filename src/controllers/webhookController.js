@@ -787,26 +787,27 @@ exports.handleWhatsAppWebhook = async (req, res) => {
               console.error('❌ [WhatsApp] Failed to mark as read:', readError.message);
             }
 
-            // Queue for auto-reply processing
-            const organization = connection.organization;
-            if (organization.autoReplySettings && organization.autoReplySettings.enabled) {
-              try {
-                const { autoReplyQueue } = require('../config/queue');
-                await autoReplyQueue.add({
-                  interactionId: savedInteraction._id.toString(),
-                  organizationId: connection.organization._id.toString(),
-                  platform: 'whatsapp'
-                }, {
+            // Full AI pipeline + auto-reply queue (respects triggerMode, platforms, types, delay)
+            try {
+              const { aiQueue } = require('../config/queue');
+              const autoReplyScheduler = require('../services/autoReplyScheduler');
+              await aiQueue.add(
+                { interactionId: savedInteraction._id },
+                {
                   attempts: 3,
-                  backoff: {
-                    type: 'exponential',
-                    delay: 2000
-                  }
-                });
-                console.log(`✅ [WhatsApp] Queued for auto-reply: ${savedInteraction._id}`);
-              } catch (queueError) {
-                console.error('❌ [WhatsApp] Failed to queue auto-reply:', queueError.message);
+                  backoff: 2000,
+                  jobId: `ai-${savedInteraction._id}`
+                }
+              );
+              const queued = await autoReplyScheduler.queueImmediateAutoReply(
+                savedInteraction._id.toString(),
+                connection.organization._id.toString()
+              );
+              if (queued) {
+                console.log(`✅ [WhatsApp] AI + auto-reply queued: ${savedInteraction._id}`);
               }
+            } catch (queueError) {
+              console.error('❌ [WhatsApp] Failed to queue AI/auto-reply:', queueError.message);
             }
           }
         } 

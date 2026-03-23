@@ -127,7 +127,7 @@ const organizationSchema = new mongoose.Schema({
     },
     minConfidence: {
       type: Number,
-      default: 0.75, // Minimum AI confidence to auto-reply
+      default: 0.75, // Minimum AI *reply* confidence (0–1) from generateResponse — enforced in generateAutoReply; not sentiment score
       min: 0,
       max: 1
     },
