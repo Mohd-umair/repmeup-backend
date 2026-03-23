@@ -493,7 +493,7 @@ async function getConnectionForReply(interaction) {
       organization: interaction.organization,
       platform: 'instagram',
       platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
-      status: 'connected',
+      status: { $in: ['connected', 'available'] },
       isActive: true
     }).lean();
     if (conn) return conn;
@@ -512,7 +512,7 @@ async function getConnectionForReply(interaction) {
       organization: interaction.organization,
       platform: 'facebook',
       platformPageId: { $in: [String(facebookPageId), facebookPageId] },
-      status: 'connected',
+      status: { $in: ['connected', 'available'] },
       isActive: true
     }).lean();
     if (conn) return conn;
@@ -525,10 +525,20 @@ async function getConnectionForReply(interaction) {
 /**
  * Send reply to platform
  */
+const ALLOWED_CONNECTION_STATUS = ['connected', 'available'];
+
 async function sendReplyToPlatform(interaction, content, organization) {
   try {
     const connection = await getConnectionForReply(interaction);
-    if (!connection || connection.status !== 'connected' || !connection.isActive) {
+    if (!connection || !ALLOWED_CONNECTION_STATUS.includes(connection.status) || !connection.isActive) {
+      logger.warn('[Auto-reply] No usable platform connection to send', {
+        platform: interaction.platform,
+        type: interaction.type,
+        interactionId: interaction._id?.toString(),
+        hasConnection: !!connection,
+        status: connection?.status,
+        isActive: connection?.isActive
+      });
       return false;
     }
 
@@ -551,19 +561,37 @@ async function sendReplyToPlatform(interaction, content, organization) {
       const instagramService = require('../integrations/meta/instagramService');
       let result;
       if (interaction.type === 'dm') {
-        const pageId = connection.platformPageId || connection.platformData?.pageId;
+        const pageId =
+          connection.platformPageId ||
+          connection.platformData?.pageId ||
+          connection.metadata?.facebookPageId;
         const recipientId = interaction.author?.platformId;
-        if (pageId && recipientId) {
-          result = await instagramService.sendMessage(
-            recipientId,
-            content,
-            connection.accessToken,
-            pageId,
-            true
-          );
+        if (!pageId || !recipientId) {
+          logger.warn('[Auto-reply] Instagram DM missing pageId or recipientId', {
+            interactionId: interaction._id?.toString(),
+            hasPageId: !!pageId,
+            hasRecipientId: !!recipientId
+          });
+        } else {
+          try {
+            result = await instagramService.sendMessage(
+              recipientId,
+              content,
+              connection.accessToken,
+              pageId,
+              true
+            );
+          } catch (sendErr) {
+            logger.error('[Auto-reply] Instagram DM sendMessage failed', {
+              interactionId: interaction._id?.toString(),
+              error: sendErr.message,
+              platformError: sendErr.platformError
+            });
+            result = null;
+          }
         }
       }
-      if (!result) {
+      if (!result && interaction.type !== 'dm') {
         result = await instagramService.replyToComment(
           interaction.platformId,
           content,

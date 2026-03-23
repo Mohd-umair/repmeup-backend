@@ -909,15 +909,8 @@ Generate a response that addresses the customer's message appropriately.`;
       }
     }
 
-    // Legacy: with filter "all", block negative unless replyToNegative is explicitly true (undefined/false = do not reply to negative)
-    if (sentimentFilter === 'all' && settings.replyToNegative !== true) {
-      if (!this._hasKnownSentiment(interaction)) {
-        return false;
-      }
-      if (sentiment === 'negative') {
-        return false;
-      }
-    }
+    // sentimentFilter === 'all' matches UI "Reply to All Sentiments" — do not also gate on legacy replyToNegative
+    // (use "positive_neutral" or turn off auto-reply for negatives via a dedicated filter if needed)
 
     // Complaints: only block when intent is explicitly classified as complaint
     if (interaction.intent === 'complaint' && !settings.replyToComplaints) {
