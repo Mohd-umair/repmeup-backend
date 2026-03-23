@@ -366,8 +366,8 @@ exports.connectSelectedPages = async (req, res, next) => {
 };
 
 /**
- * @desc    Re-subscribe all connected Facebook Pages to the app webhook (including feed for comments).
- *          Use this after deploying webhook changes so existing pages receive comment/DM events.
+ * @desc    Re-subscribe connected Facebook Pages and Instagram accounts to app webhooks.
+ *          Use this after webhook field changes (e.g. mentions) so existing connections receive events.
  * @route   POST /api/meta/pages/resubscribe-webhooks
  * @access  Private
  */
@@ -375,7 +375,7 @@ exports.resubscribeFacebookWebhooks = async (req, res, next) => {
   try {
     const organizationId = req.user.organization._id || req.user.organization;
 
-    const connections = await PlatformConnection.find({
+    const fbConnections = await PlatformConnection.find({
       organization: organizationId,
       platform: 'facebook',
       platformPageId: { $exists: true, $ne: null },
@@ -383,16 +383,24 @@ exports.resubscribeFacebookWebhooks = async (req, res, next) => {
       status: 'connected'
     }).select('platformPageId platformUsername accessToken').lean();
 
-    if (connections.length === 0) {
+    const igConnections = await PlatformConnection.find({
+      organization: organizationId,
+      platform: 'instagram',
+      platformUserId: { $exists: true, $ne: null },
+      isActive: true,
+      status: 'connected'
+    }).select('platformUserId platformUsername accessToken').lean();
+
+    if (fbConnections.length === 0 && igConnections.length === 0) {
       return res.json({
         success: true,
-        data: { subscribed: 0, failed: 0, pages: [] },
-        message: 'No connected Facebook pages to resubscribe.'
+        data: { subscribed: 0, failed: 0, pages: [], instagram: [] },
+        message: 'No connected Facebook/Instagram accounts to resubscribe.'
       });
     }
 
-    const results = { subscribed: 0, failed: 0, pages: [] };
-    for (const conn of connections) {
+    const results = { subscribed: 0, failed: 0, pages: [], instagram: [] };
+    for (const conn of fbConnections) {
       try {
         await metaAuth.subscribePageToWebhook(conn.platformPageId, conn.accessToken);
         results.subscribed++;
@@ -408,10 +416,26 @@ exports.resubscribeFacebookWebhooks = async (req, res, next) => {
       }
     }
 
+    for (const conn of igConnections) {
+      try {
+        await metaAuth.subscribeInstagramToWebhook(conn.platformUserId, conn.accessToken);
+        results.subscribed++;
+        results.instagram.push({ instagramId: conn.platformUserId, name: conn.platformUsername, ok: true });
+      } catch (err) {
+        results.failed++;
+        results.instagram.push({
+          instagramId: conn.platformUserId,
+          name: conn.platformUsername,
+          ok: false,
+          error: err.message || 'Subscription failed'
+        });
+      }
+    }
+
     res.json({
       success: true,
       data: results,
-      message: `Re-subscribed ${results.subscribed} page(s). ${results.failed} failed.`
+      message: `Re-subscribed ${results.subscribed} Facebook/Instagram webhook subscription(s). ${results.failed} failed.`
     });
   } catch (error) {
     console.error('❌ [Meta Pages] Error resubscribing webhooks:', error);

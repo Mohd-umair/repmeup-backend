@@ -381,6 +381,7 @@ exports.handleInstagramWebhook = async (req, res) => {
     }
 
     const instagramId = entry.id;
+    const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
@@ -389,7 +390,11 @@ exports.handleInstagramWebhook = async (req, res) => {
     });
 
     if (!connection) {
-      console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. DM was sent to this IG account — connect it in Settings → Page Manager to receive DMs here.`);
+      if (isMetaTestEvent && hasMentionChange) {
+        console.log('[Instagram Webhook] Received Meta test mention event (entry.id=0). This confirms callback URL works.');
+      } else {
+        console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. Connect this Instagram in Settings → Page Manager to receive DMs/comments/mentions here.`);
+      }
       return;
     }
 
