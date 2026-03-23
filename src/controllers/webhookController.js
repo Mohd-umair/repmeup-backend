@@ -370,12 +370,13 @@ exports.handleInstagramWebhook = async (req, res) => {
       return;
     }
 
-    // Process DMs (messaging/standby) or comments (changes with field "comments")
+    // Process DMs (messaging/standby), comments, or mentions
     const hasMessaging = entry.messaging && entry.messaging.length > 0;
     const hasStandby = entry.standby && entry.standby.length > 0;
     const hasChanges = entry.changes && entry.changes.length > 0;
     const hasCommentChange = hasChanges && entry.changes.some(c => c.field === 'comments');
-    if (!hasMessaging && !hasStandby && !hasCommentChange) {
+    const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
+    if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) {
       return;
     }
 

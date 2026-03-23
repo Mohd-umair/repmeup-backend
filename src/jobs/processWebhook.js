@@ -432,6 +432,70 @@ async function handleInstagramWebhook(payload, organizationId) {
         return interaction;
       }
 
+      if (change.field === 'mentions') {
+        const mention = change.value || {};
+        const mentionId =
+          mention.id ||
+          mention.comment_id ||
+          mention.media_id ||
+          `${entry.id}_${mention.timestamp || entry.time || Date.now()}`;
+
+        const authorId = mention.from?.id || mention.user_id || mention.username;
+        const avatarUrl = authorId ? await fetchInstagramAuthorAvatar(organizationId, authorId) : null;
+        const author = {
+          platformId: authorId,
+          username: mention.from?.username || mention.username || 'Instagram User',
+          name: mention.from?.username || mention.username || 'Instagram User'
+        };
+        if (avatarUrl) author.avatarUrl = avatarUrl;
+
+        const mentionText =
+          mention.text ||
+          mention.caption ||
+          mention.message ||
+          (mention.media_id ? 'You were mentioned on Instagram media.' : 'You were mentioned on Instagram.');
+
+        const rawTs = mention.timestamp ?? mention.created_time ?? entry.time;
+        let mentionCreatedAt = new Date();
+        if (rawTs != null) {
+          const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+          if (Number.isFinite(ms)) mentionCreatedAt = new Date(ms);
+        }
+
+        const interaction = await Interaction.findOneAndUpdate(
+          { platformId: String(mentionId) },
+          {
+            $set: {
+              organization: organizationId,
+              platform: 'instagram',
+              type: 'mention',
+              platformId: String(mentionId),
+              content: mentionText,
+              author,
+              platformCreatedAt: mentionCreatedAt,
+              metadata: {
+                mentionId: mention.id || null,
+                mediaId: mention.media_id || null,
+                commentId: mention.comment_id || null,
+                postId: mention.media_id || null,
+                postUrl: mention.media_id ? `https://www.instagram.com/p/${mention.media_id}` : null,
+                rawMention: mention
+              }
+            },
+            $setOnInsert: { status: 'unread', isRead: false }
+          },
+          { upsert: true, new: true }
+        );
+
+        if (interaction && organizationId) {
+          emitToOrg(organizationId.toString(), 'new_interaction', {
+            interaction: interaction.toObject()
+          });
+        }
+
+        return interaction;
+      }
+
       if (change.field === 'messages') {
         // New DM (legacy Graph API format): fetch sender profile for inbox avatar
         const message = change.value;
