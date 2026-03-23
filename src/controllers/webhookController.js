@@ -383,16 +383,10 @@ exports.handleInstagramWebhook = async (req, res) => {
     const instagramId = entry.id;
     const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
-    const accountIds = [instagramId, String(instagramId)].filter(Boolean);
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
-      isActive: true,
-      $or: [
-        { platformUserId: { $in: accountIds } },
-        { platformPageId: { $in: accountIds } },
-        { 'platformData.businessAccountId': { $in: accountIds } },
-        { 'platformData.pageId': { $in: accountIds } }
-      ]
+      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
+      isActive: true
     });
 
     if (!connection) {
