@@ -67,24 +67,27 @@ module.exports = async function processAI(job) {
       isTrainingData: true
     }).sort({ trainingWeight: -1 }).limit(10);
 
+    const populatedOrg = interaction.organization && typeof interaction.organization === 'object'
+      ? interaction.organization
+      : null;
+    const orgId = populatedOrg?._id || interaction.organization;
+
     // Step 5: Generate AI response suggestion
     jobLogger.debug('Generating AI response');
-    const aiResponse = await aiService.generateResponse(interaction, knowledgeBase);
+    const aiResponse = await aiService.generateResponse(interaction, orgId, knowledgeBase);
     
     if (aiResponse) {
       interaction.aiSuggestion = aiResponse;
     }
 
-    // Step 6: Determine if auto-reply eligible
-    interaction.autoReplyEligible = aiService.canAutoReply(interaction);
+    // Step 6: Determine if auto-reply eligible (pass populated org so settings are evaluated)
+    interaction.autoReplyEligible = aiService.canAutoReply(interaction, populatedOrg || {});
 
     // Step 7: Check if should auto-reply or assign to agent
     if (interaction.autoReplyEligible && aiResponse) {
       jobLogger.debug('Interaction eligible for auto-reply');
     } else {
-      // Assign to agent only if organization has auto-assign enabled
-      const organization = interaction.organization && typeof interaction.organization === 'object' ? interaction.organization : null;
-      const autoAssign = organization?.escalationSettings?.autoAssign !== false;
+      const autoAssign = populatedOrg?.escalationSettings?.autoAssign !== false;
       if (autoAssign) {
         jobLogger.debug('Assigning to agent (auto-assign enabled)');
         await assignToAgent(interaction, 'ai_unable');

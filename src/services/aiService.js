@@ -786,7 +786,44 @@ Generate a response that addresses the customer's message appropriately.`;
   }
 
   /**
-   * Determine if interaction is eligible for auto-reply
+   * Normalize list entries for case-insensitive platform matching
+   */
+  _normalizePlatformList(list) {
+    if (!list || !list.length) return [];
+    return list.map((p) => String(p).toLowerCase().trim()).filter(Boolean);
+  }
+
+  /**
+   * True when sentiment analysis has finished with a known label (required for sentiment-based rules).
+   */
+  _hasKnownSentiment(interaction) {
+    const s = interaction.sentiment;
+    return s === 'positive' || s === 'negative' || s === 'neutral';
+  }
+
+  /**
+   * Cheap gate before enqueueing a webhook/sync auto-reply job (avoids useless queue work).
+   * Does not require sentiment — caller still runs full canAutoReply when the job executes.
+   */
+  shouldQueueImmediateAutoReply(interaction, organizationDoc) {
+    if (!organizationDoc?.autoReplySettings) return false;
+    const settings = organizationDoc.autoReplySettings;
+    if (!settings.enabled) return false;
+
+    const plat = (interaction.platform || '').toLowerCase();
+    if (settings.enabledPlatforms && settings.enabledPlatforms.length > 0) {
+      const allowed = this._normalizePlatformList(settings.enabledPlatforms);
+      if (!allowed.includes(plat)) return false;
+    }
+    if (settings.enabledTypes && settings.enabledTypes.length > 0) {
+      if (!settings.enabledTypes.includes(interaction.type)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Determine if interaction is eligible for auto-reply (must match Organization.autoReplySettings).
+   * Note: minConfidence in settings = minimum AI reply confidence (enforced in generateAutoReply), not sentiment score.
    */
   canAutoReply(interaction, organizationSettings = {}) {
     // Check if already replied
@@ -810,23 +847,39 @@ Generate a response that addresses the customer's message appropriately.`;
       interaction._needsParentCheck = true;
     }
 
-    // Respect organization settings
-    const settings = organizationSettings.autoReplySettings || {};
+    // Respect organization settings (support plain object or Mongoose doc)
+    const settings =
+      organizationSettings.autoReplySettings ||
+      organizationSettings?.toObject?.()?.autoReplySettings ||
+      {};
 
     if (!settings.enabled) {
       return false;
     }
 
-    // Check platform filters
+    // Platform filters (case-insensitive)
     if (settings.enabledPlatforms && settings.enabledPlatforms.length > 0) {
-      if (!settings.enabledPlatforms.includes(interaction.platform)) {
+      const plat = (interaction.platform || '').toLowerCase();
+      const allowed = this._normalizePlatformList(settings.enabledPlatforms);
+      if (!allowed.includes(plat)) {
         return false;
       }
     }
 
-    // Sentiment filter: control which sentiments to auto-reply to
+    // Interaction type (comment, dm, review, mention)
+    if (settings.enabledTypes && settings.enabledTypes.length > 0) {
+      if (!settings.enabledTypes.includes(interaction.type)) {
+        return false;
+      }
+    }
+
     const sentimentFilter = settings.sentimentFilter || 'all';
     const sentiment = interaction.sentiment;
+
+    // Any non-"all" filter requires a completed sentiment analysis
+    if (sentimentFilter !== 'all' && !this._hasKnownSentiment(interaction)) {
+      return false;
+    }
 
     if (sentimentFilter !== 'all') {
       switch (sentimentFilter) {
@@ -850,30 +903,24 @@ Generate a response that addresses the customer's message appropriately.`;
             return false;
           }
           break;
+        default:
+          break;
       }
     }
 
-    // Legacy: Don't auto-reply to negative sentiment (unless explicitly enabled)
-    // This is kept for backward compatibility but sentimentFilter takes precedence
-    if (sentimentFilter === 'all' && interaction.sentiment === 'negative' && !settings.replyToNegative) {
-      return false;
-    }
-
-    // Don't auto-reply if confidence is too low
-    if (interaction.sentimentConfidence && interaction.sentimentConfidence < (settings.minConfidence || 0.7)) {
-      return false;
-    }
-
-    // Don't auto-reply to complaints (unless explicitly enabled)
-    if (interaction.intent === 'complaint' && !settings.replyToComplaints) {
-      return false;
-    }
-
-    // Check interaction type filters
-    if (settings.enabledTypes && settings.enabledTypes.length > 0) {
-      if (!settings.enabledTypes.includes(interaction.type)) {
+    // Legacy: with filter "all", block negative unless replyToNegative is explicitly true (undefined/false = do not reply to negative)
+    if (sentimentFilter === 'all' && settings.replyToNegative !== true) {
+      if (!this._hasKnownSentiment(interaction)) {
         return false;
       }
+      if (sentiment === 'negative') {
+        return false;
+      }
+    }
+
+    // Complaints: only block when intent is explicitly classified as complaint
+    if (interaction.intent === 'complaint' && !settings.replyToComplaints) {
+      return false;
     }
 
     return true;

@@ -1,5 +1,6 @@
 const { autoReplyQueue } = require('../config/queue');
 const Organization = require('../models/Organization');
+const aiService = require('./aiService');
 
 /**
  * Auto-Reply Scheduler Service
@@ -163,8 +164,16 @@ class AutoReplyScheduler {
         return false; // Silently skip - already handled
       }
 
-      // Use configured delay
-      const delay = settings.webhookDelay || delayMinutes;
+      // Respect platform / interaction-type settings (same rules as canAutoReply pre-check)
+      if (!aiService.shouldQueueImmediateAutoReply(interaction, organization)) {
+        return false;
+      }
+
+      // Use configured delay; enforce a short floor so processAI can finish (sentiment, intent, complaint rules)
+      const rawMin = Number(settings.webhookDelay);
+      const delay =
+        Number.isFinite(rawMin) && rawMin >= 0 ? rawMin : (delayMinutes ?? 5);
+      const delayMs = Math.max(delay * 60 * 1000, 45 * 1000);
 
       // Add job with delay and unique jobId to prevent duplicates
       await autoReplyQueue.add(
@@ -175,7 +184,7 @@ class AutoReplyScheduler {
         },
         {
           jobId: `auto-reply-${interactionId}`, // Unique ID prevents duplicate jobs for same interaction
-          delay: delay * 60 * 1000, // Convert minutes to milliseconds
+          delay: delayMs,
           attempts: 3,
           backoff: {
             type: 'exponential',
