@@ -388,7 +388,7 @@ exports.resubscribeFacebookWebhooks = async (req, res, next) => {
       platform: 'instagram',
       platformUserId: { $exists: true, $ne: null },
       isActive: true,
-      status: 'connected'
+      status: { $in: ['connected', 'available'] }
     }).select('platformUserId platformUsername accessToken').lean();
 
     if (fbConnections.length === 0 && igConnections.length === 0) {
