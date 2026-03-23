@@ -7,9 +7,26 @@ const router = express.Router();
 const { protect } = require('../../middlewares/auth');
 const { requireSuperAdminAccess } = require('../../middlewares/superAdminAccess');
 const superAdminController = require('../../controllers/superAdminController');
+const gpController = require('../../controllers/groupPermissionController');
 
 router.use(protect);
 router.use(requireSuperAdminAccess);
+
+// Groups & Permissions
+router.get('/permissions/meta', gpController.getPermissionMeta);
+router.get('/permissions', gpController.listPermissions);
+router.post('/permissions', gpController.createPermission);
+router.put('/permissions/:id', gpController.updatePermission);
+router.delete('/permissions/:id', gpController.deletePermission);
+
+router.get('/groups', gpController.listGroups);
+router.post('/groups', gpController.createGroup);
+router.get('/groups/:id', gpController.getGroup);
+router.put('/groups/:id', gpController.updateGroup);
+router.delete('/groups/:id', gpController.deleteGroup);
+
+router.patch('/users/:userId/group', gpController.assignGroupToUser);
+router.post('/seed/permissions', gpController.seedPermissions);
 
 router.get('/plans', superAdminController.listPlans);
 router.get('/dashboard/stats', superAdminController.getDashboardStats);

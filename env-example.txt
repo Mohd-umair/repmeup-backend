@@ -76,19 +76,12 @@ LINKEDIN_ENABLE_ADVANCED_SCOPES=true
 LINKEDIN_WEBHOOK_VERIFY_TOKEN=your_secure_random_token_here
 LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here
 
-# AI Provider Selection
-# Use 'ollama' for development (local Gemma3), 'openai' for production
-AI_PROVIDER=ollama  # Options: 'ollama' (dev) or 'openai' (production)
-
-# Ollama Configuration (for development with Gemma3)
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=gemma3:270m  # Your installed model: gemma3:270m
-
-# OpenAI Configuration (for production - comment out during dev)
+# AI (OpenAI only — chat, sentiment, inbox replies, content generation)
 # Get your API key from: https://platform.openai.com/api-keys
-# Format: sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-# OPENAI_API_KEY=your_openai_api_key
+# OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # OPENAI_MODEL=gpt-4
+# Optional image generation for posts:
+# OPENAI_IMAGE_MODEL=dall-e-2
 
 # Email Service (SendGrid)
 SENDGRID_API_KEY=your_sendgrid_api_key

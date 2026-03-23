@@ -47,6 +47,11 @@ const userSchema = new mongoose.Schema({
   permissions: [{
     type: String
   }],
+  group: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Group',
+    default: null
+  },
   organization: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Organization',

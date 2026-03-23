@@ -68,8 +68,8 @@ router.get('/auto-reply', protect, async (req, res) => {
       // AI service
       aiService: {
         provider: aiService.provider,
-        model: aiService.provider === 'openai' ? aiService.openaiModel : aiService.ollamaModel,
-        hasApiKey: aiService.provider === 'openai' ? !!aiService.openaiApiKey : true
+        model: aiService.openaiModel,
+        hasApiKey: !!(aiService.openaiApiKey && aiService.openaiApiKey.trim())
       },
 
       // Scheduled jobs

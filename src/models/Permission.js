@@ -1,30 +1,42 @@
 const mongoose = require('mongoose');
 
+const CATEGORIES = [
+  'inbox', 'analytics', 'users', 'settings', 'integrations',
+  'knowledge_base', 'posts', 'media', 'organization', 'billing'
+];
+
+const ACTIONS = ['create', 'read', 'update', 'delete', 'manage', 'export', 'assign'];
+
 const permissionSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
-    unique: true
+    unique: true,
+    trim: true,
+    maxlength: 100
   },
   code: {
     type: String,
     required: true,
-    unique: true
+    unique: true,
+    trim: true,
+    maxlength: 80
   },
-  description: String,
-  
+  description: {
+    type: String,
+    trim: true,
+    maxlength: 300,
+    default: ''
+  },
   category: {
     type: String,
-    enum: ['inbox', 'analytics', 'users', 'settings', 'integrations', 'knowledge_base'],
+    enum: CATEGORIES,
     required: true
   },
-  
-  // CRUD permissions
   actions: [{
     type: String,
-    enum: ['create', 'read', 'update', 'delete', 'manage']
+    enum: ACTIONS
   }],
-  
   isActive: {
     type: Boolean,
     default: true
@@ -33,8 +45,10 @@ const permissionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
 permissionSchema.index({ code: 1 });
 permissionSchema.index({ category: 1 });
+
+permissionSchema.statics.CATEGORIES = CATEGORIES;
+permissionSchema.statics.ACTIONS = ACTIONS;
 
 module.exports = mongoose.model('Permission', permissionSchema);
