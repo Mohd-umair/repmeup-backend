@@ -65,10 +65,10 @@ class AuthService {
    */
   async login(email, password) {
     try {
-      // Find user with password field
       const user = await User.findOne({ email })
         .select('+password')
-        .populate('organization');
+        .populate('organization')
+        .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
 
       if (!user) {
         throw new Error('Invalid credentials');
@@ -78,27 +78,23 @@ class AuthService {
         throw new Error('This account is no longer available.');
       }
 
-      // Check if user is active
       if (!user.isActive) {
         throw new Error('Account is deactivated. Please contact support.');
       }
 
-      // Verify password
       const isPasswordValid = await user.comparePassword(password);
       if (!isPasswordValid) {
         throw new Error('Invalid credentials');
       }
 
-      // Update last login
       user.lastLogin = new Date();
       await user.save();
 
-      // Generate tokens
       const token = generateToken(user._id);
       const refreshToken = generateRefreshToken(user._id);
 
-      // Remove password from response
       const userObj = user.toJSON();
+      userObj.resolvedPermissions = this._extractPermissionCodes(user);
 
       return {
         user: userObj,
@@ -115,11 +111,15 @@ class AuthService {
    */
   async getUserById(userId) {
     try {
-      const user = await User.findById(userId).populate('organization');
+      const user = await User.findById(userId)
+        .populate('organization')
+        .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
       if (!user) {
         throw new Error('User not found');
       }
-      return user;
+      const userObj = user.toJSON();
+      userObj.resolvedPermissions = this._extractPermissionCodes(user);
+      return userObj;
     } catch (error) {
       throw error;
     }
@@ -363,6 +363,13 @@ class AuthService {
     const refreshToken = generateRefreshToken(user._id);
 
     return { token, refreshToken };
+  }
+
+  _extractPermissionCodes(user) {
+    if (user.group && user.group.permissions && user.group.permissions.length > 0) {
+      return user.group.permissions.map(p => typeof p === 'object' ? p.code : p).filter(Boolean);
+    }
+    return [];
   }
 }
 
