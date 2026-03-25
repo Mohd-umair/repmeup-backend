@@ -1,6 +1,56 @@
 const Menu = require('../models/Menu');
 const User = require('../models/User');
 const Group = require('../models/Group');
+const { DEFAULT_SUBMENU_PACKS } = require('../config/defaultMenuSubmenus');
+
+function menuIdStr(id) {
+  if (id == null) return '';
+  return id.toString();
+}
+
+/**
+ * Build grouped menus: top-level only, with nested `children` from parentId (already permission-filtered).
+ */
+function buildGroupedMenuTree(accessibleMenus) {
+  const byParent = new Map();
+  accessibleMenus.forEach((m) => {
+    if (!m.parentId) return;
+    const pid = menuIdStr(m.parentId);
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid).push(m);
+  });
+  byParent.forEach((arr) => arr.sort((a, b) => (a.order || 0) - (b.order || 0)));
+
+  const topLevel = accessibleMenus.filter((m) => !m.parentId);
+
+  const enriched = topLevel.map((parent) => {
+    const kids = byParent.get(menuIdStr(parent._id)) || [];
+    if (kids.length === 0) return { ...parent };
+    return { ...parent, children: kids };
+  });
+
+  const groupedMenus = { main: [], management: [], settings: [] };
+  enriched.forEach((menu) => {
+    if (groupedMenus[menu.group]) {
+      groupedMenus[menu.group].push(menu);
+    }
+  });
+  return groupedMenus;
+}
+
+function passesMenuRoles(requiredRoles, userRole, isBypassRole) {
+  if (isBypassRole) return true;
+  if (!requiredRoles || requiredRoles.length === 0) return true;
+  return requiredRoles.includes(userRole);
+}
+
+function passesMenuPermissions(requiredPermissions, permissionSet, isBypassRole, user) {
+  if (isBypassRole) return true;
+  if (user?.role === 'admin' && permissionSet.size === 0) return true;
+  if (!requiredPermissions || requiredPermissions.length === 0) return true;
+  if (permissionSet.size === 0) return false;
+  return requiredPermissions.every((p) => permissionSet.has(p));
+}
 
 async function resolveEffectiveGroupForMenuUser(user) {
   if (user?.group && Array.isArray(user.group.permissions) && user.group.permissions.length > 0) {
@@ -51,41 +101,30 @@ exports.getMenus = async (req, res, next) => {
     const permissionSet = new Set(permissionCodes);
     const isBypassRole = user.role === 'super_admin';
     
-    console.log('🔍 [Menu] User requesting menus:', {
-      email: user.email,
-      role: user.role,
-      permissions: permissionCodes
-    });
-
     // Fetch all active menus (single source of truth from DB config)
     const allMenus = await Menu.find({ isActive: true })
       .sort({ group: 1, order: 1 })
       .lean();
-    
-    console.log(`📋 [Menu] Found ${allMenus.length} active menus in database`);
 
     // Filter menus based on user permissions
-    const accessibleMenus = allMenus.filter(menu => {
+    const accessibleMenus = allMenus.filter((menu) => {
       if (isBypassRole) {
         return true;
       }
 
-      // Role checks from menu configuration
       if (menu.requiredRoles && menu.requiredRoles.length > 0) {
         if (!menu.requiredRoles.includes(user.role)) {
-          console.log(`❌ [Menu] ${menu.label} - Role '${user.role}' not in required roles: [${menu.requiredRoles.join(', ')}]`);
           return false;
         }
       }
 
-      // Check permission requirements
       if (menu.requiredPermissions && menu.requiredPermissions.length > 0) {
         if (permissionSet.size === 0) {
           return false;
         }
 
-        const hasAllPermissions = menu.requiredPermissions.every(
-          permission => permissionSet.has(permission)
+        const hasAllPermissions = menu.requiredPermissions.every((permission) =>
+          permissionSet.has(permission)
         );
 
         if (!hasAllPermissions) {
@@ -93,24 +132,10 @@ exports.getMenus = async (req, res, next) => {
         }
       }
 
-      console.log(`✅ [Menu] ${menu.label} - Accessible`);
       return true;
     });
-    
-    console.log(`✅ [Menu] User has access to ${accessibleMenus.length} menus`);
 
-    // Group menus by group
-    const groupedMenus = {
-      main: [],
-      management: [],
-      settings: []
-    };
-
-    accessibleMenus.forEach(menu => {
-      if (groupedMenus[menu.group]) {
-        groupedMenus[menu.group].push(menu);
-      }
-    });
+    const groupedMenus = buildGroupedMenuTree(accessibleMenus);
 
     res.status(200).json({
       success: true,
@@ -305,14 +330,6 @@ exports.seedMenus = async (req, res, next) => {
         }
       },
       {
-        label: 'Publish',
-        icon: '✈️',
-        route: '/app/publish',
-        order: 4,
-        group: 'main',
-        requiredRoles: ['admin', 'manager', 'agent']
-      },
-      {
         label: 'Content',
         icon: '📄',
         route: '/app/content',
@@ -357,15 +374,159 @@ exports.seedMenus = async (req, res, next) => {
       }
     ];
 
-    const menus = await Menu.insertMany(defaultMenus);
+    const inserted = await Menu.insertMany(defaultMenus);
+
+    const publishParent = await Menu.create({
+      label: 'Publish',
+      icon: '✈️',
+      route: '/app/publish',
+      order: 4,
+      group: 'main',
+      requiredRoles: ['admin', 'manager', 'agent'],
+      requiredPermissions: []
+    });
+
+    const publishChildren = await Menu.insertMany([
+      {
+        label: 'Create',
+        icon: '✏️',
+        route: '/app/publish',
+        order: 1,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.create']
+      },
+      {
+        label: 'Calendar',
+        icon: '📅',
+        route: '/app/publish/calendar',
+        order: 2,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      },
+      {
+        label: 'Published',
+        icon: '📋',
+        route: '/app/content',
+        queryParams: { view: 'published' },
+        order: 3,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      }
+    ]);
+
+    const extraMenus = [];
+    for (const pack of DEFAULT_SUBMENU_PACKS) {
+      if (pack.parentRoute === '/app/publish') continue;
+      const parent = await Menu.findOne({
+        route: pack.parentRoute,
+        $or: [{ parentId: null }, { parentId: { $exists: false } }]
+      });
+      if (!parent) continue;
+      const docs = pack.children.map((c) => ({
+        ...c,
+        group: parent.group || 'main',
+        parentId: parent._id,
+        isActive: true
+      }));
+      const created = await Menu.insertMany(docs);
+      extraMenus.push(...created);
+    }
+
+    const menus = [...inserted, publishParent, ...publishChildren, ...extraMenus];
 
     res.status(201).json({
       success: true,
       data: menus,
-      message: `${menus.length} menus seeded successfully`
+      message: `${menus.length} menus seeded (Publish, Analytics, Settings submenus from DB)`
     });
   } catch (error) {
     console.error('Seed menus error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Add Publish submenus (Create, Calendar, Published) for existing installs — idempotent
+ * @route   POST /api/menus/migrate-publish-submenus
+ * @access  Private (Admin)
+ */
+exports.migratePublishSubmenus = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Only administrators can run menu migration'
+      });
+    }
+
+    const publishParent = await Menu.findOne({
+      route: '/app/publish',
+      $or: [{ parentId: null }, { parentId: { $exists: false } }]
+    });
+
+    if (!publishParent) {
+      return res.status(404).json({
+        success: false,
+        error: 'Top-level Publish menu not found. Create one or reseed menus.'
+      });
+    }
+
+    const existing = await Menu.countDocuments({ parentId: publishParent._id });
+    if (existing > 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'Publish submenus already exist',
+        data: { created: 0, existing }
+      });
+    }
+
+    const publishChildren = await Menu.insertMany([
+      {
+        label: 'Create',
+        icon: '✏️',
+        route: '/app/publish',
+        order: 1,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.create']
+      },
+      {
+        label: 'Calendar',
+        icon: '📅',
+        route: '/app/publish/calendar',
+        order: 2,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      },
+      {
+        label: 'Published',
+        icon: '📋',
+        route: '/app/content',
+        queryParams: { view: 'published' },
+        order: 3,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      }
+    ]);
+
+    res.status(201).json({
+      success: true,
+      message: 'Publish submenus created',
+      data: { created: publishChildren.length }
+    });
+  } catch (error) {
+    console.error('migratePublishSubmenus error:', error);
     next(error);
   }
 };

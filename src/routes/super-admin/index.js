@@ -7,6 +7,7 @@ const router = express.Router();
 const { protect } = require('../../middlewares/auth');
 const { requireSuperAdminAccess } = require('../../middlewares/superAdminAccess');
 const superAdminController = require('../../controllers/superAdminController');
+const superAdminMenuController = require('../../controllers/superAdminMenuController');
 const gpController = require('../../controllers/groupPermissionController');
 
 router.use(protect);
@@ -27,6 +28,13 @@ router.delete('/groups/:id', gpController.deleteGroup);
 
 router.patch('/users/:userId/group', gpController.assignGroupToUser);
 router.post('/seed/permissions', gpController.seedPermissions);
+
+router.get('/menus', superAdminMenuController.listAllMenus);
+router.get('/menus/parent-options', superAdminMenuController.listTopLevelParentOptions);
+router.post('/menus', superAdminMenuController.createMenu);
+router.put('/menus/:id', superAdminMenuController.updateMenu);
+router.delete('/menus/:id', superAdminMenuController.deleteMenu);
+router.post('/menus/bootstrap-defaults', superAdminMenuController.bootstrapDefaultSubmenus);
 
 router.get('/plans', superAdminController.listPlans);
 router.get('/dashboard/stats', superAdminController.getDashboardStats);
