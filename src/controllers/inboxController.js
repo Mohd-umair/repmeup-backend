@@ -11,6 +11,37 @@ const googleService = require('../integrations/google/googleService');
 const axios = require('axios');
 const logger = require('../config/logger');
 
+/**
+ * Inbox visibility: same org + platform still has a connected account, and either
+ * platformConnection matches an active row, is missing/null (legacy), or is stale (reconnect).
+ */
+function buildPlatformConnectionVisibilityFilter(activeConnections) {
+  const activeConnectionIds = activeConnections.map((c) => c._id);
+  const activePlatforms = [...new Set(activeConnections.map((c) => c.platform))];
+  if (!activeConnectionIds.length || !activePlatforms.length) {
+    return { _id: { $in: [] } };
+  }
+  return {
+    $and: [
+      { platform: { $in: activePlatforms } },
+      {
+        $or: [
+          { platformConnection: { $in: activeConnectionIds } },
+          { platformConnection: { $exists: false } },
+          { platformConnection: null },
+          {
+            platformConnection: {
+              $exists: true,
+              $ne: null,
+              $nin: activeConnectionIds
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
 exports.getInteractions = async (req, res, next) => {
@@ -23,15 +54,21 @@ exports.getInteractions = async (req, res, next) => {
       search,
       assignedTo,
       label,
+      intentBucket,
       viewMode,
       postId,
       dateFrom,
       dateTo,
       page = 1,
-      limit = 50,
-      sortBy = 'updatedAt',
+      limit = 20,
+      // Keep inbox ordered by newest platform comment/message first.
+      sortBy = 'platformCreatedAt',
       sortOrder = 'desc'
     } = req.query;
+
+    // Enforce max page size: clients cannot request more than 100 at once
+    const safeLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
+    const safePage  = Math.max(parseInt(page) || 1, 1);
 
     // Build query
     const query = { organization: req.user.organization._id };
@@ -61,7 +98,16 @@ exports.getInteractions = async (req, res, next) => {
 
     // Label filter - check if label exists in labels array
     if (label) {
-      query.labels = label; // MongoDB will match if label ID exists in the labels array
+      query.labels = label;
+    }
+
+    // Intent bucket filter
+    if (intentBucket) {
+      if (intentBucket === 'none') {
+        query.$and = [...(query.$and || []), { $or: [{ intentBucket: { $exists: false } }, { intentBucket: null }] }];
+      } else {
+        query.intentBucket = intentBucket;
+      }
     }
 
     // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA), archived
@@ -121,18 +167,10 @@ exports.getInteractions = async (req, res, next) => {
       organization: req.user.organization._id,
       isActive: true,
       status: 'connected'
-    }).select('_id');
+    }).select('_id platform');
 
-    const activeConnectionIds = activeConnections.map(conn => conn._id);
-
-    // Only show conversations for connected accounts. If no account is connected, show none.
-    const platformConnectionFilter = activeConnectionIds.length > 0 ? {
-      $or: [
-        { platformConnection: { $in: activeConnectionIds } },
-        { platformConnection: { $exists: false } },
-        { platformConnection: null }
-      ]
-    } : { _id: { $in: [] } }; // No connections → match nothing, inbox empty
+    const activeConnectionIds = activeConnections.map((conn) => conn._id);
+    const platformConnectionFilter = buildPlatformConnectionVisibilityFilter(activeConnections);
 
     // Build agent condition: agents see only chats assigned to them OR previously assigned to them
     const agentCondition = req.user.role === 'agent' ? {
@@ -169,7 +207,7 @@ exports.getInteractions = async (req, res, next) => {
     query.$and = conditionsToAnd;
 
     // Calculate pagination
-    const skip = (page - 1) * limit;
+    const skip = (safePage - 1) * safeLimit;
     const sort = { [effectiveSortBy]: effectiveSortOrder === 'desc' ? -1 : 1 };
 
     // Try to get from cache (include search in cache key, normalized)
@@ -180,18 +218,34 @@ exports.getInteractions = async (req, res, next) => {
       type,
       sentiment,
       status,
-      label, // Include label in cache key to prevent wrong cached results
+      label,
       postId: postId || '',
       viewMode: viewMode || '',
       search: cacheSearchKey,
-      page,
-      limit,
+      page: safePage,
+      limit: safeLimit,
       assignedTo: req.user.role === 'agent' ? req.user._id.toString() : effectiveAssignedTo,
-      activeConnections: activeConnectionIds.map(id => id.toString()).sort().join(',')
+      activeConnections: activeConnectionIds.map(id => id.toString()).sort().join(','),
+      // Must be part of the key or date / bucket filters return wrong cached pages
+      dateFrom: dateFrom ? String(dateFrom) : '',
+      dateTo: dateTo ? String(dateTo) : '',
+      intentBucket: intentBucket ? String(intentBucket) : ''
     });
 
     const cached = await cacheService.get(cacheKey);
     if (cached) {
+      if (!cached.pagination) {
+        cached.pagination = {
+          page: safePage,
+          limit: safeLimit,
+          hasMore: Array.isArray(cached.interactions) ? cached.interactions.length >= safeLimit : false
+        };
+      }
+      // Backward compatibility: older cached entries may not include pagination.total.
+      if (cached?.pagination && typeof cached.pagination.total !== 'number') {
+        const totalFromDb = await Interaction.countDocuments(query);
+        cached.pagination.total = totalFromDb;
+      }
       return res.status(200).json({
         success: true,
         data: cached,
@@ -199,7 +253,7 @@ exports.getInteractions = async (req, res, next) => {
       });
     }
 
-    // Execute query
+    // Execute query — fetch one extra to know if another page exists (avoids COUNT for perf)
     const interactions = await Interaction.find(query)
       .populate('assignedTo', 'firstName lastName email avatar')
       .populate('assignedBy', 'firstName lastName email')
@@ -207,21 +261,24 @@ exports.getInteractions = async (req, res, next) => {
       .populate('assignmentHistory.assignedBy', 'firstName lastName email')
       .populate('labels', 'name color icon')
       .populate('replies.sentBy', 'firstName lastName')
-      .populate('platformConnection', 'platform isActive status') // Populate to verify
+      .populate('platformConnection', 'platform isActive status')
       .sort(sort)
-      .limit(parseInt(limit))
-      .skip(skip);
+      .limit(safeLimit + 1)   // +1 to detect next page
+      .skip(skip)
+      .lean();
 
-    // Get total count
+    const hasMore = interactions.length > safeLimit;
+    if (hasMore) interactions.pop();  // remove the extra document
+
     const total = await Interaction.countDocuments(query);
 
     const result = {
       interactions,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
+        page: safePage,
+        limit: safeLimit,
+        hasMore,
+        total
       }
     };
 
@@ -243,6 +300,9 @@ exports.getInteractions = async (req, res, next) => {
 // @access  Private
 exports.getInteraction = async (req, res, next) => {
   try {
+    const sortOrder = req.query.sortOrder === 'desc' ? 'desc' : 'asc';
+    const sortDir = sortOrder === 'desc' ? -1 : 1;
+
     const interaction = await Interaction.findById(req.params.id)
       .populate('assignedTo', 'firstName lastName email avatar')
       .populate('assignedBy', 'firstName lastName email')
@@ -305,10 +365,15 @@ exports.getInteraction = async (req, res, next) => {
         { parentId: interaction.platformId } // Also check by platformId
       ],
       organization: req.user.organization._id
-    }).sort({ platformCreatedAt: 1 }); // Sort by creation time
+    }).sort({ platformCreatedAt: sortDir }); // Sort by requested order
 
     // Convert to plain object for modification
     const interactionObj = interaction.toObject();
+
+    // Hide soft-deleted app replies from thread rendering.
+    interactionObj.replies = (interactionObj.replies || []).filter(
+      (reply) => reply.status !== 'deleted'
+    );
 
     // Get all platformResponseIds from app replies to filter out our own replies
     const appReplyPlatformIds = new Set(
@@ -352,16 +417,89 @@ exports.getInteraction = async (req, res, next) => {
       const allReplies = [
         ...(interactionObj.replies || []).map(r => ({ ...r, isPlatformReply: false })),
         ...platformReplies
-      ].sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+      ].sort((a, b) =>
+        sortDir === 1
+          ? new Date(a.sentAt) - new Date(b.sentAt)
+          : new Date(b.sentAt) - new Date(a.sentAt)
+      );
 
       interactionObj.replies = allReplies;
       interactionObj.totalReplies = allReplies.length;
       interactionObj.platformRepliesCount = platformReplies.length;
+    } else if (interactionObj.replies && interactionObj.replies.length > 0) {
+      // Keep app replies sorted even when there are no child interactions.
+      interactionObj.replies = [...interactionObj.replies].sort((a, b) =>
+        sortDir === 1
+          ? new Date(a.sentAt) - new Date(b.sentAt)
+          : new Date(b.sentAt) - new Date(a.sentAt)
+      );
     }
 
     res.status(200).json({
       success: true,
       data: interactionObj
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Soft-delete a reply (hide from thread, keep in DB)
+// @route   DELETE /api/inbox/:id/replies/:replyId
+// @access  Private
+exports.deleteReply = async (req, res, next) => {
+  try {
+    const { id, replyId } = req.params;
+    const interaction = await Interaction.findById(id);
+
+    if (!interaction) {
+      return res.status(404).json({
+        success: false,
+        error: 'Interaction not found'
+      });
+    }
+
+    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+
+    const reply = interaction.replies.id(replyId);
+    if (!reply) {
+      return res.status(404).json({
+        success: false,
+        error: 'Reply not found'
+      });
+    }
+
+    // Only allow hiding replies that failed to send (unsent/error state).
+    if (reply.status !== 'failed') {
+      return res.status(400).json({
+        success: false,
+        error: 'Only failed replies can be hidden'
+      });
+    }
+
+    // Allow original sender, manager, or admin to hide the reply.
+    const isOwner = reply.sentBy?.toString?.() === req.user._id.toString();
+    const isPrivileged = ['admin', 'manager'].includes(req.user.role);
+    if (!isOwner && !isPrivileged) {
+      return res.status(403).json({
+        success: false,
+        error: 'You can only hide your own failed reply'
+      });
+    }
+
+    reply.status = 'deleted';
+    await interaction.save();
+
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Reply hidden from conversation'
     });
   } catch (error) {
     next(error);
@@ -1046,11 +1184,8 @@ exports.getStats = async (req, res, next) => {
       organization: orgId,
       isActive: true,
       status: 'connected'
-    }).select('_id');
-    const activeIds = activeConnectionsForStats.map(c => c._id);
-    const connectionFilter = activeIds.length > 0
-      ? { $or: [{ platformConnection: { $in: activeIds } }, { platformConnection: null }, { platformConnection: { $exists: false } }] }
-      : { _id: { $in: [] } };
+    }).select('_id platform');
+    const connectionFilter = buildPlatformConnectionVisibilityFilter(activeConnectionsForStats);
 
     // Match parent interactions only (exclude replies), same as inbox list
     const matchStage = {
@@ -1320,6 +1455,262 @@ exports.suggestReply = async (req, res, next) => {
   } catch (error) {
     console.error('Suggest reply error:', error);
     next(error);
+  }
+};
+
+// @desc    Generate AI-assisted replies (short, detailed, sales) for a conversation
+// @route   POST /api/inbox/:id/ai-assist
+// @access  Private
+exports.aiAssist = async (req, res, next) => {
+  try {
+    const interaction = await Interaction.findById(req.params.id);
+    if (!interaction) {
+      return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    const organizationId = req.user.organization._id.toString();
+
+    const aiCreditService = require('../services/aiCreditService');
+    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: creditCheck.error || 'Insufficient AI credits',
+        code: creditCheck.code || 'INSUFFICIENT_CREDITS',
+        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining }
+      });
+    }
+
+    // Gather conversation context: latest messages from thread
+    const childInteractions = await Interaction.find({
+      $or: [
+        { parentId: interaction._id.toString() },
+        { parentId: interaction.platformId }
+      ],
+      organization: req.user.organization._id
+    }).sort({ platformCreatedAt: -1 }).limit(10).lean();
+
+    const recentReplies = (interaction.replies || [])
+      .filter(r => r.status !== 'deleted')
+      .slice(-10);
+
+    const conversationContext = [];
+    conversationContext.push(`Customer (${interaction.author?.name || 'Unknown'}): "${interaction.content}"`);
+    for (const child of childInteractions.reverse()) {
+      conversationContext.push(`Customer: "${child.content}"`);
+    }
+    for (const reply of recentReplies) {
+      const label = reply.isPlatformReply ? 'Customer' : 'Agent';
+      conversationContext.push(`${label}: "${reply.content}"`);
+    }
+    const chatContext = conversationContext.join('\n');
+
+    // Load knowledge base entries for context
+    const KnowledgeBase = require('../models/KnowledgeBase');
+    const { entries: kbEntries } = await aiService.searchKnowledgeBase(
+      organizationId,
+      interaction.content,
+      5
+    );
+    const kbContext = kbEntries && kbEntries.length > 0
+      ? kbEntries.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
+      : '';
+
+    const baseSystemPrompt = `You are a professional customer service AI assistant.
+You help agents draft replies to customer messages.
+
+CONVERSATION CONTEXT:
+${chatContext}
+
+${kbContext ? `KNOWLEDGE BASE (use this information to ground your answers):\n${kbContext}` : 'No knowledge base content available. Provide helpful general responses.'}
+
+IMPORTANT RULES:
+- Address the customer's concern directly
+- Be polite, empathetic, and professional
+- If knowledge base content is provided, prioritize those facts
+- Never say placeholders like "[Your Name]" or "[Company]"
+- Match the tone to the platform: ${interaction.platform} (${interaction.type})
+- Do NOT include a greeting like "Dear customer" unless the message is formal`;
+
+    const replyTypes = {
+      short: {
+        instruction: 'Generate a SHORT, concise reply (1-2 sentences max). Get straight to the point.',
+        maxTokens: 100,
+        temperature: 0.6
+      },
+      detailed: {
+        instruction: 'Generate a DETAILED, comprehensive reply (3-5 sentences). Cover all relevant points thoroughly while remaining friendly.',
+        maxTokens: 300,
+        temperature: 0.7
+      },
+      sales: {
+        instruction: 'Generate a SALES-oriented reply (2-4 sentences). Address the query, then naturally suggest relevant products/services or upsell opportunities. Be helpful, not pushy.',
+        maxTokens: 250,
+        temperature: 0.75
+      }
+    };
+
+    const generateOne = async (type) => {
+      const config = replyTypes[type];
+      const result = await aiService.generateText(
+        `${baseSystemPrompt}\n\n${config.instruction}`,
+        `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
+        { temperature: config.temperature, maxTokens: config.maxTokens }
+      );
+      return { type, content: result };
+    };
+
+    const [shortReply, detailedReply, salesReply] = await Promise.all([
+      generateOne('short'),
+      generateOne('detailed'),
+      generateOne('sales')
+    ]);
+
+    await aiCreditService.deductCredits(organizationId, 1, {
+      operation: 'ai_assist',
+      userId: req.user._id,
+      interactionId: interaction._id.toString(),
+      platform: interaction.platform,
+      messagePreview: interaction.content?.substring(0, 100) || ''
+    });
+
+    const updatedCredits = await aiCreditService.getUsage(organizationId);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        short: shortReply.content,
+        detailed: detailedReply.content,
+        sales: salesReply.content,
+        usedKnowledgeBase: kbEntries && kbEntries.length > 0,
+        knowledgeBaseCount: kbEntries ? kbEntries.length : 0
+      },
+      credits: updatedCredits,
+      message: 'AI assistance generated successfully'
+    });
+  } catch (error) {
+    console.error('AI Assist error:', error);
+    if (error.response?.status === 401) {
+      return res.status(500).json({ success: false, error: 'OpenAI API key is invalid or expired.' });
+    }
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate AI assistance. Please try again.'
+    });
+  }
+};
+
+// @desc    Regenerate a single AI reply type (short/detailed/sales)
+// @route   POST /api/inbox/:id/ai-assist/regenerate
+// @access  Private
+exports.aiAssistRegenerate = async (req, res, next) => {
+  try {
+    const { type } = req.body;
+    if (!['short', 'detailed', 'sales'].includes(type)) {
+      return res.status(400).json({ success: false, error: 'Invalid type. Must be short, detailed, or sales.' });
+    }
+
+    const interaction = await Interaction.findById(req.params.id);
+    if (!interaction) {
+      return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    const organizationId = req.user.organization._id.toString();
+    const aiCreditService = require('../services/aiCreditService');
+    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: creditCheck.error || 'Insufficient AI credits',
+        code: creditCheck.code || 'INSUFFICIENT_CREDITS',
+        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining }
+      });
+    }
+
+    const childInteractions = await Interaction.find({
+      $or: [
+        { parentId: interaction._id.toString() },
+        { parentId: interaction.platformId }
+      ],
+      organization: req.user.organization._id
+    }).sort({ platformCreatedAt: -1 }).limit(10).lean();
+
+    const recentReplies = (interaction.replies || [])
+      .filter(r => r.status !== 'deleted')
+      .slice(-10);
+
+    const conversationContext = [];
+    conversationContext.push(`Customer (${interaction.author?.name || 'Unknown'}): "${interaction.content}"`);
+    for (const child of childInteractions.reverse()) {
+      conversationContext.push(`Customer: "${child.content}"`);
+    }
+    for (const reply of recentReplies) {
+      const label = reply.isPlatformReply ? 'Customer' : 'Agent';
+      conversationContext.push(`${label}: "${reply.content}"`);
+    }
+    const chatContext = conversationContext.join('\n');
+
+    const KnowledgeBase = require('../models/KnowledgeBase');
+    const { entries: kbEntries } = await aiService.searchKnowledgeBase(
+      organizationId,
+      interaction.content,
+      5
+    );
+    const kbContext = kbEntries && kbEntries.length > 0
+      ? kbEntries.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
+      : '';
+
+    const replyConfigs = {
+      short: { instruction: 'Generate a SHORT, concise reply (1-2 sentences max). Get straight to the point.', maxTokens: 100, temperature: 0.8 },
+      detailed: { instruction: 'Generate a DETAILED, comprehensive reply (3-5 sentences). Cover all relevant points thoroughly while remaining friendly.', maxTokens: 300, temperature: 0.8 },
+      sales: { instruction: 'Generate a SALES-oriented reply (2-4 sentences). Address the query, then naturally suggest relevant products/services. Be helpful, not pushy.', maxTokens: 250, temperature: 0.85 }
+    };
+
+    const config = replyConfigs[type];
+    const systemPrompt = `You are a professional customer service AI assistant.
+You help agents draft replies to customer messages. Generate a DIFFERENT response than the previous one.
+
+CONVERSATION CONTEXT:
+${chatContext}
+
+${kbContext ? `KNOWLEDGE BASE:\n${kbContext}` : ''}
+
+${config.instruction}`;
+
+    const content = await aiService.generateText(
+      systemPrompt,
+      `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
+      { temperature: config.temperature, maxTokens: config.maxTokens }
+    );
+
+    await aiCreditService.deductCredits(organizationId, 1, {
+      operation: 'ai_assist_regenerate',
+      userId: req.user._id,
+      interactionId: interaction._id.toString(),
+      platform: interaction.platform,
+      messagePreview: interaction.content?.substring(0, 100) || ''
+    });
+
+    const updatedCredits = await aiCreditService.getUsage(organizationId);
+
+    res.status(200).json({
+      success: true,
+      data: { type, content },
+      credits: updatedCredits,
+      message: `${type} reply regenerated successfully`
+    });
+  } catch (error) {
+    console.error('AI Assist regenerate error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to regenerate AI reply.'
+    });
   }
 };
 
@@ -2256,6 +2647,150 @@ exports.backfillFacebookAvatars = async (req, res) => {
     });
   } catch (error) {
     console.error('backfillFacebookAvatars error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Update interaction's intent bucket (drag-and-drop reclassification)
+ * PUT /inbox/:id/bucket
+ */
+exports.updateBucket = async (req, res) => {
+  try {
+    const { intentBucket } = req.body;
+    const interaction = await Interaction.findOne({
+      _id: req.params.id,
+      organization: req.user.organization._id
+    });
+
+    if (!interaction) {
+      return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+
+    interaction.intentBucket = intentBucket || null;
+    interaction.bucketAssignedBy = 'manual';
+    await interaction.save();
+
+    const socketService = req.app.get('socketService');
+    if (socketService) {
+      socketService.emitToOrganization(req.user.organization._id.toString(), 'bucket_update', {
+        interactionId: interaction._id,
+        intentBucket: interaction.intentBucket,
+        bucketAssignedBy: 'manual'
+      });
+    }
+
+    res.json({ success: true, data: interaction });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Get interactions grouped by intent bucket (for kanban board view)
+ * GET /inbox/bucket-view
+ */
+exports.getBucketView = async (req, res) => {
+  try {
+    const IntentBucket = require('../models/IntentBucket');
+    const orgId = req.user.organization._id;
+    const { limit = 20, platform, type, sentiment, status, search, dateFrom, dateTo } = req.query;
+    const safeLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 50);
+
+    const activeConnections = await PlatformConnection.find({
+      organization: orgId,
+      status: 'connected'
+    }).select('_id platform').lean();
+
+    const visibilityFilter = buildPlatformConnectionVisibilityFilter(activeConnections);
+
+    const baseMatch = {
+      organization: orgId,
+      $or: [
+        { parentId: { $exists: false } },
+        { parentId: null },
+        { parentId: '' }
+      ],
+      ...visibilityFilter
+    };
+
+    if (platform) baseMatch.platform = platform;
+    if (type) baseMatch.type = type;
+    if (sentiment) baseMatch.sentiment = sentiment;
+    if (status) baseMatch.status = status;
+    if (dateFrom || dateTo) {
+      baseMatch.platformCreatedAt = {};
+      if (dateFrom) baseMatch.platformCreatedAt.$gte = new Date(dateFrom);
+      if (dateTo) {
+        const end = new Date(dateTo);
+        end.setHours(23, 59, 59, 999);
+        baseMatch.platformCreatedAt.$lte = end;
+      }
+    }
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      baseMatch.$and = baseMatch.$and || [];
+      baseMatch.$and.push({
+        $or: [
+          { content: { $regex: escaped, $options: 'i' } },
+          { 'author.name': { $regex: escaped, $options: 'i' } },
+          { 'author.username': { $regex: escaped, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (!status) {
+      baseMatch.status = { $ne: 'archived' };
+    }
+
+    let buckets = await IntentBucket.find({ organization: orgId, isActive: true }).sort({ order: 1 }).lean();
+
+    if (buckets.length === 0) {
+      const { ensureDefaultBuckets } = require('../controllers/intentBucketController');
+      await ensureDefaultBuckets(orgId, req.user._id);
+      buckets = await IntentBucket.find({ organization: orgId, isActive: true }).sort({ order: 1 }).lean();
+    }
+
+    const bucketResults = await Promise.all(
+      buckets.map(async (bucket) => {
+        const matchQuery = { ...baseMatch, intentBucket: bucket._id };
+        const [interactions, total] = await Promise.all([
+          Interaction.find(matchQuery)
+            .sort({ platformCreatedAt: -1 })
+            .limit(safeLimit)
+            .populate('assignedTo', 'firstName lastName email')
+            .populate('labels', 'name color icon')
+            .populate('intentBucket', 'name color icon')
+            .populate('platformConnection', 'platform displayName')
+            .lean(),
+          Interaction.countDocuments(matchQuery)
+        ]);
+        return { bucket, interactions, total };
+      })
+    );
+
+    const unassignedMatch = { ...baseMatch };
+    unassignedMatch.$and = [...(unassignedMatch.$and || []), { $or: [{ intentBucket: { $exists: false } }, { intentBucket: null }] }];
+    const [unassignedInteractions, unassignedTotal] = await Promise.all([
+      Interaction.find(unassignedMatch)
+        .sort({ platformCreatedAt: -1 })
+        .limit(safeLimit)
+        .populate('assignedTo', 'firstName lastName email')
+        .populate('labels', 'name color icon')
+        .populate('platformConnection', 'platform displayName')
+        .lean(),
+      Interaction.countDocuments(unassignedMatch)
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        buckets: bucketResults,
+        unassigned: { interactions: unassignedInteractions, total: unassignedTotal }
+      }
+    });
+  } catch (error) {
+    console.error('getBucketView error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 };

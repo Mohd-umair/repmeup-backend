@@ -6,12 +6,56 @@ const logger = require('../config/logger');
 const { escapeRegex } = require('../utils/sanitize');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
+/**
+ * OpenAI model ids are lowercase (e.g. gpt-5.3-chat-latest). ChatGPT-style names like "GPT-5.3" 404.
+ * Maps common shorthand to the official Chat Completions model id.
+ */
+function normalizeOpenAIModelId(raw) {
+  const fallback = 'gpt-4';
+  if (raw == null || String(raw).trim() === '') {
+    return fallback;
+  }
+  const m = String(raw).trim().toLowerCase();
+  const aliases = {
+    'gpt-5.3': 'gpt-5.3-chat-latest',
+    'gpt-5-3': 'gpt-5.3-chat-latest',
+    'gpt5.3': 'gpt-5.3-chat-latest'
+  };
+  return aliases[m] || m;
+}
+
+/**
+ * Newer OpenAI chat models (e.g. gpt-5.x) reject `max_tokens` and require `max_completion_tokens`.
+ */
+function openAIChatCompletionMaxTokensField(model, maxValue) {
+  const m = (model || '').toLowerCase();
+  const useMaxCompletion =
+    /^gpt-5/.test(m) || /^o1/.test(m) || /^o3/.test(m) || /^o4/.test(m);
+  if (useMaxCompletion) {
+    return { max_completion_tokens: maxValue };
+  }
+  return { max_tokens: maxValue };
+}
+
+/** Models that only accept the default sampling temperature (omit param; do not send custom values). */
+function openAIChatModelUsesFixedTemperature(model) {
+  const m = (model || '').toLowerCase();
+  return /^gpt-5/.test(m) || /^o1/.test(m) || /^o3/.test(m) || /^o4/.test(m);
+}
+
+function openAIChatCompletionTemperatureField(model, temperature) {
+  if (openAIChatModelUsesFixedTemperature(model)) {
+    return {};
+  }
+  return { temperature };
+}
+
 class AIService {
   constructor() {
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openaiApiUrl = 'https://api.openai.com/v1/chat/completions';
     this.openaiImagesUrl = 'https://api.openai.com/v1/images/generations';
-    this.openaiModel = process.env.OPENAI_MODEL || 'gpt-4';
+    this.openaiModel = normalizeOpenAIModelId(process.env.OPENAI_MODEL);
 
     /** Kept for diagnostics / compatibility — AI stack is OpenAI-only */
     this.provider = 'openai';
@@ -223,8 +267,8 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
           { role: 'system', content: systemPrompt },
           { role: 'user', content: prompt }
         ],
-        temperature: 0.8,
-        max_tokens: 500
+        ...openAIChatCompletionTemperatureField(this.openaiModel, 0.8),
+        ...openAIChatCompletionMaxTokensField(this.openaiModel, 500)
       },
       {
         headers: {
@@ -292,8 +336,11 @@ Guidelines:
           { role: 'system', content: systemPrompt },
           { role: 'user', content: prompt }
         ],
-        temperature: Math.min(1, Math.max(0, temperature)),
-        max_tokens: 500
+        ...openAIChatCompletionTemperatureField(
+          this.openaiModel,
+          Math.min(1, Math.max(0, temperature))
+        ),
+        ...openAIChatCompletionMaxTokensField(this.openaiModel, 500)
       },
       {
         headers: {
@@ -432,8 +479,8 @@ Scoring:
                 content: `Analyze: "${content}"`
               }
             ],
-            temperature: 0.2,
-            max_tokens: 150
+            ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
+            ...openAIChatCompletionMaxTokensField(this.openaiModel, 150)
           },
           {
             headers: {
@@ -632,8 +679,8 @@ Generate a response that addresses the customer's message appropriately.`;
               content: `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
             }
           ],
-          temperature: 0.7,
-          max_tokens: 250
+          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.7),
+          ...openAIChatCompletionMaxTokensField(this.openaiModel, 250)
         },
         {
           headers: {
@@ -719,17 +766,18 @@ Generate a response that addresses the customer's message appropriately.`;
         throw new Error('OpenAI API key is not configured');
       }
 
-      console.log(`🔵 [AI] Using OpenAI model: ${model || this.openaiModel}`);
+      const resolvedModel = normalizeOpenAIModelId(model || this.openaiModel);
+      console.log(`🔵 [AI] Using OpenAI model: ${resolvedModel}`);
       const response = await axios.post(
         this.openaiApiUrl,
         {
-          model: model || this.openaiModel,
+          model: resolvedModel,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt }
           ],
-          temperature,
-          max_tokens: maxTokens || 4000
+          ...openAIChatCompletionTemperatureField(resolvedModel, temperature),
+          ...openAIChatCompletionMaxTokensField(resolvedModel, maxTokens || 4000)
         },
         {
           headers: {
@@ -775,8 +823,8 @@ Generate a response that addresses the customer's message appropriately.`;
               content: `Classify: "${content}"`
             }
           ],
-          temperature: 0.3,
-          max_tokens: 10
+          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
+          ...openAIChatCompletionMaxTokensField(this.openaiModel, 10)
         },
         {
           headers: {
@@ -794,6 +842,84 @@ Generate a response that addresses the customer's message appropriately.`;
       console.error('Intent detection error:', error.message);
       return 'other';
     }
+  }
+
+  /**
+   * Classify a message into an intent bucket.
+   * 1) Keyword match (case-insensitive) — first bucket whose keywords appear in content wins.
+   * 2) AI fallback — asks the model to pick the best bucket given hints.
+   * 3) Default fallback — returns the bucket marked isDefault if nothing matches.
+   *
+   * @param {string} content - Message text
+   * @param {Array} buckets - Active IntentBucket documents (plain objects with _id, name, keywords, aiPromptHint, isDefault)
+   * @returns {{ bucketId: string|null, method: 'keyword'|'ai'|'default' }}
+   */
+  async classifyIntoBucket(content, buckets) {
+    if (!buckets || buckets.length === 0) {
+      return { bucketId: null, method: 'default' };
+    }
+
+    const lowerContent = (content || '').toLowerCase();
+
+    // Step 1: Keyword match
+    for (const bucket of buckets) {
+      if (!bucket.keywords || bucket.keywords.length === 0) continue;
+      for (const kw of bucket.keywords) {
+        if (kw && lowerContent.includes(kw.toLowerCase())) {
+          return { bucketId: bucket._id.toString(), method: 'keyword' };
+        }
+      }
+    }
+
+    // Step 2: AI classification
+    try {
+      if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
+        const bucketDescriptions = buckets
+          .filter(b => !b.isDefault)
+          .map(b => `- "${b.name}": ${b.aiPromptHint || 'No description'}`)
+          .join('\n');
+
+        const defaultBucket = buckets.find(b => b.isDefault);
+        const defaultName = defaultBucket ? defaultBucket.name : 'General Queries';
+
+        const systemPrompt = `You are a message classifier. Classify the following message into exactly one of these categories. Respond with ONLY the category name, nothing else.
+
+Categories:
+${bucketDescriptions}
+- "${defaultName}": Anything that does not clearly fit the above categories`;
+
+        const response = await axios.post(
+          this.openaiApiUrl,
+          {
+            model: this.openaiModel,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `Classify: "${content}"` }
+            ],
+            ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
+            ...openAIChatCompletionMaxTokensField(this.openaiModel, 30)
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${this.openaiApiKey}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        const aiChoice = response.data.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
+        const matched = buckets.find(b => b.name.toLowerCase() === aiChoice.toLowerCase());
+        if (matched) {
+          return { bucketId: matched._id.toString(), method: 'ai' };
+        }
+      }
+    } catch (error) {
+      console.error('Bucket AI classification error:', error.message);
+    }
+
+    // Step 3: Default fallback
+    const defaultBucket = buckets.find(b => b.isDefault);
+    return { bucketId: defaultBucket ? defaultBucket._id.toString() : null, method: 'default' };
   }
 
   /**
@@ -818,8 +944,8 @@ Generate a response that addresses the customer's message appropriately.`;
               content: `Extract topics: "${content}"`
             }
           ],
-          temperature: 0.3,
-          max_tokens: 50
+          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
+          ...openAIChatCompletionMaxTokensField(this.openaiModel, 50)
         },
         {
           headers: {

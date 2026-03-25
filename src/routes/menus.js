@@ -13,6 +13,7 @@ router.get('/', menuController.getMenus);
 router.get('/all', menuController.getAllMenus);
 router.post('/', menuController.createMenu);
 router.post('/seed', menuController.seedMenus);
+router.post('/migrate-publish-submenus', menuController.migratePublishSubmenus);
 router.put('/:id', menuController.updateMenu);
 router.delete('/:id', menuController.deleteMenu);
 

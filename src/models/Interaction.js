@@ -217,6 +217,18 @@ const interactionSchema = new mongoose.Schema({
     }
   }],
   
+  // Intent bucket (kanban categorization)
+  intentBucket: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'IntentBucket',
+    index: true
+  },
+  bucketAssignedBy: {
+    type: String,
+    enum: ['keyword', 'ai', 'manual'],
+    default: 'ai'
+  },
+
   // Labels & categorization
   labels: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -369,6 +381,7 @@ interactionSchema.index({ assignedTo: 1, status: 1 });
 interactionSchema.index({ 'metadata.postId': 1 });
 interactionSchema.index({ requiresHumanResponse: 1, assignedTo: 1 });
 interactionSchema.index({ organization: 1, requiresHumanResponse: 1 });
+interactionSchema.index({ organization: 1, intentBucket: 1, platformCreatedAt: -1 });
 
 // Update response count when adding replies
 interactionSchema.pre('save', function(next) {

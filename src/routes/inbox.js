@@ -21,6 +21,8 @@ router.use(protect);
 
 // Get all interactions
 router.get('/', inboxController.getInteractions);
+// Get interactions grouped by intent bucket (kanban view) — must be before /:id
+router.get('/bucket-view', inboxController.getBucketView);
 // Get inbox stats (must be before /:id)
 router.get('/stats', inboxController.getStats);
 // Get org labels (must be before /:id)
@@ -48,9 +50,17 @@ router.get('/:id', inboxController.getInteraction);
 
 // Reply to interaction
 router.post('/:id/reply', validateReply, inboxController.replyToInteraction);
+// Soft-delete a single reply (hidden from chat thread)
+router.delete('/:id/replies/:replyId', inboxController.deleteReply);
 
 // Generate AI suggested reply for interaction
 router.post('/:id/suggest-reply', inboxController.suggestReply);
+
+// Generate AI-assisted replies (short, detailed, sales)
+router.post('/:id/ai-assist', inboxController.aiAssist);
+
+// Regenerate a single AI reply type
+router.post('/:id/ai-assist/regenerate', inboxController.aiAssistRegenerate);
 
 // Generate auto-replies for pending interactions (Admin/Manager only)
 router.post(
@@ -83,6 +93,9 @@ router.post('/:id/notes', validateInboxAddNote, inboxController.addNote);
 
 // Update status
 router.put('/:id/status', validateInboxUpdateStatus, inboxController.updateStatus);
+
+// Update intent bucket (drag-and-drop reclassification)
+router.put('/:id/bucket', inboxController.updateBucket);
 
 // Delete interaction (Facebook comment: deletes on Facebook and in DB; others: DB only)
 router.delete('/:id', inboxController.deleteInteraction);

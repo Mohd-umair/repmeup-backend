@@ -80,6 +80,10 @@ LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here
 # Get your API key from: https://platform.openai.com/api-keys
 # OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # OPENAI_MODEL=gpt-4
+# Newer models (use exact API ids, lowercase — e.g. not "GPT-5.3"):
+# OPENAI_MODEL=gpt-5.3-chat-latest
+# OPENAI_MODEL=gpt-5.2
+# OPENAI_MODEL=gpt-4o
 # Optional image generation for posts:
 # OPENAI_IMAGE_MODEL=dall-e-2
 

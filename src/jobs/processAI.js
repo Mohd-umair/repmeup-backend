@@ -1,4 +1,5 @@
 const Interaction = require('../models/Interaction');
+const IntentBucket = require('../models/IntentBucket');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const User = require('../models/User');
 const aiService = require('../services/aiService');
@@ -55,6 +56,23 @@ module.exports = async function processAI(job) {
     jobLogger.debug('Detecting intent');
     const intent = await aiService.detectIntent(interaction.content);
     interaction.intent = intent;
+
+    // Step 2b: Classify into intent bucket
+    jobLogger.debug('Classifying into intent bucket');
+    try {
+      const orgId = interaction.organization?._id || interaction.organization;
+      const activeBuckets = await IntentBucket.find({ organization: orgId, isActive: true }).sort({ order: 1 }).lean();
+      if (activeBuckets.length > 0) {
+        const bucketResult = await aiService.classifyIntoBucket(interaction.content, activeBuckets);
+        if (bucketResult.bucketId) {
+          interaction.intentBucket = bucketResult.bucketId;
+          interaction.bucketAssignedBy = bucketResult.method;
+          jobLogger.debug('Bucket assigned', { bucketId: bucketResult.bucketId, method: bucketResult.method });
+        }
+      }
+    } catch (bucketErr) {
+      jobLogger.warn('Bucket classification failed (non-fatal)', { error: bucketErr.message });
+    }
 
     // Step 3: Extract topics
     jobLogger.debug('Extracting topics');
