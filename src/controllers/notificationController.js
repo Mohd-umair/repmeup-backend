@@ -178,7 +178,8 @@ exports.clearReadNotifications = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: `${result.deletedCount} notification(s) cleared`
+      message: `${result.deletedCount} notification(s) cleared`,
+      deletedCount: result.deletedCount
     });
   } catch (error) {
     console.error('Clear read notifications error:', error);

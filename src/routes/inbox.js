@@ -25,6 +25,8 @@ router.get('/', inboxController.getInteractions);
 router.get('/bucket-view', inboxController.getBucketView);
 // Get inbox stats (must be before /:id)
 router.get('/stats', inboxController.getStats);
+// Get topic insights (keyword frequency + recommendation) across all org messages
+router.get('/topic-insights', inboxController.getTopicInsights);
 // Get org labels (must be before /:id)
 router.get('/labels', inboxController.getLabels);
 // Get available agents for assignment (Manager/Admin only) (must be before /:id)
