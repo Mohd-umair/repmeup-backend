@@ -100,7 +100,7 @@ module.exports = async function processAI(job) {
     }
 
     // Step 6: Determine if auto-reply eligible (pass populated org so settings are evaluated)
-    interaction.autoReplyEligible = aiService.canAutoReply(interaction, populatedOrg || {});
+    interaction.autoReplyEligible = await aiService.canAutoReply(interaction, populatedOrg || {});
 
     // Step 7: Check if should auto-reply or assign to agent
     if (interaction.autoReplyEligible && aiResponse) {

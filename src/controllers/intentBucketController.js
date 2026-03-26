@@ -44,7 +44,7 @@ exports.getBuckets = async (req, res) => {
 exports.createBucket = async (req, res) => {
   try {
     const orgId = req.user.organization._id;
-    const { name, color, icon, keywords, aiPromptHint, isDefault } = req.body;
+    const { name, color, icon, keywords, aiPromptHint, isDefault, replyEnabled, replyTone, replyLanguage, replyPrompt } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, error: 'Bucket name is required' });
@@ -66,6 +66,10 @@ exports.createBucket = async (req, res) => {
       keywords: (keywords || []).map(k => k.trim().toLowerCase()).filter(Boolean),
       aiPromptHint: aiPromptHint || '',
       isDefault: !!isDefault,
+      replyEnabled: replyEnabled !== false,
+      replyTone: replyTone || null,
+      replyLanguage: replyLanguage || 'auto',
+      replyPrompt: replyPrompt || '',
       createdBy: req.user._id
     });
 
@@ -81,7 +85,7 @@ exports.createBucket = async (req, res) => {
 exports.updateBucket = async (req, res) => {
   try {
     const orgId = req.user.organization._id;
-    const { name, color, icon, keywords, aiPromptHint, isDefault, isActive } = req.body;
+    const { name, color, icon, keywords, aiPromptHint, isDefault, isActive, replyEnabled, replyTone, replyLanguage, replyPrompt } = req.body;
 
     const bucket = await IntentBucket.findOne({ _id: req.params.id, organization: orgId });
     if (!bucket) {
@@ -94,6 +98,10 @@ exports.updateBucket = async (req, res) => {
     if (keywords !== undefined) bucket.keywords = keywords.map(k => k.trim().toLowerCase()).filter(Boolean);
     if (aiPromptHint !== undefined) bucket.aiPromptHint = aiPromptHint;
     if (isActive !== undefined) bucket.isActive = isActive;
+    if (replyEnabled !== undefined) bucket.replyEnabled = replyEnabled;
+    if (replyTone !== undefined) bucket.replyTone = replyTone || null;
+    if (replyLanguage !== undefined) bucket.replyLanguage = replyLanguage;
+    if (replyPrompt !== undefined) bucket.replyPrompt = replyPrompt;
 
     if (isDefault === true) {
       await IntentBucket.updateMany({ organization: orgId, isDefault: true, _id: { $ne: bucket._id } }, { isDefault: false });

@@ -56,7 +56,7 @@ exports.validateReply = (req, res, next) => {
     useTemplate: Joi.boolean().optional(),
     templateId: objectId().optional(),
     templateVariables: Joi.object().optional(),
-    attachmentUrl: Joi.string().uri().optional(),
+    attachmentUrl: Joi.string().uri({ scheme: ['http', 'https', 'data'] }).optional(),
     attachmentType: Joi.string().valid('image', 'video', 'file', 'audio').optional()
   });
 

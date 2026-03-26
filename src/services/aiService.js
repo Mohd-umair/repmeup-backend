@@ -647,6 +647,34 @@ Scoring:
         ? relevantKB.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
         : '';
 
+      // Load per-bucket reply config if interaction is classified
+      const IntentBucket = require('../models/IntentBucket');
+      let bucketContext = '';
+      if (interaction.intentBucket) {
+        try {
+          const bucketConfig = await IntentBucket.findById(interaction.intentBucket)
+            .select('replyTone replyLanguage replyPrompt name')
+            .lean();
+          if (bucketConfig) {
+            let tone = bucketConfig.replyTone;
+            if (!tone && organizationId) {
+              const bc = await BrandConfig.findOne({ organization: organizationId }).select('toneOfVoice').lean();
+              tone = bc?.toneOfVoice || 'professional';
+            }
+            bucketContext += `\nREPLY CONTEXT (Bucket: "${bucketConfig.name}"):`;
+            if (tone) bucketContext += `\n- Tone: ${tone}`;
+            if (bucketConfig.replyLanguage && bucketConfig.replyLanguage !== 'auto') {
+              bucketContext += `\n- Reply Language: ${bucketConfig.replyLanguage}`;
+            }
+            if (bucketConfig.replyPrompt) {
+              bucketContext += `\n- Special Instructions: ${bucketConfig.replyPrompt}`;
+            }
+          }
+        } catch (bucketErr) {
+          console.error('Error loading bucket config for reply:', bucketErr.message);
+        }
+      }
+
       const systemPrompt = `You are a professional customer service representative. 
 Your task is to generate a helpful, friendly, and professional response to customer inquiries.
 
@@ -661,6 +689,7 @@ IMPORTANT GUIDELINES:
 - If you don't have enough information, acknowledge it professionally
 - Do not make promises you can't keep
 - Match the tone to the platform (casual for social media, professional for reviews)
+${bucketContext ? `\n${bucketContext}` : ''}
 ${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
 
 Generate a response that addresses the customer's message appropriately.`;
@@ -1003,7 +1032,7 @@ ${bucketDescriptions}
    * Determine if interaction is eligible for auto-reply (must match Organization.autoReplySettings).
    * Note: minConfidence in settings = minimum AI reply confidence (enforced in generateAutoReply), not sentiment score.
    */
-  canAutoReply(interaction, organizationSettings = {}) {
+  async canAutoReply(interaction, organizationSettings = {}) {
     // One document per DM thread (dm_*_*): replies[] is conversation history, not "already answered this turn"
     if (!isThreadStyleDm(interaction)) {
       if (interaction.status === 'replied' || interaction.status === 'resolved') {
@@ -1094,6 +1123,15 @@ ${bucketDescriptions}
       return false;
     }
 
+    // Per-bucket reply toggle
+    if (interaction.intentBucket) {
+      const IntentBucket = require('../models/IntentBucket');
+      const bucket = await IntentBucket.findById(interaction.intentBucket).select('replyEnabled').lean();
+      if (bucket && bucket.replyEnabled === false) {
+        return false;
+      }
+    }
+
     return true;
   }
 
@@ -1103,7 +1141,7 @@ ${bucketDescriptions}
   async generateAutoReply(interaction, organizationId, organizationSettings = {}) {
     try {
       // Check if eligible
-      if (!this.canAutoReply(interaction, organizationSettings)) {
+      if (!(await this.canAutoReply(interaction, organizationSettings))) {
         return {
           eligible: false,
           reason: 'Interaction not eligible for auto-reply based on settings'

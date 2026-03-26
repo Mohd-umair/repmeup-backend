@@ -42,6 +42,22 @@ function buildPlatformConnectionVisibilityFilter(activeConnections) {
   };
 }
 
+/** Comma-separated or repeated query values → trimmed non-empty strings */
+function parseQueryCsv(val) {
+  if (val == null || val === '') return [];
+  if (Array.isArray(val)) {
+    return val.flatMap((s) => String(s).split(',')).map((x) => x.trim()).filter(Boolean);
+  }
+  return String(val).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function setQueryFieldInOrEquals(queryObj, field, rawVal) {
+  const parts = parseQueryCsv(rawVal);
+  if (parts.length === 0) return;
+  if (parts.length === 1) queryObj[field] = parts[0];
+  else queryObj[field] = { $in: parts };
+}
+
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
 exports.getInteractions = async (req, res, next) => {
@@ -96,10 +112,8 @@ exports.getInteractions = async (req, res, next) => {
       }
     }
 
-    // Label filter - check if label exists in labels array
-    if (label) {
-      query.labels = label;
-    }
+    // Label filter — one id or $in (OR) on labels array
+    setQueryFieldInOrEquals(query, 'labels', label);
 
     // Intent bucket filter
     if (intentBucket) {
@@ -671,7 +685,9 @@ exports.replyToInteraction = async (req, res, next) => {
             replyStatus = 'failed';
             errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
             console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId, igAccountId });
-          } else if (attachmentUrl && attachmentType) {
+          } else if (attachmentUrl && attachmentType && attachmentType !== 'audio') {
+            // Audio attachments are stored in the ORM chat thread only — Instagram DM API
+            // does not accept audio/webm (browser recording format). Fall through to text send.
             result = await instagramService.sendMessageWithAttachment(
               recipientId,
               attachmentType,
@@ -713,7 +729,9 @@ exports.replyToInteraction = async (req, res, next) => {
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
             errorMessage = 'Missing Page or recipient for Facebook Messenger reply. Reconnect the Page in Settings.';
-          } else if (attachmentUrl && attachmentType) {
+          } else if (attachmentUrl && attachmentType && attachmentType !== 'audio') {
+            // Audio attachments are stored in the ORM chat thread only — Facebook Messenger API
+            // does not accept audio/webm (browser recording format). Fall through to text send.
             result = await facebookService.sendMessageWithAttachment(
               recipientId,
               attachmentType,
@@ -1195,7 +1213,7 @@ exports.getStats = async (req, res, next) => {
         connectionFilter
       ]
     };
-    if (platform) matchStage.platform = platform;
+    setQueryFieldInOrEquals(matchStage, 'platform', platform);
 
     const SLA_HOURS = 24;
     const slaThresholdMs = SLA_HOURS * 60 * 60 * 1000;
@@ -2714,10 +2732,12 @@ exports.getBucketView = async (req, res) => {
       ...visibilityFilter
     };
 
-    if (platform) baseMatch.platform = platform;
-    if (type) baseMatch.type = type;
-    if (sentiment) baseMatch.sentiment = sentiment;
-    if (status) baseMatch.status = status;
+    setQueryFieldInOrEquals(baseMatch, 'platform', platform);
+    setQueryFieldInOrEquals(baseMatch, 'type', type);
+    setQueryFieldInOrEquals(baseMatch, 'sentiment', sentiment);
+    const bucketViewStatusParts = parseQueryCsv(status);
+    if (bucketViewStatusParts.length === 1) baseMatch.status = bucketViewStatusParts[0];
+    else if (bucketViewStatusParts.length > 1) baseMatch.status = { $in: bucketViewStatusParts };
     if (dateFrom || dateTo) {
       baseMatch.platformCreatedAt = {};
       if (dateFrom) baseMatch.platformCreatedAt.$gte = new Date(dateFrom);
@@ -2739,7 +2759,7 @@ exports.getBucketView = async (req, res) => {
       });
     }
 
-    if (!status) {
+    if (bucketViewStatusParts.length === 0) {
       baseMatch.status = { $ne: 'archived' };
     }
 
@@ -2791,6 +2811,159 @@ exports.getBucketView = async (req, res) => {
     });
   } catch (error) {
     console.error('getBucketView error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// @desc    Get topic insights (keyword frequency + AI recommendation) across ALL org interactions with filters
+// @route   GET /api/inbox/topic-insights
+exports.getTopicInsights = async (req, res) => {
+  try {
+    const orgId = req.user.organization._id;
+    const { platform, type, sentiment, status, search, dateFrom, dateTo } = req.query;
+
+    const activeConnections = await PlatformConnection.find({
+      organization: orgId,
+      status: 'connected'
+    }).select('_id platform').lean();
+
+    const visibilityFilter = buildPlatformConnectionVisibilityFilter(activeConnections);
+
+    const baseMatch = {
+      organization: orgId,
+      $or: [
+        { parentId: { $exists: false } },
+        { parentId: null },
+        { parentId: '' }
+      ],
+      ...visibilityFilter
+    };
+
+    setQueryFieldInOrEquals(baseMatch, 'platform', platform);
+    setQueryFieldInOrEquals(baseMatch, 'type', type);
+    setQueryFieldInOrEquals(baseMatch, 'sentiment', sentiment);
+    const topicStatusParts = parseQueryCsv(status);
+    if (topicStatusParts.length === 1) baseMatch.status = topicStatusParts[0];
+    else if (topicStatusParts.length > 1) baseMatch.status = { $in: topicStatusParts };
+    if (dateFrom || dateTo) {
+      baseMatch.platformCreatedAt = {};
+      if (dateFrom) baseMatch.platformCreatedAt.$gte = new Date(dateFrom);
+      if (dateTo) {
+        const end = new Date(dateTo);
+        end.setHours(23, 59, 59, 999);
+        baseMatch.platformCreatedAt.$lte = end;
+      }
+    }
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      baseMatch.$and = baseMatch.$and || [];
+      baseMatch.$and.push({
+        $or: [
+          { content: { $regex: escaped, $options: 'i' } },
+          { 'author.name': { $regex: escaped, $options: 'i' } },
+          { 'author.username': { $regex: escaped, $options: 'i' } }
+        ]
+      });
+    }
+    if (topicStatusParts.length === 0) {
+      baseMatch.status = { $ne: 'archived' };
+    }
+
+    // Use aggregation with $project + server-side JS to compute keyword frequency
+    // For performance, stream only `content`, `sentiment`, `status`, `platform` fields
+    const interactions = await Interaction.find(baseMatch)
+      .select('content sentiment status platform author platformCreatedAt')
+      .lean();
+
+    const totalMessages = interactions.length;
+
+    // --- Keyword frequency ---
+    const STOP = new Set([
+      'i','me','my','we','our','you','your','he','she','it','they','them',
+      'is','am','are','was','were','be','been','being','have','has','had',
+      'do','does','did','will','would','could','should','may','might','shall',
+      'a','an','the','and','but','or','so','if','in','on','at','to','for',
+      'of','with','by','from','up','about','into','than','then','that','this',
+      'what','which','who','how','when','where','why','not','no','yes','can',
+      'just','get','got','also','very','more','some','any','all','there','here',
+      'really','still','even','much','only','like','know','make','come','think',
+      'good','great','well','back','over','after','want','give','most','them',
+      'been','going','said','each','tell','made','find','work','because','long',
+      'look','thing','many','before','need','call','first','people','down','side'
+    ]);
+
+    const kmap = new Map();
+    interactions.forEach(interaction => {
+      const seen = new Set();
+      (interaction.content || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 3 && !STOP.has(w))
+        .forEach(word => {
+          if (seen.has(word)) return;
+          seen.add(word);
+          const entry = kmap.get(word);
+          if (entry) {
+            entry.count++;
+          } else {
+            kmap.set(word, {
+              count: 1,
+              sample: {
+                content: interaction.content?.substring(0, 200),
+                platform: interaction.platform,
+                sentiment: interaction.sentiment,
+                author: interaction.author
+              }
+            });
+          }
+        });
+    });
+
+    const commonTopics = Array.from(kmap.entries())
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 8)
+      .map(([keyword, { count, sample }]) => ({ keyword, count, sample }));
+
+    // --- Sentiment stats ---
+    let positive = 0, neutral = 0, negative = 0, unreadCount = 0;
+    interactions.forEach(i => {
+      if (i.sentiment === 'positive') positive++;
+      else if (i.sentiment === 'negative') negative++;
+      else if (i.sentiment === 'neutral') neutral++;
+      if (i.status === 'unread') unreadCount++;
+    });
+    const sentTotal = positive + neutral + negative || 1;
+    const positivePercent = Math.round((positive / sentTotal) * 100);
+    const negativePercent = Math.round((negative / sentTotal) * 100);
+
+    // --- AI Recommendation ---
+    let recommendation = '';
+    if (totalMessages === 0) {
+      recommendation = 'No conversations match the current filters. Try adjusting your filters to see insights.';
+    } else if (negativePercent >= 30) {
+      recommendation = `${negative} negative conversation${negative > 1 ? 's' : ''} out of ${totalMessages} total (${negativePercent}%). Focus on addressing customer complaints to improve satisfaction.`;
+    } else if (negativePercent >= 15) {
+      recommendation = `${negativePercent}% of conversations have negative sentiment. Monitor and respond promptly to prevent escalation.`;
+    } else if (unreadCount > 20) {
+      recommendation = `You have ${unreadCount} unread conversations out of ${totalMessages}. Consider assigning them to team members to reduce response times.`;
+    } else if (positivePercent >= 60) {
+      recommendation = `Great sentiment! ${positivePercent}% positive across ${totalMessages} conversations. Consider sharing positive testimonials to boost brand trust.`;
+    } else {
+      recommendation = `Engage consistently with your audience across ${totalMessages} conversations to maintain healthy sentiment scores.`;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        commonTopics,
+        recommendation,
+        totalMessages,
+        sentiment: { positive, neutral, negative, total: sentTotal }
+      }
+    });
+  } catch (error) {
+    console.error('getTopicInsights error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 };
