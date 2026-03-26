@@ -1191,23 +1191,17 @@ ${bucketDescriptions}
       }
       
       await aiCreditService.deductCredits(organizationId, 1, {
-        operation: 'auto_reply',
-        userId: userId,
-        interactionId: interaction._id.toString(),
-        platform: interaction.platform
+        operation: 'auto_reply', userId: userId,
+        interactionId: interaction._id.toString(), platform: interaction.platform
       });
 
-      return {
-        eligible: true,
-        response: response,
-        creditsUsed: 1
-      };
+      return { eligible: true, response: response, creditsUsed: 1 };
     } catch (error) {
       console.error('Auto-reply generation error:', error.message);
-      return {
-        eligible: false,
-        reason: error.message
-      };
+      // If credits were deducted but something failed after, rollback
+      // Since deduction is the last step before return, rollback only if deduction itself threw
+      // (the aiCreditService.deductCredits rethrows on failure, so no credits were actually taken)
+      return { eligible: false, reason: error.message };
     }
   }
 }
