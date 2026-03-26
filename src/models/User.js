@@ -57,6 +57,14 @@ const userSchema = new mongoose.Schema({
     ref: 'Organization',
     required: true
   },
+  assignedBuckets: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'IntentBucket'
+  }],
+  assignedPlatforms: [{
+    type: String,
+    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin']
+  }],
   avatar: String,
   isActive: {
     type: Boolean,
