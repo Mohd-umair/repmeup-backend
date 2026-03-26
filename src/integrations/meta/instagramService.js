@@ -799,7 +799,7 @@ class InstagramService {
       }).catch(() => {});
 
       const apiUrl = `${this.baseUrl}/${pageId}/messages`;
-      const platformType = attachmentType === 'audio' ? 'file' : attachmentType;
+      const platformType = attachmentType;
 
       const sendRequest = async (useTag) => {
         if (useDirectUpload) {

@@ -538,6 +538,16 @@ exports.replyToInteraction = async (req, res, next) => {
       }
     }
 
+    // Convert webm audio to m4a (AAC) — webm is not accepted by Meta APIs.
+    if (attachmentType === 'audio' && attachmentLocalPath && /\.webm$/i.test(attachmentLocalPath)) {
+      try {
+        const { convertToM4a } = require('../utils/audioConverter');
+        attachmentLocalPath = await convertToM4a(attachmentLocalPath);
+      } catch (convErr) {
+        console.error('[Inbox Reply] Audio conversion failed, will try original file:', convErr.message);
+      }
+    }
+
     const interaction = await Interaction.findById(req.params.id)
       .populate('platformConnection');
 
