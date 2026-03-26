@@ -54,77 +54,49 @@ const upload = multer({
  * @access  Private
  */
 exports.generatePostWithAI = async (req, res) => {
+  let creditsDeducted = 0;
+  let organizationId;
   try {
     const { prompt, platforms, mode, postType } = req.body;
-    const organizationId = req.user.organization?._id || req.user.organization;
+    organizationId = req.user.organization?._id || req.user.organization;
 
-    // Validation
     if (!prompt || !platforms || platforms.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Prompt and platforms are required'
-      });
+      return res.status(400).json({ success: false, message: 'Prompt and platforms are required' });
     }
-
     if (!['same', 'custom'].includes(mode)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Mode must be "same" or "custom"'
-      });
+      return res.status(400).json({ success: false, message: 'Mode must be "same" or "custom"' });
     }
 
-    // Calculate credits needed
     const creditsNeeded = mode === 'same' ? 1 : platforms.length;
-
-    // Check credits
     const creditCheck = await aiCreditService.checkCredits(organizationId, creditsNeeded);
-
     if (!creditCheck.allowed) {
       return res.status(403).json({
         success: false,
         message: creditCheck.error || 'Insufficient AI credits',
-        credits: {
-          current: creditCheck.current,
-          limit: creditCheck.limit,
-          remaining: creditCheck.remaining,
-          needed: creditsNeeded
-        }
+        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining, needed: creditsNeeded }
       });
     }
 
-    // Generate posts
     const result = await aiService.generatePost(prompt, platforms, mode, postType, organizationId);
 
-    // Deduct credits
     await aiCreditService.deductCredits(organizationId, result.creditsUsed, {
-      operation: 'post_generation',
-      userId: req.user._id,
-      prompt: prompt.substring(0, 100),
-      platforms: platforms,
-      mode: mode,
-      postType: postType
+      operation: 'post_generation', userId: req.user._id,
+      prompt: prompt.substring(0, 100), platforms, mode, postType
     });
+    creditsDeducted = result.creditsUsed;
 
-    // Get updated credit balance
     const updatedCredits = await aiCreditService.getUsage(organizationId);
 
     res.status(200).json({
-      success: true,
-      data: result,
-      credits: {
-        used: result.creditsUsed,
-        current: updatedCredits.current,
-        limit: updatedCredits.limit,
-        remaining: updatedCredits.remaining,
-        isUnlimited: updatedCredits.isUnlimited
-      }
+      success: true, data: result,
+      credits: { used: result.creditsUsed, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
     });
   } catch (error) {
     console.error('Generate post with AI error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Failed to generate post'
-    });
+    if (creditsDeducted > 0 && organizationId) {
+      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_generation', userId: req.user?._id, reason: error.message });
+    }
+    res.status(500).json({ success: false, message: error.message || 'Failed to generate post' });
   }
 };
 
@@ -134,58 +106,43 @@ exports.generatePostWithAI = async (req, res) => {
  * @access  Private
  */
 exports.generatePostVariantsWithAI = async (req, res) => {
+  let creditsDeducted = 0;
+  let organizationId;
   try {
     const { topic, platforms, count, audience, intent, includeTrend, postType, generateImage } = req.body;
-    const organizationId = req.user.organization?._id || req.user.organization;
+    organizationId = req.user.organization?._id || req.user.organization;
 
     if (!topic || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Topic and platforms are required'
-      });
+      return res.status(400).json({ success: false, message: 'Topic and platforms are required' });
     }
 
     const variantCount = Math.min(parseInt(count, 10) || 3, 5);
     const withImages = !!generateImage;
-    const totalCredits = variantCount + (withImages ? variantCount : 0); // text + optional image per variant
+    const totalCredits = variantCount + (withImages ? variantCount : 0);
 
     const creditCheck = await aiCreditService.checkCredits(organizationId, totalCredits);
     if (!creditCheck.allowed) {
       return res.status(403).json({
-        success: false,
-        message: creditCheck.error || 'Insufficient AI credits',
-        credits: {
-          current: creditCheck.current,
-          limit: creditCheck.limit,
-          remaining: creditCheck.remaining,
-          needed: totalCredits
-        }
+        success: false, message: creditCheck.error || 'Insufficient AI credits',
+        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining, needed: totalCredits }
       });
     }
 
     const result = await aiService.generatePostVariants(topic, platforms, {
-      count: variantCount,
-      organizationId,
-      postType: postType || 'post',
-      audience: audience || '',
-      intent: intent || '',
-      includeTrend: !!includeTrend
+      count: variantCount, organizationId, postType: postType || 'post',
+      audience: audience || '', intent: intent || '', includeTrend: !!includeTrend
     });
 
     await aiCreditService.deductCredits(organizationId, variantCount, {
-      operation: 'post_variants',
-      userId: req.user._id,
-      topic: topic.substring(0, 100),
-      platforms,
-      variantCount
+      operation: 'post_variants', userId: req.user._id, topic: topic.substring(0, 100), platforms, variantCount
     });
+    creditsDeducted += variantCount;
 
     if (withImages && result.variants && result.variants.length > 0) {
       const uploadDir = path.join(__dirname, '../../uploads/posts');
       await fs.mkdir(uploadDir, { recursive: true });
 
-      for (let i = 0; i < result.variants.length; i++) {
-        const v = result.variants[i];
+      await Promise.all(result.variants.map(async (v, i) => {
         const imagePrompt = topic + (v.content ? ` Post style: ${v.content.substring(0, 200)}` : '');
         const buffer = await aiService.generateImage(imagePrompt);
         if (buffer) {
@@ -194,35 +151,26 @@ exports.generatePostVariantsWithAI = async (req, res) => {
           await fs.writeFile(fullPath, buffer);
           v.imageUrl = getPublicMediaUrl(fullPath, req);
         }
-      }
+      }));
 
       await aiCreditService.deductCredits(organizationId, variantCount, {
-        operation: 'post_variants_image',
-        userId: req.user._id,
-        topic: topic.substring(0, 100),
-        variantCount
+        operation: 'post_variants_image', userId: req.user._id, topic: topic.substring(0, 100), variantCount
       });
+      creditsDeducted += variantCount;
     }
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
 
     res.status(200).json({
-      success: true,
-      data: result,
-      credits: {
-        used: totalCredits,
-        current: updatedCredits.current,
-        limit: updatedCredits.limit,
-        remaining: updatedCredits.remaining,
-        isUnlimited: updatedCredits.isUnlimited
-      }
+      success: true, data: result,
+      credits: { used: totalCredits, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
     });
   } catch (error) {
     console.error('Generate post variants error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Failed to generate variants'
-    });
+    if (creditsDeducted > 0 && organizationId) {
+      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_variants', userId: req.user?._id, reason: error.message });
+    }
+    res.status(500).json({ success: false, message: error.message || 'Failed to generate variants' });
   }
 };
 

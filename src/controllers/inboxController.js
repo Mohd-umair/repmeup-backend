@@ -1443,7 +1443,7 @@ exports.suggestReply = async (req, res, next) => {
     // Get organization for settings
     const organization = await Organization.findById(req.user.organization._id);
 
-    // Generate AI response using knowledge base
+    let suggestCreditsDeducted = 0;
     try {
       const aiResponse = await aiService.generateResponse(
         interaction,
@@ -1451,42 +1451,30 @@ exports.suggestReply = async (req, res, next) => {
       );
 
       if (!aiResponse) {
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to generate AI response'
-        });
+        return res.status(500).json({ success: false, error: 'Failed to generate AI response' });
       }
 
-      // Deduct credits after successful generation
       await aiCreditService.deductCredits(organizationId, 1, {
-        operation: 'ai_response',
-        userId: req.user._id,
-        interactionId: interaction._id.toString(),
-        platform: interaction.platform,
+        operation: 'ai_response', userId: req.user._id,
+        interactionId: interaction._id.toString(), platform: interaction.platform,
         messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
       });
+      suggestCreditsDeducted = 1;
 
-      // Get updated credit balance
       const updatedCredits = await aiCreditService.getUsage(organizationId);
 
       res.status(200).json({
         success: true,
-        data: {
-          suggestedReply: aiResponse.content,
-          confidence: aiResponse.confidence,
-          usedKnowledgeBase: aiResponse.usedKnowledgeBase,
-          knowledgeBaseCount: aiResponse.knowledgeBaseCount
-        },
-        credits: updatedCredits,
-        message: 'AI reply generated successfully'
+        data: { suggestedReply: aiResponse.content, confidence: aiResponse.confidence, usedKnowledgeBase: aiResponse.usedKnowledgeBase, knowledgeBaseCount: aiResponse.knowledgeBaseCount },
+        credits: updatedCredits, message: 'AI reply generated successfully'
       });
     } catch (aiError) {
-      // Handle AI service errors with user-friendly messages
       console.error('AI service error in suggestReply:', aiError.message);
-      
+      if (suggestCreditsDeducted > 0) {
+        await aiCreditService.rollbackCredits(organizationId, suggestCreditsDeducted, { operation: 'ai_response', userId: req.user?._id, reason: aiError.message });
+      }
       return res.status(500).json({
-        success: false,
-        error: aiError.message || 'Failed to generate AI response. Please check your OpenAI API configuration.'
+        success: false, error: aiError.message || 'Failed to generate AI response. Please check your OpenAI API configuration.'
       });
     }
   } catch (error) {
@@ -1499,6 +1487,9 @@ exports.suggestReply = async (req, res, next) => {
 // @route   POST /api/inbox/:id/ai-assist
 // @access  Private
 exports.aiAssist = async (req, res, next) => {
+  let assistCreditsDeducted = 0;
+  const organizationId = req.user.organization._id.toString();
+  const aiCreditService = require('../services/aiCreditService');
   try {
     const interaction = await Interaction.findById(req.params.id);
     if (!interaction) {
@@ -1507,10 +1498,6 @@ exports.aiAssist = async (req, res, next) => {
     if (interaction.organization.toString() !== req.user.organization._id.toString()) {
       return res.status(403).json({ success: false, error: 'Access denied' });
     }
-
-    const organizationId = req.user.organization._id.toString();
-
-    const aiCreditService = require('../services/aiCreditService');
     const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
     if (!creditCheck.allowed) {
       return res.status(403).json({
@@ -1607,36 +1594,28 @@ IMPORTANT RULES:
     ]);
 
     await aiCreditService.deductCredits(organizationId, 1, {
-      operation: 'ai_assist',
-      userId: req.user._id,
-      interactionId: interaction._id.toString(),
-      platform: interaction.platform,
+      operation: 'ai_assist', userId: req.user._id,
+      interactionId: interaction._id.toString(), platform: interaction.platform,
       messagePreview: interaction.content?.substring(0, 100) || ''
     });
+    assistCreditsDeducted = 1;
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
 
     res.status(200).json({
       success: true,
-      data: {
-        short: shortReply.content,
-        detailed: detailedReply.content,
-        sales: salesReply.content,
-        usedKnowledgeBase: kbEntries && kbEntries.length > 0,
-        knowledgeBaseCount: kbEntries ? kbEntries.length : 0
-      },
-      credits: updatedCredits,
-      message: 'AI assistance generated successfully'
+      data: { short: shortReply.content, detailed: detailedReply.content, sales: salesReply.content, usedKnowledgeBase: kbEntries && kbEntries.length > 0, knowledgeBaseCount: kbEntries ? kbEntries.length : 0 },
+      credits: updatedCredits, message: 'AI assistance generated successfully'
     });
   } catch (error) {
     console.error('AI Assist error:', error);
+    if (assistCreditsDeducted > 0 && organizationId) {
+      await aiCreditService.rollbackCredits(organizationId, assistCreditsDeducted, { operation: 'ai_assist', userId: req.user?._id, reason: error.message });
+    }
     if (error.response?.status === 401) {
       return res.status(500).json({ success: false, error: 'OpenAI API key is invalid or expired.' });
     }
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to generate AI assistance. Please try again.'
-    });
+    return res.status(500).json({ success: false, error: error.message || 'Failed to generate AI assistance. Please try again.' });
   }
 };
 
@@ -1644,6 +1623,9 @@ IMPORTANT RULES:
 // @route   POST /api/inbox/:id/ai-assist/regenerate
 // @access  Private
 exports.aiAssistRegenerate = async (req, res, next) => {
+  let regenCreditsDeducted = 0;
+  const organizationId = req.user.organization._id.toString();
+  const aiCreditService = require('../services/aiCreditService');
   try {
     const { type } = req.body;
     if (!['short', 'detailed', 'sales'].includes(type)) {
@@ -1657,9 +1639,6 @@ exports.aiAssistRegenerate = async (req, res, next) => {
     if (interaction.organization.toString() !== req.user.organization._id.toString()) {
       return res.status(403).json({ success: false, error: 'Access denied' });
     }
-
-    const organizationId = req.user.organization._id.toString();
-    const aiCreditService = require('../services/aiCreditService');
     const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
     if (!creditCheck.allowed) {
       return res.status(403).json({
@@ -1727,27 +1706,24 @@ ${config.instruction}`;
     );
 
     await aiCreditService.deductCredits(organizationId, 1, {
-      operation: 'ai_assist_regenerate',
-      userId: req.user._id,
-      interactionId: interaction._id.toString(),
-      platform: interaction.platform,
+      operation: 'ai_assist_regenerate', userId: req.user._id,
+      interactionId: interaction._id.toString(), platform: interaction.platform,
       messagePreview: interaction.content?.substring(0, 100) || ''
     });
+    regenCreditsDeducted = 1;
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
 
     res.status(200).json({
-      success: true,
-      data: { type, content },
-      credits: updatedCredits,
-      message: `${type} reply regenerated successfully`
+      success: true, data: { type, content },
+      credits: updatedCredits, message: `${type} reply regenerated successfully`
     });
   } catch (error) {
     console.error('AI Assist regenerate error:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to regenerate AI reply.'
-    });
+    if (regenCreditsDeducted > 0) {
+      await aiCreditService.rollbackCredits(organizationId, regenCreditsDeducted, { operation: 'ai_assist_regenerate', userId: req.user?._id, reason: error.message });
+    }
+    return res.status(500).json({ success: false, error: error.message || 'Failed to regenerate AI reply.' });
   }
 };
 
@@ -1755,6 +1731,9 @@ ${config.instruction}`;
 // @route   POST /api/inbox/auto-reply/generate
 // @access  Private (Admin/Manager)
 exports.generateAutoReplies = async (req, res, next) => {
+  let autoReplyCreditsDeducted = 0;
+  const organizationId = req.user.organization._id.toString();
+  const aiCreditService = require('../services/aiCreditService');
   try {
     const { interactionIds, autoSend = false } = req.body;
 
@@ -1812,9 +1791,6 @@ exports.generateAutoReplies = async (req, res, next) => {
       details: []
     };
 
-    const organizationId = req.user.organization._id.toString();
-    const aiCreditService = require('../services/aiCreditService');
-
     for (const interaction of interactions) {
       try {
         // Check daily limit
@@ -1859,15 +1835,12 @@ exports.generateAutoReplies = async (req, res, next) => {
 
         results.generated++;
 
-        // Deduct credits after successful generation
         await aiCreditService.deductCredits(organizationId, 1, {
-          operation: 'ai_response',
-          userId: req.user._id,
-          interactionId: interaction._id.toString(),
-          platform: interaction.platform,
-          isAutoReply: true,
-          messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
+          operation: 'ai_response', userId: req.user._id,
+          interactionId: interaction._id.toString(), platform: interaction.platform,
+          isAutoReply: true, messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
         });
+        autoReplyCreditsDeducted++;
 
         // If autoSend is true and organization allows it, send the reply
         if (autoSend && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
@@ -1959,6 +1932,9 @@ exports.generateAutoReplies = async (req, res, next) => {
     });
   } catch (error) {
     console.error('Auto-reply generation error:', error);
+    if (autoReplyCreditsDeducted > 0) {
+      await aiCreditService.rollbackCredits(organizationId, autoReplyCreditsDeducted, { operation: 'ai_response_auto_reply', userId: req.user?._id, reason: error.message });
+    }
     next(error);
   }
 };
@@ -1967,8 +1943,10 @@ exports.generateAutoReplies = async (req, res, next) => {
 // @route   POST /api/inbox/auto-reply/test-trigger
 // @access  Private (Admin/Manager)
 exports.testAutoReplyTrigger = async (req, res, next) => {
+  let testCreditsDeducted = 0;
+  const organizationId = req.user.organization._id;
+  const aiCreditService = require('../services/aiCreditService');
   try {
-    const organizationId = req.user.organization._id;
     const organization = await Organization.findById(organizationId);
 
     if (!organization) {
@@ -2011,11 +1989,7 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
       details: []
     };
 
-    const aiCreditService = require('../services/aiCreditService');
-
-    // Process each interaction
     for (const interaction of interactions) {
-      // Check AI credits before generating
       const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
       if (!creditCheck.allowed) {
         results.skipped++;
@@ -2050,15 +2024,12 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
 
       results.processed++;
 
-      // Deduct credits after successful generation
       await aiCreditService.deductCredits(organizationId, 1, {
-        operation: 'ai_response',
-        userId: req.user._id,
-        interactionId: interaction._id.toString(),
-        platform: interaction.platform,
-        isAutoReplyTest: true,
-        messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
+        operation: 'ai_response', userId: req.user._id,
+        interactionId: interaction._id.toString(), platform: interaction.platform,
+        isAutoReplyTest: true, messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
       });
+      testCreditsDeducted++;
 
       results.details.push({
         id: interaction._id,
@@ -2078,6 +2049,9 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
 
   } catch (error) {
     console.error('Auto-reply test error:', error);
+    if (testCreditsDeducted > 0) {
+      await aiCreditService.rollbackCredits(organizationId, testCreditsDeducted, { operation: 'ai_response_test', userId: req.user?._id, reason: error.message });
+    }
     next(error);
   }
 };

@@ -141,6 +141,53 @@ class AICreditService {
   }
 
   /**
+   * Rollback (refund) previously deducted credits when an operation fails after deduction.
+   * @param {String} organizationId
+   * @param {Number} amount - Credits to refund
+   * @param {Object} metadata - Context about why the rollback happened
+   * @returns {Promise<Object>} Updated usage
+   */
+  async rollbackCredits(organizationId, amount = 1, metadata = {}) {
+    if (!amount || amount <= 0) return { success: true, refunded: 0 };
+    try {
+      const result = await Subscription.findOneAndUpdate(
+        { organization: organizationId },
+        { $inc: { 'usage.aiCreditsThisMonth': -amount } },
+        { new: true }
+      );
+
+      if (!result) {
+        console.warn(`⚠️ [AI Credits Rollback] No subscription found for org ${organizationId}`);
+        return { success: false };
+      }
+
+      try {
+        await AICreditUsage.create({
+          organization: organizationId,
+          user: metadata.userId || organizationId,
+          operation: metadata.operation ? `rollback_${metadata.operation}` : 'rollback',
+          creditsUsed: -amount,
+          metadata: {
+            ...metadata,
+            userId: undefined,
+            operation: undefined,
+            reason: metadata.reason || 'Operation failed after deduction'
+          }
+        });
+      } catch (logError) {
+        console.error('Error logging AI credit rollback:', logError);
+      }
+
+      console.log(`↩️ [AI Credits] Rolled back ${amount} credits for org ${organizationId}. New total: ${result.usage.aiCreditsThisMonth}/${result.limits.maxAICreditsPerMonth}`);
+
+      return { success: true, refunded: amount };
+    } catch (error) {
+      console.error('Rollback AI credits error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * Get AI credit usage history for organization
    * @param {String} organizationId
    * @param {Object} options - Query options (page, limit, startDate, endDate)

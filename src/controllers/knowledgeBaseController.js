@@ -217,6 +217,8 @@ exports.createPDFKnowledgeBase = async (req, res) => {
  * Uses WebScraperService and ContentSummarizerService (SOLID principles)
  */
 exports.createURLKnowledgeBase = async (req, res) => {
+  let kbCreditsDeducted = 0;
+  const kbOrgId = req.user.organization._id || req.user.organization;
   try {
     const { url, title, category, tags, priority, focus = 'overview', targetWordCount, targetTagCount } = req.body;
 
@@ -312,17 +314,11 @@ exports.createURLKnowledgeBase = async (req, res) => {
       summaryData.tags.length
     );
 
-    await aiCreditService.deductCredits(
-      req.user.organization._id || req.user.organization,
-      actualCost,
-      {
-        operation: 'knowledge_base_from_url',
-        userId: req.user._id,
-        url: url,
-        wordCount: actualWordCount,
-        tagCount: summaryData.tags.length
-      }
-    );
+    await aiCreditService.deductCredits(kbOrgId, actualCost, {
+      operation: 'knowledge_base_from_url', userId: req.user._id,
+      url: url, wordCount: actualWordCount, tagCount: summaryData.tags.length
+    });
+    kbCreditsDeducted = actualCost;
 
     res.status(201).json({
       success: true,
@@ -342,9 +338,11 @@ exports.createURLKnowledgeBase = async (req, res) => {
   } catch (error) {
     console.error('Create URL knowledge base error:', error);
     
-    // Provide more specific error messages
+    if (kbCreditsDeducted > 0) {
+      await aiCreditService.rollbackCredits(kbOrgId, kbCreditsDeducted, { operation: 'knowledge_base_from_url', userId: req.user?._id, reason: error.message });
+    }
+
     let errorMessage = 'Failed to process URL. Please check the URL and try again.';
-    
     if (error.message.includes('timeout')) {
       errorMessage = 'The website took too long to respond. Please try again or use a different URL.';
     } else if (error.message.includes('not found') || error.message.includes('404')) {
@@ -358,8 +356,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
     }
 
     res.status(500).json({
-      success: false,
-      error: errorMessage,
+      success: false, error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
