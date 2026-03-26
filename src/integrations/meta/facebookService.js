@@ -130,45 +130,66 @@ class FacebookService {
 
   /**
    * Send an attachment (image, video, or file) via Messenger.
+   * @param {string} [localFilePath] - If provided, uploads the file directly via
+   *   multipart form-data instead of passing a URL for Facebook to download.
+   *   This is more reliable behind tunnels (ngrok) and for formats like audio/webm.
    */
-  async sendMessageWithAttachment(recipientPsid, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = false) {
-    if (!pageId || !recipientPsid || !accessToken || !attachmentType || !attachmentUrl) {
-      return { success: false, error: 'Missing pageId, recipientPsid, accessToken, attachmentType, or attachmentUrl' };
+  async sendMessageWithAttachment(recipientPsid, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = false, localFilePath = null) {
+    if (!pageId || !recipientPsid || !accessToken || !attachmentType) {
+      return { success: false, error: 'Missing pageId, recipientPsid, accessToken, or attachmentType' };
     }
     const allowedTypes = ['image', 'video', 'file', 'audio'];
     if (!allowedTypes.includes(attachmentType)) {
       return { success: false, error: `attachmentType must be one of: ${allowedTypes.join(', ')}` };
     }
+    const fs = require('fs');
+    const FormData = require('form-data');
+    const useDirectUpload = localFilePath && fs.existsSync(localFilePath);
+
     try {
-      const buildBody = (useTag) => {
+      const apiUrl = `${this.baseURL}/${pageId}/messages`;
+      const platformType = attachmentType === 'audio' ? 'file' : attachmentType;
+
+      const sendRequest = async (useTag) => {
+        if (useDirectUpload) {
+          const form = new FormData();
+          form.append('recipient', JSON.stringify({ id: String(recipientPsid) }));
+          form.append('messaging_type', useTag ? 'MESSAGE_TAG' : 'RESPONSE');
+          if (useTag) form.append('tag', 'HUMAN_AGENT');
+          form.append('message', JSON.stringify({
+            attachment: { type: platformType, payload: { is_reusable: false } }
+          }));
+          form.append('filedata', fs.createReadStream(localFilePath));
+          return axios.post(apiUrl, form, {
+            params: { access_token: accessToken },
+            headers: form.getHeaders(),
+            timeout: 30000,
+            maxContentLength: 100 * 1024 * 1024
+          });
+        }
         const body = {
           recipient: { id: String(recipientPsid) },
           messaging_type: useTag ? 'MESSAGE_TAG' : 'RESPONSE',
           tag: useTag ? 'HUMAN_AGENT' : undefined,
           message: {
             attachment: {
-              type: attachmentType,
+              type: platformType,
               payload: { url: String(attachmentUrl), is_reusable: false }
             }
           }
         };
         if (!useTag) delete body.tag;
-        return body;
+        return axios.post(apiUrl, body, {
+          params: { access_token: accessToken }, timeout: 15000
+        });
       };
+
       let response;
       try {
-        response = await axios.post(
-          `${this.baseURL}/${pageId}/messages`,
-          buildBody(useHumanAgentTag),
-          { params: { access_token: accessToken }, timeout: 15000 }
-        );
+        response = await sendRequest(useHumanAgentTag);
       } catch (tagErr) {
         if (tagErr.response?.data?.error?.code === 100 || (tagErr.response?.data?.error?.message || '').toLowerCase().includes('human agent')) {
-          response = await axios.post(
-            `${this.baseURL}/${pageId}/messages`,
-            buildBody(false),
-            { params: { access_token: accessToken }, timeout: 15000 }
-          );
+          response = await sendRequest(false);
         } else {
           throw tagErr;
         }

@@ -527,6 +527,17 @@ exports.replyToInteraction = async (req, res, next) => {
   try {
     const { content, useTemplate, templateId, templateVariables, attachmentUrl, attachmentType } = req.body;
 
+    // Resolve the local file on disk so we can upload directly to Meta (avoids
+    // Meta needing to download from our URL which fails behind ngrok/tunnels).
+    let attachmentLocalPath = null;
+    if (attachmentUrl) {
+      const urlFilename = attachmentUrl.split('/').pop();
+      if (urlFilename) {
+        const candidate = require('path').join(__dirname, '../../uploads/posts', urlFilename);
+        if (require('fs').existsSync(candidate)) attachmentLocalPath = candidate;
+      }
+    }
+
     const interaction = await Interaction.findById(req.params.id)
       .populate('platformConnection');
 
@@ -685,9 +696,7 @@ exports.replyToInteraction = async (req, res, next) => {
             replyStatus = 'failed';
             errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
             console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId, igAccountId });
-          } else if (attachmentUrl && attachmentType && attachmentType !== 'audio') {
-            // Audio attachments are stored in the ORM chat thread only — Instagram DM API
-            // does not accept audio/webm (browser recording format). Fall through to text send.
+          } else if (attachmentUrl && attachmentType) {
             result = await instagramService.sendMessageWithAttachment(
               recipientId,
               attachmentType,
@@ -695,7 +704,8 @@ exports.replyToInteraction = async (req, res, next) => {
               replyContent || undefined,
               connection.accessToken,
               pageId,
-              true
+              true,
+              attachmentLocalPath
             );
           } else {
             result = await instagramService.sendMessage(
@@ -729,9 +739,7 @@ exports.replyToInteraction = async (req, res, next) => {
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
             errorMessage = 'Missing Page or recipient for Facebook Messenger reply. Reconnect the Page in Settings.';
-          } else if (attachmentUrl && attachmentType && attachmentType !== 'audio') {
-            // Audio attachments are stored in the ORM chat thread only — Facebook Messenger API
-            // does not accept audio/webm (browser recording format). Fall through to text send.
+          } else if (attachmentUrl && attachmentType) {
             result = await facebookService.sendMessageWithAttachment(
               recipientId,
               attachmentType,
@@ -739,7 +747,8 @@ exports.replyToInteraction = async (req, res, next) => {
               replyContent || undefined,
               connection.accessToken,
               pageId,
-              true
+              true,
+              attachmentLocalPath
             );
           } else {
             result = await facebookService.sendMessage(
