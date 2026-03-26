@@ -142,17 +142,26 @@ exports.generatePostVariantsWithAI = async (req, res) => {
       const uploadDir = path.join(__dirname, '../../uploads/posts');
       await fs.mkdir(uploadDir, { recursive: true });
 
-      await Promise.all(result.variants.map(async (v, i) => {
+      for (let i = 0; i < result.variants.length; i++) {
+        const v = result.variants[i];
         const imagePrompt = topic + (v.content ? ` Post style: ${v.content.substring(0, 200)}` : '');
         console.log(`[Content Studio] AI image prompt for variant ${i + 1}/${result.variants.length}:\n`, imagePrompt);
-        const buffer = await aiService.generateImage(imagePrompt);
+
+        let buffer = await aiService.generateImage(imagePrompt);
+        if (!buffer) {
+          console.warn(`[Content Studio] Image gen failed for variant ${i + 1}, retrying...`);
+          await new Promise(r => setTimeout(r, 2000));
+          buffer = await aiService.generateImage(imagePrompt);
+        }
         if (buffer) {
           const filename = `ai-${Date.now()}-${i}.png`;
           const fullPath = path.join(uploadDir, filename);
           await fs.writeFile(fullPath, buffer);
           v.imageUrl = getPublicMediaUrl(fullPath, req);
+        } else {
+          console.warn(`[Content Studio] Image gen failed for variant ${i + 1} after retry, skipping.`);
         }
-      }));
+      }
 
       await aiCreditService.deductCredits(organizationId, variantCount, {
         operation: 'post_variants_image', userId: req.user._id, topic: topic.substring(0, 100), variantCount
@@ -188,7 +197,7 @@ exports.publishPost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds, mediaUrl } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -364,6 +373,19 @@ exports.publishPost = async (req, res) => {
 
         postData.mediaStoragePath = req.file.path;
         postData.mediaType = mediaType;
+      } else if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
+        const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
+        if (filename) {
+          const uploadDir = path.join(__dirname, '../../uploads/posts');
+          const fullPath = path.join(uploadDir, filename);
+          try {
+            await fs.access(fullPath);
+            postData.mediaStoragePath = fullPath;
+            postData.mediaType = 'image';
+          } catch {
+            console.warn('[Publish] AI-generated media file not found, publishing without image');
+          }
+        }
       }
 
       // If scheduled for later, save and return

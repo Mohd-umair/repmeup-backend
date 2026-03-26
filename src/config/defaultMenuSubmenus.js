@@ -23,10 +23,18 @@ const DEFAULT_SUBMENU_PACKS = [
         requiredPermissions: ['posts.read']
       },
       {
+        label: 'Scheduled',
+        icon: '⏰',
+        route: '/app/scheduled-posts',
+        order: 3,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      },
+      {
         label: 'Published',
         icon: '📋',
         route: '/app/content',
-        order: 3,
+        order: 4,
         queryParams: { view: 'published' },
         requiredRoles: ['admin', 'manager', 'agent'],
         requiredPermissions: ['posts.read']

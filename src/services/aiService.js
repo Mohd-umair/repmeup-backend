@@ -316,13 +316,14 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     const platformNames = platforms.join(', ');
     const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
     const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
-    return `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
+    return `You are a professional social media content creator. Generate a SINGLE engaging ${postType} that works across ${platformNames}.
 ${platformGuidelines}
 ${brandSection}
-Guidelines:
+CRITICAL RULES:
+- Output ONE post only. Do NOT split by platform (no "Instagram:", "Facebook:" labels).
 - Be authentic and engaging. Use appropriate emojis sparingly.
-- Include relevant hashtags (3-5 for Instagram, 1-2 for others).
-- Generate ONLY the post content. No explanations or meta-commentary.`;
+- Include 3-5 relevant hashtags at the end.
+- Generate ONLY the post text. No explanations, headers, or meta-commentary.`;
   }
 
   async _generateSinglePostWithTemperature(systemPrompt, userPrompt, temperature = 0.8) {
