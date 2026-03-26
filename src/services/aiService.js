@@ -297,10 +297,14 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     if (includeTrend) userPrompt += ' Weave in a relevant current trend or seasonal angle.';
 
     const brandContext = organizationId ? await this._getBrandContext(organizationId) : null;
+    const systemPrompt = this._buildPostVariantSystemPrompt(platforms, postType, brandContext);
+    console.log('[Content Studio] AI system prompt for post variants:\n', systemPrompt);
+    console.log('[Content Studio] AI user prompt for post variants:\n', userPrompt);
+
     const temperatures = [0.7, 0.85, 0.95].slice(0, count);
     const results = await Promise.all(
       temperatures.map(temp =>
-        this._generateSinglePostWithTemperature(userPrompt, platforms, postType, brandContext, temp)
+        this._generateSinglePostWithTemperature(systemPrompt, userPrompt, temp)
           .then(content => ({ content: content || '' }))
           .catch(() => ({ content: '' }))
       )
@@ -308,18 +312,20 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     return { variants: results.filter(v => v.content) };
   }
 
-  async _generateSinglePostWithTemperature(prompt, platforms, postType, brandContext, temperature = 0.8) {
+  _buildPostVariantSystemPrompt(platforms, postType, brandContext) {
     const platformNames = platforms.join(', ');
     const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
     const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
-    const systemPrompt = `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
+    return `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
 ${platformGuidelines}
 ${brandSection}
 Guidelines:
 - Be authentic and engaging. Use appropriate emojis sparingly.
 - Include relevant hashtags (3-5 for Instagram, 1-2 for others).
 - Generate ONLY the post content. No explanations or meta-commentary.`;
+  }
 
+  async _generateSinglePostWithTemperature(systemPrompt, userPrompt, temperature = 0.8) {
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
       throw new Error('OpenAI API key is not configured');
     }
@@ -329,7 +335,7 @@ Guidelines:
         model: this.openaiModel,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt }
+          { role: 'user', content: userPrompt }
         ],
         ...openAIChatCompletionTemperatureField(
           this.openaiModel,

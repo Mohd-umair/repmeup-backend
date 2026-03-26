@@ -144,6 +144,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
 
       await Promise.all(result.variants.map(async (v, i) => {
         const imagePrompt = topic + (v.content ? ` Post style: ${v.content.substring(0, 200)}` : '');
+        console.log(`[Content Studio] AI image prompt for variant ${i + 1}/${result.variants.length}:\n`, imagePrompt);
         const buffer = await aiService.generateImage(imagePrompt);
         if (buffer) {
           const filename = `ai-${Date.now()}-${i}.png`;
