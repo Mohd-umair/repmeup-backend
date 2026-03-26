@@ -390,7 +390,31 @@ CRITICAL RULES:
   }
 
   /**
+   * Whether an image API error is worth retrying (timeouts, drops, rate limits).
+   * @private
+   */
+  _isTransientImageGenError(error) {
+    const status = error.response?.status;
+    if (status === 429 || status === 502 || status === 503 || status === 504) return true;
+    const code = error.code;
+    if (code && ['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND'].includes(code)) return true;
+    const msg = String(error.message || '').toLowerCase();
+    if (
+      msg.includes('aborted') ||
+      msg.includes('timeout') ||
+      msg.includes('socket') ||
+      msg.includes('hang up') ||
+      msg.includes('econnreset') ||
+      msg.includes('network')
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Generate an image via OpenAI Image API using gpt-image-1.5.
+   * Retries transient failures (aborted connections, timeouts, 429/502/503).
    * @param {string} prompt - Description of the image to generate
    * @returns {Promise<Buffer|null>} Image buffer or null on error
    */
@@ -398,48 +422,74 @@ CRITICAL RULES:
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
       return null;
     }
-    try {
-      const imagePrompt = typeof prompt === 'string' && prompt.length > 0
-        ? prompt.substring(0, 1000)
-        : 'Professional social media post image, modern, high quality';
 
-      const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5';
+    const imagePrompt = typeof prompt === 'string' && prompt.length > 0
+      ? prompt.substring(0, 1000)
+      : 'Professional social media post image, modern, high quality';
 
-      const response = await axios.post(
-        'https://api.openai.com/v1/images/generations',
-        {
-          model,
-          prompt: imagePrompt,
-          n: 1,
-          size: '1024x1024',
-          quality: 'medium'
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
+    const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5';
+    const maxAttempts = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_MAX_RETRIES, 10) || 3, 1), 5);
+    const imageTimeout = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS, 10) || 120000, 60000), 300000);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await axios.post(
+          'https://api.openai.com/v1/images/generations',
+          {
+            model,
+            prompt: imagePrompt,
+            n: 1,
+            size: '1024x1024',
+            quality: 'medium'
           },
-          timeout: 90000
+          {
+            headers: {
+              Authorization: `Bearer ${this.openaiApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: imageTimeout,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+          }
+        );
+
+        const b64 = response.data?.data?.[0]?.b64_json;
+        if (b64) return Buffer.from(b64, 'base64');
+
+        const imageUrl = response.data?.data?.[0]?.url;
+        if (!imageUrl) return null;
+
+        const imgResponse = await axios.get(imageUrl, {
+          responseType: 'arraybuffer',
+          timeout: 60000,
+          maxContentLength: Infinity
+        });
+        return Buffer.from(imgResponse.data);
+      } catch (error) {
+        const status = error.response?.status;
+        const data = error.response?.data;
+        const transient = this._isTransientImageGenError(error);
+        const willRetry = transient && attempt < maxAttempts;
+
+        logger.warn('AI image generation failed', {
+          attempt,
+          maxAttempts,
+          error: error.message,
+          code: error.code,
+          status,
+          openaiError: data?.error?.message || data?.message,
+          willRetry
+        });
+
+        if (willRetry) {
+          const delayMs = Math.min(2000 * 2 ** (attempt - 1), 16000);
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
         }
-      );
-
-      const b64 = response.data?.data?.[0]?.b64_json;
-      if (b64) return Buffer.from(b64, 'base64');
-
-      const imageUrl = response.data?.data?.[0]?.url;
-      if (!imageUrl) return null;
-      const imgResponse = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
-      return Buffer.from(imgResponse.data);
-    } catch (error) {
-      const status = error.response?.status;
-      const data = error.response?.data;
-      logger.warn('AI image generation failed', {
-        error: error.message,
-        status,
-        openaiError: data?.error?.message || data?.message
-      });
-      return null;
+        return null;
+      }
     }
+    return null;
   }
 
   /**

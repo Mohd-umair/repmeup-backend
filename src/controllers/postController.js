@@ -143,14 +143,17 @@ exports.generatePostVariantsWithAI = async (req, res) => {
       await fs.mkdir(uploadDir, { recursive: true });
 
       for (let i = 0; i < result.variants.length; i++) {
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
         const v = result.variants[i];
         const imagePrompt = topic + (v.content ? ` Post style: ${v.content.substring(0, 200)}` : '');
         console.log(`[Content Studio] AI image prompt for variant ${i + 1}/${result.variants.length}:\n`, imagePrompt);
 
         let buffer = await aiService.generateImage(imagePrompt);
         if (!buffer) {
-          console.warn(`[Content Studio] Image gen failed for variant ${i + 1}, retrying...`);
-          await new Promise(r => setTimeout(r, 2000));
+          console.warn(`[Content Studio] Image gen failed for variant ${i + 1}, extra retry...`);
+          await new Promise((r) => setTimeout(r, 2500));
           buffer = await aiService.generateImage(imagePrompt);
         }
         if (buffer) {
