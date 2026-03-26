@@ -298,19 +298,15 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     if (includeTrend) userPrompt += ' Weave in a relevant current trend or seasonal angle.';
 
     const brandContext = organizationId ? await this._getBrandContext(organizationId) : null;
-    const variants = [];
     const temperatures = [0.7, 0.85, 0.95].slice(0, count);
-    for (let i = 0; i < count; i++) {
-      const content = await this._generateSinglePostWithTemperature(
-        userPrompt,
-        platforms,
-        postType,
-        brandContext,
-        temperatures[i] || 0.8
-      );
-      variants.push({ content: content || '' });
-    }
-    return { variants };
+    const results = await Promise.all(
+      temperatures.map(temp =>
+        this._generateSinglePostWithTemperature(userPrompt, platforms, postType, brandContext, temp)
+          .then(content => ({ content: content || '' }))
+          .catch(() => ({ content: '' }))
+      )
+    );
+    return { variants: results.filter(v => v.content) };
   }
 
   async _generateSinglePostWithTemperature(prompt, platforms, postType, brandContext, temperature = 0.8) {
