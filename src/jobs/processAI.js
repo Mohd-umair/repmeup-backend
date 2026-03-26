@@ -151,23 +151,42 @@ module.exports = async function processAI(job) {
  */
 async function assignToAgent(interaction, reason) {
   try {
-    // Find available agent (least busy)
-    const agents = await User.find({
-      organization: interaction.organization,
+    const orgId = interaction.organization;
+    const allAgents = await User.find({
+      organization: orgId,
       role: 'agent',
-      isActive: true
+      isActive: true,
+      deletedAt: null
     });
 
-    if (agents.length === 0) {
-      logger.warn('No agents available for assignment', { 
-        organizationId: interaction.organization.toString() 
+    if (allAgents.length === 0) {
+      logger.warn('No agents available for assignment', {
+        organizationId: orgId.toString()
       });
       return;
     }
 
-    // Count current assignments for each agent
+    const bucketId = interaction.intentBucket ? interaction.intentBucket.toString() : null;
+    const platform = interaction.platform ? interaction.platform.toLowerCase() : null;
+
+    // Filter agents whose assignedBuckets includes this bucket AND assignedPlatforms includes this platform.
+    // Agents with empty arrays are treated as "general" and skipped during specialized matching.
+    const matchedAgents = allAgents.filter(agent => {
+      const hasBuckets = Array.isArray(agent.assignedBuckets) && agent.assignedBuckets.length > 0;
+      const hasPlatforms = Array.isArray(agent.assignedPlatforms) && agent.assignedPlatforms.length > 0;
+
+      if (!hasBuckets && !hasPlatforms) return false;
+
+      const bucketMatch = !hasBuckets || (bucketId && agent.assignedBuckets.some(b => b.toString() === bucketId));
+      const platformMatch = !hasPlatforms || (platform && agent.assignedPlatforms.includes(platform));
+
+      return bucketMatch && platformMatch;
+    });
+
+    const pool = matchedAgents.length > 0 ? matchedAgents : allAgents;
+
     const agentWorkload = await Promise.all(
-      agents.map(async (agent) => {
+      pool.map(async (agent) => {
         const count = await Interaction.countDocuments({
           assignedTo: agent._id,
           status: { $in: ['assigned', 'unread'] }
@@ -176,20 +195,19 @@ async function assignToAgent(interaction, reason) {
       })
     );
 
-    // Sort by workload (ascending) and get least busy agent
     agentWorkload.sort((a, b) => a.count - b.count);
     const selectedAgent = agentWorkload[0].agent;
 
-    // Assign
     await interaction.assignTo(selectedAgent._id, null, reason);
-
-    // Send notification email
     await emailService.sendAssignmentNotification(selectedAgent, interaction);
 
-    console.log(`Assigned interaction ${interaction._id} to agent ${selectedAgent.email}`);
+    console.log(
+      `Assigned interaction ${interaction._id} to agent ${selectedAgent.email}` +
+      (matchedAgents.length > 0 ? ' (bucket/platform match)' : ' (fallback)')
+    );
 
   } catch (error) {
-    logger.error('Agent assignment error', { 
+    logger.error('Agent assignment error', {
       error: error.message,
       interactionId: interaction._id.toString()
     });

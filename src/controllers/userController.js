@@ -35,6 +35,7 @@ exports.getUsers = async (req, res, next) => {
 
     const users = await User.find(query)
       .select('-password')
+      .populate('assignedBuckets', 'name color')
       .sort({ createdAt: -1 });
 
     // Get assigned task counts for each user
@@ -135,7 +136,7 @@ exports.createUser = async (req, res, next) => {
       });
     }
 
-    const { email, password, firstName, lastName, role } = req.body;
+    const { email, password, firstName, lastName, role, assignedBuckets, assignedPlatforms } = req.body;
     const organizationId = req.user.organization._id;
 
     // Check if email already exists
@@ -165,7 +166,7 @@ exports.createUser = async (req, res, next) => {
     }
 
     // Create user
-    const user = await User.create({
+    const userData = {
       email: email.toLowerCase(),
       password,
       firstName,
@@ -173,7 +174,11 @@ exports.createUser = async (req, res, next) => {
       role: role || 'agent',
       organization: organizationId,
       isActive: true
-    });
+    };
+    if (Array.isArray(assignedBuckets)) userData.assignedBuckets = assignedBuckets;
+    if (Array.isArray(assignedPlatforms)) userData.assignedPlatforms = assignedPlatforms;
+
+    const user = await User.create(userData);
 
     // Update organization and subscription user counts
     await Organization.findByIdAndUpdate(organizationId, {
@@ -214,7 +219,7 @@ exports.createUser = async (req, res, next) => {
 exports.updateUser = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { firstName, lastName, role, isActive, preferences } = req.body;
+    const { firstName, lastName, role, isActive, preferences, assignedBuckets, assignedPlatforms } = req.body;
 
     // Check if user exists in same organization
     const userToUpdate = await User.findOne({
@@ -264,6 +269,8 @@ exports.updateUser = async (req, res, next) => {
     if (role && canUpdateOthers) updateData.role = role;
     if (typeof isActive === 'boolean' && canUpdateOthers) updateData.isActive = isActive;
     if (preferences) updateData.preferences = { ...userToUpdate.preferences, ...preferences };
+    if (Array.isArray(assignedBuckets) && canUpdateOthers) updateData.assignedBuckets = assignedBuckets;
+    if (Array.isArray(assignedPlatforms) && canUpdateOthers) updateData.assignedPlatforms = assignedPlatforms;
 
     const updatedUser = await User.findByIdAndUpdate(
       id,

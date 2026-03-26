@@ -54,7 +54,6 @@ class AIService {
   constructor() {
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openaiApiUrl = 'https://api.openai.com/v1/chat/completions';
-    this.openaiImagesUrl = 'https://api.openai.com/v1/images/generations';
     this.openaiModel = normalizeOpenAIModelId(process.env.OPENAI_MODEL);
 
     /** Kept for diagnostics / compatibility — AI stack is OpenAI-only */
@@ -384,9 +383,10 @@ Guidelines:
   }
 
   /**
-   * Generate an image from a text prompt using OpenAI DALL-E (when provider is OpenAI).
-   * @param {string} prompt - Description of the image to generate (e.g. post topic or caption)
-   * @returns {Promise<Buffer|null>} Image buffer or null if not supported / error
+   * Generate an image via OpenAI Responses API using GPT image generation tool.
+   * Uses GPT-5.4 (or OPENAI_IMAGE_MODEL env override) instead of legacy DALL-E.
+   * @param {string} prompt - Description of the image to generate
+   * @returns {Promise<Buffer|null>} Image buffer or null on error
    */
   async generateImage(prompt) {
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
@@ -396,33 +396,31 @@ Guidelines:
       const imagePrompt = typeof prompt === 'string' && prompt.length > 0
         ? prompt.substring(0, 1000)
         : 'Professional social media post image, modern, high quality';
-      const model = process.env.OPENAI_IMAGE_MODEL || 'dall-e-2';
-      const isDallE3 = model.startsWith('dall-e-3');
-      const body = {
-        model,
-        prompt: imagePrompt,
-        n: 1,
-        size: isDallE3 ? '1024x1024' : '1024x1024',
-        response_format: 'url'
-      };
-      if (isDallE3) {
-        body.quality = 'standard';
-      }
+
+      const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-5.4';
+
       const response = await axios.post(
-        this.openaiImagesUrl,
-        body,
+        'https://api.openai.com/v1/responses',
+        {
+          model,
+          input: imagePrompt,
+          tools: [{ type: 'image_generation', quality: 'medium', size: '1024x1024' }]
+        },
         {
           headers: {
             Authorization: `Bearer ${this.openaiApiKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: 60000
+          timeout: 120000
         }
       );
-      const imageUrl = response.data?.data?.[0]?.url;
-      if (!imageUrl) return null;
-      const imgResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-      return Buffer.from(imgResponse.data);
+
+      const outputs = response.data?.output || [];
+      const imageCall = outputs.find(o => o.type === 'image_generation_call');
+      const b64 = imageCall?.result;
+      if (!b64) return null;
+
+      return Buffer.from(b64, 'base64');
     } catch (error) {
       const status = error.response?.status;
       const data = error.response?.data;
