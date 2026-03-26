@@ -139,9 +139,14 @@ router.get('/media/:filename', (req, res) => {
 router.post('/generate', protect, postController.generatePostWithAI);
 
 // @route   POST /api/posts/generate-variants
-// @desc    Generate N post variants for Content Studio
+// @desc    Generate N text variants for Content Studio (images handled separately)
 // @access  Private
 router.post('/generate-variants', protect, postController.generatePostVariantsWithAI);
+
+// @route   POST /api/posts/generate-variant-image
+// @desc    Generate one AI image for a single variant (called per-variant by frontend)
+// @access  Private
+router.post('/generate-variant-image', protect, postController.generateVariantImage);
 
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately
