@@ -184,8 +184,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
       const uploadDir = path.join(__dirname, '../../uploads/posts');
       await fs.mkdir(uploadDir, { recursive: true });
 
-      for (let i = 0; i < result.variants.length; i++) {
-        const v = result.variants[i];
+      await Promise.all(result.variants.map(async (v, i) => {
         const imagePrompt = topic + (v.content ? ` Post style: ${v.content.substring(0, 200)}` : '');
         const buffer = await aiService.generateImage(imagePrompt);
         if (buffer) {
@@ -194,7 +193,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
           await fs.writeFile(fullPath, buffer);
           v.imageUrl = getPublicMediaUrl(fullPath, req);
         }
-      }
+      }));
 
       await aiCreditService.deductCredits(organizationId, variantCount, {
         operation: 'post_variants_image',

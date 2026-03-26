@@ -383,8 +383,7 @@ Guidelines:
   }
 
   /**
-   * Generate an image via OpenAI Responses API using GPT image generation tool.
-   * Uses GPT-5.4 (or OPENAI_IMAGE_MODEL env override) instead of legacy DALL-E.
+   * Generate an image via OpenAI Image API using gpt-image-1.5.
    * @param {string} prompt - Description of the image to generate
    * @returns {Promise<Buffer|null>} Image buffer or null on error
    */
@@ -397,30 +396,33 @@ Guidelines:
         ? prompt.substring(0, 1000)
         : 'Professional social media post image, modern, high quality';
 
-      const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-5.4';
+      const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5';
 
       const response = await axios.post(
-        'https://api.openai.com/v1/responses',
+        'https://api.openai.com/v1/images/generations',
         {
           model,
-          input: imagePrompt,
-          tools: [{ type: 'image_generation', quality: 'medium', size: '1024x1024' }]
+          prompt: imagePrompt,
+          n: 1,
+          size: '1024x1024',
+          quality: 'medium'
         },
         {
           headers: {
             Authorization: `Bearer ${this.openaiApiKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: 120000
+          timeout: 90000
         }
       );
 
-      const outputs = response.data?.output || [];
-      const imageCall = outputs.find(o => o.type === 'image_generation_call');
-      const b64 = imageCall?.result;
-      if (!b64) return null;
+      const b64 = response.data?.data?.[0]?.b64_json;
+      if (b64) return Buffer.from(b64, 'base64');
 
-      return Buffer.from(b64, 'base64');
+      const imageUrl = response.data?.data?.[0]?.url;
+      if (!imageUrl) return null;
+      const imgResponse = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      return Buffer.from(imgResponse.data);
     } catch (error) {
       const status = error.response?.status;
       const data = error.response?.data;
