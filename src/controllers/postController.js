@@ -109,7 +109,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
   let creditsDeducted = 0;
   let organizationId;
   try {
-    const { topic, platforms, count, audience, intent, includeTrend, postType, generateImage } = req.body;
+    const { topic, platforms, count, audience, intent, includeTrend, postType } = req.body;
     organizationId = req.user.organization?._id || req.user.organization;
 
     if (!topic || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
@@ -117,14 +117,12 @@ exports.generatePostVariantsWithAI = async (req, res) => {
     }
 
     const variantCount = Math.min(parseInt(count, 10) || 3, 5);
-    const withImages = !!generateImage;
-    const totalCredits = variantCount + (withImages ? variantCount : 0);
 
-    const creditCheck = await aiCreditService.checkCredits(organizationId, totalCredits);
+    const creditCheck = await aiCreditService.checkCredits(organizationId, variantCount);
     if (!creditCheck.allowed) {
       return res.status(403).json({
         success: false, message: creditCheck.error || 'Insufficient AI credits',
-        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining, needed: totalCredits }
+        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining, needed: variantCount }
       });
     }
 
@@ -138,45 +136,11 @@ exports.generatePostVariantsWithAI = async (req, res) => {
     });
     creditsDeducted += variantCount;
 
-    if (withImages && result.variants && result.variants.length > 0) {
-      const uploadDir = path.join(__dirname, '../../uploads/posts');
-      await fs.mkdir(uploadDir, { recursive: true });
-
-      for (let i = 0; i < result.variants.length; i++) {
-        if (i > 0) {
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-        const v = result.variants[i];
-        const imagePrompt = topic + (v.content ? ` Post style: ${v.content.substring(0, 200)}` : '');
-        console.log(`[Content Studio] AI image prompt for variant ${i + 1}/${result.variants.length}:\n`, imagePrompt);
-
-        let buffer = await aiService.generateImage(imagePrompt);
-        if (!buffer) {
-          console.warn(`[Content Studio] Image gen failed for variant ${i + 1}, extra retry...`);
-          await new Promise((r) => setTimeout(r, 2500));
-          buffer = await aiService.generateImage(imagePrompt);
-        }
-        if (buffer) {
-          const filename = `ai-${Date.now()}-${i}.png`;
-          const fullPath = path.join(uploadDir, filename);
-          await fs.writeFile(fullPath, buffer);
-          v.imageUrl = getPublicMediaUrl(fullPath, req);
-        } else {
-          console.warn(`[Content Studio] Image gen failed for variant ${i + 1} after retry, skipping.`);
-        }
-      }
-
-      await aiCreditService.deductCredits(organizationId, variantCount, {
-        operation: 'post_variants_image', userId: req.user._id, topic: topic.substring(0, 100), variantCount
-      });
-      creditsDeducted += variantCount;
-    }
-
     const updatedCredits = await aiCreditService.getUsage(organizationId);
 
     res.status(200).json({
       success: true, data: result,
-      credits: { used: totalCredits, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
+      credits: { used: variantCount, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
     });
   } catch (error) {
     console.error('Generate post variants error:', error);
@@ -184,6 +148,69 @@ exports.generatePostVariantsWithAI = async (req, res) => {
       await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_variants', userId: req.user?._id, reason: error.message });
     }
     res.status(500).json({ success: false, message: error.message || 'Failed to generate variants' });
+  }
+};
+
+/**
+ * @desc    Generate a single AI image for one content-studio variant.
+ *          Called per-variant from the frontend AFTER text variants are received,
+ *          so each request is independent and well within any proxy timeout.
+ * @route   POST /api/posts/generate-variant-image
+ * @access  Private
+ */
+exports.generateVariantImage = async (req, res) => {
+  let creditsDeducted = 0;
+  let organizationId;
+  try {
+    const { topic, variantContent } = req.body;
+    organizationId = req.user.organization?._id || req.user.organization;
+
+    if (!topic) {
+      return res.status(400).json({ success: false, message: 'topic is required' });
+    }
+
+    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false, message: creditCheck.error || 'Insufficient AI credits',
+        code: 'AI_CREDITS_EXCEEDED'
+      });
+    }
+
+    const imagePrompt = topic + (variantContent ? ` Post style: ${variantContent.substring(0, 200)}` : '');
+    console.log('[Content Studio] AI image prompt (single variant):\n', imagePrompt);
+
+    const uploadDir = path.join(__dirname, '../../uploads/posts');
+    await fs.mkdir(uploadDir, { recursive: true });
+
+    const buffer = await aiService.generateImage(imagePrompt);
+    if (!buffer) {
+      return res.status(500).json({ success: false, message: 'Image generation failed. Please try again.' });
+    }
+
+    const filename = `ai-${Date.now()}-${Math.floor(Math.random() * 1000)}.png`;
+    const fullPath = path.join(uploadDir, filename);
+    await fs.writeFile(fullPath, buffer);
+    const imageUrl = getPublicMediaUrl(fullPath, req);
+
+    await aiCreditService.deductCredits(organizationId, 1, {
+      operation: 'post_variants_image', userId: req.user._id,
+      topic: topic.substring(0, 100)
+    });
+    creditsDeducted = 1;
+
+    const updatedCredits = await aiCreditService.getUsage(organizationId);
+
+    res.status(200).json({
+      success: true, imageUrl,
+      credits: { used: 1, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
+    });
+  } catch (error) {
+    console.error('Generate variant image error:', error);
+    if (creditsDeducted > 0 && organizationId) {
+      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_variants_image', userId: req.user?._id, reason: error.message });
+    }
+    res.status(500).json({ success: false, message: error.message || 'Failed to generate image' });
   }
 };
 
