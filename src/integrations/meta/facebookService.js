@@ -148,7 +148,7 @@ class FacebookService {
 
     try {
       const apiUrl = `${this.baseURL}/${pageId}/messages`;
-      const platformType = attachmentType === 'audio' ? 'file' : attachmentType;
+      const platformType = attachmentType;
 
       const sendRequest = async (useTag) => {
         if (useDirectUpload) {
