@@ -34,6 +34,25 @@ const intentBucketSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  replyEnabled: {
+    type: Boolean,
+    default: true
+  },
+  replyTone: {
+    type: String,
+    enum: ['professional', 'casual', 'friendly', 'authoritative', 'playful', 'inspirational', 'neutral', null],
+    default: null
+  },
+  replyLanguage: {
+    type: String,
+    enum: ['english', 'hindi', 'hinglish', 'auto'],
+    default: 'auto'
+  },
+  replyPrompt: {
+    type: String,
+    trim: true,
+    maxlength: 500
+  },
   isDefault: {
     type: Boolean,
     default: false

@@ -42,6 +42,22 @@ function buildPlatformConnectionVisibilityFilter(activeConnections) {
   };
 }
 
+/** Comma-separated or repeated query values → trimmed non-empty strings */
+function parseQueryCsv(val) {
+  if (val == null || val === '') return [];
+  if (Array.isArray(val)) {
+    return val.flatMap((s) => String(s).split(',')).map((x) => x.trim()).filter(Boolean);
+  }
+  return String(val).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function setQueryFieldInOrEquals(queryObj, field, rawVal) {
+  const parts = parseQueryCsv(rawVal);
+  if (parts.length === 0) return;
+  if (parts.length === 1) queryObj[field] = parts[0];
+  else queryObj[field] = { $in: parts };
+}
+
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
 exports.getInteractions = async (req, res, next) => {
@@ -96,10 +112,8 @@ exports.getInteractions = async (req, res, next) => {
       }
     }
 
-    // Label filter - check if label exists in labels array
-    if (label) {
-      query.labels = label;
-    }
+    // Label filter — one id or $in (OR) on labels array
+    setQueryFieldInOrEquals(query, 'labels', label);
 
     // Intent bucket filter
     if (intentBucket) {
@@ -671,7 +685,9 @@ exports.replyToInteraction = async (req, res, next) => {
             replyStatus = 'failed';
             errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
             console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId, igAccountId });
-          } else if (attachmentUrl && attachmentType) {
+          } else if (attachmentUrl && attachmentType && attachmentType !== 'audio') {
+            // Audio attachments are stored in the ORM chat thread only — Instagram DM API
+            // does not accept audio/webm (browser recording format). Fall through to text send.
             result = await instagramService.sendMessageWithAttachment(
               recipientId,
               attachmentType,
@@ -713,7 +729,9 @@ exports.replyToInteraction = async (req, res, next) => {
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
             errorMessage = 'Missing Page or recipient for Facebook Messenger reply. Reconnect the Page in Settings.';
-          } else if (attachmentUrl && attachmentType) {
+          } else if (attachmentUrl && attachmentType && attachmentType !== 'audio') {
+            // Audio attachments are stored in the ORM chat thread only — Facebook Messenger API
+            // does not accept audio/webm (browser recording format). Fall through to text send.
             result = await facebookService.sendMessageWithAttachment(
               recipientId,
               attachmentType,
@@ -1195,7 +1213,7 @@ exports.getStats = async (req, res, next) => {
         connectionFilter
       ]
     };
-    if (platform) matchStage.platform = platform;
+    setQueryFieldInOrEquals(matchStage, 'platform', platform);
 
     const SLA_HOURS = 24;
     const slaThresholdMs = SLA_HOURS * 60 * 60 * 1000;
@@ -2714,10 +2732,12 @@ exports.getBucketView = async (req, res) => {
       ...visibilityFilter
     };
 
-    if (platform) baseMatch.platform = platform;
-    if (type) baseMatch.type = type;
-    if (sentiment) baseMatch.sentiment = sentiment;
-    if (status) baseMatch.status = status;
+    setQueryFieldInOrEquals(baseMatch, 'platform', platform);
+    setQueryFieldInOrEquals(baseMatch, 'type', type);
+    setQueryFieldInOrEquals(baseMatch, 'sentiment', sentiment);
+    const bucketViewStatusParts = parseQueryCsv(status);
+    if (bucketViewStatusParts.length === 1) baseMatch.status = bucketViewStatusParts[0];
+    else if (bucketViewStatusParts.length > 1) baseMatch.status = { $in: bucketViewStatusParts };
     if (dateFrom || dateTo) {
       baseMatch.platformCreatedAt = {};
       if (dateFrom) baseMatch.platformCreatedAt.$gte = new Date(dateFrom);
@@ -2739,7 +2759,7 @@ exports.getBucketView = async (req, res) => {
       });
     }
 
-    if (!status) {
+    if (bucketViewStatusParts.length === 0) {
       baseMatch.status = { $ne: 'archived' };
     }
 
@@ -2819,10 +2839,12 @@ exports.getTopicInsights = async (req, res) => {
       ...visibilityFilter
     };
 
-    if (platform) baseMatch.platform = platform;
-    if (type) baseMatch.type = type;
-    if (sentiment) baseMatch.sentiment = sentiment;
-    if (status) baseMatch.status = status;
+    setQueryFieldInOrEquals(baseMatch, 'platform', platform);
+    setQueryFieldInOrEquals(baseMatch, 'type', type);
+    setQueryFieldInOrEquals(baseMatch, 'sentiment', sentiment);
+    const topicStatusParts = parseQueryCsv(status);
+    if (topicStatusParts.length === 1) baseMatch.status = topicStatusParts[0];
+    else if (topicStatusParts.length > 1) baseMatch.status = { $in: topicStatusParts };
     if (dateFrom || dateTo) {
       baseMatch.platformCreatedAt = {};
       if (dateFrom) baseMatch.platformCreatedAt.$gte = new Date(dateFrom);
@@ -2843,7 +2865,7 @@ exports.getTopicInsights = async (req, res) => {
         ]
       });
     }
-    if (!status) {
+    if (topicStatusParts.length === 0) {
       baseMatch.status = { $ne: 'archived' };
     }
 
