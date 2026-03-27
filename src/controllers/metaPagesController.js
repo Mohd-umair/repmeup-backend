@@ -550,32 +550,34 @@ exports.reEnrichMentions = async (req, res, next) => {
 
       try {
         if (commentId && mediaId) {
-          const resp = await axios.get(`${graphBase}/${platformUserId}/mentioned_comment`, {
+          const resp = await axios.get(`${graphBase}/${platformUserId}`, {
             params: {
-              fields: 'text,timestamp,username',
+              fields: 'mentioned_comment.fields(text,timestamp,username)',
               commented_media_id: mediaId,
               comment_id: commentId,
               access_token: accessToken
             }
           });
-          text = resp.data.text || null;
-          timestamp = resp.data.timestamp || null;
-          username = resp.data.username || null;
+          const cd = resp.data?.mentioned_comment || {};
+          text = cd.text || null;
+          timestamp = cd.timestamp || null;
+          username = cd.username || null;
         }
 
         if (!text && mediaId) {
-          const resp = await axios.get(`${graphBase}/${platformUserId}/mentioned_media`, {
+          const resp = await axios.get(`${graphBase}/${platformUserId}`, {
             params: {
-              fields: 'caption,media_url,permalink,timestamp,username',
+              fields: 'mentioned_media.fields(caption,media_url,permalink,timestamp,username)',
               media_id: mediaId,
               access_token: accessToken
             }
           });
-          text = resp.data.caption || null;
-          timestamp = timestamp || resp.data.timestamp || null;
-          username = username || resp.data.username || null;
-          mediaUrl = resp.data.media_url || null;
-          permalinkUrl = resp.data.permalink || null;
+          const md = resp.data?.mentioned_media || {};
+          text = md.caption || null;
+          timestamp = timestamp || md.timestamp || null;
+          username = username || md.username || null;
+          mediaUrl = md.media_url || null;
+          permalinkUrl = md.permalink || null;
         }
 
         if (text || username) {
