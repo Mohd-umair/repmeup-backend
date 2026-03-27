@@ -31,15 +31,23 @@ class EmailService {
       auth: { user, pass }
     };
 
-    // Some SMTP servers accept LOGIN but behave oddly with PLAIN; try SMTP_AUTH_METHOD=LOGIN if you get 535.
+    // Titan/Hostinger: Nodemailer often negotiates AUTH PLAIN first; Titan frequently expects LOGIN — default that for these hosts.
     const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
-    if (authMethod === 'LOGIN') {
+    const titanOrHostingerHost = /titan\.email|hostinger\.com/i.test(host);
+    if (authMethod === 'PLAIN') {
+      // leave default (PLAIN may be tried first by server)
+    } else if (authMethod === 'LOGIN' || (authMethod === '' && titanOrHostingerHost)) {
       options.authMethod = 'LOGIN';
     }
 
     if (port === 587) {
       options.requireTLS = true;
       options.tls = { minVersion: 'TLSv1.2' };
+    }
+
+    if (smtpEnv('SMTP_DEBUG') === 'true') {
+      options.debug = true;
+      options.logger = true;
     }
 
     this.transporter = nodemailer.createTransport(options);
@@ -74,9 +82,11 @@ class EmailService {
       console.error('Email send error:', error);
       if (error.code === 'EAUTH' || String(error.message || '').includes('535')) {
         console.error(
-          '[emailService] SMTP login rejected. Check: (1) SMTP_USER = full mailbox e.g. info@repmeup.in ' +
-            '(2) SMTP_PASS = Titan webmail password, no extra spaces (3) If password has # $ ! wrap in single quotes in .env ' +
-            '(4) Try SMTP_PORT=587 (5) Titan dashboard: mailbox active, SMTP allowed (6) Optional: SMTP_AUTH_METHOD=LOGIN'
+          '[emailService] SMTP login rejected. Check: (1) Log into Titan webmail with the same user/password ' +
+            '(2) Titan/Hostinger: turn OFF 2FA on this mailbox for SMTP (or use an app password if Titan offers one) ' +
+            '(3) SMTP_USER = full address info@repmeup.in (4) Password in .env: use single quotes if it has # $ ! ' +
+            '(5) Try SMTP_HOST=smtp.hostinger.com OR smtp.titan.email (6) Try SMTP_PORT=587 ' +
+            '(7) SMTP_AUTH_METHOD=PLAIN if LOGIN still fails (8) SMTP_DEBUG=true for verbose SMTP logs'
         );
       }
       return {

@@ -91,19 +91,22 @@ LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here
 # Optional: per-request timeout ms; default 120000 (2 min)
 # OPENAI_IMAGE_TIMEOUT_MS=120000
 
-# Email — Titan Email (SMTP) for repmeup.in
-# Titan: smtp.titan.email | Port 465 = SSL | Port 587 = STARTTLS (if 465 fails on your host, try 587)
-# SMTP_USER must be the full email (info@repmeup.in). SMTP_PASS = that mailbox’s Titan password.
-# If password contains # $ ` or spaces, use single quotes: SMTP_PASS='your#pass'
-# If you still get "535 authentication failed", try: SMTP_AUTH_METHOD=LOGIN
-# Log in to Titan webmail with the same user/pass to confirm the password is correct.
+# Email — Titan / Hostinger mail (SMTP) e.g. info@repmeup.in
+# Server: smtp.titan.email (or try smtp.hostinger.com if Titan rejects login)
+# Port 465 = SSL | 587 = STARTTLS
+# SMTP_USER = full address. SMTP_PASS = webmail password (same as browser login).
+# Titan often blocks SMTP while 2FA is ON — disable 2FA on this mailbox, or use Titan’s app password if available.
+# Password with # $ ! → use quotes: SMTP_PASS='pass#here'
+# Code defaults to AUTH LOGIN on titan.email / hostinger.com hosts. Force PLAIN: SMTP_AUTH_METHOD=PLAIN
+# Verbose SMTP trace on server: SMTP_DEBUG=true
 SMTP_HOST=smtp.titan.email
 SMTP_PORT=465
 SMTP_USER=info@repmeup.in
 SMTP_PASS=your_titan_mailbox_password
 FROM_EMAIL=info@repmeup.in
 FROM_NAME=RepMeUp
-# SMTP_AUTH_METHOD=LOGIN
+# SMTP_AUTH_METHOD=PLAIN
+# SMTP_DEBUG=true
 
 # Rate limiting (optional; defaults: 1000 req/15 min per IP, or 10000 in development)
 # RATE_LIMIT_MAX_REQUESTS=5000
