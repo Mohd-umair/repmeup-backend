@@ -1,5 +1,12 @@
 const nodemailer = require('nodemailer');
 
+/** Avoid 535 from accidental spaces/newlines when pasting into .env */
+function smtpEnv(name, fallback = '') {
+  const v = process.env[name];
+  if (v == null) return fallback;
+  return String(v).trim();
+}
+
 class EmailService {
   constructor() {
     this.transporter = null;
@@ -7,17 +14,35 @@ class EmailService {
   }
 
   initializeTransporter() {
-    const port = parseInt(process.env.SMTP_PORT || '465', 10);
+    const host = smtpEnv('SMTP_HOST', 'smtp.titan.email');
+    const port = parseInt(smtpEnv('SMTP_PORT', '465'), 10) || 465;
+    const user = smtpEnv('SMTP_USER');
+    const pass = smtpEnv('SMTP_PASS');
+
+    if (!user || !pass) {
+      console.warn('[emailService] SMTP_USER or SMTP_PASS is empty — sending mail will fail until both are set.');
+    }
+
     // Titan Email: smtp.titan.email — 465 (SSL) or 587 (STARTTLS). See env-example.txt.
-    this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.titan.email',
+    const options = {
+      host,
       port,
       secure: port === 465,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      }
-    });
+      auth: { user, pass }
+    };
+
+    // Some SMTP servers accept LOGIN but behave oddly with PLAIN; try SMTP_AUTH_METHOD=LOGIN if you get 535.
+    const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
+    if (authMethod === 'LOGIN') {
+      options.authMethod = 'LOGIN';
+    }
+
+    if (port === 587) {
+      options.requireTLS = true;
+      options.tls = { minVersion: 'TLSv1.2' };
+    }
+
+    this.transporter = nodemailer.createTransport(options);
   }
 
   /**
@@ -47,6 +72,13 @@ class EmailService {
       };
     } catch (error) {
       console.error('Email send error:', error);
+      if (error.code === 'EAUTH' || String(error.message || '').includes('535')) {
+        console.error(
+          '[emailService] SMTP login rejected. Check: (1) SMTP_USER = full mailbox e.g. info@repmeup.in ' +
+            '(2) SMTP_PASS = Titan webmail password, no extra spaces (3) If password has # $ ! wrap in single quotes in .env ' +
+            '(4) Try SMTP_PORT=587 (5) Titan dashboard: mailbox active, SMTP allowed (6) Optional: SMTP_AUTH_METHOD=LOGIN'
+        );
+      }
       return {
         success: false,
         error: error.message
