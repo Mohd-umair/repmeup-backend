@@ -7,6 +7,16 @@ function smtpEnv(name, fallback = '') {
   return String(v).trim();
 }
 
+/** Plain transactional emails: white page background for all clients */
+function wrapSimpleEmailHtml(innerHtml) {
+  return `<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:24px;background-color:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+${innerHtml}
+</body>
+</html>`;
+}
+
 class EmailService {
   constructor() {
     this.transporter = null;
@@ -102,14 +112,14 @@ class EmailService {
    */
   async sendWelcomeEmail(user, tempPassword = null) {
     const subject = 'Welcome to ORM System';
-    const html = `
+    const html = wrapSimpleEmailHtml(`
       <h1>Welcome to ORM System, ${user.firstName}!</h1>
       <p>Your account has been created successfully.</p>
       ${tempPassword ? `<p><strong>Temporary Password:</strong> ${tempPassword}</p>
       <p>Please change your password after your first login.</p>` : ''}
       <p>Get started by connecting your social media accounts and managing all your interactions in one place.</p>
       <p>Best regards,<br>ORM Team</p>
-    `;
+    `);
 
     return this.sendEmail({
       to: user.email,
@@ -123,7 +133,7 @@ class EmailService {
    */
   async sendAssignmentNotification(user, interaction) {
     const subject = `New ${interaction.type} assigned to you`;
-    const html = `
+    const html = wrapSimpleEmailHtml(`
       <h2>New Assignment</h2>
       <p>Hi ${user.firstName},</p>
       <p>A new ${interaction.type} from ${interaction.platform} has been assigned to you.</p>
@@ -132,7 +142,7 @@ class EmailService {
       <p>Sentiment: ${interaction.sentiment || 'Not analyzed'}</p>
       <p><a href="${process.env.FRONTEND_URL}/inbox/${interaction._id}">View and respond</a></p>
       <p>Best regards,<br>ORM System</p>
-    `;
+    `);
 
     return this.sendEmail({
       to: user.email,
@@ -146,14 +156,14 @@ class EmailService {
    */
   async sendNegativeSpikeAlert(user, postId, count) {
     const subject = `Alert: ${count} negative comments detected`;
-    const html = `
+    const html = wrapSimpleEmailHtml(`
       <h2>Negative Comment Alert</h2>
       <p>Hi ${user.firstName},</p>
       <p><strong>Alert:</strong> ${count} negative comments have been detected on a single post.</p>
       <p>This requires immediate attention.</p>
       <p><a href="${process.env.FRONTEND_URL}/inbox?postId=${postId}">View comments</a></p>
       <p>Best regards,<br>ORM System</p>
-    `;
+    `);
 
     return this.sendEmail({
       to: user.email,
@@ -167,7 +177,7 @@ class EmailService {
    */
   async sendDailyDigest(user, stats) {
     const subject = 'Your Daily ORM Digest';
-    const html = `
+    const html = wrapSimpleEmailHtml(`
       <h2>Daily Digest for ${new Date().toLocaleDateString()}</h2>
       <p>Hi ${user.firstName},</p>
       <h3>Today's Summary:</h3>
@@ -182,7 +192,7 @@ class EmailService {
       </ul>
       <p><a href="${process.env.FRONTEND_URL}/inbox">View all interactions</a></p>
       <p>Best regards,<br>ORM System</p>
-    `;
+    `);
 
     return this.sendEmail({
       to: user.email,
@@ -200,14 +210,14 @@ class EmailService {
     const html = `
       <!DOCTYPE html>
       <html>
-      <body style="margin:0;padding:0;background-color:#0a0a0a;font-family:Arial,sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
+      <body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff;padding:40px 20px;">
           <tr>
             <td align="center">
-              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:2px solid #1a1a1a;">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
                 <!-- Header -->
                 <tr>
-                  <td style="background-color:#0a0a0a;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
+                  <td style="background-color:#ffffff;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
                     <span style="font-size:28px;font-weight:900;color:#c8f135;letter-spacing:-1px;">RepMeUp</span>
                   </td>
                 </tr>
