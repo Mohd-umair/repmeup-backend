@@ -251,8 +251,57 @@ exports.getDashboard = async (req, res, next) => {
         }
       ]),
 
-      // Top performing posts — published ScheduledPosts ranked by interaction count
-      _getTopPosts(organizationId),
+      // Top performing platform posts — group interactions by parent post, enrich with ScheduledPost
+      Interaction.aggregate([
+        { $match: { ...matchFilter, 'metadata.postId': { $exists: true, $ne: null } } },
+        {
+          $group: {
+            _id: '$metadata.postId',
+            platform: { $first: '$platform' },
+            postUrl: { $first: '$metadata.postUrl' },
+            // Capture any media URL stored on the interaction (e.g. from mention enrichment)
+            interactionMediaUrl: { $first: '$metadata.mediaUrl' },
+            commentCount: { $sum: 1 },
+            totalLikes: { $sum: { $ifNull: ['$engagement.likes', 0] } },
+            totalViews: { $sum: { $ifNull: ['$engagement.views', 0] } },
+            positiveCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] } },
+            negativeCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] } },
+            neutralCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] } },
+            latestDate: { $max: '$platformCreatedAt' },
+            latestContent: { $first: '$content' }
+          }
+        },
+        { $sort: { commentCount: -1 } },
+        { $limit: 5 },
+        {
+          $lookup: {
+            from: 'scheduledposts',
+            localField: '_id',
+            foreignField: 'platformPostId',
+            as: 'scheduledPost'
+          }
+        },
+        { $unwind: { path: '$scheduledPost', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            platform: 1,
+            postUrl: 1,
+            commentCount: 1,
+            totalLikes: 1,
+            totalViews: 1,
+            positiveCount: 1,
+            negativeCount: 1,
+            neutralCount: 1,
+            latestDate: 1,
+            latestContent: 1,
+            // Prefer ScheduledPost image → interaction media URL → null
+            postContent: '$scheduledPost.content',
+            postMediaUrl: {
+              $ifNull: ['$scheduledPost.mediaUrl', '$interactionMediaUrl']
+            }
+          }
+        }
+      ]),
 
       // --- Previous period aggregations for comparison ---
       Interaction.countDocuments(prevMatchFilter),
@@ -449,7 +498,27 @@ exports.getDashboard = async (req, res, next) => {
         totalReplies: aiHumanData.totalReplies,
         aiPercent: aiHumanData.totalReplies ? Math.round((aiHumanData.aiReplies / aiHumanData.totalReplies) * 100) : 0
       },
-      topInteractions: topInteractions || [],
+      topInteractions: (topInteractions || []).map(t => {
+        const total = (t.positiveCount || 0) + (t.negativeCount || 0) + (t.neutralCount || 0);
+        const dominant = t.positiveCount >= t.negativeCount ? 'positive' : 'negative';
+        return {
+          postId: t._id,
+          platform: t.platform,
+          postUrl: t.postUrl || null,
+          content: (() => {
+            const raw = t.postContent || t.latestContent || '';
+            return raw.length > 80 ? raw.substring(0, 80) + '…' : raw || null;
+          })(),
+          mediaUrl: t.postMediaUrl || null,
+          commentCount: t.commentCount || 0,
+          totalLikes: t.totalLikes || 0,
+          totalViews: t.totalViews || 0,
+          positiveCount: t.positiveCount || 0,
+          negativeCount: t.negativeCount || 0,
+          sentiment: dominant,
+          latestDate: t.latestDate
+        };
+      }),
       autoReplyMetrics: {
         totalAutoReplies: aiHumanData.aiReplies,
         successRate: aiHumanData.totalReplies > 0
@@ -916,65 +985,6 @@ exports.getContentPerformance = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
-
-/**
- * Get top performing posts ranked by interaction (comment) count.
- * Fetches all published ScheduledPosts for the org, counts Interactions
- * per post via platformPostId, builds image URL from mediaStoragePath.
- */
-const path = require('path');
-async function _getTopPosts(organizationId) {
-  const baseUrl = (process.env.BASE_URL || process.env.API_URL || 'https://repmeup.in').replace(/\/api\/?$/, '');
-
-  // 1. Fetch all published posts (same as /api/posts/published)
-  const posts = await ScheduledPost.find({ organization: organizationId, status: 'published' })
-    .sort({ publishedAt: -1 })
-    .select('platform content mediaUrl mediaStoragePath mediaType platformPostId platformPostUrl publishedAt')
-    .lean();
-
-  if (!posts.length) return [];
-
-  // 2. Count interactions per platformPostId in one query
-  const platformPostIds = posts.map(p => p.platformPostId).filter(Boolean);
-  const interactionCounts = await Interaction.aggregate([
-    { $match: { organization: organizationId, 'metadata.postId': { $in: platformPostIds } } },
-    { $group: { _id: '$metadata.postId', count: { $sum: 1 }, positiveCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] } }, negativeCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] } } } }
-  ]);
-
-  const countMap = {};
-  interactionCounts.forEach(ic => { countMap[ic._id] = ic; });
-
-  // 3. Merge, build image URL, sort by comment count
-  const enriched = posts
-    .filter(p => p.platformPostId)
-    .map(p => {
-      const ic = countMap[p.platformPostId] || { count: 0, positiveCount: 0, negativeCount: 0 };
-      // Build image URL: prefer mediaUrl (external URL) → convert mediaStoragePath to served URL
-      let mediaUrl = p.mediaUrl || null;
-      if (!mediaUrl && p.mediaStoragePath) {
-        const filename = path.basename(p.mediaStoragePath);
-        mediaUrl = `${baseUrl}/api/posts/media/${filename}`;
-      }
-      return {
-        postId: p.platformPostId,
-        platform: p.platform,
-        content: p.content ? (p.content.length > 80 ? p.content.substring(0, 80) + '…' : p.content) : null,
-        mediaUrl,
-        postUrl: p.platformPostUrl || null,
-        commentCount: ic.count,
-        positiveCount: ic.positiveCount,
-        negativeCount: ic.negativeCount,
-        sentiment: ic.positiveCount >= ic.negativeCount ? 'positive' : 'negative',
-        totalLikes: 0,
-        totalViews: 0,
-        latestDate: p.publishedAt
-      };
-    })
-    .sort((a, b) => b.commentCount - a.commentCount)
-    .slice(0, 5);
-
-  return enriched;
-}
 
 /**
  * GET /api/analytics/suggested-improvements
