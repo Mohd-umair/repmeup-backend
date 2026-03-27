@@ -457,47 +457,43 @@ async function handleInstagramWebhook(payload, organizationId) {
         let permalinkUrl = null;
 
         const accessToken = dmReceiverConnection?.accessToken;
-        if (accessToken) {
+        if (accessToken && igAccountId) {
           const axios = require('axios');
           const graphBase = 'https://graph.facebook.com/v18.0';
+          // IMPORTANT: URL must be pre-built as a string — axios percent-encodes parentheses
+          // in the params object (( → %28), which breaks Meta's field expansion syntax.
 
-          // Fetch comment text directly by comment_id
-          if (mention.comment_id) {
+          // Case 1: mentioned in a comment — use Mentions API field expansion
+          if (mention.comment_id && mention.media_id) {
             try {
-              const resp = await axios.get(`${graphBase}/${mention.comment_id}`, {
-                params: {
-                  fields: 'id,text,username,timestamp',
-                  access_token: accessToken
-                }
-              });
-              enrichedText = resp.data.text || null;
-              enrichedTimestamp = resp.data.timestamp || null;
-              enrichedUsername = resp.data.username || null;
-              logger.info('[processWebhook] Mention comment fetched', { text: enrichedText, username: enrichedUsername });
+              const url = `${graphBase}/${igAccountId}?fields=mentioned_comment.fields(id,text,timestamp)&commented_media_id=${mention.media_id}&comment_id=${mention.comment_id}&access_token=${encodeURIComponent(accessToken)}`;
+              const resp = await axios.get(url);
+              const cd = resp.data?.mentioned_comment || {};
+              enrichedText = cd.text || null;
+              enrichedTimestamp = cd.timestamp || null;
+              logger.info('[processWebhook] Mention comment fetched', { text: enrichedText });
             } catch (e) {
-              logger.warn('[processWebhook] comment fetch failed', {
+              logger.warn('[processWebhook] mentioned_comment fetch failed', {
                 commentId: mention.comment_id,
+                mediaId: mention.media_id,
                 err: e.response?.data?.error?.message || e.message
               });
             }
           }
 
-          // Fetch media details directly by media_id (caption mention or fallback)
+          // Case 2: mentioned in a media caption — use Mentions API field expansion
           if (mention.media_id && !enrichedText) {
             try {
-              const resp = await axios.get(`${graphBase}/${mention.media_id}`, {
-                params: {
-                  fields: 'id,caption,media_url,permalink,timestamp',
-                  access_token: accessToken
-                }
-              });
-              enrichedText = resp.data.caption || null;
-              enrichedTimestamp = enrichedTimestamp || resp.data.timestamp || null;
-              mediaUrl = resp.data.media_url || null;
-              permalinkUrl = resp.data.permalink || null;
+              const url = `${graphBase}/${igAccountId}?fields=mentioned_media.fields(id,caption,media_url,permalink,timestamp)&media_id=${mention.media_id}&access_token=${encodeURIComponent(accessToken)}`;
+              const resp = await axios.get(url);
+              const md = resp.data?.mentioned_media || {};
+              enrichedText = md.caption || null;
+              enrichedTimestamp = enrichedTimestamp || md.timestamp || null;
+              mediaUrl = md.media_url || null;
+              permalinkUrl = md.permalink || null;
               logger.info('[processWebhook] Mention media fetched', { caption: enrichedText, permalink: permalinkUrl });
             } catch (e) {
-              logger.warn('[processWebhook] media fetch failed', {
+              logger.warn('[processWebhook] mentioned_media fetch failed', {
                 mediaId: mention.media_id,
                 err: e.response?.data?.error?.message || e.message
               });

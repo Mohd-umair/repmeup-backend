@@ -549,29 +549,24 @@ exports.reEnrichMentions = async (req, res, next) => {
       let permalinkUrl = null;
 
       try {
-        if (commentId) {
-          const resp = await axios.get(`${graphBase}/${commentId}`, {
-            params: {
-              fields: 'id,text,username,timestamp',
-              access_token: accessToken
-            }
-          });
-          text = resp.data.text || null;
-          timestamp = resp.data.timestamp || null;
-          username = resp.data.username || null;
+        // Use Mentions API field expansion — URL pre-built as string to prevent
+        // axios from percent-encoding parentheses, which breaks Meta's parser.
+        if (commentId && mediaId) {
+          const url = `${graphBase}/${platformUserId}?fields=mentioned_comment.fields(id,text,timestamp)&commented_media_id=${mediaId}&comment_id=${commentId}&access_token=${encodeURIComponent(accessToken)}`;
+          const resp = await axios.get(url);
+          const cd = resp.data?.mentioned_comment || {};
+          text = cd.text || null;
+          timestamp = cd.timestamp || null;
         }
 
         if (!text && mediaId) {
-          const resp = await axios.get(`${graphBase}/${mediaId}`, {
-            params: {
-              fields: 'id,caption,media_url,permalink,timestamp',
-              access_token: accessToken
-            }
-          });
-          text = resp.data.caption || null;
-          timestamp = timestamp || resp.data.timestamp || null;
-          mediaUrl = resp.data.media_url || null;
-          permalinkUrl = resp.data.permalink || null;
+          const url = `${graphBase}/${platformUserId}?fields=mentioned_media.fields(id,caption,media_url,permalink,timestamp)&media_id=${mediaId}&access_token=${encodeURIComponent(accessToken)}`;
+          const resp = await axios.get(url);
+          const md = resp.data?.mentioned_media || {};
+          text = md.caption || null;
+          timestamp = timestamp || md.timestamp || null;
+          mediaUrl = md.media_url || null;
+          permalinkUrl = md.permalink || null;
         }
 
         if (text || username) {
