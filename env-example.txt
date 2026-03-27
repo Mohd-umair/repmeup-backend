@@ -105,8 +105,6 @@ SMTP_USER=info@repmeup.in
 SMTP_PASS=your_godaddy_mailbox_password
 FROM_EMAIL=info@repmeup.in
 FROM_NAME=RepMeUp
-# Optional: logo image URL for branded HTML emails (password reset). Defaults to production asset.
-# EMAIL_LOGO_URL=https://repmeup.in/assets/Images/logo.jpeg
 # SMTP_AUTH_METHOD=LOGIN
 # SMTP_DEBUG=true
 
