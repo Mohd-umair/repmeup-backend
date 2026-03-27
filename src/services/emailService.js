@@ -7,10 +7,12 @@ class EmailService {
   }
 
   initializeTransporter() {
+    const port = parseInt(process.env.SMTP_PORT || '465', 10);
+    // Titan Email: smtp.titan.email — 465 (SSL) or 587 (STARTTLS). See env-example.txt.
     this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.hostinger.com',
-      port: parseInt(process.env.SMTP_PORT || '465'),
-      secure: (process.env.SMTP_PORT || '465') === '465', // true for 465, false for 587
+      host: process.env.SMTP_HOST || 'smtp.titan.email',
+      port,
+      secure: port === 465,
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
