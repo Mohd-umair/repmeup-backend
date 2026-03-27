@@ -166,6 +166,7 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
+        'instagram_manage_mentions',
         'instagram_content_publish',
         'pages_read_user_content'
       ].join(','),
@@ -215,6 +216,7 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
+        'instagram_manage_mentions',
         'instagram_content_publish',
         'pages_show_list',
         'pages_read_engagement',
