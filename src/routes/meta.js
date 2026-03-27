@@ -24,7 +24,4 @@ router.post('/pages/resubscribe-webhooks', metaPagesController.resubscribeFacebo
 // Disconnect a specific page
 router.delete('/pages/:pageId', metaPagesController.disconnectPage);
 
-// Re-enrich stored Instagram mentions that only have fallback text (e.g. "You were mentioned...")
-router.post('/mentions/re-enrich', metaPagesController.reEnrichMentions);
-
 module.exports = router;
