@@ -7,7 +7,7 @@ function smtpEnv(name, fallback = '') {
   return String(v).trim();
 }
 
-/** Plain transactional emails: white page background; content reads on white */
+/** Plain transactional emails: white page background for all clients */
 function wrapSimpleEmailHtml(innerHtml) {
   return `<!DOCTYPE html>
 <html>
@@ -16,17 +16,6 @@ ${innerHtml}
 </body>
 </html>`;
 }
-
-/** Brand logo for HTML emails (override with EMAIL_LOGO_URL in .env) */
-function emailLogoUrl() {
-  const fromEnv = smtpEnv('EMAIL_LOGO_URL');
-  if (fromEnv) return fromEnv;
-  return 'https://repmeup.in/assets/Images/logo.jpeg';
-}
-
-// Matches frontend tailwind `rep.black` / `rep.lime`
-const REP_BLACK = '#0B0B0B';
-const REP_LIME = '#D8FF00';
 
 class EmailService {
   constructor() {
@@ -217,52 +206,53 @@ class EmailService {
    */
   async sendPasswordResetEmail(user, resetToken) {
     const resetUrl = `${process.env.FRONTEND_URL}/auth/reset-password?token=${resetToken}`;
-    const logoUrl = emailLogoUrl();
     const subject = 'Reset Your RepMeUp Password';
     const html = `
       <!DOCTYPE html>
       <html>
-      <body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,Helvetica,sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#ffffff;padding:40px 16px;">
+      <body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff;padding:40px 20px;">
           <tr>
             <td align="center">
-              <!-- Dark card only; outer mail stays white -->
-              <table width="520" cellpadding="0" cellspacing="0" role="presentation" style="max-width:520px;width:100%;background-color:${REP_BLACK};border-radius:16px;overflow:hidden;border:1px solid #272727;">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+                <!-- Header -->
                 <tr>
-                  <td style="padding:28px 32px;text-align:center;border-bottom:3px solid ${REP_LIME};">
-                    <img src="${logoUrl}" width="160" height="auto" alt="RepMeUp" style="display:block;margin:0 auto;max-width:200px;height:auto;border:0;outline:none;text-decoration:none;">
+                  <td style="background-color:#ffffff;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
+                    <span style="font-size:28px;font-weight:900;color:#c8f135;letter-spacing:-1px;">RepMeUp</span>
                   </td>
                 </tr>
+                <!-- Body -->
                 <tr>
-                  <td style="padding:36px 32px;">
-                    <h2 style="margin:0 0 10px;font-size:22px;color:#f3f4f6;">Reset Your Password</h2>
-                    <p style="margin:0 0 20px;color:#d1d5db;font-size:15px;">Hi ${user.firstName},</p>
-                    <p style="margin:0 0 28px;color:#9ca3af;font-size:15px;line-height:1.6;">
-                      We received a request to reset the password for your RepMeUp account. Click the button below to set a new password. This link expires in <strong style="color:#e5e7eb;">1 hour</strong>.
+                  <td style="padding:40px 36px;">
+                    <h2 style="margin:0 0 8px;font-size:22px;color:#0a0a0a;">Reset Your Password</h2>
+                    <p style="margin:0 0 24px;color:#555;font-size:15px;">Hi ${user.firstName},</p>
+                    <p style="margin:0 0 28px;color:#555;font-size:15px;line-height:1.6;">
+                      We received a request to reset the password for your RepMeUp account. Click the button below to set a new password. This link expires in <strong>1 hour</strong>.
                     </p>
-                    <table cellpadding="0" cellspacing="0" width="100%" role="presentation">
+                    <table cellpadding="0" cellspacing="0" width="100%">
                       <tr>
                         <td align="center">
                           <a href="${resetUrl}"
-                            style="display:inline-block;background-color:${REP_LIME};color:${REP_BLACK};font-weight:700;font-size:16px;text-decoration:none;padding:14px 40px;border-radius:10px;">
+                            style="display:inline-block;background-color:#c8f135;color:#0a0a0a;font-weight:700;font-size:16px;text-decoration:none;padding:14px 40px;border-radius:10px;">
                             Reset Password
                           </a>
                         </td>
                       </tr>
                     </table>
-                    <p style="margin:28px 0 0;color:#6b7280;font-size:13px;line-height:1.6;">
+                    <p style="margin:28px 0 0;color:#888;font-size:13px;line-height:1.6;">
                       If the button doesn't work, copy and paste this link into your browser:<br>
-                      <a href="${resetUrl}" style="color:${REP_LIME};word-break:break-all;">${resetUrl}</a>
+                      <a href="${resetUrl}" style="color:#c8f135;word-break:break-all;">${resetUrl}</a>
                     </p>
-                    <hr style="border:none;border-top:1px solid #374151;margin:28px 0;">
-                    <p style="margin:0;color:#6b7280;font-size:13px;">
+                    <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
+                    <p style="margin:0;color:#aaa;font-size:13px;">
                       If you didn't request a password reset, you can safely ignore this email. Your password will not be changed.
                     </p>
                   </td>
                 </tr>
+                <!-- Footer -->
                 <tr>
-                  <td style="background-color:#111111;padding:20px 32px;text-align:center;border-top:1px solid #272727;">
-                    <p style="margin:0;color:#6b7280;font-size:12px;">© ${new Date().getFullYear()} RepMeUp. All rights reserved.</p>
+                  <td style="background-color:#f9f9f9;padding:20px 36px;text-align:center;border-top:1px solid #eee;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">© ${new Date().getFullYear()} RepMeUp. All rights reserved.</p>
                   </td>
                 </tr>
               </table>
