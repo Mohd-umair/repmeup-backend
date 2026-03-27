@@ -461,20 +461,28 @@ async function handleInstagramWebhook(payload, organizationId) {
           const axios = require('axios');
           const graphBase = 'https://graph.facebook.com/v18.0';
 
-          // Case 1: mentioned in a comment (comment_id present)
+          // mentioned_comment and mentioned_media are FIELD EXPANSIONS on the IG User node,
+          // not subresource paths. Correct format:
+          //   GET /{ig-user-id}?fields=mentioned_comment.fields(text,timestamp,username)
+          //                    &commented_media_id={media_id}&comment_id={comment_id}
+          //   GET /{ig-user-id}?fields=mentioned_media.fields(caption,media_url,permalink,timestamp)
+          //                    &media_id={media_id}
+
+          // Case 1: mentioned in a comment (both comment_id and media_id present)
           if (mention.comment_id && mention.media_id) {
             try {
-              const resp = await axios.get(`${graphBase}/${igAccountId}/mentioned_comment`, {
+              const resp = await axios.get(`${graphBase}/${igAccountId}`, {
                 params: {
-                  fields: 'text,timestamp,username',
+                  fields: 'mentioned_comment.fields(text,timestamp,username)',
                   commented_media_id: mention.media_id,
                   comment_id: mention.comment_id,
                   access_token: accessToken
                 }
               });
-              enrichedText = resp.data.text || null;
-              enrichedTimestamp = resp.data.timestamp || null;
-              enrichedUsername = resp.data.username || null;
+              const cd = resp.data?.mentioned_comment || {};
+              enrichedText = cd.text || null;
+              enrichedTimestamp = cd.timestamp || null;
+              enrichedUsername = cd.username || null;
               logger.info('[processWebhook] Mention comment fetched', { text: enrichedText, username: enrichedUsername });
             } catch (e) {
               logger.warn('[processWebhook] mentioned_comment fetch failed', {
@@ -485,21 +493,22 @@ async function handleInstagramWebhook(payload, organizationId) {
             }
           }
 
-          // Case 2: mentioned in media caption (only media_id, no comment_id)
+          // Case 2: mentioned in media caption (or as fallback when comment fetch failed)
           if (mention.media_id && !enrichedText) {
             try {
-              const resp = await axios.get(`${graphBase}/${igAccountId}/mentioned_media`, {
+              const resp = await axios.get(`${graphBase}/${igAccountId}`, {
                 params: {
-                  fields: 'caption,media_url,permalink,timestamp,username',
+                  fields: 'mentioned_media.fields(caption,media_url,permalink,timestamp,username)',
                   media_id: mention.media_id,
                   access_token: accessToken
                 }
               });
-              enrichedText = resp.data.caption || null;
-              enrichedTimestamp = enrichedTimestamp || resp.data.timestamp || null;
-              enrichedUsername = enrichedUsername || resp.data.username || null;
-              mediaUrl = resp.data.media_url || null;
-              permalinkUrl = resp.data.permalink || null;
+              const md = resp.data?.mentioned_media || {};
+              enrichedText = md.caption || null;
+              enrichedTimestamp = enrichedTimestamp || md.timestamp || null;
+              enrichedUsername = enrichedUsername || md.username || null;
+              mediaUrl = md.media_url || null;
+              permalinkUrl = md.permalink || null;
               logger.info('[processWebhook] Mention media fetched', { caption: enrichedText, permalink: permalinkUrl });
             } catch (e) {
               logger.warn('[processWebhook] mentioned_media fetch failed', {
