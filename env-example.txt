@@ -91,21 +91,21 @@ LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here
 # Optional: per-request timeout ms; default 120000 (2 min)
 # OPENAI_IMAGE_TIMEOUT_MS=120000
 
-# Email — Titan / Hostinger mail (SMTP) e.g. info@repmeup.in
-# Server: smtp.titan.email (or try smtp.hostinger.com if Titan rejects login)
-# Port 465 = SSL | 587 = STARTTLS
-# SMTP_USER = full address. SMTP_PASS = webmail password (same as browser login).
-# Titan often blocks SMTP while 2FA is ON — disable 2FA on this mailbox, or use Titan’s app password if available.
-# Password with # $ ! → use quotes: SMTP_PASS='pass#here'
-# Code sets auth.method=LOGIN on titan.email / hostinger.com (Nodemailer otherwise uses AUTH PLAIN first). Force PLAIN: SMTP_AUTH_METHOD=PLAIN
+# Email — GoDaddy Workspace / Professional Email (domain + email on GoDaddy, hosting on Hostinger)
+# GoDaddy outgoing SMTP server: smtpout.secureserver.net
+# Port 465 = SSL (recommended) | 587 = STARTTLS
+# SMTP_USER = full GoDaddy email address (e.g. info@repmeup.in)
+# SMTP_PASS = the mailbox password (same one you use to log into GoDaddy webmail)
+# Password with # $ ! chars → wrap in single quotes: SMTP_PASS='pass#here'
+# If auth still fails: log into GoDaddy webmail first with same user/pass to verify credentials work.
 # Verbose SMTP trace on server: SMTP_DEBUG=true
-SMTP_HOST=smtp.titan.email
+SMTP_HOST=smtpout.secureserver.net
 SMTP_PORT=465
 SMTP_USER=info@repmeup.in
-SMTP_PASS=your_titan_mailbox_password
+SMTP_PASS=your_godaddy_mailbox_password
 FROM_EMAIL=info@repmeup.in
 FROM_NAME=RepMeUp
-# SMTP_AUTH_METHOD=PLAIN
+# SMTP_AUTH_METHOD=LOGIN
 # SMTP_DEBUG=true
 
 # Rate limiting (optional; defaults: 1000 req/15 min per IP, or 10000 in development)
@@ -119,4 +119,3 @@ ALLOWED_FILE_TYPES=image/jpeg,image/png,image/gif,image/webp
 
 # Logging
 LOG_LEVEL=debug
-
