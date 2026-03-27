@@ -97,7 +97,7 @@ LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here
 # SMTP_USER = full address. SMTP_PASS = webmail password (same as browser login).
 # Titan often blocks SMTP while 2FA is ON — disable 2FA on this mailbox, or use Titan’s app password if available.
 # Password with # $ ! → use quotes: SMTP_PASS='pass#here'
-# Code defaults to AUTH LOGIN on titan.email / hostinger.com hosts. Force PLAIN: SMTP_AUTH_METHOD=PLAIN
+# Code sets auth.method=LOGIN on titan.email / hostinger.com (Nodemailer otherwise uses AUTH PLAIN first). Force PLAIN: SMTP_AUTH_METHOD=PLAIN
 # Verbose SMTP trace on server: SMTP_DEBUG=true
 SMTP_HOST=smtp.titan.email
 SMTP_PORT=465

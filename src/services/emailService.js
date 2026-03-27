@@ -24,20 +24,26 @@ class EmailService {
     }
 
     // Titan Email: smtp.titan.email — 465 (SSL) or 587 (STARTTLS). See env-example.txt.
+    const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
+    const titanOrHostingerHost = /titan\.email|hostinger\.com/i.test(host);
+    // Nodemailer picks PLAIN first from EHLO unless auth.method is set; set it ON auth (not only root authMethod) so LOGIN is used.
+    const auth = { user, pass };
+    if (authMethod === 'PLAIN') {
+      auth.method = 'PLAIN';
+    } else if (authMethod === 'LOGIN' || (authMethod === '' && titanOrHostingerHost)) {
+      auth.method = 'LOGIN';
+    }
+
     const options = {
       host,
       port,
-      secure: port === 465,
-      auth: { user, pass }
+      auth
     };
 
-    // Titan/Hostinger: Nodemailer often negotiates AUTH PLAIN first; Titan frequently expects LOGIN — default that for these hosts.
-    const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
-    const titanOrHostingerHost = /titan\.email|hostinger\.com/i.test(host);
-    if (authMethod === 'PLAIN') {
-      // leave default (PLAIN may be tried first by server)
-    } else if (authMethod === 'LOGIN' || (authMethod === '' && titanOrHostingerHost)) {
-      options.authMethod = 'LOGIN';
+    if (port === 465) {
+      options.secure = true; // implicit TLS (SSL) from first byte
+    } else {
+      options.secure = false; // VERY IMPORTANT (for port 587): false — connection starts plain, then STARTTLS
     }
 
     if (port === 587) {
