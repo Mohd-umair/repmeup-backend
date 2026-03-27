@@ -434,33 +434,116 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       if (change.field === 'mentions') {
         const mention = change.value || {};
-        const mentionId =
-          mention.id ||
-          mention.comment_id ||
-          mention.media_id ||
-          `${entry.id}_${mention.timestamp || entry.time || Date.now()}`;
+        logger.info('[processWebhook] Instagram mention received', { mention, entryId: igAccountId });
 
-        const authorId = mention.from?.id || mention.user_id || mention.username;
+        const mentionId =
+          mention.comment_id ||
+          mention.id ||
+          mention.media_id ||
+          `${igAccountId}_${mention.timestamp || entry.time || Date.now()}`;
+
+        // ----------------------------------------------------------------
+        // Enrich mention with actual text and author via Instagram Graph API.
+        // The webhook only delivers media_id + comment_id — the actual comment
+        // text lives on someone else's media so it is NOT readable via
+        // GET /{comment_id}. The correct endpoints are:
+        //   comment mention → GET /{ig-user-id}/mentioned_comment
+        //   caption mention → GET /{ig-user-id}/mentioned_media
+        // ----------------------------------------------------------------
+        let enrichedText = null;
+        let enrichedUsername = null;
+        let enrichedTimestamp = null;
+        let mediaUrl = null;
+        let permalinkUrl = null;
+
+        const accessToken = dmReceiverConnection?.accessToken;
+        if (accessToken && igAccountId) {
+          const axios = require('axios');
+          const graphBase = 'https://graph.facebook.com/v18.0';
+
+          // Case 1: mentioned in a comment (comment_id present)
+          if (mention.comment_id && mention.media_id) {
+            try {
+              const resp = await axios.get(`${graphBase}/${igAccountId}/mentioned_comment`, {
+                params: {
+                  fields: 'text,timestamp,username',
+                  commented_media_id: mention.media_id,
+                  comment_id: mention.comment_id,
+                  access_token: accessToken
+                }
+              });
+              enrichedText = resp.data.text || null;
+              enrichedTimestamp = resp.data.timestamp || null;
+              enrichedUsername = resp.data.username || null;
+              logger.info('[processWebhook] Mention comment fetched', { text: enrichedText, username: enrichedUsername });
+            } catch (e) {
+              logger.warn('[processWebhook] mentioned_comment fetch failed', {
+                commentId: mention.comment_id,
+                mediaId: mention.media_id,
+                err: e.response?.data?.error?.message || e.message
+              });
+            }
+          }
+
+          // Case 2: mentioned in media caption (only media_id, no comment_id)
+          if (mention.media_id && !enrichedText) {
+            try {
+              const resp = await axios.get(`${graphBase}/${igAccountId}/mentioned_media`, {
+                params: {
+                  fields: 'caption,media_url,permalink,timestamp,username',
+                  media_id: mention.media_id,
+                  access_token: accessToken
+                }
+              });
+              enrichedText = resp.data.caption || null;
+              enrichedTimestamp = enrichedTimestamp || resp.data.timestamp || null;
+              enrichedUsername = enrichedUsername || resp.data.username || null;
+              mediaUrl = resp.data.media_url || null;
+              permalinkUrl = resp.data.permalink || null;
+              logger.info('[processWebhook] Mention media fetched', { caption: enrichedText, permalink: permalinkUrl });
+            } catch (e) {
+              logger.warn('[processWebhook] mentioned_media fetch failed', {
+                mediaId: mention.media_id,
+                err: e.response?.data?.error?.message || e.message
+              });
+            }
+          }
+        }
+
+        // Build author from enriched data or fall back to webhook payload
+        const authorUsername = enrichedUsername || mention.from?.username || mention.username || 'Instagram User';
+        const authorId = mention.from?.id || mention.user_id || null;
         const avatarUrl = authorId ? await fetchInstagramAuthorAvatar(organizationId, authorId) : null;
         const author = {
           platformId: authorId,
-          username: mention.from?.username || mention.username || 'Instagram User',
-          name: mention.from?.username || mention.username || 'Instagram User'
+          username: authorUsername,
+          name: authorUsername
         };
         if (avatarUrl) author.avatarUrl = avatarUrl;
 
         const mentionText =
+          enrichedText ||
           mention.text ||
           mention.caption ||
           mention.message ||
-          (mention.media_id ? 'You were mentioned on Instagram media.' : 'You were mentioned on Instagram.');
+          (mention.media_id ? `You were mentioned on Instagram by @${authorUsername}.` : 'You were mentioned on Instagram.');
 
-        const rawTs = mention.timestamp ?? mention.created_time ?? entry.time;
+        const rawTs = enrichedTimestamp ?? mention.timestamp ?? mention.created_time ?? entry.time;
         let mentionCreatedAt = new Date();
         if (rawTs != null) {
           const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
           if (Number.isFinite(ms)) mentionCreatedAt = new Date(ms);
         }
+
+        const metadataSet = {
+          mentionId: mention.id || null,
+          mediaId: mention.media_id || null,
+          commentId: mention.comment_id || null,
+          postId: mention.media_id || null,
+          postUrl: permalinkUrl || (mention.media_id ? `https://www.instagram.com/p/${mention.media_id}` : null),
+          rawMention: mention
+        };
+        if (mediaUrl) metadataSet.mediaUrl = mediaUrl;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: String(mentionId) },
@@ -473,14 +556,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               content: mentionText,
               author,
               platformCreatedAt: mentionCreatedAt,
-              metadata: {
-                mentionId: mention.id || null,
-                mediaId: mention.media_id || null,
-                commentId: mention.comment_id || null,
-                postId: mention.media_id || null,
-                postUrl: mention.media_id ? `https://www.instagram.com/p/${mention.media_id}` : null,
-                rawMention: mention
-              }
+              metadata: metadataSet
             },
             $setOnInsert: { status: 'unread', isRead: false }
           },
@@ -493,6 +569,7 @@ async function handleInstagramWebhook(payload, organizationId) {
           });
         }
 
+        logger.info('[processWebhook] Instagram mention saved', { interactionId: interaction?._id, text: mentionText, author: authorUsername });
         return interaction;
       }
 

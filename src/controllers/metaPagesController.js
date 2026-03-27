@@ -495,4 +495,121 @@ exports.disconnectPage = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    Re-enrich stored Instagram mentions that only have fallback content.
+ *          Fetches actual text via /{ig-user-id}/mentioned_comment and /mentioned_media.
+ * @route   POST /api/meta/mentions/re-enrich
+ * @access  Private
+ */
+exports.reEnrichMentions = async (req, res, next) => {
+  try {
+    const axios = require('axios');
+    const Interaction = require('../models/Interaction');
+    const organizationId = req.user.organization._id || req.user.organization;
+
+    const FALLBACK_TEXTS = [
+      'You were mentioned on Instagram media.',
+      'You were mentioned on Instagram.'
+    ];
+
+    const stale = await Interaction.find({
+      organization: organizationId,
+      platform: 'instagram',
+      type: 'mention',
+      content: { $in: FALLBACK_TEXTS }
+    }).select('_id content author metadata platformId').lean();
+
+    if (!stale.length) {
+      return res.json({ success: true, message: 'No stale mentions found.', enriched: 0, failed: 0 });
+    }
+
+    const igConnection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'instagram',
+      isActive: true,
+      status: 'connected'
+    }).select('platformUserId accessToken').lean();
+
+    if (!igConnection?.accessToken) {
+      return res.status(400).json({ success: false, message: 'No active Instagram connection found.' });
+    }
+
+    const { platformUserId, accessToken } = igConnection;
+    const graphBase = 'https://graph.facebook.com/v18.0';
+    let enriched = 0;
+    let failed = 0;
+
+    for (const mention of stale) {
+      const commentId = mention.metadata?.commentId;
+      const mediaId = mention.metadata?.mediaId;
+      let text = null;
+      let username = null;
+      let timestamp = null;
+      let mediaUrl = null;
+      let permalinkUrl = null;
+
+      try {
+        if (commentId && mediaId) {
+          const resp = await axios.get(`${graphBase}/${platformUserId}/mentioned_comment`, {
+            params: {
+              fields: 'text,timestamp,username',
+              commented_media_id: mediaId,
+              comment_id: commentId,
+              access_token: accessToken
+            }
+          });
+          text = resp.data.text || null;
+          timestamp = resp.data.timestamp || null;
+          username = resp.data.username || null;
+        }
+
+        if (!text && mediaId) {
+          const resp = await axios.get(`${graphBase}/${platformUserId}/mentioned_media`, {
+            params: {
+              fields: 'caption,media_url,permalink,timestamp,username',
+              media_id: mediaId,
+              access_token: accessToken
+            }
+          });
+          text = resp.data.caption || null;
+          timestamp = timestamp || resp.data.timestamp || null;
+          username = username || resp.data.username || null;
+          mediaUrl = resp.data.media_url || null;
+          permalinkUrl = resp.data.permalink || null;
+        }
+
+        if (text || username) {
+          const update = {};
+          if (text) update.content = text;
+          if (username) {
+            update['author.username'] = username;
+            update['author.name'] = username;
+          }
+          if (permalinkUrl) update['metadata.postUrl'] = permalinkUrl;
+          if (mediaUrl) update['metadata.mediaUrl'] = mediaUrl;
+
+          await Interaction.updateOne({ _id: mention._id }, { $set: update });
+          enriched++;
+        } else {
+          failed++;
+        }
+      } catch (e) {
+        console.warn(`[reEnrichMentions] Failed for mention ${mention._id}:`, e.response?.data?.error?.message || e.message);
+        failed++;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Re-enriched ${enriched} mention(s). ${failed} could not be enriched.`,
+      enriched,
+      failed,
+      total: stale.length
+    });
+  } catch (error) {
+    console.error('❌ [Meta Pages] reEnrichMentions error:', error);
+    next(error);
+  }
+};
+
 module.exports = exports;
