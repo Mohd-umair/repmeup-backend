@@ -14,7 +14,7 @@ class EmailService {
   }
 
   initializeTransporter() {
-    const host = smtpEnv('SMTP_HOST', 'smtp.titan.email');
+    const host = smtpEnv('SMTP_HOST', 'smtpout.secureserver.net');
     const port = parseInt(smtpEnv('SMTP_PORT', '465'), 10) || 465;
     const user = smtpEnv('SMTP_USER');
     const pass = smtpEnv('SMTP_PASS');
@@ -23,32 +23,25 @@ class EmailService {
       console.warn('[emailService] SMTP_USER or SMTP_PASS is empty — sending mail will fail until both are set.');
     }
 
-    // Titan Email: smtp.titan.email — 465 (SSL) or 587 (STARTTLS). See env-example.txt.
-    const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
-    const titanOrHostingerHost = /titan\.email|hostinger\.com/i.test(host);
-    // Nodemailer picks PLAIN first from EHLO unless auth.method is set; set it ON auth (not only root authMethod) so LOGIN is used.
     const auth = { user, pass };
-    if (authMethod === 'PLAIN') {
-      auth.method = 'PLAIN';
-    } else if (authMethod === 'LOGIN' || (authMethod === '' && titanOrHostingerHost)) {
-      auth.method = 'LOGIN';
-    }
+
+    // Allow overriding auth method via env (LOGIN, PLAIN, etc.)
+    const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
+    if (authMethod) auth.method = authMethod;
 
     const options = {
       host,
       port,
-      auth
+      auth,
+      secureConnection: false,
+      requireTLS: true,
+      tls: { ciphers: 'SSLv3' }
     };
 
     if (port === 465) {
-      options.secure = true; // implicit TLS (SSL) from first byte
+      options.secure = true;
     } else {
-      options.secure = false; // VERY IMPORTANT (for port 587): false — connection starts plain, then STARTTLS
-    }
-
-    if (port === 587) {
-      options.requireTLS = true;
-      options.tls = { minVersion: 'TLSv1.2' };
+      options.secure = false; // VERY IMPORTANT for port 587: plain socket → STARTTLS
     }
 
     if (smtpEnv('SMTP_DEBUG') === 'true') {
@@ -88,11 +81,13 @@ class EmailService {
       console.error('Email send error:', error);
       if (error.code === 'EAUTH' || String(error.message || '').includes('535')) {
         console.error(
-          '[emailService] SMTP login rejected. Check: (1) Log into Titan webmail with the same user/password ' +
-            '(2) Titan/Hostinger: turn OFF 2FA on this mailbox for SMTP (or use an app password if Titan offers one) ' +
-            '(3) SMTP_USER = full address info@repmeup.in (4) Password in .env: use single quotes if it has # $ ! ' +
-            '(5) Try SMTP_HOST=smtp.hostinger.com OR smtp.titan.email (6) Try SMTP_PORT=587 ' +
-            '(7) SMTP_AUTH_METHOD=PLAIN if LOGIN still fails (8) SMTP_DEBUG=true for verbose SMTP logs'
+          '[emailService] SMTP login rejected (535). Checklist:\n' +
+            '  1) Verify you can log into GoDaddy webmail (https://email.secureserver.net) with the SAME user/password\n' +
+            '  2) SMTP_HOST must be smtpout.secureserver.net for GoDaddy email\n' +
+            '  3) SMTP_USER = full email address (e.g. info@repmeup.in)\n' +
+            '  4) Password in .env with special chars (#$!) → wrap in single quotes: SMTP_PASS=\'pass#here\'\n' +
+            '  5) Try SMTP_PORT=587 if 465 fails (or vice versa)\n' +
+            '  6) SMTP_DEBUG=true for verbose SMTP trace'
         );
       }
       return {
