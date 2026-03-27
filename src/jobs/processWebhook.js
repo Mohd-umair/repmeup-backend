@@ -457,61 +457,47 @@ async function handleInstagramWebhook(payload, organizationId) {
         let permalinkUrl = null;
 
         const accessToken = dmReceiverConnection?.accessToken;
-        if (accessToken && igAccountId) {
+        if (accessToken) {
           const axios = require('axios');
           const graphBase = 'https://graph.facebook.com/v18.0';
 
-          // mentioned_comment and mentioned_media are FIELD EXPANSIONS on the IG User node,
-          // not subresource paths. Correct format:
-          //   GET /{ig-user-id}?fields=mentioned_comment.fields(text,timestamp,username)
-          //                    &commented_media_id={media_id}&comment_id={comment_id}
-          //   GET /{ig-user-id}?fields=mentioned_media.fields(caption,media_url,permalink,timestamp)
-          //                    &media_id={media_id}
-
-          // Case 1: mentioned in a comment (both comment_id and media_id present)
-          if (mention.comment_id && mention.media_id) {
+          // Fetch comment text directly by comment_id
+          if (mention.comment_id) {
             try {
-              const resp = await axios.get(`${graphBase}/${igAccountId}`, {
+              const resp = await axios.get(`${graphBase}/${mention.comment_id}`, {
                 params: {
-                  fields: 'mentioned_comment.fields(text,timestamp,username)',
-                  commented_media_id: mention.media_id,
-                  comment_id: mention.comment_id,
+                  fields: 'id,text,username,timestamp',
                   access_token: accessToken
                 }
               });
-              const cd = resp.data?.mentioned_comment || {};
-              enrichedText = cd.text || null;
-              enrichedTimestamp = cd.timestamp || null;
-              enrichedUsername = cd.username || null;
+              enrichedText = resp.data.text || null;
+              enrichedTimestamp = resp.data.timestamp || null;
+              enrichedUsername = resp.data.username || null;
               logger.info('[processWebhook] Mention comment fetched', { text: enrichedText, username: enrichedUsername });
             } catch (e) {
-              logger.warn('[processWebhook] mentioned_comment fetch failed', {
+              logger.warn('[processWebhook] comment fetch failed', {
                 commentId: mention.comment_id,
-                mediaId: mention.media_id,
                 err: e.response?.data?.error?.message || e.message
               });
             }
           }
 
-          // Case 2: mentioned in media caption (or as fallback when comment fetch failed)
+          // Fetch media details directly by media_id (caption mention or fallback)
           if (mention.media_id && !enrichedText) {
             try {
-              const resp = await axios.get(`${graphBase}/${igAccountId}`, {
+              const resp = await axios.get(`${graphBase}/${mention.media_id}`, {
                 params: {
-                  fields: 'mentioned_media.fields(caption,media_url,permalink,timestamp,username)',
-                  media_id: mention.media_id,
+                  fields: 'id,caption,media_url,permalink,timestamp',
                   access_token: accessToken
                 }
               });
-              const md = resp.data?.mentioned_media || {};
-              enrichedText = md.caption || null;
-              enrichedTimestamp = enrichedTimestamp || md.timestamp || null;
-              enrichedUsername = enrichedUsername || md.username || null;
-              mediaUrl = md.media_url || null;
-              permalinkUrl = md.permalink || null;
+              enrichedText = resp.data.caption || null;
+              enrichedTimestamp = enrichedTimestamp || resp.data.timestamp || null;
+              mediaUrl = resp.data.media_url || null;
+              permalinkUrl = resp.data.permalink || null;
               logger.info('[processWebhook] Mention media fetched', { caption: enrichedText, permalink: permalinkUrl });
             } catch (e) {
-              logger.warn('[processWebhook] mentioned_media fetch failed', {
+              logger.warn('[processWebhook] media fetch failed', {
                 mediaId: mention.media_id,
                 err: e.response?.data?.error?.message || e.message
               });
