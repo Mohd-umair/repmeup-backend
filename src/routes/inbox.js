@@ -96,6 +96,9 @@ router.post('/:id/notes', validateInboxAddNote, inboxController.addNote);
 // Update status
 router.put('/:id/status', validateInboxUpdateStatus, inboxController.updateStatus);
 
+// Chat session open / closed (inbox workflow)
+router.put('/:id/chat-open', inboxController.updateChatOpen);
+
 // Update intent bucket (drag-and-drop reclassification)
 router.put('/:id/bucket', inboxController.updateBucket);
 
