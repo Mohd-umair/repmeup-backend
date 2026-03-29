@@ -86,6 +86,13 @@ const interactionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
+
+  /** Agent-facing chat session: open (active) vs closed (hidden from default open list when filtered) */
+  chatOpen: {
+    type: Boolean,
+    default: true,
+    index: true
+  },
   
   // AI & Sentiment Analysis
   sentiment: {

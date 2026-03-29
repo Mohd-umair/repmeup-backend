@@ -75,6 +75,7 @@ exports.getInteractions = async (req, res, next) => {
       postId,
       dateFrom,
       dateTo,
+      chatOpen,
       page = 1,
       limit = 20,
       // Keep inbox ordered by newest platform comment/message first.
@@ -93,11 +94,12 @@ exports.getInteractions = async (req, res, next) => {
     // Replies are shown in the detail view when clicking on a parent
     // This filter will be added to $and array below
 
-    if (platform) query.platform = platform;
-    if (type) query.type = type;
+    // Multiselect sends CSV or repeated params → OR via $in (single value stays equality)
+    setQueryFieldInOrEquals(query, 'platform', platform);
+    setQueryFieldInOrEquals(query, 'type', type);
     if (postId) query['metadata.postId'] = postId;
-    if (sentiment) query.sentiment = sentiment;
-    if (status) query.status = status;
+    setQueryFieldInOrEquals(query, 'sentiment', sentiment);
+    setQueryFieldInOrEquals(query, 'status', status);
     if (assignedTo) query.assignedTo = assignedTo;
 
     // Date range filter on platformCreatedAt
@@ -217,6 +219,16 @@ exports.getInteractions = async (req, res, next) => {
       conditionsToAnd.push(agentCondition);
     }
 
+    // Chat session filter: open = true or legacy missing field; closed = explicit false
+    const chatOpenStr = chatOpen != null ? String(chatOpen).toLowerCase() : '';
+    if (chatOpenStr === 'true' || chatOpenStr === '1') {
+      conditionsToAnd.push({
+        $or: [{ chatOpen: true }, { chatOpen: { $exists: false } }]
+      });
+    } else if (chatOpenStr === 'false' || chatOpenStr === '0') {
+      conditionsToAnd.push({ chatOpen: false });
+    }
+
     // Use $and to combine all conditions
     query.$and = conditionsToAnd;
 
@@ -243,7 +255,8 @@ exports.getInteractions = async (req, res, next) => {
       // Must be part of the key or date / bucket filters return wrong cached pages
       dateFrom: dateFrom ? String(dateFrom) : '',
       dateTo: dateTo ? String(dateTo) : '',
-      intentBucket: intentBucket ? String(intentBucket) : ''
+      intentBucket: intentBucket ? String(intentBucket) : '',
+      chatOpen: chatOpen != null && chatOpen !== '' ? String(chatOpen) : ''
     });
 
     const cached = await cacheService.get(cacheKey);
@@ -874,6 +887,7 @@ exports.replyToInteraction = async (req, res, next) => {
     } else {
       // Update respondedAt timestamp if successful
       interaction.respondedAt = new Date();
+      interaction.chatOpen = true;
       await interaction.save();
 
       // IMPORTANT: Remove any pending AI processing jobs for this interaction
@@ -1201,6 +1215,62 @@ exports.updateStatus = async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: interaction
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Set chat session open/closed (inbox agent workflow)
+// @route   PUT /api/inbox/:id/chat-open
+// @access  Private
+exports.updateChatOpen = async (req, res, next) => {
+  try {
+    const { chatOpen } = req.body;
+    if (typeof chatOpen !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'chatOpen must be a boolean'
+      });
+    }
+
+    const interaction = await Interaction.findOne({
+      _id: req.params.id,
+      organization: req.user.organization._id
+    });
+
+    if (!interaction) {
+      return res.status(404).json({
+        success: false,
+        error: 'Interaction not found'
+      });
+    }
+
+    if (req.user.role === 'agent') {
+      const assignedToId = interaction.assignedTo?.toString?.() || interaction.assignedTo;
+      if (assignedToId !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          error: 'You can only update conversations assigned to you'
+        });
+      }
+    }
+
+    interaction.chatOpen = chatOpen;
+    await interaction.save();
+
+    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+
+    const populated = await Interaction.findById(interaction._id)
+      .populate('assignedTo', 'firstName lastName email avatar')
+      .populate('assignedBy', 'firstName lastName email')
+      .populate('labels', 'name color icon')
+      .populate('replies.sentBy', 'firstName lastName')
+      .populate('platformConnection', 'platform isActive status');
+
+    res.status(200).json({
+      success: true,
+      data: populated
     });
   } catch (error) {
     next(error);
@@ -2705,7 +2775,7 @@ exports.getBucketView = async (req, res) => {
   try {
     const IntentBucket = require('../models/IntentBucket');
     const orgId = req.user.organization._id;
-    const { limit = 20, platform, type, sentiment, status, search, dateFrom, dateTo } = req.query;
+    const { limit = 20, platform, type, sentiment, status, search, dateFrom, dateTo, chatOpen } = req.query;
     const safeLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 50);
 
     const activeConnections = await PlatformConnection.find({
@@ -2754,6 +2824,16 @@ exports.getBucketView = async (req, res) => {
 
     if (bucketViewStatusParts.length === 0) {
       baseMatch.status = { $ne: 'archived' };
+    }
+
+    const bucketChatOpenStr = chatOpen != null ? String(chatOpen).toLowerCase() : '';
+    if (bucketChatOpenStr === 'true' || bucketChatOpenStr === '1') {
+      baseMatch.$and = baseMatch.$and || [];
+      baseMatch.$and.push({
+        $or: [{ chatOpen: true }, { chatOpen: { $exists: false } }]
+      });
+    } else if (bucketChatOpenStr === 'false' || bucketChatOpenStr === '0') {
+      baseMatch.chatOpen = false;
     }
 
     let buckets = await IntentBucket.find({ organization: orgId, isActive: true }).sort({ order: 1 }).lean();

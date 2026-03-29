@@ -158,11 +158,72 @@ exports.generatePostVariantsWithAI = async (req, res) => {
  * @route   POST /api/posts/generate-variant-image
  * @access  Private
  */
+/**
+ * Build a richly structured, unique image prompt from user-selected style options.
+ * Each variant index gets a different primary variation directive to enforce diversity.
+ */
+function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantIndex = 0 }) {
+  const styleDescriptors = {
+    'photorealistic': 'ultra-realistic photography, DSLR quality, sharp 8K detail, no CGI',
+    'cinematic':      'cinematic film still, anamorphic lens flare, movie-grade color grading, widescreen',
+    'minimalist':     'minimalist design, vast clean white space, geometric simplicity, negative space composition',
+    '3d-render':      '3D CGI render, soft ambient occlusion, ray-traced depth of field, product visualization quality',
+    'illustration':   'digital illustration, flat design vector art, modern graphic style, clean lines',
+    'corporate':      'professional corporate photography, polished business aesthetic, high-end office environment',
+    'futuristic':     'futuristic sci-fi concept art, neon light accents, holographic UI elements, cyberpunk aesthetic',
+    'vintage':        'vintage retro film photography, analog grain texture, faded warm palette, nostalgic 1970s feel',
+    'bold-graphic':   'bold high-contrast graphic poster art, editorial design, strong geometric composition',
+    'watercolor':     'soft watercolor painting, visible expressive brushstrokes, artistic paper texture, painterly',
+    'dark-moody':     'dark moody noir photography, deep dramatic shadows, chiaroscuro contrast, cinematic atmosphere',
+    'pastel-life':    'bright airy lifestyle photography, pastel soft tones, natural golden light, consumer-friendly warmth'
+  };
+
+  // Each variant index forces a distinct visual angle to prevent identical outputs
+  const variationDirectives = [
+    'Hero shot: subject centered prominently, clean uncluttered background, confident direct composition.',
+    'Environmental context: subject integrated into relevant setting, rule-of-thirds framing, storytelling depth.',
+    'Abstract close-up: tight macro detail of subject, bold foreground crop, abstract artistic interpretation.',
+    'Wide establishing shot: expansive scene with subject as part of larger narrative, atmospheric depth.',
+    'Dynamic diagonal: subject at striking diagonal angle, energy and motion implied, graphic impact.',
+    'Flat lay overhead: bird\'s eye top-down arrangement, organized flat lay aesthetic, product catalog feel.'
+  ];
+
+  const styleDesc        = styleDescriptors[imageConfig.style] || 'professional social media photography, high quality';
+  const moodPart         = imageConfig.mood        ? `${imageConfig.mood.toLowerCase()} emotional atmosphere` : '';
+  const lightingPart     = imageConfig.lighting    ? `${imageConfig.lighting.toLowerCase()} lighting` : '';
+  const compositionPart  = imageConfig.composition ? `${imageConfig.composition.toLowerCase()} composition` : '';
+  const palettePart      = imageConfig.colorPalette? `${imageConfig.colorPalette.toLowerCase()} color palette` : '';
+  const anglePart        = imageConfig.cameraAngle ? `${imageConfig.cameraAngle.toLowerCase()} camera angle` : '';
+  const variationNote    = variationDirectives[variantIndex % variationDirectives.length];
+
+  // Derive subject from topic + hint from post content (first sentence only)
+  const contentHint = variantContent
+    ? variantContent.replace(/[#@\n]/g, ' ').trim().split('.')[0].substring(0, 150)
+    : '';
+
+  const promptParts = [
+    styleDesc,
+    `Subject: ${topic.trim()}`,
+    contentHint ? `Context: ${contentHint}` : '',
+    moodPart,
+    lightingPart,
+    compositionPart,
+    palettePart,
+    anglePart,
+    variationNote,
+    'No text overlays, no watermarks, no logos, no words.',
+    'Ultra high quality, suitable for professional social media post.',
+    `seed:${Date.now() % 100000 + variantIndex * 13337}`  // soft uniqueness token
+  ].filter(Boolean);
+
+  return promptParts.join(', ');
+}
+
 exports.generateVariantImage = async (req, res) => {
   let creditsDeducted = 0;
   let organizationId;
   try {
-    const { topic, variantContent } = req.body;
+    const { topic, variantContent, imageConfig, variantIndex } = req.body;
     organizationId = req.user.organization?._id || req.user.organization;
 
     if (!topic) {
@@ -177,8 +238,13 @@ exports.generateVariantImage = async (req, res) => {
       });
     }
 
-    const imagePrompt = topic + (variantContent ? ` Post style: ${variantContent.substring(0, 200)}` : '');
-    console.log('[Content Studio] AI image prompt (single variant):\n', imagePrompt);
+    const imagePrompt = buildImagePrompt({
+      topic,
+      variantContent,
+      imageConfig: imageConfig || {},
+      variantIndex: typeof variantIndex === 'number' ? variantIndex : 0
+    });
+    console.log('[Content Studio] AI image prompt (variant %d):\n', variantIndex, imagePrompt);
 
     const uploadDir = path.join(__dirname, '../../uploads/posts');
     await fs.mkdir(uploadDir, { recursive: true });
