@@ -158,6 +158,11 @@ router.post('/generate-variant-video', protect, postController.generateVariantVi
 // @access  Private
 router.get('/video-job/:jobId', protect, postController.getVideoJobStatus);
 
+// @route   POST /api/posts/save-draft
+// @desc    Save an AI-generated variant as a draft ScheduledPost
+// @access  Private
+router.post('/save-draft', protect, postController.saveDraft);
+
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately
 // @access  Private
@@ -172,6 +177,31 @@ router.post('/schedule', protect, postController.schedulePost);
 // @desc    Create a post as pending approval (Send to Approval from Content Studio)
 // @access  Private
 router.post('/to-approval', protect, postController.sendToApproval);
+
+// @route   GET /api/posts/drafts
+// @desc    Get all draft posts
+// @access  Private
+router.get('/drafts', protect, postController.getDraftPosts);
+
+// @route   PATCH /api/posts/drafts/:id
+// @desc    Update draft content
+// @access  Private
+router.patch('/drafts/:id', protect, postController.updateDraft);
+
+// @route   PATCH /api/posts/drafts/:id/schedule
+// @desc    Schedule a draft
+// @access  Private
+router.patch('/drafts/:id/schedule', protect, postController.scheduleDraft);
+
+// @route   DELETE /api/posts/drafts/:id
+// @desc    Delete a draft
+// @access  Private
+router.delete('/drafts/:id', protect, postController.deleteDraft);
+
+// @route   POST /api/posts/drafts/:id/publish
+// @desc    Publish a draft immediately
+// @access  Private
+router.post('/drafts/:id/publish', protect, postController.publishDraft);
 
 // @route   GET /api/posts/scheduled
 // @desc    Get all scheduled posts

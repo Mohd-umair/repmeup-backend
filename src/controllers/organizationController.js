@@ -1,4 +1,29 @@
 const Organization = require('../models/Organization');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs').promises;
+
+// ─── Multer setup for logo uploads ────────────────────────────────────────────
+const logoStorage = multer.diskStorage({
+  destination: async (req, file, cb) => {
+    const dir = path.join(__dirname, '../../uploads/logos');
+    try { await fs.mkdir(dir, { recursive: true }); } catch (_) {}
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || '.png';
+    cb(null, `logo-${req.params.id}-${Date.now()}${ext}`);
+  }
+});
+
+const logoUpload = multer({
+  storage: logoStorage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
+  fileFilter: (req, file, cb) => {
+    const ok = /jpeg|jpg|png|gif|svg\+xml|webp/.test(file.mimetype);
+    ok ? cb(null, true) : cb(new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)'));
+  }
+}).single('logo');
 
 /**
  * Get organization details
@@ -184,3 +209,78 @@ exports.getAutoReplySettings = async (req, res, next) => {
   }
 };
 
+/**
+ * Upload / replace organization logo
+ * POST /api/organizations/:id/logo
+ */
+exports.uploadLogo = (req, res, next) => {
+  logoUpload(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ success: false, error: err.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded.' });
+    }
+
+    try {
+      const organization = await Organization.findById(req.params.id);
+      if (!organization) {
+        return res.status(404).json({ success: false, error: 'Organization not found' });
+      }
+
+      if (req.user.organization._id.toString() !== organization._id.toString()) {
+        return res.status(403).json({ success: false, error: 'Access denied' });
+      }
+
+      // Delete old logo file if it was a local upload
+      if (organization.logo && organization.logo.startsWith('/uploads/logos/')) {
+        const oldPath = path.join(__dirname, '../..', organization.logo);
+        try { await fs.unlink(oldPath); } catch (_) {}
+      }
+
+      // Build public URL — served from /uploads/logos/<filename>
+      const logoUrl = `/uploads/logos/${req.file.filename}`;
+      organization.logo = logoUrl;
+      await organization.save();
+
+      res.status(200).json({
+        success: true,
+        data: { logo: logoUrl },
+        message: 'Logo uploaded successfully'
+      });
+    } catch (error) {
+      console.error('Upload logo error:', error);
+      next(error);
+    }
+  });
+};
+
+/**
+ * Delete organization logo
+ * DELETE /api/organizations/:id/logo
+ */
+exports.deleteLogo = async (req, res, next) => {
+  try {
+    const organization = await Organization.findById(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ success: false, error: 'Organization not found' });
+    }
+
+    if (req.user.organization._id.toString() !== organization._id.toString()) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    if (organization.logo && organization.logo.startsWith('/uploads/logos/')) {
+      const oldPath = path.join(__dirname, '../..', organization.logo);
+      try { await fs.unlink(oldPath); } catch (_) {}
+    }
+
+    organization.logo = undefined;
+    await organization.save();
+
+    res.status(200).json({ success: true, message: 'Logo removed successfully' });
+  } catch (error) {
+    console.error('Delete logo error:', error);
+    next(error);
+  }
+};

@@ -290,10 +290,12 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     const postType = options.postType || 'post';
     const audience = options.audience || '';
     const intent = options.intent || '';
+    const mood = options.mood || '';
     const includeTrend = options.includeTrend;
     let userPrompt = prompt;
     if (audience) userPrompt += ` Target audience: ${audience}.`;
     if (intent) userPrompt += ` Content intent: ${intent}.`;
+    if (mood) userPrompt += ` Writing tone/mood: ${mood}.`;
     if (includeTrend) userPrompt += ' Weave in a relevant current trend or seasonal angle.';
 
     const brandContext = organizationId ? await this._getBrandContext(organizationId) : null;
