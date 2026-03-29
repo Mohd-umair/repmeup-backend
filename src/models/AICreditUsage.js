@@ -23,6 +23,7 @@ const aiCreditUsageSchema = new mongoose.Schema({
       'post_generation',
       'post_variants',
       'post_variants_image',
+      'post_variants_video',
       'content_analysis',
       'sentiment_analysis',
       'knowledge_base_analysis',
