@@ -3,26 +3,10 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 
-const LOGOS_UPLOAD_DIR = path.join(__dirname, '../../uploads/logos');
-
-/** Remove a locally stored logo file (new path /organizations/logos/ or legacy /uploads/logos/). */
-async function unlinkLocalLogoFile(logo) {
-  if (!logo || typeof logo !== 'string') return;
-  const isLocal =
-    logo.startsWith('/organizations/logos/') || logo.startsWith('/uploads/logos/');
-  if (!isLocal) return;
-  const base = path.basename(logo);
-  if (!base || base.includes('..')) return;
-  const diskPath = path.join(LOGOS_UPLOAD_DIR, base);
-  try {
-    await fs.unlink(diskPath);
-  } catch (_) {}
-}
-
 // ─── Multer setup for logo uploads ────────────────────────────────────────────
 const logoStorage = multer.diskStorage({
   destination: async (req, file, cb) => {
-    const dir = LOGOS_UPLOAD_DIR;
+    const dir = path.join(__dirname, '../../uploads/logos');
     try { await fs.mkdir(dir, { recursive: true }); } catch (_) {}
     cb(null, dir);
   },
@@ -249,10 +233,13 @@ exports.uploadLogo = (req, res, next) => {
       }
 
       // Delete old logo file if it was a local upload
-      await unlinkLocalLogoFile(organization.logo);
+      if (organization.logo && organization.logo.startsWith('/uploads/logos/')) {
+        const oldPath = path.join(__dirname, '../..', organization.logo);
+        try { await fs.unlink(oldPath); } catch (_) {}
+      }
 
-      // Public URL — served by GET /api/organizations/logos/<filename> (see organizations routes)
-      const logoUrl = `/organizations/logos/${req.file.filename}`;
+      // Build public URL — served from /uploads/logos/<filename>
+      const logoUrl = `/uploads/logos/${req.file.filename}`;
       organization.logo = logoUrl;
       await organization.save();
 
@@ -283,7 +270,10 @@ exports.deleteLogo = async (req, res, next) => {
       return res.status(403).json({ success: false, error: 'Access denied' });
     }
 
-    await unlinkLocalLogoFile(organization.logo);
+    if (organization.logo && organization.logo.startsWith('/uploads/logos/')) {
+      const oldPath = path.join(__dirname, '../..', organization.logo);
+      try { await fs.unlink(oldPath); } catch (_) {}
+    }
 
     organization.logo = undefined;
     await organization.save();

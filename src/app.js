@@ -1,5 +1,4 @@
 const express = require('express');
-const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -117,9 +116,6 @@ app.get('/health', (req, res) => {
 // Bull Board monitoring UI
 const bullBoardAdapter = require('./config/bullBoard');
 app.use('/admin/queues', bullBoardAdapter.getRouter());
-
-// Org logos: DB historically stored /uploads/logos/*; serve files here when requests reach Node (proxy /uploads/logos in nginx if needed)
-app.use('/uploads/logos', express.static(path.join(__dirname, '../uploads/logos')));
 
 // API routes
 app.use('/api/auth', require('./routes/auth'));
