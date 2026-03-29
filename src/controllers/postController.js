@@ -362,6 +362,153 @@ exports.generateVariantImage = async (req, res) => {
   }
 };
 
+// ─── Video Generation ────────────────────────────────────────────────────────
+
+/**
+ * Build a cinematic direction prompt for Sora from the user's VideoConfig.
+ * Sanitised the same way as image prompts so copyrighted terms don't trigger rejections.
+ */
+function buildVideoPrompt({ topic, variantContent, videoConfig = {}, variantIndex = 0 }) {
+  const styleDescriptors = {
+    cinematic:    'cinematic short film scene, anamorphic lens, movie-grade color grading, dramatic lighting',
+    realistic:    'ultra-realistic live action footage, natural lighting, documentary handheld camera feel',
+    animated:     'smooth 3D animation, modern motion graphics, vibrant colors, fluid transitions',
+    documentary:  'documentary style footage, authentic real-world setting, journalistic framing',
+    energetic:    'fast-paced dynamic edit, quick cuts, high energy motion, bold visual rhythm',
+  };
+
+  const toneDescriptors = {
+    energetic:    'high-energy, fast-paced, exciting',
+    calm:         'calm, serene, slow-motion elegance',
+    professional: 'polished, corporate, clean and authoritative',
+    playful:      'fun, colorful, upbeat, cheerful',
+  };
+
+  const variationAngles = [
+    'Opening establishing shot with gradual zoom-in, setting the scene.',
+    'Close-up product or subject detail reveal with motion blur transitions.',
+    'Aerial or wide cinematic sweep across the subject environment.',
+  ];
+
+  const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 100);
+  const rawHint   = variantContent ? variantContent.split(/[.\n!?]/)[0].trim() : '';
+  const hint      = sanitizeForImagePrompt(rawHint).substring(0, 80);
+
+  const styleDesc = styleDescriptors[videoConfig.style] || 'professional social media short video, high quality';
+  const toneDesc  = toneDescriptors[videoConfig.tone]   || 'engaging and professional';
+  const angleNote = variationAngles[variantIndex % variationAngles.length];
+
+  const parts = [
+    styleDesc,
+    `Subject: ${safeTopic}`,
+    hint ? `Theme: ${hint}` : '',
+    toneDesc,
+    angleNote,
+    'No text overlays, no captions, no subtitles, no watermarks.',
+    'Ultra high quality, suitable for professional social media reel.',
+  ].filter(Boolean);
+
+  return parts.join(', ');
+}
+
+/**
+ * @desc    Generate one AI video/reel for a single variant (called per-variant by frontend)
+ * @route   POST /api/posts/generate-variant-video
+ * @access  Private
+ */
+exports.generateVariantVideo = async (req, res) => {
+  let creditsDeducted = 0;
+  let organizationId;
+  try {
+    const { topic, variantContent, videoConfig, variantIndex } = req.body;
+    organizationId = req.user.organization?._id || req.user.organization;
+
+    if (!topic) {
+      return res.status(400).json({ success: false, message: 'topic is required' });
+    }
+
+    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false, message: creditCheck.error || 'Insufficient AI credits',
+        code: 'AI_CREDITS_EXCEEDED'
+      });
+    }
+
+    const videoPrompt = buildVideoPrompt({
+      topic,
+      variantContent,
+      videoConfig: videoConfig || {},
+      variantIndex: typeof variantIndex === 'number' ? variantIndex : 0
+    });
+    console.log('[Content Studio] AI video prompt (variant %d):\n', variantIndex, videoPrompt);
+
+    const cfg = videoConfig || {};
+    const buffer = await aiService.generateVideo(videoPrompt, {
+      duration: cfg.duration || 5,
+      aspect:   cfg.aspect   || '9:16'
+    });
+
+    if (!buffer) {
+      return res.status(500).json({ success: false, message: 'Video generation failed or timed out. Please try again.' });
+    }
+
+    const uploadDir = path.join(__dirname, '../../uploads/posts');
+    await fs.mkdir(uploadDir, { recursive: true });
+
+    const filename = `ai-video-${Date.now()}-${Math.floor(Math.random() * 1000)}.mp4`;
+    const fullPath = path.join(uploadDir, filename);
+    await fs.writeFile(fullPath, buffer);
+    const videoUrl = getPublicMediaUrl(fullPath, req);
+
+    await aiCreditService.deductCredits(organizationId, 1, {
+      operation: 'post_variants_video', userId: req.user._id,
+      topic: topic.substring(0, 100)
+    });
+    creditsDeducted = 1;
+
+    const updatedCredits = await aiCreditService.getUsage(organizationId);
+
+    res.status(200).json({
+      success: true, videoUrl,
+      credits: {
+        used: 1,
+        current: updatedCredits.current,
+        limit: updatedCredits.limit,
+        remaining: updatedCredits.remaining,
+        isUnlimited: updatedCredits.isUnlimited
+      }
+    });
+  } catch (error) {
+    console.error('Generate variant video error:', error);
+    if (creditsDeducted > 0 && organizationId) {
+      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, {
+        operation: 'post_variants_video', userId: req.user?._id, reason: error.message
+      });
+    }
+
+    // Sora job explicitly failed (content policy or flagged content)
+    const openaiMsg  = error?.response?.data?.error?.message || error?.openaiError || error?.message || '';
+    const isSafetyRejection =
+      (error?.response?.status === 400 || error?.soraFailed) &&
+      (openaiMsg.toLowerCase().includes('safety') ||
+       openaiMsg.toLowerCase().includes('rejected') ||
+       openaiMsg.toLowerCase().includes('content policy') ||
+       openaiMsg.toLowerCase().includes('content_policy') ||
+       openaiMsg.toLowerCase().includes('violates'));
+
+    if (isSafetyRejection) {
+      return res.status(422).json({
+        success: false,
+        code: 'CONTENT_POLICY',
+        message: 'Video could not be generated because the topic references restricted content. Try rephrasing your topic to be more generic.'
+      });
+    }
+
+    res.status(500).json({ success: false, message: error.message || 'Failed to generate video' });
+  }
+};
+
 /**
  * @desc    Publish post immediately
  * @route   POST /api/posts/publish
