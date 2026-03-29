@@ -493,31 +493,42 @@ CRITICAL RULES:
   }
 
   /**
-   * Generate a short video/reel using OpenAI Sora.
-   * The call is asynchronous on Sora's side — this method submits the job,
-   * polls for completion, downloads the MP4, and returns a Buffer.
+   * Generate a short video/reel using OpenAI Sora (v1/videos API).
+   * Submits the job, polls for completion, downloads via /content endpoint, returns a Buffer.
    *
-   * @param {string} prompt  - Cinematic direction prompt
+   * Correct endpoints (as of 2026):
+   *   Submit : POST  https://api.openai.com/v1/videos
+   *   Poll   : GET   https://api.openai.com/v1/videos/{id}
+   *   Download: GET  https://api.openai.com/v1/videos/{id}/content
+   *
+   * @param {string} prompt   - Cinematic direction prompt
    * @param {object} options
-   * @param {number} [options.duration=5]   - Clip length in seconds (5 | 10 | 15)
-   * @param {string} [options.aspect='9:16'] - '16:9' | '9:16' | '1:1'
+   * @param {number} [options.duration=4]    - Clip length in seconds; Sora accepts 4 | 8 | 12
+   * @param {string} [options.aspect='9:16'] - '16:9' | '9:16'
    * @returns {Promise<Buffer|null>}
    */
-  async generateVideo(prompt, { duration = 5, aspect = '9:16' } = {}) {
+  async generateVideo(prompt, { duration = 4, aspect = '9:16' } = {}) {
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
       logger.warn('[Video] OPENAI_API_KEY not set — video generation skipped.');
       return null;
     }
 
-    const model = process.env.OPENAI_VIDEO_MODEL || 'sora-1.0-turbo';
+    const model = process.env.OPENAI_VIDEO_MODEL || 'sora-2';
     const timeoutMs = Math.min(
       Math.max(parseInt(process.env.OPENAI_VIDEO_TIMEOUT_MS, 10) || 300000, 60000),
       600000
     );
 
-    // Map aspect ratio to Sora size strings
-    const sizeMap = { '16:9': '1280x720', '9:16': '720x1280', '1:1': '1080x1080' };
+    // Sora valid sizes: 720x1280 (9:16), 1280x720 (16:9), 1024x1792 (tall), 1792x1024 (wide)
+    const sizeMap = { '16:9': '1280x720', '9:16': '720x1280' };
     const size = sizeMap[aspect] || '720x1280';
+
+    // Sora valid seconds values are strings: "4" | "8" | "12"
+    const validSeconds = [4, 8, 12];
+    const nearest = validSeconds.reduce((prev, cur) =>
+      Math.abs(cur - duration) < Math.abs(prev - duration) ? cur : prev
+    );
+    const seconds = String(nearest);
 
     const videoPrompt = typeof prompt === 'string' && prompt.length > 0
       ? prompt.substring(0, 2000)
@@ -532,8 +543,8 @@ CRITICAL RULES:
     let jobId;
     try {
       const submitRes = await axios.post(
-        'https://api.openai.com/v1/video/generations',
-        { model, prompt: videoPrompt, size, n_seconds: duration, n: 1 },
+        'https://api.openai.com/v1/videos',
+        { model, prompt: videoPrompt, size, seconds },
         { headers, timeout: 30000 }
       );
       jobId = submitRes.data?.id;
@@ -541,18 +552,18 @@ CRITICAL RULES:
         logger.warn('[Video] Sora did not return a job id', { data: submitRes.data });
         return null;
       }
-      logger.info('[Video] Sora job submitted', { jobId, model, size, duration });
+      logger.info('[Video] Sora job submitted', { jobId, model, size, seconds });
     } catch (err) {
       logger.warn('[Video] Sora submit failed', {
         error: err.message,
         status: err.response?.status,
         openaiError: err.response?.data?.error?.message
       });
-      throw err; // re-throw so controller can detect content-policy rejections
+      throw err;
     }
 
     // ── Step 2: Poll for completion ──────────────────────────────────────────
-    const pollInterval = 5000; // 5 s
+    const pollInterval = 5000;
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
@@ -561,7 +572,7 @@ CRITICAL RULES:
       let statusRes;
       try {
         statusRes = await axios.get(
-          `https://api.openai.com/v1/video/generations/${jobId}`,
+          `https://api.openai.com/v1/videos/${jobId}`,
           { headers, timeout: 15000 }
         );
       } catch (pollErr) {
@@ -572,27 +583,21 @@ CRITICAL RULES:
       }
 
       const status = statusRes.data?.status;
-      logger.info('[Video] Sora job status', { jobId, status });
+      logger.info('[Video] Sora job status', { jobId, status, progress: statusRes.data?.progress });
 
-      if (status === 'completed' || status === 'succeeded') {
-        const videoUrl =
-          statusRes.data?.generations?.[0]?.url ||
-          statusRes.data?.data?.[0]?.url ||
-          statusRes.data?.result?.url;
-
-        if (!videoUrl) {
-          logger.warn('[Video] Sora completed but no video URL in response', { data: statusRes.data });
-          return null;
-        }
-
-        // ── Step 3: Download the MP4 ─────────────────────────────────────────
+      if (status === 'completed') {
+        // ── Step 3: Download via /content endpoint ────────────────────────────
         try {
-          const dlRes = await axios.get(videoUrl, {
-            responseType: 'arraybuffer',
-            timeout: 120000,
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity
-          });
+          const dlRes = await axios.get(
+            `https://api.openai.com/v1/videos/${jobId}/content`,
+            {
+              headers: { Authorization: `Bearer ${this.openaiApiKey}` },
+              responseType: 'arraybuffer',
+              timeout: 120000,
+              maxContentLength: Infinity,
+              maxBodyLength: Infinity
+            }
+          );
           return Buffer.from(dlRes.data);
         } catch (dlErr) {
           logger.warn('[Video] MP4 download failed', { jobId, error: dlErr.message });
@@ -600,17 +605,16 @@ CRITICAL RULES:
         }
       }
 
-      if (status === 'failed' || status === 'cancelled') {
-        const reason = statusRes.data?.error?.message || status;
+      if (status === 'failed') {
+        const reason = statusRes.data?.error?.message || 'Video generation failed';
         logger.warn('[Video] Sora job failed', { jobId, reason });
-        // Throw so controller content-policy detection fires on the right message
         const err = new Error(reason);
         err.soraFailed = true;
         err.soraStatus = status;
         throw err;
       }
 
-      // statuses 'pending' | 'processing' | 'queued' — keep polling
+      // statuses 'queued' | 'in_progress' — keep polling
     }
 
     logger.warn('[Video] Sora job timed out', { jobId, timeoutMs });

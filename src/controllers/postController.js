@@ -445,7 +445,7 @@ exports.generateVariantVideo = async (req, res) => {
 
     const cfg = videoConfig || {};
     const buffer = await aiService.generateVideo(videoPrompt, {
-      duration: cfg.duration || 5,
+      duration: cfg.duration || 4,
       aspect:   cfg.aspect   || '9:16'
     });
 
