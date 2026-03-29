@@ -162,6 +162,65 @@ exports.generatePostVariantsWithAI = async (req, res) => {
  * Build a richly structured, unique image prompt from user-selected style options.
  * Each variant index gets a different primary variation directive to enforce diversity.
  */
+/**
+ * Replaces known copyrighted / safety-triggering IP terms with safe generic alternatives
+ * so DALL-E doesn't reject the prompt for copyright or policy violations.
+ */
+const IP_REPLACEMENTS = [
+  // Anime / manga characters & franchises
+  [/(pokémon|pokemon)\s*characters?/gi,   'animated creatures'],
+  [/(pokémon|pokemon)/gi,                 'animated cartoon series'],
+  [/(pikachu|charmander|squirtle|bulbasaur|eevee|mewtwo)/gi, 'animated creature'],
+  [/(ash\s+ketchum|misty|brock|team\s+rocket)/gi, 'animated series protagonist'],
+  [/(goku|vegeta|piccolo|gohan|bulma)/gi, 'anime warrior hero'],
+  [/(naruto|sasuke|kakashi|sakura|itachi)/gi, 'anime ninja protagonist'],
+  [/(luffy|zoro|nami|sanji|usopp)/gi,    'anime adventure hero'],
+  [/(dragon\s*ball(\s*z|\s*super)?)/gi,  'classic anime series'],
+  [/(one\s*piece)/gi,                    'anime adventure series'],
+  [/(attack\s+on\s+titan|aot)/gi,        'anime action series'],
+  [/(fullmetal\s+alchemist)/gi,           'anime series'],
+  [/(sailor\s*moon)/gi,                  'magical anime series'],
+  [/(death\s+note)/gi,                   'anime thriller series'],
+  [/(evangelion|neon\s+genesis)/gi,      'mecha anime series'],
+  // Gaming characters
+  [/(mario|luigi|princess\s+peach|bowser|toad)/gi, 'video game character'],
+  [/(link|zelda|ganon(dorf)?)/gi,        'fantasy video game hero'],
+  [/(sonic\s+the\s+hedgehog|sonic)/gi,   'video game character'],
+  [/(master\s+chief|halo)/gi,            'sci-fi video game hero'],
+  [/(pac.?man)/gi,                       'arcade game character'],
+  // Comics / superheroes
+  [/(spider.?man|peter\s+parker)/gi,     'web-slinging superhero'],
+  [/(batman|bruce\s+wayne)/gi,           'dark knight superhero'],
+  [/(superman|clark\s+kent)/gi,          'caped superhero'],
+  [/(iron\s*man|tony\s+stark)/gi,        'armored superhero'],
+  [/(captain\s+america|steve\s+rogers)/gi, 'patriotic superhero'],
+  [/(thor|loki|avengers)/gi,             'superhero character'],
+  [/(wonder\s+woman)/gi,                 'warrior superhero'],
+  [/(black\s+panther)/gi,                'superhero character'],
+  // Movies & TV franchise characters
+  [/(darth\s+vader|luke\s+skywalker|yoda|obi.?wan|star\s+wars|jedi|sith|the\s+force)/gi, 'sci-fi space hero'],
+  [/(harry\s+potter|hermione|ron\s+weasley|dumbledore|voldemort|hogwarts)/gi, 'young wizard protagonist'],
+  [/(gandalf|frodo|bilbo|aragorn|sauron|lord\s+of\s+the\s+rings|hobbit)/gi, 'fantasy hero'],
+  [/(mickey\s+mouse|minnie\s+mouse|donald\s+duck|goofy)/gi, 'classic cartoon character'],
+  [/(simpsons?|homer|bart|marge|lisa)/gi, 'animated sitcom character'],
+  [/(shrek|fiona|donkey)/gi,             'animated movie character'],
+  // General safety — things that commonly trigger DALL-E
+  [/real\s+person|celebrity|influencer\s+named/gi, 'public figure'],
+];
+
+function sanitizeForImagePrompt(text) {
+  if (!text) return '';
+  let result = text
+    .replace(/[#@\n\r]/g, ' ')
+    .replace(/[^\x20-\x7E]/g, '')   // strip non-printable / emoji
+    .replace(/\s+/g, ' ')
+    .trim();
+  for (const [pattern, replacement] of IP_REPLACEMENTS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
 function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantIndex = 0 }) {
   const styleDescriptors = {
     'photorealistic': 'ultra-realistic photography, DSLR quality, sharp 8K detail, no CGI',
@@ -196,15 +255,19 @@ function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantInde
   const anglePart        = imageConfig.cameraAngle ? `${imageConfig.cameraAngle.toLowerCase()} camera angle` : '';
   const variationNote    = variationDirectives[variantIndex % variationDirectives.length];
 
-  // Derive subject from topic + hint from post content (first sentence only)
-  const contentHint = variantContent
-    ? variantContent.replace(/[#@\n]/g, ' ').trim().split('.')[0].substring(0, 150)
+  // Sanitize topic — strip IP/copyright terms so DALL-E safety system doesn't reject
+  const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 120);
+
+  // Derive a short thematic hint from the post content (first sentence, sanitized, ≤80 chars)
+  const rawHint = variantContent
+    ? variantContent.split(/[.\n!?]/)[0].trim()
     : '';
+  const contentHint = sanitizeForImagePrompt(rawHint).substring(0, 80);
 
   const promptParts = [
     styleDesc,
-    `Subject: ${topic.trim()}`,
-    contentHint ? `Context: ${contentHint}` : '',
+    `Subject: ${safeTopic}`,
+    contentHint ? `Theme: ${contentHint}` : '',
     moodPart,
     lightingPart,
     compositionPart,
