@@ -110,7 +110,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
   let creditsDeducted = 0;
   let organizationId;
   try {
-    const { topic, platforms, count, audience, intent, includeTrend, postType } = req.body;
+    const { topic, platforms, count, audience, intent, mood, includeTrend, postType } = req.body;
     organizationId = req.user.organization?._id || req.user.organization;
 
     if (!topic || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
@@ -129,7 +129,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
 
     const result = await aiService.generatePostVariants(topic, platforms, {
       count: variantCount, organizationId, postType: postType || 'post',
-      audience: audience || '', intent: intent || '', includeTrend: !!includeTrend
+      audience: audience || '', intent: intent || '', mood: mood || '', includeTrend: !!includeTrend
     });
 
     await aiCreditService.deductCredits(organizationId, variantCount, {
@@ -222,7 +222,7 @@ function sanitizeForImagePrompt(text) {
   return result;
 }
 
-function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantIndex = 0 }) {
+function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantIndex = 0, contentType = '' }) {
   const styleDescriptors = {
     'photorealistic': 'ultra-realistic photography, DSLR quality, sharp 8K detail, no CGI',
     'cinematic':      'cinematic film still, anamorphic lens flare, movie-grade color grading, widescreen',
@@ -275,7 +275,9 @@ function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantInde
     palettePart,
     anglePart,
     variationNote,
-    'No text overlays, no watermarks, no logos, no words.',
+    contentType === 'image-layover'
+      ? `Include the headline text "${safeTopic.split(' ').slice(0, 8).join(' ')}" as a bold, stylish graphic overlay in the scene, modern typography, high contrast — text rendered in the image itself.`
+      : 'No text overlays, no watermarks, no logos, no words.',
     'Ultra high quality, suitable for professional social media post.',
     `seed:${Date.now() % 100000 + variantIndex * 13337}`  // soft uniqueness token
   ].filter(Boolean);
@@ -287,8 +289,9 @@ exports.generateVariantImage = async (req, res) => {
   let creditsDeducted = 0;
   let organizationId;
   try {
-    const { topic, variantContent, imageConfig, variantIndex } = req.body;
+    const { topic, variantContent, imageConfig, variantIndex, contentType, logoOverlay, logoPosition, logoUrl } = req.body;
     organizationId = req.user.organization?._id || req.user.organization;
+    const userId = req.user._id;
 
     if (!topic) {
       return res.status(400).json({ success: false, message: 'topic is required' });
@@ -306,7 +309,8 @@ exports.generateVariantImage = async (req, res) => {
       topic,
       variantContent,
       imageConfig: imageConfig || {},
-      variantIndex: typeof variantIndex === 'number' ? variantIndex : 0
+      variantIndex: typeof variantIndex === 'number' ? variantIndex : 0,
+      contentType: contentType || ''
     });
     console.log('[Content Studio] AI image prompt (variant %d):\n', variantIndex, imagePrompt);
 
@@ -318,10 +322,87 @@ exports.generateVariantImage = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Image generation failed. Please try again.' });
     }
 
+    // ── Optional: logo compositing via sharp ─────────────────────────────────
+    let finalBuffer = buffer;
+    if (logoOverlay && logoUrl && logoPosition) {
+      try {
+        const sharp = require('sharp');
+        const https = require('https');
+        const http = require('http');
+
+        // Fetch logo buffer from URL
+        const fetchBuffer = (url) => new Promise((resolve, reject) => {
+          const mod = url.startsWith('https') ? https : http;
+          mod.get(url, (resp) => {
+            const chunks = [];
+            resp.on('data', (c) => chunks.push(c));
+            resp.on('end', () => resolve(Buffer.concat(chunks)));
+            resp.on('error', reject);
+          }).on('error', reject);
+        });
+
+        const logoBuffer = await fetchBuffer(logoUrl);
+        const baseImage = sharp(buffer);
+        const meta = await baseImage.metadata();
+        const logoSize = Math.round(Math.min(meta.width, meta.height) * 0.18);
+        const margin  = Math.round(logoSize * 0.3);
+
+        const resizedLogo = await sharp(logoBuffer)
+          .resize(logoSize, logoSize, { fit: 'inside', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+          .png()
+          .toBuffer();
+
+        const logoMeta = await sharp(resizedLogo).metadata();
+        const lw = logoMeta.width;
+        const lh = logoMeta.height;
+
+        const posMap = {
+          'top-left':      { top: margin,                             left: margin },
+          'top-center':    { top: margin,                             left: Math.round((meta.width - lw) / 2) },
+          'top-right':     { top: margin,                             left: meta.width - lw - margin },
+          'bottom-left':   { top: meta.height - lh - margin,         left: margin },
+          'bottom-center': { top: meta.height - lh - margin,         left: Math.round((meta.width - lw) / 2) },
+          'bottom-right':  { top: meta.height - lh - margin,         left: meta.width - lw - margin },
+        };
+        const gravity = posMap[logoPosition] || posMap['bottom-right'];
+
+        finalBuffer = await baseImage
+          .composite([{ input: resizedLogo, ...gravity }])
+          .png()
+          .toBuffer();
+        console.log(`[Content Studio] Logo composited at ${logoPosition}`);
+      } catch (logoErr) {
+        console.warn('[Content Studio] Logo compositing failed, using original image:', logoErr.message);
+        finalBuffer = buffer;
+      }
+    }
+
     const filename = `ai-${Date.now()}-${Math.floor(Math.random() * 1000)}.png`;
     const fullPath = path.join(uploadDir, filename);
-    await fs.writeFile(fullPath, buffer);
+    await fs.writeFile(fullPath, finalBuffer);
     const imageUrl = getPublicMediaUrl(fullPath, req);
+
+    // ── Auto-save to Media Library ────────────────────────────────────────────
+    let savedToLibrary = false;
+    try {
+      const stat = await fs.stat(fullPath);
+      await Media.create({
+        filename,
+        originalName: filename,
+        filePath: fullPath,
+        publicUrl: imageUrl,
+        mimeType: 'image/png',
+        mediaType: 'image',
+        size: stat.size,
+        user: userId,
+        organization: organizationId,
+        tags: ['ai-generated', 'content-studio'],
+        description: `AI generated for: ${topic.substring(0, 80)}`
+      });
+      savedToLibrary = true;
+    } catch (mediaErr) {
+      console.warn('[Content Studio] Failed to save image to media library:', mediaErr.message);
+    }
 
     await aiCreditService.deductCredits(organizationId, 1, {
       operation: 'post_variants_image', userId: req.user._id,
@@ -332,7 +413,7 @@ exports.generateVariantImage = async (req, res) => {
     const updatedCredits = await aiCreditService.getUsage(organizationId);
 
     res.status(200).json({
-      success: true, imageUrl,
+      success: true, imageUrl, savedToLibrary,
       credits: { used: 1, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
     });
   } catch (error) {
@@ -349,7 +430,9 @@ exports.generateVariantImage = async (req, res) => {
        openaiMsg.toLowerCase().includes('rejected') ||
        openaiMsg.toLowerCase().includes('content policy') ||
        openaiMsg.toLowerCase().includes('content_policy') ||
-       openaiMsg.toLowerCase().includes('violates'));
+       openaiMsg.toLowerCase().includes('violates') ||
+       openaiMsg.toLowerCase().includes('blocked') ||
+       openaiMsg.toLowerCase().includes('moderation'));
 
     if (isSafetyRejection) {
       return res.status(422).json({
@@ -495,7 +578,9 @@ exports.generateVariantVideo = async (req, res) => {
            openaiMsg.toLowerCase().includes('rejected') ||
            openaiMsg.toLowerCase().includes('content policy') ||
            openaiMsg.toLowerCase().includes('content_policy') ||
-           openaiMsg.toLowerCase().includes('violates'));
+           openaiMsg.toLowerCase().includes('violates') ||
+           openaiMsg.toLowerCase().includes('blocked') ||
+           openaiMsg.toLowerCase().includes('moderation'));
 
         await VideoJob.findOneAndUpdate({ jobId }, {
           status: 'failed',
@@ -531,6 +616,79 @@ exports.getVideoJobStatus = async (req, res) => {
   } catch (err) {
     console.error('Video job status error:', err);
     res.status(500).json({ success: false, message: 'Failed to fetch job status' });
+  }
+};
+
+/**
+ * @desc    Save an AI-generated variant as a draft
+ * @route   POST /api/posts/save-draft
+ * @access  Private
+ */
+exports.saveDraft = async (req, res) => {
+  try {
+    const {
+      platform, content, postType, mediaUrl, generatedBy,
+      topic, audience, intent, mood, contentType, postFormat,
+      visualStyle, logoOverlay, logoPosition
+    } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const userId = req.user._id;
+
+    if (!platform || !content) {
+      return res.status(400).json({ success: false, message: 'platform and content are required' });
+    }
+
+    const connection = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: platform.toLowerCase(),
+      isActive: true
+    });
+
+    if (!connection) {
+      return res.status(404).json({ success: false, message: `No active ${platform} connection found. Connect the platform in Settings.` });
+    }
+
+    const draftData = {
+      organization: organizationId,
+      user: userId,
+      platform: platform.toLowerCase(),
+      platformConnection: connection._id,
+      content: content.trim(),
+      postType: postType || 'post',
+      status: 'draft',
+      generatedBy: generatedBy || 'ai',
+      metadata: {
+        topic: topic || '',
+        audience: audience || '',
+        intent: intent || '',
+        mood: mood || '',
+        contentType: contentType || 'text',
+        postFormat: postFormat || 'post',
+        visualStyle: visualStyle || '',
+        logoOverlay: logoOverlay || false,
+        logoPosition: logoPosition || 'bottom-right'
+      }
+    };
+
+    if (mediaUrl) {
+      const filename = typeof mediaUrl === 'string' ? mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim() : null;
+      if (filename) {
+        const uploadDir = path.join(__dirname, '../../uploads/posts');
+        const fullPath = path.join(uploadDir, filename);
+        draftData.mediaStoragePath = fullPath;
+        draftData.mediaType = filename.endsWith('.mp4') ? 'video' : 'image';
+      } else {
+        draftData.mediaUrl = mediaUrl;
+      }
+    }
+
+    const draft = await ScheduledPost.create(draftData);
+    console.log(`[Content Studio] Draft saved: ${draft._id} for org ${organizationId}`);
+
+    res.status(201).json({ success: true, draft });
+  } catch (err) {
+    console.error('Save draft error:', err);
+    res.status(500).json({ success: false, message: err.message || 'Failed to save draft' });
   }
 };
 
@@ -577,7 +735,26 @@ exports.publishPost = async (req, res) => {
             message: 'No Facebook page connection found. Please connect a Facebook page from Settings.' 
           });
         }
+        if (platform.toLowerCase() === 'youtube') {
+          return res.status(404).json({
+            success: false,
+            code: 'PLATFORM_NOT_CONNECTED',
+            message: 'YouTube is not connected. Go to Settings → Social Accounts and connect your YouTube channel before posting videos.',
+            platform: 'youtube'
+          });
+        }
         return res.status(404).json({ message: `No active ${platform} connection found` });
+      }
+
+      // YouTube publishing guard — not yet implemented, guide user to download
+      if (platform.toLowerCase() === 'youtube') {
+        return res.status(501).json({
+          success: false,
+          code: 'PLATFORM_NOT_IMPLEMENTED',
+          message: 'Direct YouTube publishing is coming soon. For now, download your video and upload it via YouTube Studio.',
+          platform: 'youtube',
+          downloadUrl: req.body.mediaUrl || null
+        });
       }
 
       // Prepare post data
@@ -768,8 +945,11 @@ exports.publishPost = async (req, res) => {
           case 'linkedin':
             result = await publishToLinkedIn(connection, post);
             break;
+          case 'youtube':
+            // Guarded above — should not reach here
+            throw new Error('YouTube publishing is not yet implemented. Please upload via YouTube Studio.');
           default:
-            throw new Error(`Publishing to ${platform} not yet implemented`);
+            throw new Error(`Publishing to ${platform} is not yet supported`);
         }
 
         // Update post with result
@@ -1341,6 +1521,220 @@ exports.deleteScheduledPost = async (req, res) => {
   } catch (error) {
     console.error('Delete scheduled post error:', error);
     res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * @desc    Get all draft posts for the organisation
+ * @route   GET /api/posts/drafts
+ * @access  Private
+ */
+exports.getDraftPosts = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    const posts = await ScheduledPost.find({
+      organization: organizationId,
+      status: 'draft'
+    })
+      .sort({ createdAt: -1 })
+      .populate('platformConnection', 'platform platformPageId platformUsername')
+      .lean();
+
+    res.status(200).json({ success: true, data: posts, count: posts.length });
+  } catch (error) {
+    console.error('Get draft posts error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * @desc    Update draft content / fields
+ * @route   PATCH /api/posts/drafts/:id
+ * @access  Private
+ */
+exports.updateDraft = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const { id } = req.params;
+    const { content } = req.body;
+
+    const draft = await ScheduledPost.findOne({
+      _id: id,
+      organization: organizationId,
+      status: 'draft'
+    });
+
+    if (!draft) {
+      return res.status(404).json({ success: false, message: 'Draft not found' });
+    }
+
+    if (content !== undefined) draft.content = content.trim();
+    await draft.save();
+
+    res.status(200).json({ success: true, data: draft });
+  } catch (error) {
+    console.error('Update draft error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * @desc    Schedule a draft (move to scheduled status)
+ * @route   PATCH /api/posts/drafts/:id/schedule
+ * @access  Private
+ */
+exports.scheduleDraft = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const { id } = req.params;
+    const { scheduledFor } = req.body;
+
+    if (!scheduledFor) {
+      return res.status(400).json({ success: false, message: 'scheduledFor is required' });
+    }
+
+    const draft = await ScheduledPost.findOne({
+      _id: id,
+      organization: organizationId,
+      status: 'draft'
+    });
+
+    if (!draft) {
+      return res.status(404).json({ success: false, message: 'Draft not found' });
+    }
+
+    draft.status = 'scheduled';
+    draft.scheduledFor = new Date(scheduledFor);
+    await draft.save();
+
+    res.status(200).json({ success: true, data: draft });
+  } catch (error) {
+    console.error('Schedule draft error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * @desc    Delete a draft post
+ * @route   DELETE /api/posts/drafts/:id
+ * @access  Private
+ */
+exports.deleteDraft = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const draft = await ScheduledPost.findOne({
+      _id: req.params.id,
+      organization: organizationId,
+      status: 'draft'
+    });
+
+    if (!draft) {
+      return res.status(404).json({ success: false, message: 'Draft not found' });
+    }
+
+    // Clean up local media files
+    if (draft.mediaStoragePath) {
+      try { await fs.unlink(draft.mediaStoragePath); } catch (_) {}
+    }
+    if (draft.mediaStoragePaths?.length) {
+      for (const p of draft.mediaStoragePaths) {
+        try { await fs.unlink(p); } catch (_) {}
+      }
+    }
+
+    await ScheduledPost.findByIdAndDelete(draft._id);
+    res.status(200).json({ success: true, message: 'Draft deleted' });
+  } catch (error) {
+    console.error('Delete draft error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * @desc    Publish a draft immediately to the connected platform
+ * @route   POST /api/posts/drafts/:id/publish
+ * @access  Private
+ */
+exports.publishDraft = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    const draft = await ScheduledPost.findOne({
+      _id: req.params.id,
+      organization: organizationId,
+      status: 'draft'
+    }).populate('platformConnection');
+
+    if (!draft) {
+      return res.status(404).json({ success: false, message: 'Draft not found' });
+    }
+
+    const connection = draft.platformConnection;
+    if (!connection) {
+      return res.status(400).json({ success: false, message: 'Platform connection not found on this draft.' });
+    }
+
+    const platform = draft.platform.toLowerCase();
+
+    if (platform === 'youtube') {
+      return res.status(501).json({
+        success: false,
+        code: 'PLATFORM_NOT_IMPLEMENTED',
+        message: 'Direct YouTube publishing is coming soon. For now, download your video and upload it via YouTube Studio.',
+        platform: 'youtube'
+      });
+    }
+
+    // Transition to publishing state
+    draft.status = 'publishing';
+    await draft.save();
+
+    let result;
+    try {
+      switch (platform) {
+        case 'instagram':
+          result = await publishToInstagram(connection, draft, req);
+          break;
+        case 'facebook':
+          result = await publishToFacebook(connection, draft, req);
+          break;
+        case 'linkedin':
+          result = await publishToLinkedIn(connection, draft);
+          break;
+        default:
+          throw new Error(`Publishing to ${platform} is not yet supported`);
+      }
+
+      draft.status = 'published';
+      draft.publishedAt = new Date();
+      draft.platformPostId = result.postId;
+      draft.platformPostUrl = result.postUrl;
+      await draft.save();
+
+      res.status(200).json({
+        success: true,
+        message: 'Draft published successfully',
+        data: draft,
+        platformPostUrl: result.postUrl
+      });
+    } catch (publishError) {
+      console.error('Publish draft platform error:', publishError);
+      draft.status = 'failed';
+      draft.error = publishError.message;
+      await draft.save();
+
+      const errorResponse = {
+        success: false,
+        message: 'Failed to publish draft',
+        error: publishError.message
+      };
+      if (publishError.platformError) errorResponse.platformError = publishError.platformError;
+      res.status(500).json(errorResponse);
+    }
+  } catch (error) {
+    console.error('Publish draft error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
