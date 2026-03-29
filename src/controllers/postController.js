@@ -339,6 +339,25 @@ exports.generateVariantImage = async (req, res) => {
     if (creditsDeducted > 0 && organizationId) {
       await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_variants_image', userId: req.user?._id, reason: error.message });
     }
+
+    // Detect OpenAI safety / content-policy rejection (HTTP 400 with safety message)
+    const openaiMsg = error?.response?.data?.error?.message || error?.openaiError || '';
+    const isSafetyRejection =
+      error?.response?.status === 400 &&
+      (openaiMsg.toLowerCase().includes('safety') ||
+       openaiMsg.toLowerCase().includes('rejected') ||
+       openaiMsg.toLowerCase().includes('content policy') ||
+       openaiMsg.toLowerCase().includes('content_policy') ||
+       openaiMsg.toLowerCase().includes('violates'));
+
+    if (isSafetyRejection) {
+      return res.status(422).json({
+        success: false,
+        code: 'CONTENT_POLICY',
+        message: 'Image could not be generated because the topic or content references copyrighted characters, brands, or restricted subjects. Try rephrasing your topic to be more generic (e.g. "nostalgic cartoon memories" instead of specific character names).'
+      });
+    }
+
     res.status(500).json({ success: false, message: error.message || 'Failed to generate image' });
   }
 };
