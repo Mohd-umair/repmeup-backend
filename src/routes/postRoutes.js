@@ -149,9 +149,14 @@ router.post('/generate-variants', protect, postController.generatePostVariantsWi
 router.post('/generate-variant-image', protect, postController.generateVariantImage);
 
 // @route   POST /api/posts/generate-variant-video
-// @desc    Generate one AI video/reel for a single variant using OpenAI Sora
+// @desc    Submit an AI video generation job (returns jobId immediately)
 // @access  Private
 router.post('/generate-variant-video', protect, postController.generateVariantVideo);
+
+// @route   GET /api/posts/video-job/:jobId
+// @desc    Poll the status of a video generation job
+// @access  Private
+router.get('/video-job/:jobId', protect, postController.getVideoJobStatus);
 
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately

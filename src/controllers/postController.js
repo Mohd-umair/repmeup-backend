@@ -1,6 +1,7 @@
 const ScheduledPost = require('../models/ScheduledPost');
 const PlatformConnection = require('../models/PlatformConnection');
 const Media = require('../models/Media');
+const VideoJob = require('../models/VideoJob');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
@@ -412,21 +413,22 @@ function buildVideoPrompt({ topic, variantContent, videoConfig = {}, variantInde
 }
 
 /**
- * @desc    Generate one AI video/reel for a single variant (called per-variant by frontend)
+ * @desc    Submit an AI video generation job (returns jobId immediately — non-blocking).
+ *          Avoids nginx proxy-timeout issues by not holding the HTTP connection open.
  * @route   POST /api/posts/generate-variant-video
  * @access  Private
  */
 exports.generateVariantVideo = async (req, res) => {
-  let creditsDeducted = 0;
-  let organizationId;
   try {
     const { topic, variantContent, videoConfig, variantIndex } = req.body;
-    organizationId = req.user.organization?._id || req.user.organization;
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const userId = req.user._id;
 
     if (!topic) {
       return res.status(400).json({ success: false, message: 'topic is required' });
     }
 
+    // Credit gate — fail fast before we even start
     const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
     if (!creditCheck.allowed) {
       return res.status(403).json({
@@ -435,77 +437,100 @@ exports.generateVariantVideo = async (req, res) => {
       });
     }
 
-    const videoPrompt = buildVideoPrompt({
-      topic,
-      variantContent,
-      videoConfig: videoConfig || {},
-      variantIndex: typeof variantIndex === 'number' ? variantIndex : 0
-    });
-    console.log('[Content Studio] AI video prompt (variant %d):\n', variantIndex, videoPrompt);
+    const jobId = `vjob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await VideoJob.create({ jobId, status: 'pending', organizationId });
 
-    const cfg = videoConfig || {};
-    const buffer = await aiService.generateVideo(videoPrompt, {
-      duration: cfg.duration || 4,
-      aspect:   cfg.aspect   || '9:16'
-    });
+    // ── Respond immediately so the browser connection is released ────────────
+    res.status(202).json({ success: true, jobId });
 
-    if (!buffer) {
-      return res.status(500).json({ success: false, message: 'Video generation failed or timed out. Please try again.' });
-    }
+    // ── Background generation (no await — runs after response is sent) ───────
+    ;(async () => {
+      try {
+        const videoPrompt = buildVideoPrompt({
+          topic,
+          variantContent,
+          videoConfig: videoConfig || {},
+          variantIndex: typeof variantIndex === 'number' ? variantIndex : 0
+        });
+        console.log('[Content Studio] AI video prompt (variant %d):\n', variantIndex, videoPrompt);
 
-    const uploadDir = path.join(__dirname, '../../uploads/posts');
-    await fs.mkdir(uploadDir, { recursive: true });
+        const cfg = videoConfig || {};
+        const buffer = await aiService.generateVideo(videoPrompt, {
+          duration: cfg.duration || 4,
+          aspect:   cfg.aspect   || '9:16'
+        });
 
-    const filename = `ai-video-${Date.now()}-${Math.floor(Math.random() * 1000)}.mp4`;
-    const fullPath = path.join(uploadDir, filename);
-    await fs.writeFile(fullPath, buffer);
-    const videoUrl = getPublicMediaUrl(fullPath, req);
+        if (!buffer) {
+          await VideoJob.findOneAndUpdate({ jobId }, {
+            status: 'failed',
+            error: { code: 'VIDEO_FAILED', message: 'Video generation returned no data. Please try again.' }
+          });
+          return;
+        }
 
-    await aiCreditService.deductCredits(organizationId, 1, {
-      operation: 'post_variants_video', userId: req.user._id,
-      topic: topic.substring(0, 100)
-    });
-    creditsDeducted = 1;
+        const uploadDir = path.join(__dirname, '../../uploads/posts');
+        await fs.mkdir(uploadDir, { recursive: true });
+        const filename = `ai-video-${Date.now()}-${Math.floor(Math.random() * 1000)}.mp4`;
+        const fullPath = path.join(uploadDir, filename);
+        await fs.writeFile(fullPath, buffer);
 
-    const updatedCredits = await aiCreditService.getUsage(organizationId);
+        // Build URL without req (req is already gone after response was sent)
+        const baseUrl = (process.env.BASE_URL || process.env.API_URL || 'https://repmeup.in').replace(/\/api\/?$/, '');
+        const videoUrl = `${baseUrl}/api/posts/media/${filename}`;
 
-    res.status(200).json({
-      success: true, videoUrl,
-      credits: {
-        used: 1,
-        current: updatedCredits.current,
-        limit: updatedCredits.limit,
-        remaining: updatedCredits.remaining,
-        isUnlimited: updatedCredits.isUnlimited
+        await VideoJob.findOneAndUpdate({ jobId }, { status: 'completed', videoUrl });
+
+        await aiCreditService.deductCredits(organizationId, 1, {
+          operation: 'post_variants_video', userId, topic: topic.substring(0, 100)
+        });
+
+        console.log('[Video] Job completed:', jobId, videoUrl);
+      } catch (err) {
+        console.error('[Video] Background generation error:', err.message);
+
+        const openaiMsg = err?.response?.data?.error?.message || err?.openaiError || err?.message || '';
+        const isSafety =
+          (err?.response?.status === 400 || err?.soraFailed) &&
+          (openaiMsg.toLowerCase().includes('safety') ||
+           openaiMsg.toLowerCase().includes('rejected') ||
+           openaiMsg.toLowerCase().includes('content policy') ||
+           openaiMsg.toLowerCase().includes('content_policy') ||
+           openaiMsg.toLowerCase().includes('violates'));
+
+        await VideoJob.findOneAndUpdate({ jobId }, {
+          status: 'failed',
+          error: isSafety
+            ? { code: 'CONTENT_POLICY', message: 'Video blocked due to content policy. Try rephrasing your topic.' }
+            : { code: 'VIDEO_FAILED', message: err.message || 'Video generation failed.' }
+        });
       }
-    });
+    })();
+
   } catch (error) {
-    console.error('Generate variant video error:', error);
-    if (creditsDeducted > 0 && organizationId) {
-      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, {
-        operation: 'post_variants_video', userId: req.user?._id, reason: error.message
-      });
+    console.error('Generate variant video submit error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to start video generation' });
+  }
+};
+
+/**
+ * @desc    Poll the status of a video generation job
+ * @route   GET /api/posts/video-job/:jobId
+ * @access  Private
+ */
+exports.getVideoJobStatus = async (req, res) => {
+  try {
+    const job = await VideoJob.findOne({ jobId: req.params.jobId })
+      .select('jobId status videoUrl error')
+      .lean();
+
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Job not found or expired' });
     }
 
-    // Sora job explicitly failed (content policy or flagged content)
-    const openaiMsg  = error?.response?.data?.error?.message || error?.openaiError || error?.message || '';
-    const isSafetyRejection =
-      (error?.response?.status === 400 || error?.soraFailed) &&
-      (openaiMsg.toLowerCase().includes('safety') ||
-       openaiMsg.toLowerCase().includes('rejected') ||
-       openaiMsg.toLowerCase().includes('content policy') ||
-       openaiMsg.toLowerCase().includes('content_policy') ||
-       openaiMsg.toLowerCase().includes('violates'));
-
-    if (isSafetyRejection) {
-      return res.status(422).json({
-        success: false,
-        code: 'CONTENT_POLICY',
-        message: 'Video could not be generated because the topic references restricted content. Try rephrasing your topic to be more generic.'
-      });
-    }
-
-    res.status(500).json({ success: false, message: error.message || 'Failed to generate video' });
+    res.json({ success: true, status: job.status, videoUrl: job.videoUrl || null, error: job.error || null });
+  } catch (err) {
+    console.error('Video job status error:', err);
+    res.status(500).json({ success: false, message: 'Failed to fetch job status' });
   }
 };
 
