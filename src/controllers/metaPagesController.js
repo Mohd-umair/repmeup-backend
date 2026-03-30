@@ -229,7 +229,22 @@ exports.connectSelectedPages = async (req, res, next) => {
         continue;
       }
 
-      // Check if page is already connected
+      // Check cross-org conflict first (page already in another workspace)
+      const fbCrossOrg = await PlatformConnection.findCrossOrgConflict(
+        'facebook', pageId, organizationId
+      );
+      if (fbCrossOrg) {
+        results.failed.push({
+          pageId,
+          pageName: pageData.name,
+          reason: 'This Facebook page is already connected to another workspace.',
+          code: 'CROSS_ORG_CONFLICT',
+          platform: 'facebook'
+        });
+        continue;
+      }
+
+      // Check if page is already connected to this org
       const existingFacebookConnection = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'facebook',
@@ -287,7 +302,22 @@ exports.connectSelectedPages = async (req, res, next) => {
       // Connect Instagram if requested and available
       if (includeInstagram && pageData.instagram_business_account) {
         const instagramId = pageData.instagram_business_account.id;
-        
+
+        // Check cross-org conflict for Instagram
+        const igCrossOrg = await PlatformConnection.findCrossOrgConflict(
+          'instagram', instagramId, organizationId
+        );
+        if (igCrossOrg) {
+          results.failed.push({
+            pageId: instagramId,
+            pageName: pageData.instagram_business_account.username,
+            reason: 'This Instagram account is already connected to another workspace.',
+            code: 'CROSS_ORG_CONFLICT',
+            platform: 'instagram'
+          });
+          continue;
+        }
+
         const existingInstagramConnection = await PlatformConnection.findOne({
           organization: organizationId,
           platform: 'instagram',

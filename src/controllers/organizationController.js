@@ -2,22 +2,29 @@ const Organization = require('../models/Organization');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
+const storageService = require('../services/storageService');
 
 // ─── Multer setup for logo uploads ────────────────────────────────────────────
-const logoStorage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    const dir = path.join(__dirname, '../../uploads/logos');
-    try { await fs.mkdir(dir, { recursive: true }); } catch (_) {}
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase() || '.png';
-    cb(null, `logo-${req.params.id}-${Date.now()}${ext}`);
+// Use memory storage when S3 is configured to avoid disk dependency
+function buildLogoStorage() {
+  if (storageService.isS3Configured()) {
+    return multer.memoryStorage();
   }
-});
+  return multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(__dirname, '../../uploads/logos');
+      require('fs').mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase() || '.png';
+      cb(null, `logo-${req.params.id}-${Date.now()}${ext}`);
+    }
+  });
+}
 
 const logoUpload = multer({
-  storage: logoStorage,
+  storage: buildLogoStorage(),
   limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
   fileFilter: (req, file, cb) => {
     const ok = /jpeg|jpg|png|gif|svg\+xml|webp/.test(file.mimetype);
@@ -232,14 +239,37 @@ exports.uploadLogo = (req, res, next) => {
         return res.status(403).json({ success: false, error: 'Access denied' });
       }
 
-      // Delete old logo file if it was a local upload
-      if (organization.logo && organization.logo.startsWith('/uploads/logos/')) {
-        const oldPath = path.join(__dirname, '../..', organization.logo);
-        try { await fs.unlink(oldPath); } catch (_) {}
+      if (organization.logo) {
+        if (/^https?:\/\//i.test(organization.logo)) {
+          await storageService.deleteObjectFromPublicUrl(organization.logo);
+        } else if (
+          organization.logo.startsWith('/uploads/logos/') ||
+          organization.logo.startsWith('/organizations/logos/')
+        ) {
+          const rel = organization.logo.replace(/^\//, '');
+          const oldPath = path.join(__dirname, '../..', rel);
+          try {
+            await fs.unlink(oldPath);
+          } catch (_) {}
+        }
       }
 
-      // Build public URL — served from /uploads/logos/<filename>
-      const logoUrl = `/uploads/logos/${req.file.filename}`;
+      let logoUrl;
+      if (storageService.isS3Configured()) {
+        // memory storage → req.file.buffer; disk storage → read from path
+        const buf = req.file.buffer
+          ? req.file.buffer
+          : await fs.readFile(req.file.path).finally(() => {
+              fs.unlink(req.file.path).catch(() => {});
+            });
+        const ext = path.extname(req.file.originalname).toLowerCase() || '.png';
+        const filename = `logo-${req.params.id}-${Date.now()}${ext}`;
+        const key = storageService.buildLogoKey(req.params.id, filename);
+        const { publicUrl } = await storageService.uploadBuffer(key, buf, req.file.mimetype);
+        logoUrl = publicUrl;
+      } else {
+        logoUrl = `/uploads/logos/${req.file.filename}`;
+      }
       organization.logo = logoUrl;
       await organization.save();
 
@@ -270,9 +300,19 @@ exports.deleteLogo = async (req, res, next) => {
       return res.status(403).json({ success: false, error: 'Access denied' });
     }
 
-    if (organization.logo && organization.logo.startsWith('/uploads/logos/')) {
-      const oldPath = path.join(__dirname, '../..', organization.logo);
-      try { await fs.unlink(oldPath); } catch (_) {}
+    if (organization.logo) {
+      if (/^https?:\/\//i.test(organization.logo)) {
+        await storageService.deleteObjectFromPublicUrl(organization.logo);
+      } else if (
+        organization.logo.startsWith('/uploads/logos/') ||
+        organization.logo.startsWith('/organizations/logos/')
+      ) {
+        const rel = organization.logo.replace(/^\//, '');
+        const oldPath = path.join(__dirname, '../..', rel);
+        try {
+          await fs.unlink(oldPath);
+        } catch (_) {}
+      }
     }
 
     organization.logo = undefined;

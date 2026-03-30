@@ -4,6 +4,7 @@ const { protect } = require('../middlewares/auth');
 const postController = require('../controllers/postController');
 const path = require('path');
 const fs = require('fs');
+const Media = require('../models/Media');
 
 /**
  * Post Routes
@@ -59,22 +60,28 @@ router.get('/test-media-url', async (req, res) => {
 });
 
 // @route   GET /api/posts/media/:filename
-// @desc    Serve uploaded media files (public for Instagram API)
+// @desc    Serve uploaded media files (public for Instagram API); S3-backed library items redirect
 // @access  Public (needed for Instagram to access the media)
-router.get('/media/:filename', (req, res) => {
+router.get('/media/:filename', async (req, res) => {
   try {
-    const filename = req.params.filename;
+    const filename = path.basename(req.params.filename || '');
+    if (!filename || filename === '.' || filename === '..') {
+      return res.status(400).json({ message: 'Invalid filename' });
+    }
     const filePath = path.join(__dirname, '../../uploads/posts', filename);
-    
+
     console.log(`📁 [Media] Serving file: ${filename}`);
     console.log(`📍 [Media] File path: ${filePath}`);
     console.log(`📋 [Media] Request headers:`, {
       'user-agent': req.get('user-agent'),
       'range': req.get('range')
     });
-    
-    // Check if file exists first
+
     if (!fs.existsSync(filePath)) {
+      const doc = await Media.findOne({ filename }).select('publicUrl').lean();
+      if (doc?.publicUrl && /^https?:\/\//i.test(String(doc.publicUrl))) {
+        return res.redirect(302, doc.publicUrl);
+      }
       console.error(`❌ [Media] File not found: ${filename}`);
       return res.status(404).json({ message: 'Media file not found' });
     }

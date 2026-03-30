@@ -2,6 +2,7 @@ const ScheduledPost = require('../models/ScheduledPost');
 const PlatformConnection = require('../models/PlatformConnection');
 const Media = require('../models/Media');
 const VideoJob = require('../models/VideoJob');
+const storageService = require('../services/storageService');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
@@ -12,7 +13,43 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 const crypto = require('crypto');
+const axios = require('axios');
 const { validateMedia, getRequirementsText } = require('../config/platformMediaRequirements');
+
+/** Image bytes for Facebook/LinkedIn when media is a public URL (S3/CDN) or local path */
+async function readImageBufferForPublish(mediaRef) {
+  if (!mediaRef) throw new Error('Missing media');
+  if (/^https?:\/\//i.test(String(mediaRef))) {
+    const r = await axios.get(String(mediaRef), {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    });
+    return Buffer.from(r.data);
+  }
+  return fs.readFile(mediaRef);
+}
+
+function contentTypeFromMediaRef(mediaRef) {
+  const ext = path.extname(String(mediaRef).split('?')[0]).toLowerCase();
+  if (ext === '.png') return 'image/png';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+async function removeStoredMediaRef(ref) {
+  if (!ref) return;
+  const s = String(ref);
+  if (/^https?:\/\//i.test(s)) {
+    await storageService.deleteObjectFromPublicUrl(s);
+    return;
+  }
+  try {
+    await fs.unlink(s);
+  } catch (_) {}
+}
 
 // Configure multer for media uploads
 const storage = multer.diskStorage({
@@ -314,9 +351,6 @@ exports.generateVariantImage = async (req, res) => {
     });
     console.log('[Content Studio] AI image prompt (variant %d):\n', variantIndex, imagePrompt);
 
-    const uploadDir = path.join(__dirname, '../../uploads/posts');
-    await fs.mkdir(uploadDir, { recursive: true });
-
     const buffer = await aiService.generateImage(imagePrompt);
     if (!buffer) {
       return res.status(500).json({ success: false, message: 'Image generation failed. Please try again.' });
@@ -378,22 +412,41 @@ exports.generateVariantImage = async (req, res) => {
     }
 
     const filename = `ai-${Date.now()}-${Math.floor(Math.random() * 1000)}.png`;
-    const fullPath = path.join(uploadDir, filename);
-    await fs.writeFile(fullPath, finalBuffer);
-    const imageUrl = getPublicMediaUrl(fullPath, req);
+    let imageUrl;
+    let mediaFilePath;
+    let mediaS3Key = null;
+    let mediaStorageType = 'local';
+
+    if (storageService.isS3Configured()) {
+      const key = storageService.buildPostsKey(organizationId, filename);
+      const { publicUrl, key: s3Key } = await storageService.uploadBuffer(key, finalBuffer, 'image/png');
+      imageUrl = publicUrl;
+      mediaFilePath = publicUrl;
+      mediaS3Key = s3Key;
+      mediaStorageType = 's3';
+    } else {
+      const uploadDir = path.join(__dirname, '../../uploads/posts');
+      await fs.mkdir(uploadDir, { recursive: true });
+      mediaFilePath = path.join(uploadDir, filename);
+      await fs.writeFile(mediaFilePath, finalBuffer);
+      imageUrl = getPublicMediaUrl(mediaFilePath, req);
+    }
+
+    const byteSize = finalBuffer.length;
 
     // ── Auto-save to Media Library ────────────────────────────────────────────
     let savedToLibrary = false;
     try {
-      const stat = await fs.stat(fullPath);
       await Media.create({
         filename,
         originalName: filename,
-        filePath: fullPath,
+        filePath: mediaFilePath,
         publicUrl: imageUrl,
+        s3Key: mediaS3Key || undefined,
+        storageType: mediaStorageType,
         mimeType: 'image/png',
         mediaType: 'image',
-        size: stat.size,
+        size: byteSize,
         user: userId,
         organization: organizationId,
         tags: ['ai-generated', 'content-studio'],
@@ -551,15 +604,20 @@ exports.generateVariantVideo = async (req, res) => {
           return;
         }
 
-        const uploadDir = path.join(__dirname, '../../uploads/posts');
-        await fs.mkdir(uploadDir, { recursive: true });
         const filename = `ai-video-${Date.now()}-${Math.floor(Math.random() * 1000)}.mp4`;
-        const fullPath = path.join(uploadDir, filename);
-        await fs.writeFile(fullPath, buffer);
-
-        // Build URL without req (req is already gone after response was sent)
-        const baseUrl = (process.env.BASE_URL || process.env.API_URL || 'https://repmeup.in').replace(/\/api\/?$/, '');
-        const videoUrl = `${baseUrl}/api/posts/media/${filename}`;
+        let videoUrl;
+        if (storageService.isS3Configured()) {
+          const key = storageService.buildPostsKey(organizationId, filename);
+          const { publicUrl } = await storageService.uploadBuffer(key, buffer, 'video/mp4');
+          videoUrl = publicUrl;
+        } else {
+          const uploadDir = path.join(__dirname, '../../uploads/posts');
+          await fs.mkdir(uploadDir, { recursive: true });
+          const fullPath = path.join(uploadDir, filename);
+          await fs.writeFile(fullPath, buffer);
+          const baseUrl = (process.env.BASE_URL || process.env.API_URL || 'https://repmeup.in').replace(/\/api\/?$/, '');
+          videoUrl = `${baseUrl}/api/posts/media/${filename}`;
+        }
 
         await VideoJob.findOneAndUpdate({ jobId }, { status: 'completed', videoUrl });
 
@@ -670,15 +728,20 @@ exports.saveDraft = async (req, res) => {
       }
     };
 
-    if (mediaUrl) {
-      const filename = typeof mediaUrl === 'string' ? mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim() : null;
-      if (filename) {
-        const uploadDir = path.join(__dirname, '../../uploads/posts');
-        const fullPath = path.join(uploadDir, filename);
-        draftData.mediaStoragePath = fullPath;
-        draftData.mediaType = filename.endsWith('.mp4') ? 'video' : 'image';
+    if (mediaUrl && typeof mediaUrl === 'string') {
+      if (/^https?:\/\//i.test(mediaUrl.trim())) {
+        draftData.mediaStoragePath = mediaUrl.split('?')[0].trim();
+        draftData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
       } else {
-        draftData.mediaUrl = mediaUrl;
+        const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
+        if (filename) {
+          const uploadDir = path.join(__dirname, '../../uploads/posts');
+          const fullPath = path.join(uploadDir, filename);
+          draftData.mediaStoragePath = fullPath;
+          draftData.mediaType = filename.endsWith('.mp4') ? 'video' : 'image';
+        } else {
+          draftData.mediaUrl = mediaUrl;
+        }
       }
     }
 
@@ -783,12 +846,12 @@ exports.publishPost = async (req, res) => {
           });
         }
 
-        postData.mediaStoragePaths = libraryMediaItems.map(m => m.filePath);
+        postData.mediaStoragePaths = libraryMediaItems.map(m => m.publicUrl || storageService.resolvePublicUrl(m.filePath, req));
         postData.mediaTypes = libraryMediaItems.map(m => m.mediaType);
         postData.mediaLibraryIds = libraryMediaItems.map(m => m._id);
         
         // For backward compatibility
-        postData.mediaStoragePath = libraryMediaItems[0].filePath;
+        postData.mediaStoragePath = postData.mediaStoragePaths[0];
         postData.mediaType = libraryMediaItems[0].mediaType;
 
         console.log(`📚 [Post] Using ${libraryMediaItems.length} items from library for carousel`);
@@ -806,7 +869,7 @@ exports.publishPost = async (req, res) => {
           });
         }
 
-        postData.mediaStoragePath = libraryMedia.filePath;
+        postData.mediaStoragePath = libraryMedia.publicUrl || storageService.resolvePublicUrl(libraryMedia.filePath, req);
         postData.mediaType = libraryMedia.mediaType;
         postData.mediaLibraryId = libraryMedia._id;
 
@@ -851,7 +914,19 @@ exports.publishPost = async (req, res) => {
             console.warn(`⚠️ Media warnings for ${file.originalname}:`, validation.warnings);
           }
 
-          mediaStoragePaths.push(file.path);
+          if (storageService.isS3Configured()) {
+            const buf = await fs.readFile(file.path);
+            const key = storageService.buildPostsKey(organizationId, path.basename(file.path));
+            const { publicUrl } = await storageService.uploadBuffer(key, buf, file.mimetype);
+            try {
+              await fs.unlink(file.path);
+            } catch (err) {
+              console.warn('Temp file unlink after S3:', err.message);
+            }
+            mediaStoragePaths.push(publicUrl);
+          } else {
+            mediaStoragePaths.push(file.path);
+          }
           mediaTypes.push(mediaType);
         }
 
@@ -898,8 +973,23 @@ exports.publishPost = async (req, res) => {
           console.warn('⚠️ Media warnings:', validation.warnings);
         }
 
-        postData.mediaStoragePath = req.file.path;
+        if (storageService.isS3Configured()) {
+          const buf = await fs.readFile(req.file.path);
+          const key = storageService.buildPostsKey(organizationId, path.basename(req.file.path));
+          const { publicUrl } = await storageService.uploadBuffer(key, buf, req.file.mimetype);
+          try {
+            await fs.unlink(req.file.path);
+          } catch (err) {
+            console.warn('Temp file unlink after S3:', err.message);
+          }
+          postData.mediaStoragePath = publicUrl;
+        } else {
+          postData.mediaStoragePath = req.file.path;
+        }
         postData.mediaType = mediaType;
+      } else if (mediaUrl && typeof mediaUrl === 'string' && /^https?:\/\//i.test(mediaUrl.trim())) {
+        postData.mediaStoragePath = mediaUrl.split('?')[0].trim();
+        postData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
       } else if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
         const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
         if (filename) {
@@ -1086,12 +1176,15 @@ exports.schedulePost = async (req, res) => {
           });
         }
 
-        // Use library media's file path and type
-        postData.mediaStoragePath = libraryMedia.filePath;
+        // Use library public URL (S3 or API) for publishers
+        postData.mediaStoragePath = libraryMedia.publicUrl || storageService.resolvePublicUrl(libraryMedia.filePath, req);
         postData.mediaType = libraryMedia.mediaType;
         postData.mediaLibraryId = libraryMedia._id; // Track which library media is used
 
         console.log(`📚 [Post] Using media from library: ${libraryMedia.originalName} (${libraryMedia._id})`);
+      } else if (mediaUrl && typeof mediaUrl === 'string' && /^https?:\/\//i.test(mediaUrl.trim())) {
+        postData.mediaStoragePath = mediaUrl.split('?')[0].trim();
+        postData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
       } else if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
         const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
         if (filename) {
@@ -1139,7 +1232,19 @@ exports.schedulePost = async (req, res) => {
           console.warn('⚠️ Media warnings:', validation.warnings);
         }
 
-        postData.mediaStoragePath = req.file.path;
+        if (storageService.isS3Configured()) {
+          const buf = await fs.readFile(req.file.path);
+          const key = storageService.buildPostsKey(organizationId, path.basename(req.file.path));
+          const { publicUrl } = await storageService.uploadBuffer(key, buf, req.file.mimetype);
+          try {
+            await fs.unlink(req.file.path);
+          } catch (err) {
+            console.warn('Temp file unlink after S3:', err.message);
+          }
+          postData.mediaStoragePath = publicUrl;
+        } else {
+          postData.mediaStoragePath = req.file.path;
+        }
         postData.mediaType = mediaType;
       }
 
@@ -1396,7 +1501,10 @@ exports.sendToApproval = async (req, res) => {
       generatedBy: generatedBy === 'ai' ? 'ai' : 'human'
     };
 
-    if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
+    if (mediaUrl && typeof mediaUrl === 'string' && /^https?:\/\//i.test(mediaUrl.trim())) {
+      postData.mediaStoragePath = mediaUrl.split('?')[0].trim();
+      postData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
+    } else if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
       const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
       if (filename) {
         const uploadDir = path.join(__dirname, '../../uploads/posts');
@@ -1495,25 +1603,15 @@ exports.deleteScheduledPost = async (req, res) => {
       return res.status(404).json({ message: 'Scheduled post not found' });
     }
 
-    // Delete media files (carousel or single)
+    // Delete media files (carousel or single) — local disk or S3
     if (post.mediaStoragePaths && post.mediaStoragePaths.length > 0) {
-      // Carousel - delete all media files
       for (const mediaPath of post.mediaStoragePaths) {
-        try {
-          await fs.unlink(mediaPath);
-          console.log(`🗑️  Deleted carousel media: ${mediaPath}`);
-        } catch (err) {
-          console.error('Error deleting carousel media:', err);
-        }
+        await removeStoredMediaRef(mediaPath);
+        console.log(`🗑️  Removed carousel media ref: ${mediaPath}`);
       }
     } else if (post.mediaStoragePath) {
-      // Single media file
-      try {
-        await fs.unlink(post.mediaStoragePath);
-        console.log(`🗑️  Deleted media: ${post.mediaStoragePath}`);
-      } catch (err) {
-        console.error('Error deleting media file:', err);
-      }
+      await removeStoredMediaRef(post.mediaStoragePath);
+      console.log(`🗑️  Removed media ref: ${post.mediaStoragePath}`);
     }
 
     await ScheduledPost.findByIdAndDelete(post._id);
@@ -1633,13 +1731,12 @@ exports.deleteDraft = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Draft not found' });
     }
 
-    // Clean up local media files
     if (draft.mediaStoragePath) {
-      try { await fs.unlink(draft.mediaStoragePath); } catch (_) {}
+      await removeStoredMediaRef(draft.mediaStoragePath);
     }
     if (draft.mediaStoragePaths?.length) {
       for (const p of draft.mediaStoragePaths) {
-        try { await fs.unlink(p); } catch (_) {}
+        await removeStoredMediaRef(p);
       }
     }
 
@@ -1785,28 +1882,7 @@ exports.getMediaRequirements = (req, res) => {
  * Helper: Get public URL for media file (must be reachable by Instagram/Facebook)
  */
 function getPublicMediaUrl(filePath, req) {
-  const filename = path.basename(filePath);
-
-  let baseUrl = process.env.BASE_URL || process.env.API_URL;
-
-  if (!baseUrl && req && req.get && req.get('host')) {
-    const protocol = req.protocol || 'https';
-    const host = req.get('host');
-    baseUrl = `${protocol}://${host}`;
-  }
-
-  if (!baseUrl) {
-    // Default to production URL if available, otherwise localhost
-    baseUrl = 'https://repmeup.in';
-  }
-
-  // Ensure baseUrl doesn't have /api at the end
-  baseUrl = baseUrl.replace(/\/api\/?$/, '');
-
-  const publicUrl = `${baseUrl}/api/posts/media/${filename}`;
-  console.log(`📎 [Media] Generated public URL: ${publicUrl}`);
-  console.log(`📎 [Media] Base URL: ${baseUrl}, Protocol: ${req?.protocol}, Host: ${req?.get?.('host')}`);
-  return publicUrl;
+  return storageService.resolvePublicUrl(filePath, req);
 }
 
 /**
@@ -1910,7 +1986,7 @@ async function publishToFacebook(connection, post, req) {
       console.log(`📖 [Facebook] Creating story`);
       
       if (mediaType === 'image') {
-        const imageBuffer = await fs.readFile(mediaStoragePath);
+        const imageBuffer = await readImageBufferForPublish(mediaStoragePath);
         result = await facebookService.createStory(connection, {
           imageBuffer: imageBuffer
         });
@@ -1948,8 +2024,7 @@ async function publishToFacebook(connection, post, req) {
         try {
           console.log(`📸 [Facebook] Reading image file: ${mediaStoragePath}`);
           
-          // Read the image file as a buffer
-          const imageBuffer = await fs.readFile(mediaStoragePath);
+          const imageBuffer = await readImageBufferForPublish(mediaStoragePath);
           
           console.log(`📤 [Facebook] Uploading image directly (${imageBuffer.length} bytes)`);
           
@@ -2013,16 +2088,8 @@ async function publishToLinkedIn(connection, post) {
       );
     }
     if (resolvedType === 'image') {
-      const imageBuffer = await fs.readFile(storagePath);
-      const ext = path.extname(storagePath).toLowerCase();
-      const contentType =
-        ext === '.png'
-          ? 'image/png'
-          : ext === '.gif'
-            ? 'image/gif'
-            : ext === '.webp'
-              ? 'image/webp'
-              : 'image/jpeg';
+      const imageBuffer = await readImageBufferForPublish(storagePath);
+      const contentType = contentTypeFromMediaRef(storagePath);
       media = { imageBuffer, contentType };
     }
   }
