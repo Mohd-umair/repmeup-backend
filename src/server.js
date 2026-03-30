@@ -7,7 +7,6 @@ const http = require('http');
 const socketIO = require('socket.io');
 const logger = require('./config/logger');
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   logger.error('UNCAUGHT EXCEPTION! Shutting down...', {
     error: err.message,
