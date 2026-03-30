@@ -578,6 +578,16 @@ class MetaAuthService {
         return existingConnection;
       }
 
+      // Cross-org conflict check: block if this page is already active in another workspace
+      const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
+        'facebook', pageData.id, organizationId
+      );
+      if (crossOrgConflict) {
+        const err = new Error('This Facebook page is already connected to another workspace.');
+        err.code = 'CROSS_ORG_CONFLICT';
+        throw err;
+      }
+
       // Create new connection
       const pagePictureUrl = pageData.picture?.data?.url || (typeof pageData.picture === 'string' ? pageData.picture : null) || null;
       const connection = await PlatformConnection.create({
@@ -735,6 +745,16 @@ class MetaAuthService {
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
         await this.subscribeInstagramToWebhook(instagramAccount.id, pageAccessToken);
         return existingConnection;
+      }
+
+      // Cross-org conflict check: block if this IG account is already active in another workspace
+      const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
+        'instagram', instagramAccount.id, organizationId
+      );
+      if (crossOrgConflict) {
+        const err = new Error('This Instagram account is already connected to another workspace.');
+        err.code = 'CROSS_ORG_CONFLICT';
+        throw err;
       }
 
       // Create new connection

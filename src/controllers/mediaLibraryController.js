@@ -1,6 +1,7 @@
 const Media = require('../models/Media');
 const path = require('path');
 const fs = require('fs');
+const storageService = require('../services/storageService');
 
 /**
  * Media Library Controller
@@ -23,22 +24,47 @@ exports.uploadMedia = async (req, res) => {
 
     const { tags, description } = req.body;
     const file = req.file;
+    const organizationId = req.user.organization?._id || req.user.organization;
 
     // Determine media type
     let mediaType = 'video';
     if (file.mimetype.startsWith('image/')) mediaType = 'image';
     else if (file.mimetype.startsWith('audio/') || file.mimetype === 'audio/mpeg' || file.mimetype === 'audio/mp3') mediaType = 'audio';
 
-    // Generate public URL
-    const baseUrl = process.env.BASE_URL || 'https://repmeup.in';
-    const publicUrl = `${baseUrl}/api/posts/media/${file.filename}`;
+    let filename = file.filename;
+    let filePath;
+    let publicUrl;
+    let s3Key;
+    let storageType = 'local';
+
+    if (storageService.isS3Configured()) {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      const ext = path.extname(file.originalname) || '';
+      filename = `media-${uniqueSuffix}${ext}`;
+      const key = storageService.buildPostsKey(organizationId, filename);
+      const body = file.buffer;
+      if (!body) {
+        return res.status(500).json({ success: false, message: 'Upload buffer missing (S3 mode requires memory storage)' });
+      }
+      const uploaded = await storageService.uploadBuffer(key, body, file.mimetype);
+      publicUrl = uploaded.publicUrl;
+      filePath = uploaded.publicUrl;
+      s3Key = uploaded.key;
+      storageType = 's3';
+    } else {
+      const baseUrl = (process.env.BASE_URL || 'https://repmeup.in').replace(/\/api\/?$/, '');
+      publicUrl = `${baseUrl}/api/posts/media/${file.filename}`;
+      filePath = file.path;
+    }
 
     // Create media record
     const media = new Media({
-      filename: file.filename,
+      filename,
       originalName: file.originalname,
-      filePath: file.path,
-      publicUrl: publicUrl,
+      filePath,
+      publicUrl,
+      s3Key: s3Key || undefined,
+      storageType,
       mimeType: file.mimetype,
       mediaType: mediaType,
       size: file.size,
@@ -231,15 +257,18 @@ exports.deleteMedia = async (req, res) => {
       });
     }
 
-    // Delete physical file
     try {
-      if (fs.existsSync(media.filePath)) {
+      if (media.s3Key) {
+        await storageService.deleteObjectByKey(media.s3Key);
+        console.log(`🗑️  [Media Library] Deleted S3 object: ${media.s3Key}`);
+      } else if (media.filePath && fs.existsSync(media.filePath)) {
         fs.unlinkSync(media.filePath);
         console.log(`🗑️  [Media Library] Deleted file: ${media.filePath}`);
+      } else if (media.storageType === 's3' && media.publicUrl) {
+        await storageService.deleteObjectFromPublicUrl(media.publicUrl);
       }
     } catch (err) {
-      console.error('Error deleting physical file:', err);
-      // Continue with database deletion even if file deletion fails
+      console.error('Error deleting stored media:', err);
     }
 
     // Delete from database

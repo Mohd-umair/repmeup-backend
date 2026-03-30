@@ -243,6 +243,24 @@ class LinkedInAuthService {
         const savedConnections = [];
 
         for (const org of orgData.organizations) {
+          // Cross-org conflict check: block if this LinkedIn org is already in another workspace
+          const crossOrgConflict = await PlatformConnection.findOne({
+            platform: 'linkedin',
+            'platformData.organizationId': org.id,
+            organization: { $ne: organizationId },
+            isActive: true
+          }).select('organization').lean();
+          if (crossOrgConflict) {
+            console.warn(
+              `[LinkedIn] Skipping org ${org.name} — already connected to another workspace (CROSS_ORG_CONFLICT)`
+            );
+            const err = new Error(
+              `LinkedIn organization "${org.name}" is already connected to another workspace.`
+            );
+            err.code = 'CROSS_ORG_CONFLICT';
+            throw err;
+          }
+
           const connection = await PlatformConnection.findOneAndUpdate(
             {
               organization: organizationId,
@@ -281,6 +299,18 @@ class LinkedInAuthService {
 
         return savedConnections;
       } else {
+        // Cross-org conflict check for personal profile connection
+        const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
+          'linkedin', profile.id, organizationId
+        );
+        if (crossOrgConflict) {
+          const err = new Error(
+            'This LinkedIn account is already connected to another workspace.'
+          );
+          err.code = 'CROSS_ORG_CONFLICT';
+          throw err;
+        }
+
         // Save personal profile connection
         const connection = await PlatformConnection.findOneAndUpdate(
           {
