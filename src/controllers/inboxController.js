@@ -369,19 +369,20 @@ exports.getInteraction = async (req, res, next) => {
       }
     }
 
-    // Mark as read
-    if (!interaction.isRead || interaction.status === 'unread') {
-      interaction.isRead = true;
-      interaction.readAt = new Date();
-      interaction.readBy = req.user._id;
-      // Update status from 'unread' to 'read' if it's currently 'unread'
-      if (interaction.status === 'unread') {
-        interaction.status = 'read';
+    // Only mark as read when the caller explicitly requests it (e.g. user opens a conversation).
+    // Background refreshes, polling, socket-triggered refetches and action-panel refreshes must
+    // NOT pass markRead=true so they never override a status that was manually set to 'unread'.
+    if (req.query.markRead === 'true') {
+      if (!interaction.isRead || interaction.status === 'unread') {
+        interaction.isRead = true;
+        interaction.readAt = new Date();
+        interaction.readBy = req.user._id;
+        if (interaction.status === 'unread') {
+          interaction.status = 'read';
+        }
+        await interaction.save();
+        await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
       }
-      await interaction.save();
-      
-      // Clear cache to reflect the status change
-      await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
     }
 
     // Fetch child interactions (replies from the platform, e.g., YouTube user replies)

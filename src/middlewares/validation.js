@@ -1,5 +1,5 @@
 const Joi = require('joi');
-const { escapeHtml, sanitizeString } = require('../utils/sanitize');
+const { sanitizeString } = require('../utils/sanitize');
 
 const objectId = () => Joi.string().pattern(/^[0-9a-fA-F]{24}$/);
 const dateRange = () => Joi.object({
@@ -78,14 +78,9 @@ exports.validateReply = (req, res, next) => {
     });
   }
 
-  // Sanitize content for safe storage/reflection
-  if (req.body.content) req.body.content = escapeHtml(req.body.content);
-  if (req.body.templateVariables && typeof req.body.templateVariables === 'object') {
-    const sanitized = {};
-    for (const [k, v] of Object.entries(req.body.templateVariables)) {
-      sanitized[k] = typeof v === 'string' ? escapeHtml(v) : v;
-    }
-    req.body.templateVariables = sanitized;
+  /* Plain text for JSON API — do not HTML-escape (shows as &quot; in Angular {{ }}) */
+  if (req.body.content && typeof req.body.content === 'string') {
+    req.body.content = req.body.content.trim();
   }
   next();
 };
@@ -331,7 +326,9 @@ exports.validateInboxAssign = (req, res, next) => {
 
   const { error } = schema.validate(req.body);
   if (error) return res.status(400).json({ success: false, error: error.details[0].message });
-  if (req.body.reason) req.body.reason = escapeHtml(req.body.reason);
+  if (req.body.reason && typeof req.body.reason === 'string') {
+    req.body.reason = req.body.reason.trim();
+  }
   next();
 };
 
@@ -353,7 +350,9 @@ exports.validateInboxAddNote = (req, res, next) => {
 
   const { error } = schema.validate(req.body);
   if (error) return res.status(400).json({ success: false, error: error.details[0].message });
-  if (req.body.note) req.body.note = escapeHtml(req.body.note);
+  if (req.body.note && typeof req.body.note === 'string') {
+    req.body.note = req.body.note.trim();
+  }
   next();
 };
 
@@ -418,7 +417,9 @@ exports.validateInboxEscalate = (req, res, next) => {
 
   const { error } = schema.validate(req.body);
   if (error) return res.status(400).json({ success: false, error: error.details[0].message });
-  if (req.body.reason) req.body.reason = escapeHtml(req.body.reason);
+  if (req.body.reason && typeof req.body.reason === 'string') {
+    req.body.reason = req.body.reason.trim();
+  }
   next();
 };
 
