@@ -14,6 +14,7 @@ router.get('/all', menuController.getAllMenus);
 router.post('/', menuController.createMenu);
 router.post('/seed', menuController.seedMenus);
 router.post('/migrate-publish-submenus', menuController.migratePublishSubmenus);
+router.post('/migrate-content-menu-library', menuController.migrateContentMenuLibrary);
 router.put('/:id', menuController.updateMenu);
 router.delete('/:id', menuController.deleteMenu);
 

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middlewares/auth');
+const { protect, authorize } = require('../middlewares/auth');
 const postController = require('../controllers/postController');
 const path = require('path');
 const fs = require('fs');
@@ -200,6 +200,11 @@ router.patch('/drafts/:id', protect, postController.updateDraft);
 // @access  Private
 router.patch('/drafts/:id/schedule', protect, postController.scheduleDraft);
 
+// @route   PATCH /api/posts/drafts/:id/send-to-approval
+// @desc    Move an existing draft to pending_approval
+// @access  Private
+router.patch('/drafts/:id/send-to-approval', protect, postController.sendDraftToApproval);
+
 // @route   DELETE /api/posts/drafts/:id
 // @desc    Delete a draft
 // @access  Private
@@ -225,15 +230,30 @@ router.get('/dashboard-counts', protect, postController.getDashboardCounts);
 // @access  Private
 router.get('/pending-approval', protect, postController.getPendingApprovalPosts);
 
+// @route   GET /api/posts/approval-history
+// @desc    Get full approval history (pending + approved + rejected) for the current user or whole org
+// @access  Private
+router.get('/approval-history', protect, postController.getApprovalHistory);
+
 // @route   PATCH /api/posts/:id/approve
 // @desc    Approve a post (optionally set scheduledFor)
-// @access  Private
-router.patch('/:id/approve', protect, postController.approvePost);
+// @access  Private — admin, manager, super_admin only
+router.patch('/:id/approve', protect, authorize('admin', 'manager', 'super_admin'), postController.approvePost);
 
 // @route   PATCH /api/posts/:id/reject
 // @desc    Reject a post
-// @access  Private
-router.patch('/:id/reject', protect, postController.rejectPost);
+// @access  Private — admin, manager, super_admin only
+router.patch('/:id/reject', protect, authorize('admin', 'manager', 'super_admin'), postController.rejectPost);
+
+// @route   PATCH /api/posts/:id/update-pending
+// @desc    Edit content and/or replace media before approving (admin/manager)
+// @access  Private — admin, manager, super_admin only
+router.patch('/:id/update-pending', protect, authorize('admin', 'manager', 'super_admin'), postController.updatePendingPostByAdmin);
+
+// @route   PATCH /api/posts/:id/resubmit
+// @desc    Agent edits rejected post content and resubmits for approval
+// @access  Private (post creator only)
+router.patch('/:id/resubmit', protect, postController.resubmitPost);
 
 // @route   GET /api/posts/published
 // @desc    Get all published posts

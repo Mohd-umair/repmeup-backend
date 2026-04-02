@@ -22,7 +22,10 @@ const notificationSchema = new mongoose.Schema({
       'negative_spike',
       'response_received',
       'platform_error',
-      'system'
+      'system',
+      'post_pending_approval',
+      'post_approved',
+      'post_rejected'
     ],
     required: true
   },
@@ -41,7 +44,7 @@ const notificationSchema = new mongoose.Schema({
   relatedTo: {
     model: {
       type: String,
-      enum: ['Interaction', 'Assignment', 'PlatformConnection', 'User']
+      enum: ['Interaction', 'Assignment', 'PlatformConnection', 'User', 'ScheduledPost']
     },
     id: mongoose.Schema.Types.ObjectId
   },

@@ -4,6 +4,7 @@ const Subscription = require('../models/Subscription');
 const Interaction = require('../models/Interaction');
 const { escapeRegex } = require('../utils/sanitize');
 const userActivityLogService = require('../services/userActivityLogService');
+const { parsePagination, paginationMeta } = require('../utils/pagination');
 
 // @desc    Get all users in organization
 // @route   GET /api/users
@@ -12,6 +13,7 @@ exports.getUsers = async (req, res, next) => {
   try {
     const { role, status, search } = req.query;
     const organizationId = req.user.organization._id;
+    const { page, limit, skip } = parsePagination(req.query);
 
     // Build query (exclude soft-deleted)
     const query = { organization: organizationId, deletedAt: null };
@@ -33,12 +35,17 @@ exports.getUsers = async (req, res, next) => {
       ];
     }
 
-    const users = await User.find(query)
-      .select('-password')
-      .populate('assignedBuckets', 'name color')
-      .sort({ createdAt: -1 });
+    const [total, users] = await Promise.all([
+      User.countDocuments(query),
+      User.find(query)
+        .select('-password')
+        .populate('assignedBuckets', 'name color')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+    ]);
 
-    // Get assigned task counts for each user
+    // Get assigned task counts for each user on this page
     const usersWithStats = await Promise.all(
       users.map(async (user) => {
         const assignedTasks = await Interaction.countDocuments({
@@ -62,8 +69,8 @@ exports.getUsers = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      count: usersWithStats.length,
-      data: usersWithStats
+      data: usersWithStats,
+      pagination: paginationMeta(total, page, limit)
     });
   } catch (error) {
     console.error('Get users error:', error);

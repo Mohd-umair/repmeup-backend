@@ -1,5 +1,6 @@
 const IntentBucket = require('../models/IntentBucket');
 const Interaction = require('../models/Interaction');
+const { parsePagination, paginationMeta } = require('../utils/pagination');
 
 const DEFAULT_BUCKETS = [
   { name: 'Hot Leads', color: '#EF4444', icon: 'fas fa-fire', order: 0, keywords: ['price', 'buy', 'purchase', 'deal', 'quote', 'order', 'interested', 'cost', 'pricing', 'rates'], aiPromptHint: 'Messages showing purchase intent, asking about pricing, deals, or expressing interest in buying', isDefault: false },
@@ -28,14 +29,24 @@ async function ensureDefaultBuckets(organizationId, userId) {
 exports.getBuckets = async (req, res) => {
   try {
     const orgId = req.user.organization._id;
-    let buckets = await IntentBucket.find({ organization: orgId }).sort({ order: 1 }).lean();
+    const { page, limit, skip } = parsePagination(req.query);
 
-    if (buckets.length === 0) {
-      buckets = await ensureDefaultBuckets(orgId, req.user._id);
-      buckets = await IntentBucket.find({ organization: orgId }).sort({ order: 1 }).lean();
+    // Ensure defaults exist before paginating
+    const existingCount = await IntentBucket.countDocuments({ organization: orgId });
+    if (existingCount === 0) {
+      await ensureDefaultBuckets(orgId, req.user._id);
     }
 
-    res.json({ success: true, data: buckets });
+    const [total, buckets] = await Promise.all([
+      IntentBucket.countDocuments({ organization: orgId }),
+      IntentBucket.find({ organization: orgId })
+        .sort({ order: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
+
+    res.json({ success: true, data: buckets, pagination: paginationMeta(total, page, limit) });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

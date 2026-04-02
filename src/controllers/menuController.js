@@ -113,22 +113,27 @@ exports.getMenus = async (req, res, next) => {
       }
 
       if (menu.requiredRoles && menu.requiredRoles.length > 0) {
-        if (!menu.requiredRoles.includes(user.role)) {
+        const bypassRoleCheck = user.role === 'admin';
+        if (!bypassRoleCheck && !menu.requiredRoles.includes(user.role)) {
           return false;
         }
       }
 
       if (menu.requiredPermissions && menu.requiredPermissions.length > 0) {
-        if (permissionSet.size === 0) {
-          return false;
-        }
+        // Org admins often lack every granular code (e.g. posts.manage); route guards still apply on navigation.
+        const bypassPermCheck = user.role === 'admin';
+        if (!bypassPermCheck) {
+          if (permissionSet.size === 0) {
+            return false;
+          }
 
-        const hasAllPermissions = menu.requiredPermissions.every((permission) =>
-          permissionSet.has(permission)
-        );
+          const hasAllPermissions = menu.requiredPermissions.every((permission) =>
+            permissionSet.has(permission)
+          );
 
-        if (!hasAllPermissions) {
-          return false;
+          if (!hasAllPermissions) {
+            return false;
+          }
         }
       }
 
@@ -330,14 +335,6 @@ exports.seedMenus = async (req, res, next) => {
         }
       },
       {
-        label: 'Content',
-        icon: '📄',
-        route: '/app/content',
-        order: 5,
-        group: 'main',
-        requiredRoles: ['admin', 'manager', 'agent']
-      },
-      {
         label: 'Knowledge Base',
         icon: '🧠',
         route: '/app/knowledge-base',
@@ -527,6 +524,44 @@ exports.migratePublishSubmenus = async (req, res, next) => {
     });
   } catch (error) {
     console.error('migratePublishSubmenus error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Point /app/content menu items at platform library (strip ?view=published). Idempotent.
+ * @route   POST /api/menus/migrate-content-menu-library
+ * @access  Private (Admin)
+ */
+exports.migrateContentMenuLibrary = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Only administrators can run menu migration'
+      });
+    }
+
+    const cleared = await Menu.updateMany(
+      { route: '/app/content', 'queryParams.view': 'published' },
+      { $unset: { queryParams: 1 } }
+    );
+
+    const relabeled = await Menu.updateMany(
+      { route: '/app/content', label: 'Published' },
+      { $set: { label: 'Content', icon: '📚' } }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Content menu opens platform library; RepMeUp published is available from the Content page tab.',
+      data: {
+        clearedPublishedQueryParam: cleared.modifiedCount,
+        relabeledPublishedToContent: relabeled.modifiedCount
+      }
+    });
+  } catch (error) {
+    console.error('migrateContentMenuLibrary error:', error);
     next(error);
   }
 };
