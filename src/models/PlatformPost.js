@@ -62,6 +62,14 @@ const platformPostSchema = new mongoose.Schema({
     default: 'post',
     index: true
   },
+  likeCount: {
+    type: Number,
+    default: 0
+  },
+  shareCount: {
+    type: Number,
+    default: 0
+  },
   syncedAt: {
     type: Date,
     default: Date.now

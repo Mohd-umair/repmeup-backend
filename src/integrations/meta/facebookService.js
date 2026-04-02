@@ -27,7 +27,8 @@ class FacebookService {
     const maxPages = 10;
     // Start with full fields; fallback to minimal fields if API returns 400 (e.g. permission on attachments)
     const fieldsSets = [
-      'id,message,created_time,full_picture,permalink_url,attachments{media_type,type}',
+      'id,message,created_time,full_picture,permalink_url,attachments{media_type,type},reactions.summary(true),shares',
+      'id,message,created_time,full_picture,permalink_url,reactions.summary(true),shares',
       'id,message,created_time,full_picture,permalink_url'
     ];
     for (const fields of fieldsSets) {
@@ -43,6 +44,12 @@ class FacebookService {
           allPosts = allPosts.concat(posts);
           nextPage = response.data.paging?.next;
           pageCount++;
+        }
+        if (allPosts.length > 0) {
+          const sample = allPosts[0];
+          console.log(`[Facebook] getPagePosts using fields: ${fields.substring(0, 60)}...`);
+          console.log(`[Facebook] Sample post reactions:`, JSON.stringify(sample.reactions ?? 'MISSING'));
+          console.log(`[Facebook] Sample post shares:`, JSON.stringify(sample.shares ?? 'MISSING'));
         }
         return allPosts;
       } catch (error) {
