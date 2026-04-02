@@ -189,6 +189,38 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
 }
 
 /**
+ * Meta sometimes delivers a user-shared post in DM with is_echo:true, sender=IG business id, recipient=user id.
+ * We still want an inbox thread for the user who shared the post.
+ */
+function isInstagramSharePostEcho(event, message, igAccountId) {
+  if (!message?.is_echo || !igAccountId) return false;
+  if (String(event.sender?.id) !== String(igAccountId) || !event.recipient?.id) return false;
+  const atts = message.attachments || [];
+  return atts.some(
+    (a) =>
+      a.type === 'share' ||
+      a.type === 'ig_post' ||
+      !!(a.payload && a.payload.ig_post_media_id)
+  );
+}
+
+/** Pick best attachment for shared IG post / media in DMs. */
+function buildInstagramDmAttachmentFields(message) {
+  const atts = message.attachments || [];
+  const primary =
+    atts.find((a) => a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id)) ||
+    atts.find((a) => a.type === 'share') ||
+    atts[0];
+  const p = primary?.payload || {};
+  return {
+    attachmentType: primary?.type || 'file',
+    attachmentUrl: p.url || null,
+    igPostMediaId: p.ig_post_media_id || null,
+    shareTitle: typeof p.title === 'string' ? p.title : null
+  };
+}
+
+/**
  * Handle Instagram webhook
  * Supports two payload formats:
  * 1. Graph API (comments): entry[].changes[] with field "comments" or "messages"
@@ -235,53 +267,77 @@ async function handleInstagramWebhook(payload, organizationId) {
       });
     }
 
-    // One conversation thread per sender: platformId = dm_igAccountId_senderId (not per-message mid)
+    // One conversation thread per customer: platformId = dm_igAccountId_<userId> (not per-message mid)
     for (const event of allMessageEvents) {
       const message = event.message;
       if (!message) {
         // message_edit, reaction, read, etc. — skip (or could update thread in future)
         continue;
       }
-      if (message.is_echo || message.is_deleted || message.is_unsupported) {
+      if (message.is_deleted || message.is_unsupported) {
         logger.info('[processWebhook] Instagram: skipping message', {
-          is_echo: !!message.is_echo,
           is_deleted: !!message.is_deleted,
           is_unsupported: !!message.is_unsupported
         });
         continue;
       }
 
-      const senderId = event.sender?.id;
-      const mid = message.mid;
-      const attachment = message.attachments && message.attachments[0] ? message.attachments[0] : null;
-      const attachmentType = attachment ? (attachment.type || 'file') : null;
-      const attachmentUrl = attachment && attachment.payload && attachment.payload.url ? attachment.payload.url : null;
-      const text = message.text || (attachment ? `[${attachmentType}]` : '');
-      if (!mid || !senderId) {
-        logger.warn('[processWebhook] Instagram: message missing mid or senderId', { mid: !!mid, senderId: !!senderId });
+      const sharePostEcho = isInstagramSharePostEcho(event, message, igAccountId);
+      if (message.is_echo && !sharePostEcho) {
+        logger.info('[processWebhook] Instagram: skipping message', {
+          is_echo: true,
+          reason: 'echo (not user-shared post)'
+        });
         continue;
       }
 
-      // Webhook only sends sender.id; fetch username/name/profile_pic from Instagram User Profile API.
+      // Normal DM: partner is sender. Share-post echo: sender is IG account, partner is recipient (the user).
+      const partnerId = sharePostEcho ? event.recipient?.id : event.sender?.id;
+      const mid = message.mid;
+      const { attachmentType, attachmentUrl, igPostMediaId, shareTitle } = buildInstagramDmAttachmentFields(message);
+      const text =
+        message.text ||
+        shareTitle ||
+        (igPostMediaId ? '[Shared Instagram post]' : attachmentType ? `[${attachmentType}]` : '');
+      if (!mid || !partnerId) {
+        logger.warn('[processWebhook] Instagram: message missing mid or partnerId', {
+          mid: !!mid,
+          partnerId: !!partnerId,
+          sharePostEcho
+        });
+        continue;
+      }
+
+      if (sharePostEcho) {
+        logger.info('[processWebhook] Instagram: processing share/ig_post echo as incoming DM', {
+          partnerId: String(partnerId),
+          igPostMediaId: igPostMediaId || undefined
+        });
+      }
+
+      // Webhook only sends ids; fetch username/name/profile_pic from Instagram User Profile API.
       // Must use the token of the IG account that *received* the DM (Meta requirement).
       const profile = await fetchInstagramAuthorProfile(
         organizationId,
-        senderId,
+        String(partnerId),
         dmReceiverConnection?.accessToken || null
       );
       if (!profile.username && !profile.name && !profile.avatarUrl) {
         // Expected when app lacks Advanced Access; interaction is still created with platformId
-        logger.debug('[processWebhook] Instagram DM: no profile for senderId', { senderId, hasReceiverToken: !!dmReceiverConnection?.accessToken });
+        logger.debug('[processWebhook] Instagram DM: no profile for partnerId', {
+          partnerId: String(partnerId),
+          hasReceiverToken: !!dmReceiverConnection?.accessToken
+        });
       }
       const author = {
-        platformId: senderId,
+        platformId: String(partnerId),
         username: profile.username,
         name: profile.name || profile.username || 'Instagram User'
       };
       if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
-      // One thread per conversation (IG account + sender), not per message
-      const threadPlatformId = `dm_${String(igAccountId)}_${String(senderId)}`;
+      // One thread per conversation (IG account + customer), not per message
+      const threadPlatformId = `dm_${String(igAccountId)}_${String(partnerId)}`;
       const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author').lean();
       if (existing && existing.metadata?.lastMid === mid) {
         // Meta webhook retry — do not re-queue AI / auto-reply
@@ -293,7 +349,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       // If the profile fetch returned richer data than what's stored, overwrite.
       const existingAuthor = existing?.author || {};
       const mergedAuthor = {
-        platformId: senderId,
+        platformId: String(partnerId),
         username: profile.username || existingAuthor.username || undefined,
         name: profile.name || existingAuthor.name || profile.username || existingAuthor.username || 'Instagram User'
       };
@@ -307,7 +363,7 @@ async function handleInstagramWebhook(payload, organizationId) {
         platformId: threadPlatformId,
         content: text,
         author: mergedAuthor,
-        threadId: senderId,
+        threadId: String(partnerId),
         platformCreatedAt: new Date(event.timestamp),
         'metadata.lastMid': mid,
         'metadata.instagramAccountId': igAccountId,
@@ -329,6 +385,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       const incomingMsg = { mid, text, timestamp: event.timestamp };
       if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
       if (attachmentType) incomingMsg.attachmentType = attachmentType;
+      if (igPostMediaId) incomingMsg.igPostMediaId = igPostMediaId;
       await Interaction.updateOne(
         { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
         {
