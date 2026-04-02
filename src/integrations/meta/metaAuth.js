@@ -166,6 +166,7 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
+        'instagram_manage_insights',
         'instagram_content_publish',
         'pages_read_user_content'
       ].join(','),
@@ -215,6 +216,7 @@ class MetaAuthService {
         'instagram_basic',
         'instagram_manage_comments',
         'instagram_manage_messages',
+        'instagram_manage_insights',
         'instagram_content_publish',
         'pages_show_list',
         'pages_read_engagement',
@@ -739,7 +741,7 @@ class MetaAuthService {
           if (!existingConnection.metadata) existingConnection.metadata = {};
           existingConnection.metadata.profilePicture = instagramAccount.profile_picture_url;
         }
-        existingConnection.scopes = ['instagram_basic', 'instagram_manage_comments', 'instagram_content_publish', 'pages_show_list'];
+        existingConnection.scopes = ['instagram_basic', 'instagram_manage_comments', 'instagram_manage_insights', 'instagram_content_publish', 'pages_show_list'];
         await existingConnection.save();
         console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
@@ -776,7 +778,7 @@ class MetaAuthService {
         accessToken: pageAccessToken,
         refreshToken: null,
         tokenExpiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
-        scopes: ['instagram_basic', 'instagram_manage_comments', 'instagram_content_publish', 'pages_show_list'],
+        scopes: ['instagram_basic', 'instagram_manage_comments', 'instagram_manage_insights', 'instagram_content_publish', 'pages_show_list'],
         status: 'connected',
         isActive: true,
         platformData: {

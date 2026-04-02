@@ -89,7 +89,7 @@ class InstagramService {
         const mediaResponse = await axios.get(nextPage, {
           params: {
             access_token: accessToken,
-            fields: 'id,caption,media_type,timestamp,permalink,media_url',
+            fields: 'id,caption,media_type,timestamp,permalink,media_url,like_count',
             limit: 25
           }
         });
@@ -101,6 +101,54 @@ class InstagramService {
         break;
       }
     }
+
+    // Fetch share count via Insights API — requires instagram_manage_insights permission.
+    // Only attempt for the first item to check if the permission exists, then batch the rest.
+    let insightsPermissionAvailable = true;
+    if (allMedia.length > 0) {
+      // Probe the first media item first to detect permission errors early
+      try {
+        const probeRes = await axios.get(`${this.baseUrl}/${allMedia[0].id}/insights`, {
+          params: { metric: 'shares', period: 'lifetime', access_token: accessToken }
+        });
+        const sharesEntry = (probeRes.data.data || []).find(d => d.name === 'shares');
+        allMedia[0].share_count =
+          sharesEntry?.total_value?.value ??
+          sharesEntry?.values?.[0]?.value ??
+          0;
+        console.log(`[IG insights] probe OK — media ${allMedia[0].id} shares:`, allMedia[0].share_count);
+      } catch (e) {
+        const fbErr = e.response?.data?.error;
+        console.warn(`[IG insights] Cannot fetch shares — ${fbErr?.message || e.message} (code ${fbErr?.code}). Requires instagram_manage_insights permission.`);
+        insightsPermissionAvailable = false;
+        allMedia[0].share_count = 0;
+      }
+
+      // If permission is available, fetch the remaining media in batches of 10
+      if (insightsPermissionAvailable && allMedia.length > 1) {
+        const BATCH = 10;
+        for (let i = 1; i < allMedia.length; i += BATCH) {
+          const batch = allMedia.slice(i, i + BATCH);
+          await Promise.all(batch.map(async (media) => {
+            try {
+              const res = await axios.get(`${this.baseUrl}/${media.id}/insights`, {
+                params: { metric: 'shares', period: 'lifetime', access_token: accessToken }
+              });
+              const sharesEntry = (res.data.data || []).find(d => d.name === 'shares');
+              media.share_count =
+                sharesEntry?.total_value?.value ??
+                sharesEntry?.values?.[0]?.value ??
+                0;
+            } catch (e) {
+              const fbErr = e.response?.data?.error;
+              console.warn(`[IG insights] media ${media.id} shares failed: ${fbErr?.message || e.message}`);
+              media.share_count = 0;
+            }
+          }));
+        }
+      }
+    }
+
     return allMedia;
   }
 

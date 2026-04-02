@@ -14,6 +14,11 @@ function normalizeFacebookPost(post, connection) {
   const attachmentType = post.attachments?.data?.[0]?.type || post.attachments?.data?.[0]?.media_type;
   const isVideo = attachmentType === 'video' || attachmentType === 'video_inline';
   const contentType = isVideo ? 'video' : 'post';
+  const likeCount = post.reactions?.summary?.total_count ?? 0;
+  const shareCount = post.shares?.count ?? 0;
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[FB normalize] post ${post.id} → reactions raw:`, JSON.stringify(post.reactions ?? null), '| shares raw:', JSON.stringify(post.shares ?? null), '| likeCount:', likeCount, '| shareCount:', shareCount);
+  }
   return {
     platform: 'facebook',
     externalId: post.id,
@@ -24,7 +29,9 @@ function normalizeFacebookPost(post, connection) {
     permalink: post.permalink_url || null,
     mediaUrl: post.full_picture || null,
     mediaType: hasPicture ? 'image' : null,
-    contentType
+    contentType,
+    likeCount,
+    shareCount
   };
 }
 
@@ -35,6 +42,11 @@ function normalizeInstagramMedia(media, connection) {
   let contentType = 'post';
   if (media.media_type === 'VIDEO') contentType = 'reel';
   else if (media.media_type === 'CAROUSEL_ALBUM') contentType = 'carousel';
+  const likeCount = media.like_count ?? 0;
+  const shareCount = media.share_count ?? 0;
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[IG normalize] media ${media.id} → like_count:`, likeCount, '| share_count:', shareCount);
+  }
   return {
     platform: 'instagram',
     externalId: media.id,
@@ -45,14 +57,16 @@ function normalizeInstagramMedia(media, connection) {
     permalink: media.permalink || null,
     mediaUrl: media.media_url || null,
     mediaType: media.media_type === 'VIDEO' ? 'video' : media.media_type === 'CAROUSEL_ALBUM' ? 'carousel' : 'image',
-    contentType
+    contentType,
+    likeCount,
+    shareCount
   };
 }
 
 /**
  * @desc    Get stored platform posts from database
  * @route   GET /api/platform-posts
- * @query   platform    - required: 'facebook' | 'instagram' (returns [] when 'all' or missing)
+ * @query   platform    - optional: 'facebook' | 'instagram' | 'all' (default: all)
  * @query   page        - page number (default 1)
  * @query   limit       - page size (default 10)
  * @query   search      - text search on post caption/message
@@ -62,35 +76,20 @@ function normalizeInstagramMedia(media, connection) {
 exports.getPlatformPosts = async (req, res, next) => {
   try {
     const organizationId = req.user.organization?._id || req.user.organization;
-    const platformFilter = (req.query.platform || '').toLowerCase();
+    const platformFilter = (req.query.platform || 'all').toLowerCase();
     const searchTerm = (req.query.search || '').trim();
     const contentTypeFilter = (req.query.contentType || 'all').toLowerCase();
 
-    const emptyResponse = (extra = {}) => res.status(200).json({
-      success: true,
-      posts: [],
-      meta: { total: 0, platformFilter: platformFilter || 'all', lastSyncedAt: null, ...extra },
-      pagination: paginationMeta(0, 1, 10)
-    });
-
-    if (!platformFilter || platformFilter === 'all') return emptyResponse();
-    if (!['facebook', 'instagram'].includes(platformFilter)) return emptyResponse();
-
-    const hasConnection = await PlatformConnection.exists({
-      organization: organizationId,
-      platform: platformFilter,
-      isActive: true,
-      status: 'connected',
-      platformPageId: { $ne: null }
-    });
-
-    if (!hasConnection) return emptyResponse({ noConnection: true });
-
-    // Use default limit of 10 for this endpoint
     const { page, limit, skip } = parsePagination({ ...req.query, limit: req.query.limit || '10' });
 
     // Build query filter
-    const filter = { organization: organizationId, platform: platformFilter };
+    const filter = { organization: organizationId };
+
+    // Only add platform filter when a specific platform is requested
+    if (platformFilter && platformFilter !== 'all' && ['facebook', 'instagram'].includes(platformFilter)) {
+      filter.platform = platformFilter;
+    }
+
     if (searchTerm) {
       filter.text = { $regex: searchTerm, $options: 'i' };
     }
@@ -98,11 +97,14 @@ exports.getPlatformPosts = async (req, res, next) => {
       filter.contentType = contentTypeFilter;
     }
 
+    const matchStage = { organization: new mongoose.Types.ObjectId(organizationId) };
+    if (filter.platform) matchStage.platform = filter.platform;
+
     const [total, posts, lastSyncResult] = await Promise.all([
       PlatformPost.countDocuments(filter),
       PlatformPost.find(filter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       PlatformPost.aggregate([
-        { $match: { organization: new mongoose.Types.ObjectId(organizationId), platform: platformFilter } },
+        { $match: matchStage },
         { $group: { _id: null, lastSyncedAt: { $max: '$syncedAt' } } }
       ])
     ]);
@@ -111,15 +113,15 @@ exports.getPlatformPosts = async (req, res, next) => {
 
     // Fetch comment counts only for current page posts
     const externalIds = posts.map(p => p.externalId);
+    const commentCountFilter = {
+      organization: new mongoose.Types.ObjectId(organizationId),
+      type: 'comment',
+      'metadata.postId': { $in: externalIds }
+    };
+    if (filter.platform) commentCountFilter.platform = filter.platform;
+
     const commentCounts = externalIds.length > 0 ? await Interaction.aggregate([
-      {
-        $match: {
-          organization: new mongoose.Types.ObjectId(organizationId),
-          platform: platformFilter,
-          type: 'comment',
-          'metadata.postId': { $in: externalIds }
-        }
-      },
+      { $match: commentCountFilter },
       { $group: { _id: '$metadata.postId', count: { $sum: 1 } } }
     ]) : [];
     const countByPostId = Object.fromEntries(commentCounts.map(c => [c._id, c.count]));
@@ -135,6 +137,8 @@ exports.getPlatformPosts = async (req, res, next) => {
       mediaUrl: p.mediaUrl,
       mediaType: p.mediaType,
       contentType: p.contentType,
+      likeCount: p.likeCount ?? 0,
+      shareCount: p.shareCount ?? 0,
       commentCount: countByPostId[p.externalId] || 0
     }));
 
@@ -295,6 +299,8 @@ exports.syncPlatformPosts = async (req, res, next) => {
             mediaUrl: post.mediaUrl,
             mediaType: post.mediaType,
             contentType: post.contentType,
+            likeCount: post.likeCount ?? 0,
+            shareCount: post.shareCount ?? 0,
             syncedAt
           }
         },
@@ -303,11 +309,16 @@ exports.syncPlatformPosts = async (req, res, next) => {
       upserted++;
     }
 
+    const totalLikes = normalized.reduce((s, p) => s + (p.likeCount || 0), 0);
+    const totalShares = normalized.reduce((s, p) => s + (p.shareCount || 0), 0);
+    console.log(`[PlatformPosts] Sync complete: ${upserted} posts, total likes=${totalLikes}, total shares=${totalShares}`);
+
     res.status(200).json({
       success: true,
       synced: upserted,
       platform,
-      message: `Synced ${upserted} posts from ${platform}`
+      message: `Synced ${upserted} posts from ${platform}`,
+      debug: { totalLikes, totalShares }
     });
   } catch (error) {
     next(error);
