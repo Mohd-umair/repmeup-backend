@@ -31,11 +31,10 @@ const DEFAULT_SUBMENU_PACKS = [
         requiredPermissions: ['posts.read']
       },
       {
-        label: 'Published',
-        icon: '📋',
+        label: 'Content',
+        icon: '📚',
         route: '/app/content',
         order: 4,
-        queryParams: { view: 'published' },
         requiredRoles: ['admin', 'manager', 'agent'],
         requiredPermissions: ['posts.read']
       }

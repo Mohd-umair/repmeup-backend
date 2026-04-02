@@ -33,6 +33,26 @@ const logoUpload = multer({
 }).single('logo');
 
 /**
+ * Get the current authenticated user's organization
+ * GET /api/organizations/me
+ */
+exports.getMyOrganization = async (req, res, next) => {
+  try {
+    const orgId = req.user.organization?._id || req.user.organization;
+    const organization = await Organization.findById(orgId);
+
+    if (!organization) {
+      return res.status(404).json({ success: false, error: 'Organization not found' });
+    }
+
+    res.status(200).json({ success: true, data: organization });
+  } catch (error) {
+    console.error('Get my organization error:', error);
+    next(error);
+  }
+};
+
+/**
  * Get organization details
  * GET /api/organizations/:id
  */

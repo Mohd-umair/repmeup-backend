@@ -49,22 +49,33 @@ exports.getNotifications = async (req, res, next) => {
   }
 };
 
+/** Notification types that belong to the Inbox (social interactions). */
+const INBOX_TYPES = ['new_interaction', 'assignment', 'mention', 'escalation', 'response_received'];
+/** Notification types that belong to the Publish workflow (post review). */
+const PUBLISH_TYPES = ['post_pending_approval', 'post_approved', 'post_rejected'];
+
 /**
- * @desc    Get unread notification count
+ * @desc    Get unread notification count split by UI section
  * @route   GET /api/notifications/unread-count
  * @access  Private
  */
 exports.getUnreadCount = async (req, res, next) => {
   try {
-    const count = await Notification.countDocuments({
+    const base = {
       user: req.user._id,
       organization: req.user.organization._id,
       isRead: false
-    });
+    };
+
+    const [total, inboxCount, publishCount] = await Promise.all([
+      Notification.countDocuments(base),
+      Notification.countDocuments({ ...base, type: { $in: INBOX_TYPES } }),
+      Notification.countDocuments({ ...base, type: { $in: PUBLISH_TYPES } })
+    ]);
 
     res.status(200).json({
       success: true,
-      data: { count }
+      data: { count: total, inboxCount, publishCount }
     });
   } catch (error) {
     console.error('Get unread count error:', error);

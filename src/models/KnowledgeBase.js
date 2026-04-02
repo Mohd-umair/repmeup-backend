@@ -38,6 +38,14 @@ const knowledgeBaseSchema = new mongoose.Schema({
     required: true
   },
   
+  // Structured key-value fields (populated when created via the field editor)
+  templateFields: [
+    {
+      key:   { type: String, default: '' },
+      value: { type: String, default: '' }
+    }
+  ],
+
   // Tags for better organization
   tags: [String],
   

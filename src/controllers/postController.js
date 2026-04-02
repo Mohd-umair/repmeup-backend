@@ -2,6 +2,8 @@ const ScheduledPost = require('../models/ScheduledPost');
 const PlatformConnection = require('../models/PlatformConnection');
 const Media = require('../models/Media');
 const VideoJob = require('../models/VideoJob');
+const Notification = require('../models/Notification');
+const User = require('../models/User');
 const storageService = require('../services/storageService');
 const instagramService = require('../integrations/meta/instagramService');
 const facebookService = require('../integrations/meta/facebookService');
@@ -15,6 +17,7 @@ const fs = require('fs').promises;
 const crypto = require('crypto');
 const axios = require('axios');
 const { validateMedia, getRequirementsText } = require('../config/platformMediaRequirements');
+const { parsePagination, paginationMeta } = require('../utils/pagination');
 
 /** Image bytes for Facebook/LinkedIn when media is a public URL (S3/CDN) or local path */
 async function readImageBufferForPublish(mediaRef) {
@@ -85,6 +88,68 @@ const upload = multer({
     }
   }
 }).array('media', 10); // Support up to 10 files for carousel posts
+
+/**
+ * Notify all admin / manager users in an organization that a post is awaiting approval.
+ * Fires-and-forgets (non-blocking); errors are logged but never bubble up to callers.
+ */
+async function notifyAdminsOfPendingPost(organizationId, post, agentName) {
+  try {
+    const admins = await User.find({
+      organization: organizationId,
+      role: { $in: ['admin', 'manager', 'super_admin'] },
+      isActive: { $ne: false },
+      isDeleted: { $ne: true }
+    }).select('_id').lean();
+
+    if (!admins.length) return;
+
+    const platform = post.platform ? post.platform.charAt(0).toUpperCase() + post.platform.slice(1) : 'a platform';
+    const preview = post.content ? post.content.substring(0, 80) + (post.content.length > 80 ? '…' : '') : '';
+
+    const notifications = admins.map(admin => ({
+      user: admin._id,
+      organization: organizationId,
+      type: 'post_pending_approval',
+      title: 'New Post Awaiting Approval',
+      message: `${agentName} submitted a ${platform} post for review: "${preview}"`,
+      relatedTo: { model: 'ScheduledPost', id: post._id },
+      actionUrl: '/app/approval-queue',
+      deliveryMethod: ['in_app']
+    }));
+
+    await Notification.insertMany(notifications, { ordered: false });
+  } catch (err) {
+    console.error('[notifyAdminsOfPendingPost] Error creating notifications:', err.message);
+  }
+}
+
+/**
+ * Notify the post creator (agent) that their post has been approved or rejected.
+ * Fires-and-forgets (non-blocking).
+ */
+async function notifyAgentOfDecision(userId, organizationId, post, decision, rejectedReason) {
+  try {
+    const isApproved = decision === 'approved';
+    const platform = post.platform ? post.platform.charAt(0).toUpperCase() + post.platform.slice(1) : 'a platform';
+    const preview = post.content ? post.content.substring(0, 60) + (post.content.length > 60 ? '…' : '') : '';
+
+    await Notification.create({
+      user: userId,
+      organization: organizationId,
+      type: isApproved ? 'post_approved' : 'post_rejected',
+      title: isApproved ? 'Your Post Was Approved' : 'Your Post Was Rejected',
+      message: isApproved
+        ? `Your ${platform} post "${preview}" has been approved and is ready to publish.`
+        : `Your ${platform} post "${preview}" was rejected${rejectedReason ? `: "${rejectedReason}"` : '. You can edit and resubmit it.'}`,
+      relatedTo: { model: 'ScheduledPost', id: post._id },
+      actionUrl: '/app/approval-queue',
+      deliveryMethod: ['in_app']
+    });
+  } catch (err) {
+    console.error('[notifyAgentOfDecision] Error creating notification:', err.message);
+  }
+}
 
 /**
  * @desc    Generate post content with AI
@@ -768,7 +833,7 @@ exports.publishPost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds, mediaUrl } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds, mediaUrl, generatedBy } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -827,7 +892,8 @@ exports.publishPost = async (req, res) => {
         platform: platform.toLowerCase(),
         platformConnection: connection._id,
         content: content.trim(),
-        postType: postType || 'post'
+        postType: postType || 'post',
+        generatedBy: generatedBy === 'ai' ? 'ai' : 'human'
       };
 
       // Check if using media from library or uploading new media
@@ -1005,6 +1071,19 @@ exports.publishPost = async (req, res) => {
         }
       }
 
+      // Agent posts always require approval — redirect to pending_approval regardless of publish/schedule intent
+      if (req.user.role === 'agent') {
+        if (scheduledFor) postData.scheduledFor = new Date(scheduledFor);
+        postData.status = 'pending_approval';
+        const pendingPost = await ScheduledPost.create(postData);
+        notifyAdminsOfPendingPost(organizationId, pendingPost, req.user.name || req.user.email || 'An agent');
+        return res.status(201).json({
+          message: 'Post submitted for approval',
+          pendingApproval: true,
+          post: pendingPost
+        });
+      }
+
       // If scheduled for later, save and return
       if (scheduledFor) {
         postData.scheduledFor = new Date(scheduledFor);
@@ -1122,7 +1201,7 @@ exports.schedulePost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaUrl } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaUrl, generatedBy } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -1150,6 +1229,7 @@ exports.schedulePost = async (req, res) => {
         return res.status(404).json({ message: `No active ${platform} connection found` });
       }
 
+      const isAgent = req.user.role === 'agent';
       const postData = {
         organization: organizationId,
         user: userId,
@@ -1157,8 +1237,10 @@ exports.schedulePost = async (req, res) => {
         platformConnection: connection._id,
         content: content.trim(),
         scheduledFor: new Date(scheduledFor),
-        status: 'scheduled',
-        postType: postType || 'post'
+        // Agents cannot publish directly — store scheduledFor and route to approval
+        status: isAgent ? 'pending_approval' : 'scheduled',
+        postType: postType || 'post',
+        generatedBy: generatedBy === 'ai' ? 'ai' : 'human'
       };
 
       // Check if using media from library, AI-generated media URL, or uploading new media
@@ -1250,6 +1332,15 @@ exports.schedulePost = async (req, res) => {
 
       const scheduledPost = await ScheduledPost.create(postData);
 
+      if (isAgent) {
+        notifyAdminsOfPendingPost(organizationId, scheduledPost, req.user.name || req.user.email || 'An agent');
+        return res.status(201).json({
+          message: 'Post submitted for approval',
+          pendingApproval: true,
+          post: scheduledPost
+        });
+      }
+
       res.status(201).json({
         message: 'Post scheduled successfully',
         post: scheduledPost
@@ -1328,20 +1419,29 @@ exports.getScheduledPosts = async (req, res) => {
 exports.getPendingApprovalPosts = async (req, res) => {
   try {
     const organizationId = req.user.organization?._id || req.user.organization;
+    const { page, limit, skip } = parsePagination(req.query);
 
-    const posts = await ScheduledPost.find({
-      organization: organizationId,
-      status: 'pending_approval'
-    })
-      .sort({ createdAt: -1 })
-      .populate('platformConnection', 'platform platformPageId platformUsername')
-      .populate('user', 'name email')
-      .lean();
+    const filter = { organization: organizationId, status: 'pending_approval' };
+    // Agents may only view posts they created; admins/managers see all
+    if (req.user.role === 'agent') {
+      filter.user = req.user._id;
+    }
+
+    const [total, posts] = await Promise.all([
+      ScheduledPost.countDocuments(filter),
+      ScheduledPost.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('platformConnection', 'platform platformPageId platformUsername')
+        .populate('user', 'name email')
+        .lean()
+    ]);
 
     res.status(200).json({
       success: true,
       data: posts,
-      count: posts.length
+      pagination: paginationMeta(total, page, limit)
     });
   } catch (error) {
     console.error('Get pending approval posts error:', error);
@@ -1353,21 +1453,23 @@ exports.getPendingApprovalPosts = async (req, res) => {
 };
 
 /**
- * @desc    Approve a post (optionally set scheduledFor and status to scheduled)
+ * @desc    Approve a post.
+ *          - If scheduledFor is provided (by admin or already on the post) → schedule it.
+ *          - Otherwise → publish to the platform immediately.
  * @route   PATCH /api/posts/:id/approve
- * @access  Private
+ * @access  Private — admin, manager, super_admin only
  */
 exports.approvePost = async (req, res) => {
   try {
     const { id } = req.params;
-    const { scheduledFor } = req.body;
+    const { scheduledFor: scheduledForBody } = req.body;
     const organizationId = req.user.organization?._id || req.user.organization;
 
     const post = await ScheduledPost.findOne({
       _id: id,
       organization: organizationId,
       status: 'pending_approval'
-    });
+    }).populate('platformConnection');
 
     if (!post) {
       return res.status(404).json({
@@ -1376,31 +1478,97 @@ exports.approvePost = async (req, res) => {
       });
     }
 
-    post.status = scheduledFor ? 'scheduled' : 'draft';
     post.approvedBy = req.user._id;
     post.approvedAt = new Date();
-    if (scheduledFor) post.scheduledFor = new Date(scheduledFor);
+
+    // Resolve the effective schedule date:
+    // admin can override via request body, or keep the date the agent originally set
+    const effectiveScheduledFor = scheduledForBody
+      ? new Date(scheduledForBody)
+      : (post.scheduledFor ? new Date(post.scheduledFor) : null);
+
+    if (effectiveScheduledFor && effectiveScheduledFor > new Date()) {
+      // ── Schedule for later ──────────────────────────────────────────────
+      post.scheduledFor = effectiveScheduledFor;
+      post.status = 'scheduled';
+      await post.save();
+
+      await auditLogController.log(organizationId, 'post', post._id, 'approved', req.user._id,
+        { scheduledFor: post.scheduledFor, status: post.status });
+
+      notifyAgentOfDecision(post.user, organizationId, post, 'approved', null);
+
+      return res.status(200).json({ success: true, scheduled: true, data: post });
+    }
+
+    // ── Publish immediately ───────────────────────────────────────────────
+    const connection = post.platformConnection;
+    if (!connection) {
+      return res.status(400).json({
+        success: false,
+        message: 'Platform connection not found for this post. Cannot publish.'
+      });
+    }
+
+    post.status = 'publishing';
     await post.save();
 
-    await auditLogController.log(
-      organizationId,
-      'post',
-      post._id,
-      'approved',
-      req.user._id,
-      { scheduledFor: post.scheduledFor, status: post.status }
-    );
+    // Build a minimal req-like object needed by the publish helpers (media URL building)
+    const fakeReq = {
+      protocol: req.protocol || 'https',
+      get: (name) => name === 'host' ? req.get('host') : null
+    };
 
-    res.status(200).json({
-      success: true,
-      data: post
-    });
+    let result;
+    try {
+      switch (post.platform.toLowerCase()) {
+        case 'instagram':
+          result = await publishToInstagram(connection, post, fakeReq);
+          break;
+        case 'facebook':
+          result = await publishToFacebook(connection, post, fakeReq);
+          break;
+        case 'linkedin':
+          result = await publishToLinkedIn(connection, post);
+          break;
+        default:
+          post.status = 'failed';
+          post.error = `Publishing to ${post.platform} is not yet supported`;
+          await post.save();
+          return res.status(422).json({ success: false, message: post.error });
+      }
+
+      post.status = 'published';
+      post.publishedAt = new Date();
+      post.platformPostId = result.postId;
+      post.platformPostUrl = result.postUrl;
+      post.error = undefined;
+      await post.save();
+
+      await auditLogController.log(organizationId, 'post', post._id, 'approved', req.user._id,
+        { status: post.status, platformPostUrl: post.platformPostUrl });
+
+      notifyAgentOfDecision(post.user, organizationId, post, 'approved', null);
+
+      return res.status(200).json({
+        success: true,
+        published: true,
+        data: post,
+        platformPostUrl: result.postUrl
+      });
+    } catch (publishError) {
+      console.error('Approve+publish error:', publishError);
+      post.status = 'failed';
+      post.error = publishError.message;
+      await post.save();
+
+      const errBody = { success: false, message: 'Post approved but publishing failed', error: publishError.message };
+      if (publishError.platformError) errBody.platformError = publishError.platformError;
+      return res.status(500).json(errBody);
+    }
   } catch (error) {
     console.error('Approve post error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
@@ -1443,6 +1611,8 @@ exports.rejectPost = async (req, res) => {
       { reason: post.rejectedReason }
     );
 
+    notifyAgentOfDecision(post.user, organizationId, post, 'rejected', post.rejectedReason);
+
     res.status(200).json({
       success: true,
       data: post
@@ -1453,6 +1623,349 @@ exports.rejectPost = async (req, res) => {
       success: false,
       error: error.message
     });
+  }
+};
+
+/**
+ * @desc    Get an agent's full approval history (pending, rejected, and approved posts)
+ * @route   GET /api/posts/approval-history
+ * @access  Private (agents see their own; admins/managers see all org posts in workflow)
+ */
+exports.getApprovalHistory = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const { page, limit, skip } = parsePagination(req.query);
+
+    let filter;
+    if (req.user.role === 'agent') {
+      // Show all posts this agent sent through the approval workflow
+      filter = {
+        organization: organizationId,
+        user: req.user._id,
+        $or: [
+          { status: 'pending_approval' },
+          { status: 'rejected' },
+          { approvedBy: { $exists: true, $ne: null } }
+        ]
+      };
+    } else {
+      // Admin / manager — full history across the org
+      filter = {
+        organization: organizationId,
+        $or: [
+          { status: 'pending_approval' },
+          { status: 'rejected' },
+          { approvedBy: { $exists: true, $ne: null } }
+        ]
+      };
+    }
+
+    const [total, posts] = await Promise.all([
+      ScheduledPost.countDocuments(filter),
+      ScheduledPost.find(filter)
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('platformConnection', 'platform platformPageId platformUsername')
+        .populate('user', 'name email')
+        .populate('approvedBy', 'name')
+        .populate('rejectedBy', 'name')
+        .lean()
+    ]);
+
+    res.status(200).json({ success: true, data: posts, pagination: paginationMeta(total, page, limit) });
+  } catch (error) {
+    console.error('Get approval history error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * @desc    Admin/manager updates content and/or replaces media on a post pending approval
+ * @route   PATCH /api/posts/:id/update-pending
+ * @access  Private — admin, manager, super_admin
+ */
+exports.updatePendingPostByAdmin = (req, res) => {
+  upload(req, res, async function (err) {
+    if (err) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
+
+    const cleanupUploaded = async (files) => {
+      if (!files || !files.length) return;
+      for (const f of files) {
+        try {
+          await fs.unlink(f.path);
+        } catch (_) {}
+      }
+    };
+
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organization?._id || req.user.organization;
+      const content = req.body.content;
+      const files = req.files || [];
+
+      if (files.length > 1) {
+        await cleanupUploaded(files);
+        return res.status(400).json({
+          success: false,
+          message: 'Only one media file can be uploaded when replacing post media'
+        });
+      }
+
+      const mediaLibraryIdRaw = req.body.mediaLibraryId;
+      const hasLibraryMedia = !!(mediaLibraryIdRaw && String(mediaLibraryIdRaw).trim());
+
+      if (files.length === 1 && hasLibraryMedia) {
+        await cleanupUploaded(files);
+        return res.status(400).json({
+          success: false,
+          message: 'Send either an uploaded file or a mediaLibraryId, not both'
+        });
+      }
+
+      const hasContent = typeof content === 'string' && content.trim().length > 0;
+      const hasFile = files.length === 1;
+
+      if (!hasContent && !hasFile && !hasLibraryMedia) {
+        await cleanupUploaded(files);
+        return res.status(400).json({
+          success: false,
+          message: 'Provide updated content, a new media file, or a media library item'
+        });
+      }
+
+      const post = await ScheduledPost.findOne({
+        _id: id,
+        organization: organizationId,
+        status: 'pending_approval'
+      });
+
+      if (!post) {
+        await cleanupUploaded(files);
+        return res.status(404).json({
+          success: false,
+          message: 'Pending post not found'
+        });
+      }
+
+      if (hasContent) {
+        post.content = content.trim();
+      }
+
+      if (hasLibraryMedia) {
+        const libraryMedia = await Media.findOne({
+          _id: mediaLibraryIdRaw,
+          organization: organizationId
+        });
+
+        if (!libraryMedia) {
+          return res.status(404).json({
+            success: false,
+            message: 'Media not found in library or does not belong to your organization'
+          });
+        }
+
+        if (libraryMedia.mediaType === 'audio') {
+          return res.status(400).json({
+            success: false,
+            message: 'Select an image or video from the library'
+          });
+        }
+
+        const fileExtension = path.extname(libraryMedia.originalName || libraryMedia.filename || '');
+        const validation = validateMedia(
+          post.platform.toLowerCase(),
+          libraryMedia.mediaType,
+          libraryMedia.size,
+          fileExtension,
+          post.postType || 'post'
+        );
+
+        if (!validation.valid) {
+          return res.status(400).json({
+            success: false,
+            message: 'Media validation failed',
+            errors: validation.errors,
+            warnings: validation.warnings
+          });
+        }
+
+        await removeStoredMediaRef(post.mediaStoragePath);
+        if (Array.isArray(post.mediaStoragePaths) && post.mediaStoragePaths.length) {
+          for (const p of post.mediaStoragePaths) {
+            await removeStoredMediaRef(p);
+          }
+        }
+
+        const newRef = libraryMedia.publicUrl || storageService.resolvePublicUrl(libraryMedia.filePath, req);
+        const mt = libraryMedia.mediaType === 'video' ? 'video' : 'image';
+        post.mediaStoragePath = newRef;
+        post.mediaType = mt;
+        post.mediaStoragePaths = [newRef];
+        post.mediaTypes = [mt];
+        post.mediaUrl = null;
+        post.mediaLibraryId = libraryMedia._id;
+        post.mediaLibraryIds = [];
+      } else if (hasFile) {
+        const file = files[0];
+        const mediaType = file.mimetype.startsWith('image') ? 'image' : 'video';
+        const fileExtension = path.extname(file.originalname);
+
+        const validation = validateMedia(
+          post.platform.toLowerCase(),
+          mediaType,
+          file.size,
+          fileExtension,
+          post.postType || 'post'
+        );
+
+        if (!validation.valid) {
+          await cleanupUploaded(files);
+          return res.status(400).json({
+            success: false,
+            message: 'Media validation failed',
+            errors: validation.errors,
+            warnings: validation.warnings
+          });
+        }
+
+        await removeStoredMediaRef(post.mediaStoragePath);
+        if (Array.isArray(post.mediaStoragePaths) && post.mediaStoragePaths.length) {
+          for (const p of post.mediaStoragePaths) {
+            await removeStoredMediaRef(p);
+          }
+        }
+
+        let newRef;
+        if (storageService.isS3Configured()) {
+          const buf = await fs.readFile(file.path);
+          const key = storageService.buildPostsKey(organizationId, path.basename(file.path));
+          const { publicUrl } = await storageService.uploadBuffer(key, buf, file.mimetype);
+          try {
+            await fs.unlink(file.path);
+          } catch (e) {
+            console.warn('Temp file unlink after S3:', e.message);
+          }
+          newRef = publicUrl;
+        } else {
+          newRef = file.path;
+        }
+
+        post.mediaStoragePath = newRef;
+        post.mediaType = mediaType;
+        post.mediaStoragePaths = [newRef];
+        post.mediaTypes = [mediaType];
+        post.mediaUrl = null;
+        post.mediaLibraryId = null;
+        post.mediaLibraryIds = [];
+      }
+
+      await post.save();
+      const lean = await ScheduledPost.findById(post._id)
+        .populate('platformConnection', 'platform platformPageId platformUsername')
+        .populate('user', 'name email')
+        .lean();
+
+      res.status(200).json({ success: true, data: lean });
+    } catch (error) {
+      console.error('Update pending post error:', error);
+      await cleanupUploaded(req.files || []);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+};
+
+/**
+ * @desc    Agent edits a rejected post and resubmits for approval
+ * @route   PATCH /api/posts/:id/resubmit
+ * @access  Private (only the post creator)
+ */
+exports.resubmitPost = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content, mediaLibraryId } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ success: false, message: 'Content is required' });
+    }
+
+    const post = await ScheduledPost.findOne({
+      _id: id,
+      organization: organizationId,
+      user: req.user._id,
+      status: 'rejected'
+    });
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rejected post not found or you are not the owner'
+      });
+    }
+
+    // Keep original content for diff; update content and reset approval fields
+    if (!post.originalContent) post.originalContent = post.content;
+    post.content = content.trim();
+
+    // Optional media replacement from library
+    if (mediaLibraryId && String(mediaLibraryId).trim()) {
+      const libraryMedia = await Media.findOne({
+        _id: mediaLibraryId,
+        organization: organizationId
+      });
+
+      if (!libraryMedia) {
+        return res.status(404).json({
+          success: false,
+          message: 'Media not found in library or does not belong to your organization'
+        });
+      }
+
+      if (libraryMedia.mediaType === 'audio') {
+        return res.status(400).json({
+          success: false,
+          message: 'Select an image or video from the library'
+        });
+      }
+
+      await removeStoredMediaRef(post.mediaStoragePath);
+      if (Array.isArray(post.mediaStoragePaths) && post.mediaStoragePaths.length) {
+        for (const p of post.mediaStoragePaths) {
+          await removeStoredMediaRef(p);
+        }
+      }
+
+      const newRef = libraryMedia.publicUrl || storageService.resolvePublicUrl(libraryMedia.filePath, req);
+      const mt = libraryMedia.mediaType === 'video' ? 'video' : 'image';
+      post.mediaStoragePath = newRef;
+      post.mediaType = mt;
+      post.mediaStoragePaths = [newRef];
+      post.mediaTypes = [mt];
+      post.mediaUrl = null;
+      post.mediaLibraryId = libraryMedia._id;
+      post.mediaLibraryIds = [];
+    }
+
+    post.status = 'pending_approval';
+    post.rejectedBy = undefined;
+    post.rejectedAt = undefined;
+    post.rejectedReason = undefined;
+    await post.save();
+
+    notifyAdminsOfPendingPost(organizationId, post, req.user.name || req.user.email || 'An agent');
+
+    res.status(200).json({
+      success: true,
+      message: 'Post resubmitted for approval',
+      pendingApproval: true,
+      data: post
+    });
+  } catch (error) {
+    console.error('Resubmit post error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
@@ -1542,19 +2055,24 @@ exports.sendToApproval = async (req, res) => {
 exports.getPublishedPosts = async (req, res) => {
   try {
     const organizationId = req.user.organization?._id || req.user.organization;
+    const { page, limit, skip } = parsePagination(req.query);
 
-    const posts = await ScheduledPost.find({
-      organization: organizationId,
-      status: 'published'
-    })
-      .sort({ publishedAt: -1 })
-      .populate('platformConnection', 'platform platformPageId platformUsername')
-      .lean();
+    const filter = { organization: organizationId, status: 'published' };
 
-    res.status(200).json({ posts });
+    const [total, posts] = await Promise.all([
+      ScheduledPost.countDocuments(filter),
+      ScheduledPost.find(filter)
+        .sort({ publishedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('platformConnection', 'platform platformPageId platformUsername')
+        .lean()
+    ]);
+
+    res.status(200).json({ success: true, data: posts, pagination: paginationMeta(total, page, limit) });
   } catch (error) {
     console.error('Get published posts error:', error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 
@@ -1630,16 +2148,21 @@ exports.deleteScheduledPost = async (req, res) => {
 exports.getDraftPosts = async (req, res) => {
   try {
     const organizationId = req.user.organization?._id || req.user.organization;
+    const { page, limit, skip } = parsePagination(req.query);
 
-    const posts = await ScheduledPost.find({
-      organization: organizationId,
-      status: 'draft'
-    })
-      .sort({ createdAt: -1 })
-      .populate('platformConnection', 'platform platformPageId platformUsername')
-      .lean();
+    const filter = { organization: organizationId, status: 'draft' };
 
-    res.status(200).json({ success: true, data: posts, count: posts.length });
+    const [total, posts] = await Promise.all([
+      ScheduledPost.countDocuments(filter),
+      ScheduledPost.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('platformConnection', 'platform platformPageId platformUsername')
+        .lean()
+    ]);
+
+    res.status(200).json({ success: true, data: posts, pagination: paginationMeta(total, page, limit) });
   } catch (error) {
     console.error('Get draft posts error:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -1673,6 +2196,36 @@ exports.updateDraft = async (req, res) => {
     res.status(200).json({ success: true, data: draft });
   } catch (error) {
     console.error('Update draft error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * @desc    Move an existing draft to pending_approval (Send to Approval Queue)
+ * @route   PATCH /api/posts/drafts/:id/send-to-approval
+ * @access  Private
+ */
+exports.sendDraftToApproval = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const { id } = req.params;
+
+    const draft = await ScheduledPost.findOne({
+      _id: id,
+      organization: organizationId,
+      status: 'draft'
+    });
+
+    if (!draft) {
+      return res.status(404).json({ success: false, message: 'Draft not found' });
+    }
+
+    draft.status = 'pending_approval';
+    await draft.save();
+
+    res.status(200).json({ success: true, data: draft, message: 'Draft sent for approval.' });
+  } catch (error) {
+    console.error('Send draft to approval error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -1780,6 +2333,20 @@ exports.publishDraft = async (req, res) => {
         code: 'PLATFORM_NOT_IMPLEMENTED',
         message: 'Direct YouTube publishing is coming soon. For now, download your video and upload it via YouTube Studio.',
         platform: 'youtube'
+      });
+    }
+
+    // Agent posts require admin approval before publishing
+    if (req.user.role === 'agent') {
+      draft.status = 'pending_approval';
+      await draft.save();
+      const orgId = req.user.organization?._id || req.user.organization;
+      notifyAdminsOfPendingPost(orgId, draft, req.user.name || req.user.email || 'An agent');
+      return res.status(200).json({
+        success: true,
+        message: 'Post submitted for approval',
+        pendingApproval: true,
+        data: draft
       });
     }
 

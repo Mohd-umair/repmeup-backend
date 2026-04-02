@@ -11,6 +11,10 @@ router.use('/logos', express.static(path.join(__dirname, '../../uploads/logos'))
 // All organization routes require authentication
 router.use(protect);
 
+// Get the current user's organization — must be declared before /:id to prevent
+// Express routing "me" as a MongoDB ObjectId parameter
+router.get('/me', organizationController.getMyOrganization);
+
 // Get organization details
 router.get('/:id', organizationController.getOrganization);
 

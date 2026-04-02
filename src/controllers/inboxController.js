@@ -1605,11 +1605,21 @@ exports.aiAssist = async (req, res, next) => {
 
     // Load knowledge base entries for context
     const KnowledgeBase = require('../models/KnowledgeBase');
-    const { entries: kbEntries } = await aiService.searchKnowledgeBase(
+    const { entries: kbEntries, fromFallback: kbFallback } = await aiService.searchKnowledgeBase(
       organizationId,
       interaction.content,
       5
     );
+    // Track real (non-fallback) matches so usage stats stay accurate
+    if (!kbFallback && kbEntries && kbEntries.length > 0) {
+      for (const kb of kbEntries) {
+        try {
+          await kb.incrementUsage();
+        } catch (usageErr) {
+          console.error('Error incrementing KB usage (aiAssist):', usageErr);
+        }
+      }
+    }
     const kbContext = kbEntries && kbEntries.length > 0
       ? kbEntries.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
       : '';
@@ -1744,11 +1754,21 @@ exports.aiAssistRegenerate = async (req, res, next) => {
     const chatContext = conversationContext.join('\n');
 
     const KnowledgeBase = require('../models/KnowledgeBase');
-    const { entries: kbEntries } = await aiService.searchKnowledgeBase(
+    const { entries: kbEntries, fromFallback: kbFallback } = await aiService.searchKnowledgeBase(
       organizationId,
       interaction.content,
       5
     );
+    // Track real (non-fallback) matches so usage stats stay accurate
+    if (!kbFallback && kbEntries && kbEntries.length > 0) {
+      for (const kb of kbEntries) {
+        try {
+          await kb.incrementUsage();
+        } catch (usageErr) {
+          console.error('Error incrementing KB usage (aiAssistRegenerate):', usageErr);
+        }
+      }
+    }
     const kbContext = kbEntries && kbEntries.length > 0
       ? kbEntries.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
       : '';

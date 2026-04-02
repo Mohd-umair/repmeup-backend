@@ -4,6 +4,7 @@ const PlatformPost = require('../models/PlatformPost');
 const Interaction = require('../models/Interaction');
 const facebookService = require('../integrations/meta/facebookService');
 const instagramService = require('../integrations/meta/instagramService');
+const { parsePagination, paginationMeta } = require('../utils/pagination');
 
 /**
  * Normalize a Facebook feed post to unified shape (for DB storage).
@@ -51,31 +52,30 @@ function normalizeInstagramMedia(media, connection) {
 /**
  * @desc    Get stored platform posts from database
  * @route   GET /api/platform-posts
- * @query   platform - required for data: 'facebook' | 'instagram' (returns [] when 'all' or missing)
+ * @query   platform    - required: 'facebook' | 'instagram' (returns [] when 'all' or missing)
+ * @query   page        - page number (default 1)
+ * @query   limit       - page size (default 10)
+ * @query   search      - text search on post caption/message
+ * @query   contentType - filter by content type: post | reel | video | carousel | story | all
  * @access  Private
  */
 exports.getPlatformPosts = async (req, res, next) => {
   try {
     const organizationId = req.user.organization?._id || req.user.organization;
     const platformFilter = (req.query.platform || '').toLowerCase();
+    const searchTerm = (req.query.search || '').trim();
+    const contentTypeFilter = (req.query.contentType || 'all').toLowerCase();
 
-    if (!platformFilter || platformFilter === 'all') {
-      return res.status(200).json({
-        success: true,
-        posts: [],
-        meta: { total: 0, platformFilter: platformFilter || 'all' }
-      });
-    }
+    const emptyResponse = (extra = {}) => res.status(200).json({
+      success: true,
+      posts: [],
+      meta: { total: 0, platformFilter: platformFilter || 'all', lastSyncedAt: null, ...extra },
+      pagination: paginationMeta(0, 1, 10)
+    });
 
-    if (!['facebook', 'instagram'].includes(platformFilter)) {
-      return res.status(200).json({
-        success: true,
-        posts: [],
-        meta: { total: 0, platformFilter }
-      });
-    }
+    if (!platformFilter || platformFilter === 'all') return emptyResponse();
+    if (!['facebook', 'instagram'].includes(platformFilter)) return emptyResponse();
 
-    // Return empty if no active connection exists for this platform
     const hasConnection = await PlatformConnection.exists({
       organization: organizationId,
       platform: platformFilter,
@@ -84,21 +84,32 @@ exports.getPlatformPosts = async (req, res, next) => {
       platformPageId: { $ne: null }
     });
 
-    if (!hasConnection) {
-      return res.status(200).json({
-        success: true,
-        posts: [],
-        meta: { total: 0, platformFilter, noConnection: true }
-      });
+    if (!hasConnection) return emptyResponse({ noConnection: true });
+
+    // Use default limit of 10 for this endpoint
+    const { page, limit, skip } = parsePagination({ ...req.query, limit: req.query.limit || '10' });
+
+    // Build query filter
+    const filter = { organization: organizationId, platform: platformFilter };
+    if (searchTerm) {
+      filter.text = { $regex: searchTerm, $options: 'i' };
+    }
+    if (contentTypeFilter && contentTypeFilter !== 'all') {
+      filter.contentType = contentTypeFilter;
     }
 
-    const posts = await PlatformPost.find({
-      organization: organizationId,
-      platform: platformFilter
-    })
-      .sort({ postedAt: -1 })
-      .lean();
+    const [total, posts, lastSyncResult] = await Promise.all([
+      PlatformPost.countDocuments(filter),
+      PlatformPost.find(filter).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
+      PlatformPost.aggregate([
+        { $match: { organization: new mongoose.Types.ObjectId(organizationId), platform: platformFilter } },
+        { $group: { _id: null, lastSyncedAt: { $max: '$syncedAt' } } }
+      ])
+    ]);
 
+    const lastSyncedAt = lastSyncResult[0]?.lastSyncedAt || null;
+
+    // Fetch comment counts only for current page posts
     const externalIds = posts.map(p => p.externalId);
     const commentCounts = externalIds.length > 0 ? await Interaction.aggregate([
       {
@@ -112,12 +123,6 @@ exports.getPlatformPosts = async (req, res, next) => {
       { $group: { _id: '$metadata.postId', count: { $sum: 1 } } }
     ]) : [];
     const countByPostId = Object.fromEntries(commentCounts.map(c => [c._id, c.count]));
-
-    const [lastSyncResult] = await PlatformPost.aggregate([
-      { $match: { organization: new mongoose.Types.ObjectId(organizationId), platform: platformFilter } },
-      { $group: { _id: null, lastSyncedAt: { $max: '$syncedAt' } } }
-    ]);
-    const lastSyncedAt = lastSyncResult?.lastSyncedAt || null;
 
     const formatted = posts.map(p => ({
       platform: p.platform,
@@ -136,7 +141,8 @@ exports.getPlatformPosts = async (req, res, next) => {
     res.status(200).json({
       success: true,
       posts: formatted,
-      meta: { total: formatted.length, platformFilter, lastSyncedAt }
+      meta: { total, platformFilter, lastSyncedAt },
+      pagination: paginationMeta(total, page, limit)
     });
   } catch (error) {
     next(error);
