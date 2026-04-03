@@ -82,8 +82,33 @@ exports.getPlatformPosts = async (req, res, next) => {
 
     const { page, limit, skip } = parsePagination({ ...req.query, limit: req.query.limit || '10' });
 
+    // Resolve active platform connections for this org — only show posts from connected accounts
+    const activeConnectionQuery = {
+      organization: organizationId,
+      isActive: true,
+      status: 'connected'
+    };
+    if (platformFilter && platformFilter !== 'all') {
+      activeConnectionQuery.platform = platformFilter;
+    }
+    const activeConnections = await PlatformConnection.find(activeConnectionQuery).select('_id').lean();
+    const activeConnectionIds = activeConnections.map(c => c._id);
+
+    // If no connected accounts exist for this filter, return early with empty result
+    if (activeConnectionIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        posts: [],
+        meta: { total: 0, platformFilter, lastSyncedAt: null, noActiveConnections: true },
+        pagination: paginationMeta(0, 1, limit)
+      });
+    }
+
     // Build query filter
-    const filter = { organization: organizationId };
+    const filter = {
+      organization: organizationId,
+      platformConnection: { $in: activeConnectionIds }
+    };
 
     // Only add platform filter when a specific platform is requested
     if (platformFilter && platformFilter !== 'all' && ['facebook', 'instagram'].includes(platformFilter)) {
@@ -97,7 +122,10 @@ exports.getPlatformPosts = async (req, res, next) => {
       filter.contentType = contentTypeFilter;
     }
 
-    const matchStage = { organization: new mongoose.Types.ObjectId(organizationId) };
+    const matchStage = {
+      organization: new mongoose.Types.ObjectId(organizationId),
+      platformConnection: { $in: activeConnectionIds }
+    };
     if (filter.platform) matchStage.platform = filter.platform;
 
     const [total, posts, lastSyncResult] = await Promise.all([
