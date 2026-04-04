@@ -130,12 +130,22 @@ const planSchema = new mongoose.Schema({
   stripePriceId: {
     type: String,
     trim: true,
-    // Stripe Price ID for this plan
   },
   stripeProductId: {
     type: String,
     trim: true,
-    // Stripe Product ID for this plan
+  },
+
+  // Razorpay integration
+  razorpayPlanId: {
+    type: String,
+    trim: true,
+    // Razorpay Plan ID (e.g. plan_xxx) — created in Razorpay dashboard by super admin
+  },
+  priceInr: {
+    type: Number,
+    // Monthly price in INR paise (e.g. 199900 = ₹1999/mo); required for Razorpay subscriptions
+    default: 0,
   },
   
   // Trial settings

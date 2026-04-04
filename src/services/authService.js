@@ -400,6 +400,81 @@ class AuthService {
     }
     return [];
   }
+
+  /**
+   * Generate & store a 6-digit OTP, then email it.
+   * Rate-limited to 1 request per 60 seconds per email.
+   */
+  async sendLoginOtp(email) {
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+    // Always respond with success to avoid user enumeration attacks.
+    // If no account exists we send nothing but don't error.
+    if (!user || !user.isActive || user.deletedAt) return;
+
+    // Rate limit: block if existing OTP was sent less than 60 seconds ago
+    const now = new Date();
+    if (
+      user.loginOtpExpires &&
+      user.loginOtpExpires > new Date(now.getTime() - 9 * 60 * 1000) // within last 9 min
+    ) {
+      // OTP already sent and still fresh — resend is allowed after 60 s
+      const sentAgo = now - (user.loginOtpExpires - 10 * 60 * 1000);
+      if (sentAgo < 60 * 1000) {
+        throw new Error('Please wait a moment before requesting another code.');
+      }
+    }
+
+    // Generate cryptographically random 6-digit OTP
+    const otp = String(crypto.randomInt(100000, 999999));
+
+    // Hash before storing (plain text is only in the email)
+    const hashedOtp = crypto.createHash('sha256').update(otp).digest('hex');
+
+    user.loginOtpCode = hashedOtp;
+    user.loginOtpExpires = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes
+    await user.save({ validateBeforeSave: false });
+
+    await emailService.sendLoginOtpEmail(email, otp, user.firstName);
+  }
+
+  /**
+   * Verify OTP and return auth tokens.
+   */
+  async verifyLoginOtp(email, otp) {
+    const user = await User.findOne({ email: email.toLowerCase().trim() })
+      .select('+loginOtpCode +loginOtpExpires')
+      .populate('organization');
+
+    if (!user || !user.isActive || user.deletedAt) {
+      throw new Error('Invalid or expired code.');
+    }
+
+    if (!user.loginOtpCode || !user.loginOtpExpires) {
+      throw new Error('No active code found. Please request a new one.');
+    }
+
+    if (user.loginOtpExpires < new Date()) {
+      throw new Error('This code has expired. Please request a new one.');
+    }
+
+    const hashedInput = crypto.createHash('sha256').update(String(otp)).digest('hex');
+    if (hashedInput !== user.loginOtpCode) {
+      throw new Error('Incorrect code. Please try again.');
+    }
+
+    // Consume the OTP
+    user.loginOtpCode = undefined;
+    user.loginOtpExpires = undefined;
+    user.isEmailVerified = true;
+    user.lastLogin = new Date();
+    await user.save({ validateBeforeSave: false });
+
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    return { token, refreshToken, user };
+  }
 }
 
 module.exports = new AuthService();

@@ -12,6 +12,10 @@ router.post('/login', validateLogin, authController.login);
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password', authController.resetPassword);
 
+// Passwordless login via email OTP
+router.post('/send-otp', authController.sendLoginOtp);
+router.post('/verify-otp', authController.verifyLoginOtp);
+
 // Protected routes
 router.get('/me', protect, authController.getMe);
 router.put('/profile', protect, authController.updateProfile);

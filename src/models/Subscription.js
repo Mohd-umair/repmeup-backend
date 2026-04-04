@@ -83,7 +83,7 @@ const subscriptionSchema = new mongoose.Schema({
   // Billing status
   status: {
     type: String,
-    enum: ['active', 'trialing', 'past_due', 'cancelled', 'paused'],
+    enum: ['active', 'trialing', 'past_due', 'cancelled', 'paused', 'pending_payment'],
     default: 'active'
   },
   
@@ -100,6 +100,12 @@ const subscriptionSchema = new mongoose.Schema({
   // Payment information
   stripeCustomerId: String,
   stripeSubscriptionId: String,
+
+  // Razorpay integration
+  razorpaySubscriptionId: String,
+  razorpayCustomerId: String,
+  razorpayNextBillingAt: Date,
+
   paymentMethod: {
     type: {
       type: String,
@@ -131,6 +137,12 @@ const subscriptionSchema = new mongoose.Schema({
     reason: String
   }],
   
+  // Downgrade scheduled at period end (set planId here; applied by subscription.completed webhook)
+  pendingDowngradePlanId: {
+    type: String,
+    default: null
+  },
+
   // Cancellation
   cancelledAt: Date,
   cancelledBy: {

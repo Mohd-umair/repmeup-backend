@@ -82,6 +82,10 @@ const userSchema = new mongoose.Schema({
   emailVerificationToken: String,
   passwordResetToken: String,
   passwordResetExpires: Date,
+
+  // Email OTP login (6-digit, expires in 10 minutes)
+  loginOtpCode: { type: String, select: false },
+  loginOtpExpires: { type: Date, select: false },
   lastLogin: Date,
   preferences: {
     notifications: {

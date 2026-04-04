@@ -41,7 +41,10 @@ app.use(cors({
   credentials: true
 }));
 
-// Body parser
+// Razorpay webhook — MUST be registered before express.json() to receive raw Buffer for HMAC verification
+app.use('/api/razorpay', require('./routes/razorpay'));
+
+// Body parser (applied after Razorpay webhook so its raw middleware is not overridden)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
