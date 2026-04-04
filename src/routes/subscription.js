@@ -24,4 +24,7 @@ router.post('/upgrade', subscriptionController.upgradePlan);
 // Cancel subscription (admin only)
 router.post('/cancel', subscriptionController.cancelSubscription);
 
+// Reactivate a subscription scheduled for cancellation at period end
+router.post('/reactivate', subscriptionController.reactivateSubscription);
+
 module.exports = router;

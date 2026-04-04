@@ -37,6 +37,7 @@ router.delete('/menus/:id', superAdminMenuController.deleteMenu);
 router.post('/menus/bootstrap-defaults', superAdminMenuController.bootstrapDefaultSubmenus);
 
 router.get('/plans', superAdminController.listPlans);
+router.get('/transactions', superAdminController.listTransactions);
 router.get('/dashboard/stats', superAdminController.getDashboardStats);
 router.get('/organizations', superAdminController.listOrganizations);
 router.post(

@@ -221,6 +221,63 @@ exports.forgotPassword = async (req, res, next) => {
   }
 };
 
+// @desc    Send 6-digit OTP to email for passwordless login
+// @route   POST /api/auth/send-otp
+// @access  Public
+exports.sendLoginOtp = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required.' });
+    }
+    // Always 200 to avoid user enumeration
+    await authService.sendLoginOtp(email);
+    res.status(200).json({ success: true, message: 'If an account exists, a login code has been sent.' });
+  } catch (error) {
+    if (error.message.includes('Please wait')) {
+      return res.status(429).json({ success: false, error: error.message });
+    }
+    next(error);
+  }
+};
+
+// @desc    Verify OTP and issue auth tokens
+// @route   POST /api/auth/verify-otp
+// @access  Public
+exports.verifyLoginOtp = async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, error: 'Email and OTP are required.' });
+    }
+
+    const result = await authService.verifyLoginOtp(email, otp);
+
+    const orgId = result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'login_otp',
+      path: '/api/auth/verify-otp',
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        token: result.token,
+        refreshToken: result.refreshToken,
+        user: result.user
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+};
+
 // @desc    Reset password using token
 // @route   POST /api/auth/reset-password
 // @access  Public

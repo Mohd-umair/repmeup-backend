@@ -269,6 +269,66 @@ class EmailService {
       html
     });
   }
+
+  /**
+   * Send a 6-digit OTP for passwordless login.
+   */
+  async sendLoginOtpEmail(email, otp, firstName) {
+    const displayName = firstName || email.split('@')[0];
+    const subject = `${otp} — Your RepMeUp login code`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head><meta charset="UTF-8"></head>
+      <body style="margin:0;padding:0;background-color:#0a0a0a;font-family:Arial,Helvetica,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" style="padding:40px 20px;">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;">
+                <!-- Header -->
+                <tr>
+                  <td style="background-color:#0a0a0a;padding:32px 36px;text-align:center;">
+                    <div style="display:inline-block;background-color:#c8f135;padding:12px 24px;border-radius:10px;">
+                      <span style="font-size:20px;font-weight:900;color:#0a0a0a;letter-spacing:-0.5px;">RepMeUp</span>
+                    </div>
+                  </td>
+                </tr>
+                <!-- Body -->
+                <tr>
+                  <td style="padding:36px 36px 28px;">
+                    <h2 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#0a0a0a;">Your login code</h2>
+                    <p style="margin:0 0 28px;color:#555;font-size:15px;line-height:1.6;">
+                      Hi ${displayName}, use the code below to sign in to RepMeUp. This code expires in <strong>10 minutes</strong>.
+                    </p>
+                    <!-- OTP Box -->
+                    <div style="background-color:#f4f4f4;border:2px solid #c8f135;border-radius:14px;padding:28px;text-align:center;margin-bottom:28px;">
+                      <span style="font-size:48px;font-weight:900;letter-spacing:16px;color:#0a0a0a;font-family:'Courier New',monospace;">${otp}</span>
+                    </div>
+                    <p style="margin:0;color:#888;font-size:13px;line-height:1.6;">
+                      If you didn't request this code, you can safely ignore this email. Someone may have typed your email by mistake.
+                    </p>
+                    <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">
+                      For security, never share this code with anyone — RepMeUp will never ask for it.
+                    </p>
+                  </td>
+                </tr>
+                <!-- Footer -->
+                <tr>
+                  <td style="background-color:#f9f9f9;padding:16px 36px;text-align:center;border-top:1px solid #eee;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">© ${new Date().getFullYear()} RepMeUp. All rights reserved.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    return this.sendEmail({ to: email, subject, html });
+  }
 }
 
 module.exports = new EmailService();

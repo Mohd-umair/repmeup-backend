@@ -1,4 +1,5 @@
 const superAdminService = require('../services/superAdminService');
+const Transaction = require('../models/Transaction');
 
 /**
  * GET /api/super-admin/plans
@@ -189,6 +190,58 @@ exports.softDeleteUser = async (req, res, next) => {
         error: error.message
       });
     }
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/transactions
+ * Query params:
+ *   type    — filter by transaction type: order | payment | renewal | failed
+ *   status  — filter by status: pending | completed | failed
+ *   search  — partial match on organizationName (case-insensitive)
+ *   page    — page number (default 1)
+ *   limit   — page size (default 50, max 100)
+ */
+exports.listTransactions = async (req, res, next) => {
+  try {
+    const page  = Math.max(1, parseInt(req.query.page,  10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const skip  = (page - 1) * limit;
+
+    const filter = {};
+    if (req.query.type)   filter.type   = req.query.type;
+    // Payments tab: exclude 'order' type so only payment/renewal/failed events are shown
+    if (req.query.excludeOrders === 'true') filter.type = { $ne: 'order' };
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.search) {
+      filter.organizationName = { $regex: req.query.search, $options: 'i' };
+    }
+
+    const [items, total] = await Promise.all([
+      Transaction.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('organization', 'name slug')
+        .populate('user', 'firstName lastName email')
+        .lean(),
+      Transaction.countDocuments(filter)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        items,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+  } catch (error) {
     next(error);
   }
 };

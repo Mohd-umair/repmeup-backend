@@ -7,6 +7,7 @@ const User = require('../models/User');
 const Plan = require('../models/Plan');
 const UserActivityLog = require('../models/UserActivityLog');
 const PlatformConnection = require('../models/PlatformConnection');
+const Subscription = require('../models/Subscription');
 
 const PLAN_ADMIN_SELECT =
   'planId name description tier price billingCycle limits features badge badgeColor highlightColor isActive isPublic displayOrder trialDays stripePriceId stripeProductId createdAt updatedAt';
@@ -124,13 +125,44 @@ class SuperAdminService {
       throw err;
     }
 
-    const userCount = await User.countDocuments({ organization: id, deletedAt: null });
-    const connectionCount = await PlatformConnection.countDocuments({
-      organization: id,
-      isActive: true
-    });
+    const [userCount, connectionCount, subscription] = await Promise.all([
+      User.countDocuments({ organization: id, deletedAt: null }),
+      PlatformConnection.countDocuments({ organization: id, isActive: true }),
+      Subscription.findOne({ organization: id })
+        .select(
+          'planId planName tier status billingCycle ' +
+          'currentPeriodStart currentPeriodEnd razorpayNextBillingAt ' +
+          'cancelAtPeriodEnd cancelledAt cancellationReason ' +
+          'pendingDowngradePlanId planHistory razorpaySubscriptionId'
+        )
+        .lean()
+    ]);
 
-    return { ...org, _meta: { userCount, connectionCount } };
+    const subData = subscription
+      ? {
+          planId: subscription.planId,
+          planName: subscription.planName,
+          tier: subscription.tier,
+          status: subscription.status,
+          billingCycle: subscription.billingCycle,
+          currentPeriodStart: subscription.currentPeriodStart ?? null,
+          currentPeriodEnd: subscription.currentPeriodEnd ?? null,
+          razorpayNextBillingAt: subscription.razorpayNextBillingAt ?? null,
+          razorpaySubscriptionId: subscription.razorpaySubscriptionId ?? null,
+          cancelAtPeriodEnd: subscription.cancelAtPeriodEnd ?? false,
+          cancelledAt: subscription.cancelledAt ?? null,
+          cancellationReason: subscription.cancellationReason ?? null,
+          pendingDowngradePlanId: subscription.pendingDowngradePlanId ?? null,
+          planHistory: (subscription.planHistory || []).slice(-10).map(h => ({
+            planId: h.planId,
+            planName: h.planName,
+            changedAt: h.changedAt,
+            reason: h.reason || null
+          }))
+        }
+      : null;
+
+    return { ...org, _meta: { userCount, connectionCount, subscription: subData } };
   }
 
   /**
