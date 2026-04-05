@@ -1,10 +1,9 @@
 const Interaction = require('../models/Interaction');
 const IntentBucket = require('../models/IntentBucket');
-const KnowledgeBase = require('../models/KnowledgeBase');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { resolveEscalationAssignmentUsers } = require('../services/autoAssignmentPoolService');
-const { runWithAiContext, runWithAiContextAndUsageId } = require('../services/aiRequestContext');
+const { runWithAiContext } = require('../services/aiRequestContext');
 const aiService = require('../services/aiService');
 const aiCreditService = require('../services/aiCreditService');
 const emailService = require('../services/emailService');
@@ -84,36 +83,15 @@ module.exports = async function processAI(job) {
       });
     }
 
-    // Step 4: Get knowledge base for AI response
-    const knowledgeBase = await KnowledgeBase.find({
-      organization: interaction.organization,
-      isActive: true,
-      isTrainingData: true
-    }).sort({ trainingWeight: -1 }).limit(10);
-
     const populatedOrg = interaction.organization && typeof interaction.organization === 'object'
       ? interaction.organization
       : null;
-    const orgId = populatedOrg?._id || interaction.organization;
 
-    // Step 5: Generate AI response suggestion (capture aiApiUsageId for credit linking)
-    jobLogger.debug('Generating AI response');
-    const { result: aiResponse, aiApiUsageId } = await runWithAiContextAndUsageId(
-      { organizationId: orgIdCtx, feature: 'processAI.generate_response' },
-      () => aiService.generateResponse(interaction, orgId, knowledgeBase)
-    );
-    
-    if (aiResponse) {
-      interaction.aiSuggestion = aiResponse;
-    }
-
-    // Step 6: Determine if auto-reply eligible (pass populated org so settings are evaluated)
+    // Step 4: Determine if auto-reply eligible (pass populated org so settings are evaluated)
     interaction.autoReplyEligible = await aiService.canAutoReply(interaction, populatedOrg || {});
 
-    // Step 7: Check if should auto-reply or assign to agent
-    if (interaction.autoReplyEligible && aiResponse) {
-      jobLogger.debug('Interaction eligible for auto-reply');
-    } else {
+    // Step 5: Auto-assign to agent when auto-reply won't handle this interaction
+    if (!interaction.autoReplyEligible) {
       const autoAssign = populatedOrg?.escalationSettings?.autoAssign !== false;
       if (autoAssign) {
         jobLogger.debug('Assigning to agent (auto-assign enabled)');
@@ -121,20 +99,21 @@ module.exports = async function processAI(job) {
       } else {
         jobLogger.debug('Skipping assignment (auto-assign disabled, manual assign)');
       }
+    } else {
+      jobLogger.debug('Interaction eligible for auto-reply');
     }
 
-    // Step 8: Check for negative spike (3+ negative comments on same post)
+    // Step 6: Check for negative spike (3+ negative comments on same post)
     if (interaction.type === 'comment' && interaction.sentiment === 'negative') {
       await checkNegativeSpike(interaction);
     }
 
-    // Deduct 1 credit for the full AI analysis pipeline
+    // Deduct 1 credit for the analysis pipeline (analyzeInteraction only)
     try {
       await aiCreditService.deductCredits(
         orgIdCtx,
         1,
-        { operation: 'processAI_analysis', userId: interaction.assignedTo || orgIdCtx },
-        { aiApiUsageId }
+        { operation: 'processAI_analysis', userId: interaction.assignedTo || orgIdCtx }
       );
     } catch (creditErr) {
       jobLogger.warn('Credit deduction failed (non-fatal)', { error: creditErr.message });

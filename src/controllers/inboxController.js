@@ -892,20 +892,28 @@ exports.replyToInteraction = async (req, res, next) => {
       interaction.chatOpen = true;
       await interaction.save();
 
-      // IMPORTANT: Remove any pending AI processing jobs for this interaction
+      // IMPORTANT: Remove any pending AI and auto-reply jobs for this interaction
       // since it's already been replied to
       try {
-        const { aiQueue } = require('../config/queue');
+        const { aiQueue, autoReplyQueue } = require('../config/queue');
         const jobs = await aiQueue.getJobs(['waiting', 'active', 'delayed']);
-        
+
         for (const job of jobs) {
           if (job.data.interactionId && job.data.interactionId.toString() === interaction._id.toString()) {
             await job.remove();
             console.log(`🗑️  [Reply] Removed pending AI job ${job.id} for interaction ${interaction._id} (already replied)`);
           }
         }
+
+        const autoReplyJobs = await autoReplyQueue.getJobs(['waiting', 'active', 'delayed']);
+        for (const job of autoReplyJobs) {
+          if (job.data.interactionId && job.data.interactionId.toString() === interaction._id.toString()) {
+            await job.remove();
+            console.log(`🗑️  [Reply] Removed pending auto-reply job ${job.id} for interaction ${interaction._id} (already replied)`);
+          }
+        }
       } catch (queueError) {
-        console.warn('Could not remove pending AI jobs:', queueError.message);
+        console.warn('Could not remove pending AI/auto-reply jobs:', queueError.message);
         // Don't fail the reply if queue cleanup fails
       }
     }
@@ -2909,7 +2917,7 @@ exports.getBucketView = async (req, res) => {
         const matchQuery = { ...baseMatch, intentBucket: bucket._id };
         const [interactions, total] = await Promise.all([
           Interaction.find(matchQuery)
-            .sort({ platformCreatedAt: -1 })
+            .sort({ platformCreatedAt: 1 })
             .limit(safeLimit)
             .populate('assignedTo', 'firstName lastName email')
             .populate('labels', 'name color icon')
@@ -2926,7 +2934,7 @@ exports.getBucketView = async (req, res) => {
     unassignedMatch.$and = [...(unassignedMatch.$and || []), { $or: [{ intentBucket: { $exists: false } }, { intentBucket: null }] }];
     const [unassignedInteractions, unassignedTotal] = await Promise.all([
       Interaction.find(unassignedMatch)
-        .sort({ platformCreatedAt: -1 })
+        .sort({ platformCreatedAt: 1 })
         .limit(safeLimit)
         .populate('assignedTo', 'firstName lastName email')
         .populate('labels', 'name color icon')

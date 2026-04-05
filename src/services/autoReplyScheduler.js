@@ -165,10 +165,12 @@ class AutoReplyScheduler {
           console.log(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} already has replies`);
           return false;
         }
-        if (interaction.status === 'replied' || interaction.status === 'resolved') {
-          console.log(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} status is "${interaction.status}"`);
-          return false;
-        }
+      }
+      // Thread DMs: a new inbound webhook sets status to unread first; if still replied/resolved,
+      // do not enqueue (e.g. human already replied — matches processAutoReply single-job guards).
+      if (interaction.status === 'replied' || interaction.status === 'resolved') {
+        console.log(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} status is "${interaction.status}"`);
+        return false;
       }
 
       // Respect platform / interaction-type settings (same rules as canAutoReply pre-check)
@@ -195,7 +197,8 @@ class AutoReplyScheduler {
         {
           type: 'single',
           interactionId: interactionId,
-          organizationId: organizationId
+          organizationId: organizationId,
+          ...(threadDm && mid ? { expectedLastMid: mid } : {})
         },
         {
           jobId: autoReplyJobId,

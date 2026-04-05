@@ -53,7 +53,7 @@ module.exports = async function processAutoReply(job) {
 
     if (type === 'single' && interactionId) {
       // Process single interaction (webhook-triggered)
-      const result = await processSingleInteraction(interactionId, organization);
+      const result = await processSingleInteraction(interactionId, organization, job.data);
       if (result.sent) sentCount++;
       else if (result.skipped) skippedCount++;
       else processedCount++;
@@ -111,7 +111,7 @@ module.exports = async function processAutoReply(job) {
 /**
  * Process a single interaction (webhook-triggered)
  */
-async function processSingleInteraction(interactionId, organization) {
+async function processSingleInteraction(interactionId, organization, jobData = {}) {
   try {
     const interaction = await Interaction.findById(interactionId)
       .populate('platformConnection');
@@ -126,7 +126,9 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: 'Already has replies' };
     }
 
-    if (!threadDm && (interaction.status === 'replied' || interaction.status === 'resolved')) {
+    // Thread DMs: a new inbound message sets status to unread via webhook; if we still see
+    // replied/resolved, a human (or prior send) already handled this turn — skip delayed job.
+    if (interaction.status === 'replied' || interaction.status === 'resolved') {
       return { skipped: true, reason: `Status is ${interaction.status}` };
     }
 
@@ -208,6 +210,22 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: 'Interaction not found' };
     }
     const threadDmReply = isThreadStyleDm(interactionForReply);
+
+    const expectedLastMid = jobData.expectedLastMid;
+    if (
+      threadDmReply &&
+      expectedLastMid &&
+      interactionForReply.metadata?.lastMid != null &&
+      String(interactionForReply.metadata.lastMid) !== String(expectedLastMid)
+    ) {
+      logger.info('[Auto-reply] Skipped — stale job (newer inbound message in thread)', {
+        interactionId: interactionForReply._id?.toString(),
+        expectedLastMid: String(expectedLastMid),
+        currentLastMid: String(interactionForReply.metadata.lastMid)
+      });
+      return { skipped: true, reason: 'Stale auto-reply job (newer inbound message)' };
+    }
+
     if (!threadDmReply && interactionForReply.replies && interactionForReply.replies.length > 0) {
       if (escalationCheck.shouldEscalate) {
         await escalationService.escalateInteraction(
@@ -217,7 +235,7 @@ async function processSingleInteraction(interactionId, organization) {
       }
       return { skipped: true, reason: 'Already has replies' };
     }
-    if (!threadDmReply && (interactionForReply.status === 'replied' || interactionForReply.status === 'resolved')) {
+    if (interactionForReply.status === 'replied' || interactionForReply.status === 'resolved') {
       if (escalationCheck.shouldEscalate) {
         await escalationService.escalateInteraction(
           interactionForReply, organization,
