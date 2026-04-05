@@ -84,6 +84,11 @@ class AIService {
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openaiApiUrl = 'https://api.openai.com/v1/chat/completions';
     this.openaiModel = normalizeOpenAIModelId(process.env.OPENAI_MODEL);
+    // Cheaper model for classification-only tasks (sentiment, intent, topics, bucket).
+    // Defaults to gpt-4o-mini; override with OPENAI_CLASSIFICATION_MODEL env var.
+    this.classificationModel = normalizeOpenAIModelId(
+      process.env.OPENAI_CLASSIFICATION_MODEL || 'gpt-4o-mini'
+    );
 
     /** Kept for diagnostics / compatibility — AI stack is OpenAI-only */
     this.provider = 'openai';
@@ -337,18 +342,8 @@ class AIService {
     const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
 
     const systemPrompt = `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
-
-${platformGuidelines}
-${brandSection}
-Guidelines:
-- Be authentic and engaging
-- Use appropriate emojis sparingly
-- Include relevant hashtags (3-5 for Instagram, 1-2 for others)
-- Keep tone professional yet conversational
-- Match platform best practices
-- For stories: Keep it casual and time-sensitive
-- For reels/shorts: Hook in first 3 seconds
-
+${platformGuidelines ? `\n${platformGuidelines}` : ''}${brandSection}
+Rules: Be authentic; use emojis sparingly; match platform hashtag norms; professional yet conversational tone.
 Generate ONLY the post content. No explanations or meta-commentary.`;
 
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
@@ -416,13 +411,9 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
     const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
     return `You are a professional social media content creator. Generate a SINGLE engaging ${postType} that works across ${platformNames}.
-${platformGuidelines}
-${brandSection}
-CRITICAL RULES:
-- Output ONE post only. Do NOT split by platform (no "Instagram:", "Facebook:" labels).
-- Be authentic and engaging. Use appropriate emojis sparingly.
-- Include 3-5 relevant hashtags at the end.
-- Generate ONLY the post text. No explanations, headers, or meta-commentary.`;
+${platformGuidelines ? `\n${platformGuidelines}` : ''}${brandSection}
+CRITICAL RULES: Output ONE post only — no platform labels. Emojis sparingly; 3-5 hashtags at end.
+Generate ONLY the post text. No explanations, headers, or meta-commentary.`;
   }
 
   async _generateSinglePostWithTemperature(systemPrompt, userPrompt, temperature = 0.8) {
@@ -728,7 +719,7 @@ CRITICAL RULES:
       try {
         const response = await this._postChatCompletions(
           {
-            model: this.openaiModel,
+            model: this.classificationModel,
             messages: [
               {
                 role: 'system',
@@ -738,8 +729,7 @@ Respond with ONLY this JSON structure (no other text):
 {
   "sentiment": "positive" or "negative" or "neutral",
   "score": number between -1 and 1,
-  "confidence": number between 0 and 1,
-  "reasoning": "brief explanation"
+  "confidence": number between 0 and 1
 }
 
 Rules:
@@ -747,18 +737,15 @@ Rules:
 - negative: Complaints, anger, disappointment, frustration
 - neutral: Questions, information requests, factual statements
 
-Scoring:
-- Very positive: 0.7 to 1.0
-- Neutral: -0.3 to 0.3
-- Very negative: -1.0 to -0.7`
+Scoring: very positive 0.7-1.0, neutral -0.3 to 0.3, very negative -1.0 to -0.7`
               },
               {
                 role: 'user',
                 content: `Analyze: "${content}"`
               }
             ],
-            ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
-            ...openAIChatCompletionMaxTokensField(this.openaiModel, 150)
+            ...openAIChatCompletionTemperatureField(this.classificationModel, 0.2),
+            ...openAIChatCompletionMaxTokensField(this.classificationModel, 80)
           },
           {}
         );
@@ -914,9 +901,14 @@ Scoring:
         }
       }
 
-      // Build context from knowledge base
+      // Build context from knowledge base — cap each entry to avoid bloating the prompt
+      const MAX_KB_ENTRY_CHARS = 600;
       const kbContext = relevantKB && relevantKB.length > 0
-        ? relevantKB.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
+        ? relevantKB.map(kb => {
+            const body = (kb.content || '').substring(0, MAX_KB_ENTRY_CHARS);
+            const truncated = (kb.content || '').length > MAX_KB_ENTRY_CHARS ? '…' : '';
+            return `${kb.title}: ${body}${truncated}`;
+          }).join('\n\n')
         : '';
 
       // Load per-bucket reply config if interaction is classified
@@ -980,7 +972,7 @@ Generate a response that addresses the customer's message appropriately.`;
             }
           ],
           ...openAIChatCompletionTemperatureField(this.openaiModel, 0.7),
-          ...openAIChatCompletionMaxTokensField(this.openaiModel, 250)
+          ...openAIChatCompletionMaxTokensField(this.openaiModel, 200)
         },
         {},
         { timeout: 120000 }
@@ -1102,7 +1094,7 @@ Generate a response that addresses the customer's message appropriately.`;
       }
       const response = await this._postChatCompletions(
         {
-          model: this.openaiModel,
+          model: this.classificationModel,
           messages: [
             {
               role: 'system',
@@ -1113,8 +1105,8 @@ Generate a response that addresses the customer's message appropriately.`;
               content: `Classify: "${content}"`
             }
           ],
-          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
-          ...openAIChatCompletionMaxTokensField(this.openaiModel, 10)
+          ...openAIChatCompletionTemperatureField(this.classificationModel, 0.3),
+          ...openAIChatCompletionMaxTokensField(this.classificationModel, 10)
         },
         {}
       );
@@ -1175,13 +1167,13 @@ ${bucketDescriptions}
 
         const response = await this._postChatCompletions(
           {
-            model: this.openaiModel,
+            model: this.classificationModel,
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: `Classify: "${content}"` }
             ],
-            ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
-            ...openAIChatCompletionMaxTokensField(this.openaiModel, 30)
+            ...openAIChatCompletionTemperatureField(this.classificationModel, 0.2),
+            ...openAIChatCompletionMaxTokensField(this.classificationModel, 20)
           },
           {}
         );
@@ -1202,6 +1194,103 @@ ${bucketDescriptions}
   }
 
   /**
+   * Combined single-call analysis: sentiment + intent + topics + optional bucket classification.
+   * Replaces the 4 separate calls in processAI for a ~4x reduction in HTTP round trips and
+   * system-prompt overhead per interaction.
+   *
+   * @param {string} content - Interaction message text
+   * @param {Array} buckets  - Active IntentBucket documents (from DB, may be empty)
+   * @returns {{ sentiment, sentimentScore, sentimentConfidence, intent, topics, bucketResult }}
+   */
+  async analyzeInteraction(content, buckets = []) {
+    // Keyword bucket match first — no AI cost, short-circuits bucket section from the prompt
+    let keywordBucketResult = null;
+    const lowerContent = (content || '').toLowerCase();
+    if (buckets && buckets.length > 0) {
+      outer: for (const bucket of buckets) {
+        if (!bucket.keywords || bucket.keywords.length === 0) continue;
+        for (const kw of bucket.keywords) {
+          if (kw && lowerContent.includes(kw.toLowerCase())) {
+            keywordBucketResult = { bucketId: bucket._id.toString(), method: 'keyword' };
+            break outer;
+          }
+        }
+      }
+    }
+
+    const includeBucketAI = !keywordBucketResult && buckets && buckets.length > 0;
+    const defaultBucket = buckets.find(b => b.isDefault);
+    const defaultName = defaultBucket ? defaultBucket.name : 'General Queries';
+
+    const bucketJsonField = includeBucketAI ? ',\n  "bucketName": "exact bucket name, or null"' : '';
+    const bucketSection = includeBucketAI
+      ? `\n\nBucket categories (assign exactly one or null):\n${
+          buckets
+            .filter(b => !b.isDefault)
+            .map(b => `- "${b.name}": ${b.aiPromptHint || 'No description'}`)
+            .join('\n')
+        }\n- "${defaultName}": anything that does not fit the above`
+      : '';
+
+    const systemPrompt = `Analyze the customer message. Respond ONLY with valid JSON, no other text:
+{
+  "sentiment": "positive" or "negative" or "neutral",
+  "score": number from -1 to 1,
+  "confidence": number from 0 to 1,
+  "intent": "inquiry" or "complaint" or "praise" or "feedback" or "support" or "other",
+  "topics": ["keyword1", "keyword2"]${bucketJsonField}
+}
+
+Scoring: very positive 0.7-1.0, neutral -0.3 to 0.3, very negative -1.0 to -0.7.
+Topics: 2-3 keywords only.${bucketSection}`;
+
+    const response = await this._postChatCompletions(
+      {
+        model: this.classificationModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Message: "${content}"` }
+        ],
+        ...openAIChatCompletionTemperatureField(this.classificationModel, 0.2),
+        ...openAIChatCompletionMaxTokensField(this.classificationModel, includeBucketAI ? 150 : 120)
+      },
+      {}
+    );
+
+    const raw = response.data.choices[0].message.content.trim();
+    let parsed;
+    try {
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
+    } catch {
+      parsed = {};
+    }
+
+    const validSentiments = ['positive', 'negative', 'neutral'];
+    const validIntents = ['inquiry', 'complaint', 'praise', 'feedback', 'support', 'other'];
+
+    const sentiment = validSentiments.includes(parsed.sentiment) ? parsed.sentiment : 'neutral';
+    const sentimentScore = typeof parsed.score === 'number' ? Math.max(-1, Math.min(1, parsed.score)) : 0;
+    const sentimentConfidence = typeof parsed.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5;
+    const intent = validIntents.includes(parsed.intent) ? parsed.intent : 'other';
+    const topics = Array.isArray(parsed.topics) ? parsed.topics.map(t => String(t).trim()).filter(Boolean) : [];
+
+    // Resolve bucket result
+    let bucketResult = keywordBucketResult;
+    if (!bucketResult && includeBucketAI && parsed.bucketName) {
+      const matched = buckets.find(b => b.name.toLowerCase() === String(parsed.bucketName).toLowerCase());
+      if (matched) {
+        bucketResult = { bucketId: matched._id.toString(), method: 'ai' };
+      }
+    }
+    if (!bucketResult && defaultBucket) {
+      bucketResult = { bucketId: defaultBucket._id.toString(), method: 'default' };
+    }
+
+    return { sentiment, sentimentScore, sentimentConfidence, intent, topics, bucketResult };
+  }
+
+  /**
    * Extract topics/keywords from text
    */
   async extractTopics(content) {
@@ -1211,7 +1300,7 @@ ${bucketDescriptions}
       }
       const response = await this._postChatCompletions(
         {
-          model: this.openaiModel,
+          model: this.classificationModel,
           messages: [
             {
               role: 'system',
@@ -1222,8 +1311,8 @@ ${bucketDescriptions}
               content: `Extract topics: "${content}"`
             }
           ],
-          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
-          ...openAIChatCompletionMaxTokensField(this.openaiModel, 50)
+          ...openAIChatCompletionTemperatureField(this.classificationModel, 0.3),
+          ...openAIChatCompletionMaxTokensField(this.classificationModel, 50)
         },
         {}
       );
