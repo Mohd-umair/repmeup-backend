@@ -140,10 +140,12 @@ class AutoReplyScheduler {
       
       // Check if webhook mode or hybrid mode is enabled
       if (settings.triggerMode !== 'webhook' && settings.triggerMode !== 'hybrid') {
+        console.log(`⚠️  [Auto-Reply Queue] Skipping — triggerMode is "${settings.triggerMode || 'not set'}" (must be "webhook" or "hybrid" for immediate replies). Org: ${organizationId}`);
         return false;
       }
 
       if (!settings.webhookImmediate) {
+        console.log(`⚠️  [Auto-Reply Queue] Skipping — webhookImmediate is false/not set. Org: ${organizationId}`);
         return false;
       }
 
@@ -160,15 +162,20 @@ class AutoReplyScheduler {
       const threadDm = isThreadStyleDm(interaction);
       if (!threadDm) {
         if (interaction.replies && interaction.replies.length > 0) {
+          console.log(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} already has replies`);
           return false;
         }
         if (interaction.status === 'replied' || interaction.status === 'resolved') {
+          console.log(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} status is "${interaction.status}"`);
           return false;
         }
       }
 
       // Respect platform / interaction-type settings (same rules as canAutoReply pre-check)
       if (!aiService.shouldQueueImmediateAutoReply(interaction, organization)) {
+        const enabledPlats = settings.enabledPlatforms?.join(', ') || 'all';
+        const enabledTypes = settings.enabledTypes?.join(', ') || 'all';
+        console.log(`⚠️  [Auto-Reply Queue] Skipping — platform/type not enabled. Interaction: platform="${interaction.platform}" type="${interaction.type}". Settings: enabledPlatforms=[${enabledPlats}] enabledTypes=[${enabledTypes}]. Org: ${organizationId}`);
         return false;
       }
 
