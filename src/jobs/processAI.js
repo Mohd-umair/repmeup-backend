@@ -57,52 +57,32 @@ module.exports = async function processAI(job) {
       return { skipped: true, reason: 'No AI credits' };
     }
 
-    // Step 1: Analyze sentiment
-    jobLogger.debug('Analyzing sentiment');
-    const sentimentResult = await runWithAiContext(
-      { organizationId: orgIdCtx, feature: 'processAI.sentiment' },
-      () => aiService.analyzeSentiment(interaction.content)
-    );
-    
-    interaction.sentiment = sentimentResult.sentiment;
-    interaction.sentimentScore = sentimentResult.sentimentScore;
-    interaction.sentimentConfidence = sentimentResult.sentimentConfidence;
+    // Steps 1-3: Combined single AI call — sentiment + intent + topics + bucket classification
+    jobLogger.debug('Running combined interaction analysis');
+    const orgIdForBuckets = interaction.organization?._id || interaction.organization;
+    const activeBuckets = await IntentBucket.find({ organization: orgIdForBuckets, isActive: true })
+      .sort({ order: 1 })
+      .lean();
 
-    // Step 2: Detect intent
-    jobLogger.debug('Detecting intent');
-    const intent = await runWithAiContext(
-      { organizationId: orgIdCtx, feature: 'processAI.detect_intent' },
-      () => aiService.detectIntent(interaction.content)
+    const analysis = await runWithAiContext(
+      { organizationId: orgIdCtx, feature: 'processAI.analyze_interaction' },
+      () => aiService.analyzeInteraction(interaction.content, activeBuckets)
     );
-    interaction.intent = intent;
 
-    // Step 2b: Classify into intent bucket
-    jobLogger.debug('Classifying into intent bucket');
-    try {
-      const orgId = interaction.organization?._id || interaction.organization;
-      const activeBuckets = await IntentBucket.find({ organization: orgId, isActive: true }).sort({ order: 1 }).lean();
-      if (activeBuckets.length > 0) {
-        const bucketResult = await runWithAiContext(
-          { organizationId: orgIdCtx, feature: 'processAI.classify_bucket' },
-          () => aiService.classifyIntoBucket(interaction.content, activeBuckets)
-        );
-        if (bucketResult.bucketId) {
-          interaction.intentBucket = bucketResult.bucketId;
-          interaction.bucketAssignedBy = bucketResult.method;
-          jobLogger.debug('Bucket assigned', { bucketId: bucketResult.bucketId, method: bucketResult.method });
-        }
-      }
-    } catch (bucketErr) {
-      jobLogger.warn('Bucket classification failed (non-fatal)', { error: bucketErr.message });
+    interaction.sentiment = analysis.sentiment;
+    interaction.sentimentScore = analysis.sentimentScore;
+    interaction.sentimentConfidence = analysis.sentimentConfidence;
+    interaction.intent = analysis.intent;
+    interaction.topics = analysis.topics;
+
+    if (analysis.bucketResult?.bucketId) {
+      interaction.intentBucket = analysis.bucketResult.bucketId;
+      interaction.bucketAssignedBy = analysis.bucketResult.method;
+      jobLogger.debug('Bucket assigned', {
+        bucketId: analysis.bucketResult.bucketId,
+        method: analysis.bucketResult.method
+      });
     }
-
-    // Step 3: Extract topics
-    jobLogger.debug('Extracting topics');
-    const topics = await runWithAiContext(
-      { organizationId: orgIdCtx, feature: 'processAI.extract_topics' },
-      () => aiService.extractTopics(interaction.content)
-    );
-    interaction.topics = topics;
 
     // Step 4: Get knowledge base for AI response
     const knowledgeBase = await KnowledgeBase.find({

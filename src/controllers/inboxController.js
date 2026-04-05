@@ -1632,8 +1632,14 @@ exports.aiAssist = async (req, res, next) => {
         }
       }
     }
+    // Cap each KB entry to avoid bloating the AI Assist prompt
+    const MAX_KB_ENTRY_CHARS = 600;
     const kbContext = kbEntries && kbEntries.length > 0
-      ? kbEntries.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
+      ? kbEntries.map(kb => {
+          const body = (kb.content || '').substring(0, MAX_KB_ENTRY_CHARS);
+          const truncated = (kb.content || '').length > MAX_KB_ENTRY_CHARS ? '…' : '';
+          return `${kb.title}: ${body}${truncated}`;
+        }).join('\n\n')
       : '';
 
     const baseSystemPrompt = `You are a professional customer service AI assistant.
@@ -1801,8 +1807,14 @@ exports.aiAssistRegenerate = async (req, res, next) => {
         }
       }
     }
+    // Cap each KB entry to avoid bloating the regenerate prompt
+    const MAX_KB_REGEN_ENTRY_CHARS = 600;
     const kbContext = kbEntries && kbEntries.length > 0
-      ? kbEntries.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
+      ? kbEntries.map(kb => {
+          const body = (kb.content || '').substring(0, MAX_KB_REGEN_ENTRY_CHARS);
+          const truncated = (kb.content || '').length > MAX_KB_REGEN_ENTRY_CHARS ? '…' : '';
+          return `${kb.title}: ${body}${truncated}`;
+        }).join('\n\n')
       : '';
 
     const replyConfigs = {
