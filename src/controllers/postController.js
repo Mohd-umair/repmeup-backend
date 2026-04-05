@@ -10,7 +10,7 @@ const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
 const aiService = require('../services/aiService');
 const aiCreditService = require('../services/aiCreditService');
-const { runWithAiContext } = require('../services/aiRequestContext');
+const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
 const auditLogController = require('./auditLogController');
 const multer = require('multer');
 const path = require('path');
@@ -181,7 +181,7 @@ exports.generatePostWithAI = async (req, res) => {
       });
     }
 
-    const result = await runWithAiContext(
+    const { result, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId,
         userId: req.user._id,
@@ -190,10 +190,19 @@ exports.generatePostWithAI = async (req, res) => {
       () => aiService.generatePost(prompt, platforms, mode, postType, organizationId)
     );
 
-    await aiCreditService.deductCredits(organizationId, result.creditsUsed, {
-      operation: 'post_generation', userId: req.user._id,
-      prompt: prompt.substring(0, 100), platforms, mode, postType
-    });
+    await aiCreditService.deductCredits(
+      organizationId,
+      result.creditsUsed,
+      {
+        operation: 'post_generation',
+        userId: req.user._id,
+        prompt: prompt.substring(0, 100),
+        platforms,
+        mode,
+        postType
+      },
+      { aiApiUsageId }
+    );
     creditsDeducted = result.creditsUsed;
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
@@ -237,7 +246,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
       });
     }
 
-    const result = await runWithAiContext(
+    const { result, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId,
         userId: req.user._id,
@@ -256,9 +265,18 @@ exports.generatePostVariantsWithAI = async (req, res) => {
         })
     );
 
-    await aiCreditService.deductCredits(organizationId, variantCount, {
-      operation: 'post_variants', userId: req.user._id, topic: topic.substring(0, 100), platforms, variantCount
-    });
+    await aiCreditService.deductCredits(
+      organizationId,
+      variantCount,
+      {
+        operation: 'post_variants',
+        userId: req.user._id,
+        topic: topic.substring(0, 100),
+        platforms,
+        variantCount
+      },
+      { aiApiUsageId }
+    );
     creditsDeducted += variantCount;
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
@@ -438,7 +456,7 @@ exports.generateVariantImage = async (req, res) => {
     });
     console.log('[Content Studio] AI image prompt (variant %d):\n', variantIndex, imagePrompt);
 
-    const buffer = await runWithAiContext(
+    const { result: buffer, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId,
         userId,
@@ -551,10 +569,16 @@ exports.generateVariantImage = async (req, res) => {
       console.warn('[Content Studio] Failed to save image to media library:', mediaErr.message);
     }
 
-    await aiCreditService.deductCredits(organizationId, 1, {
-      operation: 'post_variants_image', userId: req.user._id,
-      topic: topic.substring(0, 100)
-    });
+    await aiCreditService.deductCredits(
+      organizationId,
+      1,
+      {
+        operation: 'post_variants_image',
+        userId: req.user._id,
+        topic: topic.substring(0, 100)
+      },
+      { aiApiUsageId }
+    );
     creditsDeducted = 1;
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
@@ -686,7 +710,7 @@ exports.generateVariantVideo = async (req, res) => {
 
         const cfg = videoConfig || {};
         const vIdx = typeof variantIndex === 'number' ? variantIndex : 0;
-        const buffer = await runWithAiContext(
+        const { result: buffer, aiApiUsageId } = await runWithAiContextAndUsageId(
           {
             organizationId,
             userId,
@@ -724,9 +748,16 @@ exports.generateVariantVideo = async (req, res) => {
 
         await VideoJob.findOneAndUpdate({ jobId }, { status: 'completed', videoUrl });
 
-        await aiCreditService.deductCredits(organizationId, 1, {
-          operation: 'post_variants_video', userId, topic: topic.substring(0, 100)
-        });
+        await aiCreditService.deductCredits(
+          organizationId,
+          1,
+          {
+            operation: 'post_variants_video',
+            userId,
+            topic: topic.substring(0, 100)
+          },
+          { aiApiUsageId }
+        );
 
         console.log('[Video] Job completed:', jobId, videoUrl);
       } catch (err) {

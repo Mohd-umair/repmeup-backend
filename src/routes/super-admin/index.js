@@ -41,6 +41,8 @@ router.get('/plans', superAdminController.listPlans);
 router.get('/contact-inquiries', contactInquiryController.listForSuperAdmin);
 router.get('/transactions', superAdminController.listTransactions);
 router.get('/dashboard/stats', superAdminController.getDashboardStats);
+router.get('/ai-usage/records/:id', superAdminController.getAiUsageRecordById);
+router.get('/ai-usage/records', superAdminController.getAiUsageRecords);
 router.get('/ai-usage', superAdminController.getAiUsage);
 router.get('/organizations', superAdminController.listOrganizations);
 router.post(

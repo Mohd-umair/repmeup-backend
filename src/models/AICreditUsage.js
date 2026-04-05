@@ -33,6 +33,8 @@ const aiCreditUsageSchema = new mongoose.Schema({
       'ai_assist',
       'ai_assist_regenerate',
       'auto_reply',
+      'processAI_analysis',
+      'brand_config_preview',
       'rollback',
       'rollback_ai_response',
       'rollback_ai_assist',
@@ -43,7 +45,8 @@ const aiCreditUsageSchema = new mongoose.Schema({
       'rollback_post_variants_video',
       'rollback_knowledge_base_from_url',
       'rollback_ai_response_auto_reply',
-      'rollback_ai_response_test'
+      'rollback_ai_response_test',
+      'rollback_brand_config_preview'
     ],
     index: true
   },

@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const { escapeRegex } = require('../utils/sanitize');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
-const { runWithAiContext } = require('../services/aiRequestContext');
+const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
 
 const KB_SOURCE_ENUM = ['manual', 'pdf', 'url', 'import'];
 
@@ -385,7 +385,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
 
     // Step 2: Generate AI summary (ContentSummarizerService - Single Responsibility)
     console.log(`🤖 [KB] Generating AI summary...`);
-    const summaryData = await runWithAiContext(
+    const { result: summaryData, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId: kbOrgId,
         userId: req.user._id,
@@ -439,10 +439,18 @@ exports.createURLKnowledgeBase = async (req, res) => {
       summaryData.tags.length
     );
 
-    await aiCreditService.deductCredits(kbOrgId, actualCost, {
-      operation: 'knowledge_base_from_url', userId: req.user._id,
-      url: url, wordCount: actualWordCount, tagCount: summaryData.tags.length
-    });
+    await aiCreditService.deductCredits(
+      kbOrgId,
+      actualCost,
+      {
+        operation: 'knowledge_base_from_url',
+        userId: req.user._id,
+        url: url,
+        wordCount: actualWordCount,
+        tagCount: summaryData.tags.length
+      },
+      { aiApiUsageId }
+    );
     kbCreditsDeducted = actualCost;
 
     res.status(201).json({

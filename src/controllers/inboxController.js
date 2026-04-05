@@ -3,7 +3,7 @@ const Label = require('../models/Label');
 const ResponseTemplate = require('../models/ResponseTemplate');
 const cacheService = require('../services/cacheService');
 const aiService = require('../services/aiService');
-const { runWithAiContext } = require('../services/aiRequestContext');
+const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
 const Organization = require('../models/Organization');
 const escalationService = require('../services/escalationService');
 const User = require('../models/User');
@@ -1517,7 +1517,7 @@ exports.suggestReply = async (req, res, next) => {
 
     let suggestCreditsDeducted = 0;
     try {
-      const aiResponse = await runWithAiContext(
+      const { result: aiResponse, aiApiUsageId } = await runWithAiContextAndUsageId(
         {
           organizationId: req.user.organization._id,
           userId: req.user._id,
@@ -1530,11 +1530,18 @@ exports.suggestReply = async (req, res, next) => {
         return res.status(500).json({ success: false, error: 'Failed to generate AI response' });
       }
 
-      await aiCreditService.deductCredits(organizationId, 1, {
-        operation: 'ai_response', userId: req.user._id,
-        interactionId: interaction._id.toString(), platform: interaction.platform,
-        messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
-      });
+      await aiCreditService.deductCredits(
+        organizationId,
+        1,
+        {
+          operation: 'ai_response',
+          userId: req.user._id,
+          interactionId: interaction._id.toString(),
+          platform: interaction.platform,
+          messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
+        },
+        { aiApiUsageId }
+      );
       suggestCreditsDeducted = 1;
 
       const updatedCredits = await aiCreditService.getUsage(organizationId);
@@ -1665,7 +1672,7 @@ IMPORTANT RULES:
 
     const generateOne = async (type) => {
       const config = replyTypes[type];
-      return runWithAiContext(
+      return runWithAiContextAndUsageId(
         {
           organizationId: req.user.organization._id,
           userId: req.user._id,
@@ -1682,17 +1689,28 @@ IMPORTANT RULES:
       );
     };
 
-    const [shortReply, detailedReply, salesReply] = await Promise.all([
+    const [wShort, wDetailed, wSales] = await Promise.all([
       generateOne('short'),
       generateOne('detailed'),
       generateOne('sales')
     ]);
+    const shortReply = wShort.result;
+    const detailedReply = wDetailed.result;
+    const salesReply = wSales.result;
+    const assistLinkId = wSales.aiApiUsageId || wDetailed.aiApiUsageId || wShort.aiApiUsageId;
 
-    await aiCreditService.deductCredits(organizationId, 1, {
-      operation: 'ai_assist', userId: req.user._id,
-      interactionId: interaction._id.toString(), platform: interaction.platform,
-      messagePreview: interaction.content?.substring(0, 100) || ''
-    });
+    await aiCreditService.deductCredits(
+      organizationId,
+      1,
+      {
+        operation: 'ai_assist',
+        userId: req.user._id,
+        interactionId: interaction._id.toString(),
+        platform: interaction.platform,
+        messagePreview: interaction.content?.substring(0, 100) || ''
+      },
+      { aiApiUsageId: assistLinkId }
+    );
     assistCreditsDeducted = 1;
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
@@ -1804,7 +1822,7 @@ ${kbContext ? `KNOWLEDGE BASE:\n${kbContext}` : ''}
 
 ${config.instruction}`;
 
-    const content = await runWithAiContext(
+    const { result: content, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId: req.user.organization._id,
         userId: req.user._id,
@@ -1818,11 +1836,18 @@ ${config.instruction}`;
         )
     );
 
-    await aiCreditService.deductCredits(organizationId, 1, {
-      operation: 'ai_assist_regenerate', userId: req.user._id,
-      interactionId: interaction._id.toString(), platform: interaction.platform,
-      messagePreview: interaction.content?.substring(0, 100) || ''
-    });
+    await aiCreditService.deductCredits(
+      organizationId,
+      1,
+      {
+        operation: 'ai_assist_regenerate',
+        userId: req.user._id,
+        interactionId: interaction._id.toString(),
+        platform: interaction.platform,
+        messagePreview: interaction.content?.substring(0, 100) || ''
+      },
+      { aiApiUsageId }
+    );
     regenCreditsDeducted = 1;
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);

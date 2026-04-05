@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { getAiRequestContext, runWithAiContext } = require('./aiRequestContext');
+const { getAiRequestContext, runWithAiContext, runWithAiContextAndUsageId } = require('./aiRequestContext');
 const aiApiUsageService = require('./aiApiUsageService');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const BrandConfig = require('../models/BrandConfig');
@@ -52,6 +52,33 @@ function openAIChatCompletionTemperatureField(model, temperature) {
   return { temperature };
 }
 
+/** Plain text from first chat completion choice (handles string or multimodal content parts). */
+function completionTextFromOpenAIResponse(data) {
+  const ch = data?.choices?.[0];
+  if (!ch) return '';
+  const msg = ch.message || ch;
+  const c = msg?.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    return c
+      .map((part) => {
+        if (part && part.type === 'text' && typeof part.text === 'string') return part.text;
+        if (typeof part === 'string') return part;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (c != null && typeof c === 'object') {
+    try {
+      return JSON.stringify(c);
+    } catch {
+      return String(c);
+    }
+  }
+  return c != null ? String(c) : '';
+}
+
 class AIService {
   constructor() {
     this.openaiApiKey = process.env.OPENAI_API_KEY;
@@ -100,6 +127,7 @@ class AIService {
     const response = await axios.post(this.openaiApiUrl, requestBody, { ...defaultAxios, ...axiosConfig });
     const usage = response.data?.usage;
     if (usage) {
+      const completionText = completionTextFromOpenAIResponse(response.data);
       aiApiUsageService.recordChatUsage({
         organizationId: ctx.organizationId,
         userId: ctx.userId,
@@ -108,6 +136,8 @@ class AIService {
         promptTokens: usage.prompt_tokens,
         completionTokens: usage.completion_tokens,
         totalTokens: usage.total_tokens,
+        promptMessages: requestBody.messages,
+        completionText,
         metadata: ctx.metadata
       });
     }
@@ -1377,7 +1407,7 @@ ${bucketDescriptions}
       }
 
       // Generate response (attributed to auto-reply for AiApiUsage)
-      const response = await runWithAiContext(
+      const { result: response, aiApiUsageId } = await runWithAiContextAndUsageId(
         {
           organizationId,
           userId: interaction.assignedTo || undefined,
@@ -1415,10 +1445,17 @@ ${bucketDescriptions}
         userId = adminUser?._id;
       }
       
-      await aiCreditService.deductCredits(organizationId, 1, {
-        operation: 'auto_reply', userId: userId,
-        interactionId: interaction._id.toString(), platform: interaction.platform
-      });
+      await aiCreditService.deductCredits(
+        organizationId,
+        1,
+        {
+          operation: 'auto_reply',
+          userId: userId,
+          interactionId: interaction._id.toString(),
+          platform: interaction.platform
+        },
+        { aiApiUsageId }
+      );
 
       return { eligible: true, response: response, creditsUsed: 1 };
     } catch (error) {

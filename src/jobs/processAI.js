@@ -4,8 +4,9 @@ const KnowledgeBase = require('../models/KnowledgeBase');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { resolveEscalationAssignmentUsers } = require('../services/autoAssignmentPoolService');
-const { runWithAiContext } = require('../services/aiRequestContext');
+const { runWithAiContext, runWithAiContextAndUsageId } = require('../services/aiRequestContext');
 const aiService = require('../services/aiService');
+const aiCreditService = require('../services/aiCreditService');
 const emailService = require('../services/emailService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
@@ -48,6 +49,13 @@ module.exports = async function processAI(job) {
     }
 
     const orgIdCtx = interaction.organization?._id || interaction.organization;
+
+    // Credit gate — 1 credit covers the full analysis pipeline for this interaction
+    const creditCheck = await aiCreditService.checkCredits(orgIdCtx, 1);
+    if (!creditCheck.allowed) {
+      jobLogger.warn('Skipping AI analysis — insufficient credits', { orgId: String(orgIdCtx) });
+      return { skipped: true, reason: 'No AI credits' };
+    }
 
     // Step 1: Analyze sentiment
     jobLogger.debug('Analyzing sentiment');
@@ -108,9 +116,9 @@ module.exports = async function processAI(job) {
       : null;
     const orgId = populatedOrg?._id || interaction.organization;
 
-    // Step 5: Generate AI response suggestion
+    // Step 5: Generate AI response suggestion (capture aiApiUsageId for credit linking)
     jobLogger.debug('Generating AI response');
-    const aiResponse = await runWithAiContext(
+    const { result: aiResponse, aiApiUsageId } = await runWithAiContextAndUsageId(
       { organizationId: orgIdCtx, feature: 'processAI.generate_response' },
       () => aiService.generateResponse(interaction, orgId, knowledgeBase)
     );
@@ -138,6 +146,18 @@ module.exports = async function processAI(job) {
     // Step 8: Check for negative spike (3+ negative comments on same post)
     if (interaction.type === 'comment' && interaction.sentiment === 'negative') {
       await checkNegativeSpike(interaction);
+    }
+
+    // Deduct 1 credit for the full AI analysis pipeline
+    try {
+      await aiCreditService.deductCredits(
+        orgIdCtx,
+        1,
+        { operation: 'processAI_analysis', userId: interaction.assignedTo || orgIdCtx },
+        { aiApiUsageId }
+      );
+    } catch (creditErr) {
+      jobLogger.warn('Credit deduction failed (non-fatal)', { error: creditErr.message });
     }
 
     // Save interaction
