@@ -1402,6 +1402,10 @@ Topics: 2-3 keywords only.${bucketSection}`;
       const plat = (interaction.platform || '').toLowerCase();
       const allowed = this._normalizePlatformList(settings.enabledPlatforms);
       if (!allowed.includes(plat)) {
+        console.warn(
+          `⚠️  [canAutoReply] Blocked — platform "${plat}" not in enabledPlatforms [${allowed.join(', ')}]. ` +
+          `Add "${plat}" in Auto-Reply settings → Enabled Platforms. Interaction: ${interaction._id}`
+        );
         return false;
       }
     }
@@ -1409,6 +1413,10 @@ Topics: 2-3 keywords only.${bucketSection}`;
     // Interaction type (comment, dm, review, mention)
     if (settings.enabledTypes && settings.enabledTypes.length > 0) {
       if (!settings.enabledTypes.includes(interaction.type)) {
+        console.warn(
+          `⚠️  [canAutoReply] Blocked — type "${interaction.type}" not in enabledTypes [${settings.enabledTypes.join(', ')}]. ` +
+          `Add "${interaction.type}" in Auto-Reply settings → Enabled Types. Interaction: ${interaction._id}`
+        );
         return false;
       }
     }
@@ -1422,45 +1430,42 @@ Topics: 2-3 keywords only.${bucketSection}`;
     }
 
     if (sentimentFilter !== 'all') {
+      let blocked = false;
       switch (sentimentFilter) {
         case 'negative_only':
-          if (sentiment !== 'negative') {
-            return false;
-          }
+          if (sentiment !== 'negative') blocked = true;
           break;
         case 'positive_only':
-          if (sentiment !== 'positive') {
-            return false;
-          }
+          if (sentiment !== 'positive') blocked = true;
           break;
         case 'neutral_only':
-          if (sentiment !== 'neutral') {
-            return false;
-          }
+          if (sentiment !== 'neutral') blocked = true;
           break;
         case 'positive_neutral':
-          if (sentiment === 'negative') {
-            return false;
-          }
+          if (sentiment === 'negative') blocked = true;
           break;
         default:
           break;
       }
-    }
-
-    // sentimentFilter === 'all' matches UI "Reply to All Sentiments" — do not also gate on legacy replyToNegative
-    // (use "positive_neutral" or turn off auto-reply for negatives via a dedicated filter if needed)
-
-    // Complaints: only block when intent is explicitly classified as complaint
-    if (interaction.intent === 'complaint' && !settings.replyToComplaints) {
-      return false;
+      if (blocked) {
+        console.warn(
+          `⚠️  [canAutoReply] Blocked — sentimentFilter is "${sentimentFilter}" but message sentiment is "${sentiment}". ` +
+          `Set sentimentFilter to "all" in Auto-Reply settings to reply to all messages. Interaction: ${interaction._id}`
+        );
+        return false;
+      }
     }
 
     // Per-bucket reply toggle
     if (interaction.intentBucket) {
       const IntentBucket = require('../models/IntentBucket');
-      const bucket = await IntentBucket.findById(interaction.intentBucket).select('replyEnabled').lean();
+      const bucket = await IntentBucket.findById(interaction.intentBucket).select('replyEnabled name').lean();
       if (bucket && bucket.replyEnabled === false) {
+        console.warn(
+          `⚠️  [canAutoReply] Blocked — bucket "${bucket.name}" has auto-reply disabled. ` +
+          `Enable it in Settings → Intent Buckets → ${bucket.name} → Auto-Reply. ` +
+          `Interaction: ${interaction._id}`
+        );
         return false;
       }
     }

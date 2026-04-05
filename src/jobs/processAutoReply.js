@@ -235,7 +235,18 @@ async function processSingleInteraction(interactionId, organization) {
     );
 
     if (!autoReply.eligible) {
-      // Reply not eligible (settings gate) — escalate if triggered, then stop
+      // Reply not eligible (settings gate) — log clearly so the user can diagnose in console
+      logger.info('[Auto-reply] Not eligible — check org auto-reply settings', {
+        interactionId: interactionForReply._id?.toString(),
+        platform: interactionForReply.platform,
+        type: interactionForReply.type,
+        sentiment: interactionForReply.sentiment,
+        intent: interactionForReply.intent,
+        reason: autoReply.reason,
+        hint: 'Check: sentimentFilter, enabledPlatforms, enabledTypes in Auto-Reply settings'
+      });
+      console.warn(`⚠️  [Auto-reply] Not eligible for interaction ${interactionForReply._id}: ${autoReply.reason}`);
+      // Escalate to human if rules triggered
       if (escalationCheck.shouldEscalate) {
         await escalationService.escalateInteraction(
           interactionForReply, organization,
