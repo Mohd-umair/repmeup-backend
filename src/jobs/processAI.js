@@ -171,6 +171,17 @@ module.exports = async function processAI(job) {
  */
 async function assignToAgent(interaction, reason) {
   try {
+    // Thread DMs re-run processAI on every new customer message; do not re-auto-assign if someone already owns it.
+    const latestAssign = await Interaction.findById(interaction._id).select('assignedTo').lean();
+    if (latestAssign?.assignedTo) {
+      interaction.assignedTo = latestAssign.assignedTo;
+      logger.info('Skipping auto-assign — interaction already has an assignee', {
+        interactionId: interaction._id.toString(),
+        assignedTo: String(latestAssign.assignedTo)
+      });
+      return;
+    }
+
     const orgId = interaction.organization?._id || interaction.organization;
     const orgDoc =
       interaction.organization &&

@@ -187,35 +187,43 @@ async function processSingleInteraction(interactionId, organization) {
       }
     }
 
-    // CHECK ESCALATION RULES BEFORE GENERATING AUTO-REPLY
+    // Evaluate escalation rules now so we know whether to route to human,
+    // but DO NOT skip the reply — customers should always receive an acknowledgment.
     const escalationCheck = await escalationService.shouldEscalate(
       interaction,
       organization
     );
 
-    if (escalationCheck.shouldEscalate) {
-      await escalationService.escalateInteraction(
-        interaction,
-        organization,
-        escalationCheck.reasons,
-        escalationCheck.type,
-        escalationCheck.metadata
-      );
-
-      return { skipped: true, reason: 'Escalated to human agent' };
-    }
-
-    // Reload interaction so sentiment / intent from processAI match org filters (sentimentFilter, replyToComplaints, etc.)
+    // Reload interaction so sentiment / intent from processAI match org filters
     const interactionForReply = await Interaction.findById(interactionId)
       .populate('platformConnection');
     if (!interactionForReply) {
+      // Nothing to reply to — still escalate if needed
+      if (escalationCheck.shouldEscalate) {
+        await escalationService.escalateInteraction(
+          interaction, organization,
+          escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
+        );
+      }
       return { skipped: true, reason: 'Interaction not found' };
     }
     const threadDmReply = isThreadStyleDm(interactionForReply);
     if (!threadDmReply && interactionForReply.replies && interactionForReply.replies.length > 0) {
+      if (escalationCheck.shouldEscalate) {
+        await escalationService.escalateInteraction(
+          interactionForReply, organization,
+          escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
+        );
+      }
       return { skipped: true, reason: 'Already has replies' };
     }
     if (!threadDmReply && (interactionForReply.status === 'replied' || interactionForReply.status === 'resolved')) {
+      if (escalationCheck.shouldEscalate) {
+        await escalationService.escalateInteraction(
+          interactionForReply, organization,
+          escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
+        );
+      }
       return { skipped: true, reason: `Status is ${interactionForReply.status}` };
     }
 
@@ -225,11 +233,18 @@ async function processSingleInteraction(interactionId, organization) {
       organization._id,
       organization
     );
-    
+
     if (!autoReply.eligible) {
+      // Reply not eligible (settings gate) — escalate if triggered, then stop
+      if (escalationCheck.shouldEscalate) {
+        await escalationService.escalateInteraction(
+          interactionForReply, organization,
+          escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
+        );
+      }
       return { skipped: true, reason: autoReply.reason };
     }
-    
+
     logEvents.autoReply.generated({
       interactionId: interactionForReply._id,
       confidence: autoReply.response.confidence,
@@ -246,26 +261,29 @@ async function processSingleInteraction(interactionId, organization) {
       confidence: autoReply.response.confidence
     });
 
-    // Check escalation after generating reply (to check AI confidence)
+    // Merge confidence-based escalation check with the earlier one
     const postReplyEscalationCheck = await escalationService.shouldEscalate(
       interactionForReply,
       organization,
-      autoReply.response // Pass AI response with confidence
+      autoReply.response
     );
 
-    if (postReplyEscalationCheck.shouldEscalate) {
-      await escalationService.escalateInteraction(
-        interactionForReply,
-        organization,
-        postReplyEscalationCheck.reasons,
-        'ai_confidence',
-        postReplyEscalationCheck.metadata
-      );
+    const shouldEscalate = escalationCheck.shouldEscalate || postReplyEscalationCheck.shouldEscalate;
+    const escalationReasons = [
+      ...(escalationCheck.reasons || []),
+      ...(postReplyEscalationCheck?.reasons || [])
+    ];
+    const escalationType = escalationCheck.shouldEscalate
+      ? escalationCheck.type
+      : 'ai_confidence';
+    const escalationMetadata = {
+      ...(escalationCheck.metadata || {}),
+      ...(postReplyEscalationCheck?.metadata || {})
+    };
 
-      return { skipped: true, reason: 'Escalated due to low AI confidence' };
-    }
-
-    // Send if autoSend is enabled and no approval required
+    // Send the reply FIRST so the customer always gets an acknowledgment,
+    // even when the conversation is being escalated to a human agent.
+    let replySent = false;
     if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
       const sent = await sendReplyToPlatform(interactionForReply, autoReply.response.content, organization);
       if (sent) {
@@ -273,12 +291,29 @@ async function processSingleInteraction(interactionId, organization) {
           interactionId: interactionForReply._id,
           platform: interactionForReply.platform
         });
+        replySent = true;
       }
-      return { sent: sent };
     }
 
-    // Otherwise just mark as generated
-    return { processed: true };
+    // THEN escalate to human if rules triggered (routing happens after the reply)
+    if (shouldEscalate) {
+      await escalationService.escalateInteraction(
+        interactionForReply,
+        organization,
+        escalationReasons,
+        escalationType,
+        escalationMetadata
+      );
+      logger.info('[Auto-reply] Escalated after reply', {
+        interactionId: interactionForReply._id?.toString(),
+        replySent,
+        escalationType,
+        reasons: escalationReasons
+      });
+      return { sent: replySent, escalated: true };
+    }
+
+    return replySent ? { sent: true } : { processed: true };
 
   } catch (error) {
     logEvents.autoReply.failed({

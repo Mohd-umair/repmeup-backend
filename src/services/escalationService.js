@@ -296,6 +296,14 @@ class EscalationService {
     const method = settings.assignmentMethod || 'round_robin';
 
     try {
+      const existing = await Interaction.findById(interaction._id).select('assignedTo').lean();
+      if (existing?.assignedTo) {
+        console.log(
+          `⏭️ [Escalation] Skipping auto-assign — interaction ${interaction._id} already assigned to ${existing.assignedTo}`
+        );
+        return null;
+      }
+
       let agent = null;
 
       switch (method) {
