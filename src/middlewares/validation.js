@@ -49,6 +49,38 @@ exports.validateLogin = (req, res, next) => {
   next();
 };
 
+const CONTACT_SUBJECTS = [
+  'general',
+  'demo',
+  'support',
+  'sales',
+  'billing',
+  'partnership',
+  'other'
+];
+
+exports.validateContactInquiry = (req, res, next) => {
+  const schema = Joi.object({
+    name: Joi.string().trim().min(2).max(200).required(),
+    email: Joi.string().email().required(),
+    phone: Joi.string().trim().max(40).allow('', null),
+    company: Joi.string().trim().max(200).allow('', null),
+    subject: Joi.string().valid(...CONTACT_SUBJECTS).required(),
+    message: Joi.string().trim().min(10).max(10000).required(),
+    intent: Joi.string().trim().max(64).allow('', null)
+  });
+
+  const { error } = schema.validate(req.body, { abortEarly: true, stripUnknown: true });
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      error: error.details[0].message
+    });
+  }
+
+  next();
+};
+
 // Validate interaction reply
 exports.validateReply = (req, res, next) => {
   const schema = Joi.object({

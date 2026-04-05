@@ -1,5 +1,6 @@
 const superAdminService = require('../services/superAdminService');
 const Transaction = require('../models/Transaction');
+const aiUsageReportService = require('../services/aiUsageReportService');
 
 /**
  * GET /api/super-admin/plans
@@ -190,6 +191,27 @@ exports.softDeleteUser = async (req, res, next) => {
         error: error.message
       });
     }
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/ai-usage
+ * Query: organizationId, feature, apiKind, startDate, endDate, groupBy=feature|organization|day|feature_org
+ * format=json|csv — CSV returns raw rows (capped)
+ */
+exports.getAiUsage = async (req, res, next) => {
+  try {
+    if (req.query.format === 'csv') {
+      const raw = await aiUsageReportService.listRaw(req.query);
+      const csv = aiUsageReportService.toCsv(raw);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="ai-api-usage.csv"');
+      return res.status(200).send(csv);
+    }
+    const data = await aiUsageReportService.aggregateReport(req.query);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
     next(error);
   }
 };

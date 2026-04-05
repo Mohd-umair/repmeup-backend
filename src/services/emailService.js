@@ -1,4 +1,8 @@
 const nodemailer = require('nodemailer');
+const {
+  buildWelcomeSignupEmail,
+  buildWelcomeSignupPlainText
+} = require('./emailTemplates/welcomeSignupTemplate');
 
 /** Avoid 535 from accidental spaces/newlines when pasting into .env */
 function smtpEnv(name, fallback = '') {
@@ -108,23 +112,35 @@ class EmailService {
   }
 
   /**
-   * Send welcome email
+   * Send welcome email (first-time signup: register, Google OAuth, or team invite with temp password).
    */
   async sendWelcomeEmail(user, tempPassword = null) {
-    const subject = 'Welcome to ORM System';
-    const html = wrapSimpleEmailHtml(`
-      <h1>Welcome to ORM System, ${user.firstName}!</h1>
-      <p>Your account has been created successfully.</p>
-      ${tempPassword ? `<p><strong>Temporary Password:</strong> ${tempPassword}</p>
-      <p>Please change your password after your first login.</p>` : ''}
-      <p>Get started by connecting your social media accounts and managing all your interactions in one place.</p>
-      <p>Best regards,<br>ORM Team</p>
-    `);
+    const baseUrl = String(process.env.FRONTEND_URL || 'http://localhost:4200').replace(/\/$/, '');
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+    const loginUrl = `${baseUrl}/auth/login`;
+    const dashboardUrl = `${baseUrl}/app/dashboard`;
+
+    const html = buildWelcomeSignupEmail({
+      firstName: user.firstName,
+      tempPassword: tempPassword || null,
+      loginUrl,
+      dashboardUrl,
+      appName
+    });
+    const text = buildWelcomeSignupPlainText({
+      firstName: user.firstName,
+      tempPassword: tempPassword || null,
+      loginUrl,
+      dashboardUrl,
+      appName
+    });
+    const subject = `Welcome to ${appName} — your account is ready`;
 
     return this.sendEmail({
       to: user.email,
       subject,
-      html
+      html,
+      text
     });
   }
 

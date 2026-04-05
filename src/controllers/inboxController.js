@@ -3,6 +3,7 @@ const Label = require('../models/Label');
 const ResponseTemplate = require('../models/ResponseTemplate');
 const cacheService = require('../services/cacheService');
 const aiService = require('../services/aiService');
+const { runWithAiContext } = require('../services/aiRequestContext');
 const Organization = require('../models/Organization');
 const escalationService = require('../services/escalationService');
 const User = require('../models/User');
@@ -1516,9 +1517,13 @@ exports.suggestReply = async (req, res, next) => {
 
     let suggestCreditsDeducted = 0;
     try {
-      const aiResponse = await aiService.generateResponse(
-        interaction,
-        req.user.organization._id
+      const aiResponse = await runWithAiContext(
+        {
+          organizationId: req.user.organization._id,
+          userId: req.user._id,
+          feature: 'inbox.suggest_reply'
+        },
+        () => aiService.generateResponse(interaction, req.user.organization._id)
       );
 
       if (!aiResponse) {
@@ -1660,12 +1665,21 @@ IMPORTANT RULES:
 
     const generateOne = async (type) => {
       const config = replyTypes[type];
-      const result = await aiService.generateText(
-        `${baseSystemPrompt}\n\n${config.instruction}`,
-        `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
-        { temperature: config.temperature, maxTokens: config.maxTokens }
+      return runWithAiContext(
+        {
+          organizationId: req.user.organization._id,
+          userId: req.user._id,
+          feature: `inbox.ai_assist.${type}`
+        },
+        async () => {
+          const result = await aiService.generateText(
+            `${baseSystemPrompt}\n\n${config.instruction}`,
+            `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
+            { temperature: config.temperature, maxTokens: config.maxTokens }
+          );
+          return { type, content: result };
+        }
       );
-      return { type, content: result };
     };
 
     const [shortReply, detailedReply, salesReply] = await Promise.all([
@@ -1790,10 +1804,18 @@ ${kbContext ? `KNOWLEDGE BASE:\n${kbContext}` : ''}
 
 ${config.instruction}`;
 
-    const content = await aiService.generateText(
-      systemPrompt,
-      `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
-      { temperature: config.temperature, maxTokens: config.maxTokens }
+    const content = await runWithAiContext(
+      {
+        organizationId: req.user.organization._id,
+        userId: req.user._id,
+        feature: `inbox.ai_assist_regenerate.${type}`
+      },
+      () =>
+        aiService.generateText(
+          systemPrompt,
+          `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
+          { temperature: config.temperature, maxTokens: config.maxTokens }
+        )
     );
 
     await aiCreditService.deductCredits(organizationId, 1, {
@@ -1822,7 +1844,6 @@ ${config.instruction}`;
 // @route   POST /api/inbox/auto-reply/generate
 // @access  Private (Admin/Manager)
 exports.generateAutoReplies = async (req, res, next) => {
-  let autoReplyCreditsDeducted = 0;
   const organizationId = req.user.organization._id.toString();
   const aiCreditService = require('../services/aiCreditService');
   try {
@@ -1925,13 +1946,7 @@ exports.generateAutoReplies = async (req, res, next) => {
         }
 
         results.generated++;
-
-        await aiCreditService.deductCredits(organizationId, 1, {
-          operation: 'ai_response', userId: req.user._id,
-          interactionId: interaction._id.toString(), platform: interaction.platform,
-          isAutoReply: true, messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
-        });
-        autoReplyCreditsDeducted++;
+        // Credits: generateAutoReply already deducts 1 credit (operation: auto_reply)
 
         // If autoSend is true and organization allows it, send the reply
         if (autoSend && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
@@ -2023,9 +2038,6 @@ exports.generateAutoReplies = async (req, res, next) => {
     });
   } catch (error) {
     console.error('Auto-reply generation error:', error);
-    if (autoReplyCreditsDeducted > 0) {
-      await aiCreditService.rollbackCredits(organizationId, autoReplyCreditsDeducted, { operation: 'ai_response_auto_reply', userId: req.user?._id, reason: error.message });
-    }
     next(error);
   }
 };
@@ -2034,7 +2046,6 @@ exports.generateAutoReplies = async (req, res, next) => {
 // @route   POST /api/inbox/auto-reply/test-trigger
 // @access  Private (Admin/Manager)
 exports.testAutoReplyTrigger = async (req, res, next) => {
-  let testCreditsDeducted = 0;
   const organizationId = req.user.organization._id;
   const aiCreditService = require('../services/aiCreditService');
   try {
@@ -2114,13 +2125,7 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
       }
 
       results.processed++;
-
-      await aiCreditService.deductCredits(organizationId, 1, {
-        operation: 'ai_response', userId: req.user._id,
-        interactionId: interaction._id.toString(), platform: interaction.platform,
-        isAutoReplyTest: true, messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
-      });
-      testCreditsDeducted++;
+      // Credits: generateAutoReply already deducts 1 credit
 
       results.details.push({
         id: interaction._id,
@@ -2140,9 +2145,6 @@ exports.testAutoReplyTrigger = async (req, res, next) => {
 
   } catch (error) {
     console.error('Auto-reply test error:', error);
-    if (testCreditsDeducted > 0) {
-      await aiCreditService.rollbackCredits(organizationId, testCreditsDeducted, { operation: 'ai_response_test', userId: req.user?._id, reason: error.message });
-    }
     next(error);
   }
 };

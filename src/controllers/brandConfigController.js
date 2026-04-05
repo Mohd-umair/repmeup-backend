@@ -1,6 +1,7 @@
 const BrandConfig = require('../models/BrandConfig');
 const auditLogController = require('./auditLogController');
 const aiService = require('../services/aiService');
+const { runWithAiContext } = require('../services/aiRequestContext');
 
 /**
  * @desc    Get brand config for current user's organization
@@ -51,12 +52,20 @@ exports.getPreview = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Organization not found' });
     }
 
-    const result = await aiService.generatePost(
-      'Write one short sample post that reflects our brand voice. One or two sentences only.',
-      ['instagram'],
-      'same',
-      'post',
-      organizationId
+    const result = await runWithAiContext(
+      {
+        organizationId,
+        userId: req.user._id,
+        feature: 'brand_config.preview'
+      },
+      () =>
+        aiService.generatePost(
+          'Write one short sample post that reflects our brand voice. One or two sentences only.',
+          ['instagram'],
+          'same',
+          'post',
+          organizationId
+        )
     );
 
     const sample = result?.posts?.all ?? result?.platformPosts?.instagram ?? '';

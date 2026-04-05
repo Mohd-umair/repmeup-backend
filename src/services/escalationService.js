@@ -1,6 +1,5 @@
 const Interaction = require('../models/Interaction');
-const Organization = require('../models/Organization');
-const User = require('../models/User');
+const { resolveEscalationAssignmentUsers } = require('./autoAssignmentPoolService');
 
 /**
  * Escalation Service - Hybrid Approach
@@ -321,7 +320,7 @@ class EscalationService {
       }
 
       if (agent) {
-        await interaction.assignTo(agent._id, agent._id, 'escalation');
+        await interaction.assignTo(agent._id, null, 'escalation');
         return agent;
       }
 
@@ -336,69 +335,37 @@ class EscalationService {
    * Round-robin assignment
    */
   async assignRoundRobin(organization) {
-    const availableAgents = organization.escalationSettings?.availableAgents || [];
-    
-    if (availableAgents.length === 0) {
-      // Fallback: Get all users with 'admin' or 'manager' role
-      const agents = await User.find({
-        organization: organization._id,
-        role: { $in: ['admin', 'manager'] },
-        isActive: true
-      });
+    const pool = await resolveEscalationAssignmentUsers(organization);
 
-      if (agents.length === 0) return null;
+    if (pool.length === 0) return null;
 
-      // Use first agent
-      return agents[0];
-    }
-
-    // Get next agent in round-robin
-    const lastIndex = organization.escalationSettings.lastAssignedAgentIndex || -1;
-    const nextIndex = (lastIndex + 1) % availableAgents.length;
-    const agentId = availableAgents[nextIndex];
-
-    // Update last assigned index
+    const lastIndex = organization.escalationSettings.lastAssignedAgentIndex ?? -1;
+    const nextIndex = (lastIndex + 1) % pool.length;
     organization.escalationSettings.lastAssignedAgentIndex = nextIndex;
     await organization.save();
 
-    const agent = await User.findById(agentId);
-    return agent;
+    return pool[nextIndex];
   }
 
   /**
    * Assign to least busy agent
    */
   async assignLeastBusy(organization) {
-    const availableAgents = organization.escalationSettings?.availableAgents || [];
-    
-    let agents;
-    if (availableAgents.length === 0) {
-      agents = await User.find({
-        organization: organization._id,
-        role: { $in: ['admin', 'manager'] },
-        isActive: true
-      });
-    } else {
-      agents = await User.find({ _id: { $in: availableAgents } });
-    }
+    const agents = await resolveEscalationAssignmentUsers(organization);
 
     if (agents.length === 0) return null;
 
-    // Count assigned interactions for each agent
     const agentWorkload = await Promise.all(
       agents.map(async (agent) => {
         const count = await Interaction.countDocuments({
           assignedTo: agent._id,
-          status: 'assigned',
-          requiresHumanResponse: true
+          status: { $in: ['assigned', 'unread'] }
         });
         return { agent, count };
       })
     );
 
-    // Sort by workload (least busy first)
     agentWorkload.sort((a, b) => a.count - b.count);
-
     return agentWorkload[0].agent;
   }
 

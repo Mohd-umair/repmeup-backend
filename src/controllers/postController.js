@@ -10,6 +10,7 @@ const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
 const aiService = require('../services/aiService');
 const aiCreditService = require('../services/aiCreditService');
+const { runWithAiContext } = require('../services/aiRequestContext');
 const auditLogController = require('./auditLogController');
 const multer = require('multer');
 const path = require('path');
@@ -180,7 +181,14 @@ exports.generatePostWithAI = async (req, res) => {
       });
     }
 
-    const result = await aiService.generatePost(prompt, platforms, mode, postType, organizationId);
+    const result = await runWithAiContext(
+      {
+        organizationId,
+        userId: req.user._id,
+        feature: 'content_studio.post_generate'
+      },
+      () => aiService.generatePost(prompt, platforms, mode, postType, organizationId)
+    );
 
     await aiCreditService.deductCredits(organizationId, result.creditsUsed, {
       operation: 'post_generation', userId: req.user._id,
@@ -229,10 +237,24 @@ exports.generatePostVariantsWithAI = async (req, res) => {
       });
     }
 
-    const result = await aiService.generatePostVariants(topic, platforms, {
-      count: variantCount, organizationId, postType: postType || 'post',
-      audience: audience || '', intent: intent || '', mood: mood || '', includeTrend: !!includeTrend
-    });
+    const result = await runWithAiContext(
+      {
+        organizationId,
+        userId: req.user._id,
+        feature: 'content_studio.post_variants'
+      },
+      () =>
+        aiService.generatePostVariants(topic, platforms, {
+          count: variantCount,
+          organizationId,
+          userId: req.user._id,
+          postType: postType || 'post',
+          audience: audience || '',
+          intent: intent || '',
+          mood: mood || '',
+          includeTrend: !!includeTrend
+        })
+    );
 
     await aiCreditService.deductCredits(organizationId, variantCount, {
       operation: 'post_variants', userId: req.user._id, topic: topic.substring(0, 100), platforms, variantCount
@@ -416,7 +438,14 @@ exports.generateVariantImage = async (req, res) => {
     });
     console.log('[Content Studio] AI image prompt (variant %d):\n', variantIndex, imagePrompt);
 
-    const buffer = await aiService.generateImage(imagePrompt);
+    const buffer = await runWithAiContext(
+      {
+        organizationId,
+        userId,
+        feature: `content_studio.variant_image.${typeof variantIndex === 'number' ? variantIndex : 0}`
+      },
+      () => aiService.generateImage(imagePrompt)
+    );
     if (!buffer) {
       return res.status(500).json({ success: false, message: 'Image generation failed. Please try again.' });
     }
@@ -656,10 +685,19 @@ exports.generateVariantVideo = async (req, res) => {
         console.log('[Content Studio] AI video prompt (variant %d):\n', variantIndex, videoPrompt);
 
         const cfg = videoConfig || {};
-        const buffer = await aiService.generateVideo(videoPrompt, {
-          duration: cfg.duration || 4,
-          aspect:   cfg.aspect   || '9:16'
-        });
+        const vIdx = typeof variantIndex === 'number' ? variantIndex : 0;
+        const buffer = await runWithAiContext(
+          {
+            organizationId,
+            userId,
+            feature: `content_studio.variant_video.${vIdx}`
+          },
+          () =>
+            aiService.generateVideo(videoPrompt, {
+              duration: cfg.duration || 4,
+              aspect: cfg.aspect || '9:16'
+            })
+        );
 
         if (!buffer) {
           await VideoJob.findOneAndUpdate({ jobId }, {

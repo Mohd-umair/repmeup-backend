@@ -22,8 +22,11 @@ exports.register = async (req, res, next) => {
       userAgent: req.headers['user-agent']
     });
 
-    // Send welcome email
-    await emailService.sendWelcomeEmail(result.user);
+    try {
+      await emailService.sendWelcomeEmail(result.user);
+    } catch (welcomeErr) {
+      console.warn('[auth] Welcome email failed:', welcomeErr.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -168,14 +171,17 @@ exports.createTeamMember = async (req, res, next) => {
       req.body
     );
 
-    // Send welcome email with temp password
-    await emailService.sendWelcomeEmail(result.user, result.tempPassword);
+    try {
+      await emailService.sendWelcomeEmail(result.user, result.tempPassword);
+    } catch (welcomeErr) {
+      console.warn('[auth] Team welcome email failed:', welcomeErr.message);
+    }
 
     res.status(201).json({
       success: true,
       data: {
         user: result.user,
-        message: 'Team member created. Welcome email sent with temporary password.'
+        message: 'Team member created. If email is configured, a welcome message was sent.'
       }
     });
   } catch (error) {
