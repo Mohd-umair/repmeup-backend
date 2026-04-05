@@ -103,6 +103,51 @@ async function aggregateReport(query) {
   };
 }
 
+/** Fields for list + CSV — exclude large prompt/completion snapshots */
+const USAGE_SUMMARY_FIELDS =
+  'organization user feature apiKind model promptTokens completionTokens totalTokens estimatedUsd applicationCreditsUsed creditOperation metadata createdAt updatedAt';
+
+/**
+ * Paginated call log for super-admin (no prompt bodies).
+ */
+async function listRecords(query) {
+  const match = buildMatch(query);
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  let limit = parseInt(query.limit, 10) || 20;
+  limit = Math.min(Math.max(1, limit), 100);
+  const skip = (page - 1) * limit;
+
+  const [total, items] = await Promise.all([
+    AiApiUsage.countDocuments(match),
+    AiApiUsage.find(match)
+      .select(USAGE_SUMMARY_FIELDS)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('organization', 'name slug')
+      .populate('user', 'firstName lastName email')
+      .lean()
+  ]);
+
+  return {
+    items,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit) || 0
+    }
+  };
+}
+
+async function getRecordById(id) {
+  if (!mongoose.Types.ObjectId.isValid(String(id))) return null;
+  return AiApiUsage.findById(id)
+    .populate('organization', 'name slug')
+    .populate('user', 'firstName lastName email')
+    .lean();
+}
+
 /**
  * Raw rows for CSV (limited)
  */
@@ -110,6 +155,7 @@ async function listRaw(query, limit = 5000) {
   const match = buildMatch(query);
   const lim = Math.min(Math.max(parseInt(query.limit, 10) || 5000, 1), 20000);
   return AiApiUsage.find(match)
+    .select(USAGE_SUMMARY_FIELDS)
     .sort({ createdAt: -1 })
     .limit(lim)
     .lean();
@@ -125,7 +171,9 @@ function toCsv(rows) {
     'promptTokens',
     'completionTokens',
     'totalTokens',
-    'estimatedUsd'
+    'estimatedUsd',
+    'applicationCreditsUsed',
+    'creditOperation'
   ];
   const lines = [headers.join(',')];
   for (const r of rows) {
@@ -146,6 +194,8 @@ function toCsv(rows) {
 
 module.exports = {
   aggregateReport,
+  listRecords,
+  getRecordById,
   listRaw,
   toCsv,
   buildMatch

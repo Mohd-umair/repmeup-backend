@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
 const AICreditUsage = require('../models/AICreditUsage');
+const AiApiUsage = require('../models/AiApiUsage');
+const { getAiRequestContext, clearLastAiApiUsageId } = require('./aiRequestContext');
 
 /**
  * AI Credit Service - Single Responsibility Principle
@@ -82,13 +84,10 @@ class AICreditService {
   }
 
   /**
-   * Deduct AI credits after successful operation
-   * @param {String} organizationId
-   * @param {Number} actualCost - Actual credits used
-   * @param {Object} metadata - Optional metadata (operation type, details, userId)
-   * @returns {Promise<Object>} Updated usage
+   * Deduct AI credits after successful operation.
+   * @param {object} [linkOptions] Optional `aiApiUsageId` to attach product credits to `AiApiUsage` when deduct runs outside ALS.
    */
-  async deductCredits(organizationId, actualCost = 1, metadata = {}) {
+  async deductCredits(organizationId, actualCost = 1, metadata = {}, linkOptions = {}) {
     try {
       const result = await Subscription.findOneAndUpdate(
         { organization: organizationId },
@@ -104,6 +103,27 @@ class AICreditService {
         return { success: false };
       }
 
+      const explicitId =
+        linkOptions.aiApiUsageId && mongoose.Types.ObjectId.isValid(String(linkOptions.aiApiUsageId))
+          ? String(linkOptions.aiApiUsageId)
+          : null;
+      const store = getAiRequestContext();
+      const fromContext =
+        !explicitId &&
+        store &&
+        store.lastAiApiUsageId &&
+        mongoose.Types.ObjectId.isValid(String(store.lastAiApiUsageId))
+          ? String(store.lastAiApiUsageId)
+          : null;
+      const linkedUsageId = explicitId || fromContext;
+
+      const creditMeta = {
+        ...metadata,
+        userId: undefined,
+        operation: undefined,
+        ...(linkedUsageId ? { aiApiUsageId: linkedUsageId } : {})
+      };
+
       // Log usage event for history tracking
       try {
         await AICreditUsage.create({
@@ -111,15 +131,25 @@ class AICreditService {
           user: metadata.userId || organizationId, // Fallback to org ID if user not provided
           operation: metadata.operation || 'unknown',
           creditsUsed: actualCost,
-          metadata: {
-            ...metadata,
-            userId: undefined, // Remove userId from metadata to avoid duplication
-            operation: undefined // Remove operation from metadata to avoid duplication
-          }
+          metadata: creditMeta
         });
       } catch (logError) {
         console.error('Error logging AI credit usage:', logError);
         // Don't fail the deduction if logging fails
+      }
+
+      if (linkedUsageId) {
+        try {
+          await AiApiUsage.findByIdAndUpdate(linkedUsageId, {
+            $set: {
+              applicationCreditsUsed: actualCost,
+              creditOperation: metadata.operation || 'unknown'
+            }
+          });
+        } catch (linkErr) {
+          console.error('Error linking application credits to AiApiUsage:', linkErr.message);
+        }
+        clearLastAiApiUsageId();
       }
 
       console.log(`💰 [AI Credits] Deducted ${actualCost} credits for org ${organizationId}. New total: ${result.usage.aiCreditsThisMonth}/${result.limits.maxAICreditsPerMonth}`);

@@ -1,7 +1,8 @@
 const BrandConfig = require('../models/BrandConfig');
 const auditLogController = require('./auditLogController');
 const aiService = require('../services/aiService');
-const { runWithAiContext } = require('../services/aiRequestContext');
+const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
+const aiCreditService = require('../services/aiCreditService');
 
 /**
  * @desc    Get brand config for current user's organization
@@ -52,7 +53,17 @@ exports.getPreview = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Organization not found' });
     }
 
-    const result = await runWithAiContext(
+    // Credit gate — 1 credit per preview generation
+    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        code: 'AI_CREDITS_EXCEEDED',
+        message: creditCheck.error || 'Insufficient AI credits'
+      });
+    }
+
+    const { result, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId,
         userId: req.user._id,
@@ -67,6 +78,18 @@ exports.getPreview = async (req, res) => {
           organizationId
         )
     );
+
+    // Deduct 1 credit and link to the vendor API usage record
+    try {
+      await aiCreditService.deductCredits(
+        organizationId,
+        1,
+        { operation: 'brand_config_preview', userId: req.user._id },
+        { aiApiUsageId }
+      );
+    } catch (creditErr) {
+      console.warn('Brand preview credit deduction failed (non-fatal):', creditErr.message);
+    }
 
     const sample = result?.posts?.all ?? result?.platformPosts?.instagram ?? '';
     const previewText = typeof sample === 'string' ? sample : (sample?.content || sample?.text || '');

@@ -217,6 +217,38 @@ exports.getAiUsage = async (req, res, next) => {
 };
 
 /**
+ * GET /api/super-admin/ai-usage/records
+ * Same filters as aggregate + page, limit — paginated rows (excludes stored prompts).
+ */
+exports.getAiUsageRecords = async (req, res, next) => {
+  try {
+    const data = await aiUsageReportService.listRecords(req.query);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/ai-usage/records/:id
+ * Single row including promptMessages + completionText where stored.
+ */
+exports.getAiUsageRecordById = async (req, res, next) => {
+  try {
+    const row = await aiUsageReportService.getRecordById(req.params.id);
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: 'Record not found'
+      });
+    }
+    res.status(200).json({ success: true, data: row });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * GET /api/super-admin/transactions
  * Query params:
  *   type    — filter by transaction type: order | payment | renewal | failed
