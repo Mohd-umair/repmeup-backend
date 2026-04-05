@@ -1,87 +1,226 @@
 const axios = require('axios');
+const { getAiRequestContext, runWithAiContext } = require('./aiRequestContext');
+const aiApiUsageService = require('./aiApiUsageService');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const BrandConfig = require('../models/BrandConfig');
 const aiCreditService = require('./aiCreditService');
 const logger = require('../config/logger');
 const { escapeRegex } = require('../utils/sanitize');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+
+/**
+ * OpenAI model ids are lowercase (e.g. gpt-5.3-chat-latest). ChatGPT-style names like "GPT-5.3" 404.
+ * Maps common shorthand to the official Chat Completions model id.
+ */
+function normalizeOpenAIModelId(raw) {
+  const fallback = 'gpt-4';
+  if (raw == null || String(raw).trim() === '') {
+    return fallback;
+  }
+  const m = String(raw).trim().toLowerCase();
+  const aliases = {
+    'gpt-5.3': 'gpt-5.3-chat-latest',
+    'gpt-5-3': 'gpt-5.3-chat-latest',
+    'gpt5.3': 'gpt-5.3-chat-latest'
+  };
+  return aliases[m] || m;
+}
+
+/**
+ * Newer OpenAI chat models (e.g. gpt-5.x) reject `max_tokens` and require `max_completion_tokens`.
+ */
+function openAIChatCompletionMaxTokensField(model, maxValue) {
+  const m = (model || '').toLowerCase();
+  const useMaxCompletion =
+    /^gpt-5/.test(m) || /^o1/.test(m) || /^o3/.test(m) || /^o4/.test(m);
+  if (useMaxCompletion) {
+    return { max_completion_tokens: maxValue };
+  }
+  return { max_tokens: maxValue };
+}
+
+/** Models that only accept the default sampling temperature (omit param; do not send custom values). */
+function openAIChatModelUsesFixedTemperature(model) {
+  const m = (model || '').toLowerCase();
+  return /^gpt-5/.test(m) || /^o1/.test(m) || /^o3/.test(m) || /^o4/.test(m);
+}
+
+function openAIChatCompletionTemperatureField(model, temperature) {
+  if (openAIChatModelUsesFixedTemperature(model)) {
+    return {};
+  }
+  return { temperature };
+}
 
 class AIService {
   constructor() {
-    // Ollama configuration (for development with Gemma3)
-    this.ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
-    this.ollamaModel = process.env.OLLAMA_MODEL || 'gemma3:270m';
-
-    // OpenAI configuration (for production)
     this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.openaiApiUrl = 'https://api.openai.com/v1/chat/completions';
-    this.openaiImagesUrl = 'https://api.openai.com/v1/images/generations';
-    this.openaiModel = process.env.OPENAI_MODEL || 'gpt-4';
+    this.openaiModel = normalizeOpenAIModelId(process.env.OPENAI_MODEL);
 
-    // Provider selection: Auto-detect based on availability
-    // Priority: 1. Explicit AI_PROVIDER env var, 2. OpenAI if key exists, 3. Ollama
-    const explicitProvider = process.env.AI_PROVIDER;
+    /** Kept for diagnostics / compatibility — AI stack is OpenAI-only */
+    this.provider = 'openai';
 
-    if (explicitProvider) {
-      this.provider = explicitProvider.toLowerCase();
-    } else if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
-      // Auto-detect: Use OpenAI if API key is present
-      this.provider = 'openai';
-      logger.info('AI Service: Auto-detected OpenAI provider', { hasApiKey: true });
-    } else {
-      // Fallback to Ollama if no OpenAI key
-      this.provider = 'ollama';
-      logger.warn('AI Service: Using Ollama provider', { reason: 'No OpenAI API key found' });
+    if (process.env.AI_PROVIDER && process.env.AI_PROVIDER.toLowerCase() === 'ollama') {
+      logger.warn('AI_PROVIDER=ollama is no longer supported; OpenAI only. Set OPENAI_API_KEY.');
     }
 
-    console.log(`🤖 AI Provider: ${this.provider.toUpperCase()}`);
-    if (this.provider === 'openai') {
-      console.log(`📝 OpenAI Model: ${this.openaiModel}`);
+    if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
+      logger.info('AI Service: OpenAI', { model: this.openaiModel });
     } else {
-      console.log(`📝 Ollama Model: ${this.ollamaModel}`);
+      logger.warn('AI Service: OPENAI_API_KEY is not set — AI features will fail until configured.');
     }
+
+    console.log('🤖 AI Provider: OPENAI');
+    console.log(`📝 OpenAI Model: ${this.openaiModel}`);
+  }
+
+  _mergeAiLogContext(overrides = {}) {
+    const store = getAiRequestContext();
+    return {
+      organizationId: overrides.organizationId !== undefined ? overrides.organizationId : store.organizationId,
+      userId: overrides.userId !== undefined ? overrides.userId : store.userId,
+      feature: overrides.feature || store.feature || 'unknown',
+      metadata: overrides.metadata || {}
+    };
+  }
+
+  /**
+   * Chat completions POST with token usage persisted to AiApiUsage (non-blocking).
+   */
+  async _postChatCompletions(requestBody, logOverrides = {}, axiosConfig = {}) {
+    const ctx = this._mergeAiLogContext(logOverrides);
+    const defaultAxios = {
+      headers: {
+        Authorization: `Bearer ${this.openaiApiKey}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    };
+    const response = await axios.post(this.openaiApiUrl, requestBody, { ...defaultAxios, ...axiosConfig });
+    const usage = response.data?.usage;
+    if (usage) {
+      aiApiUsageService.recordChatUsage({
+        organizationId: ctx.organizationId,
+        userId: ctx.userId,
+        feature: ctx.feature,
+        model: requestBody.model || this.openaiModel,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
+        totalTokens: usage.total_tokens,
+        metadata: ctx.metadata
+      });
+    }
+    return response;
+  }
+
+  _logImageUsage(model, size, quality) {
+    const ctx = this._mergeAiLogContext({});
+    aiApiUsageService.recordImageUsage({
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      feature: ctx.feature || 'image.generation',
+      model,
+      size,
+      quality,
+      metadata: {}
+    });
+  }
+
+  _logVideoUsage(model, durationSeconds) {
+    const ctx = this._mergeAiLogContext({});
+    aiApiUsageService.recordVideoUsage({
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      feature: ctx.feature || 'video.generation',
+      model,
+      durationSeconds,
+      metadata: {}
+    });
+  }
+
+  /**
+   * Base filter for KB entries used in replies (DMs use the same path as comments).
+   */
+  _knowledgeBaseReplyFilter(organizationId) {
+    return {
+      organization: organizationId,
+      isActive: true,
+      isTrainingData: { $ne: false }
+    };
   }
 
   /**
    * Search relevant knowledge base entries for a given query
+   * (Short DMs like "hi" used to match nothing — keyword len>3 and no fallback — so we add broader matching + top-FAQ fallback.)
    */
   async searchKnowledgeBase(organizationId, query, limit = 5) {
     try {
-      // Use MongoDB text search for relevant entries
-      const results = await KnowledgeBase.find({
-        organization: organizationId,
-        isActive: true,
-        $text: { $search: query }
-      })
-        .select('title content category priority keywords')
-        .sort({ score: { $meta: 'textScore' }, priority: -1 })
-        .limit(limit);
+      const base = this._knowledgeBaseReplyFilter(organizationId);
+      const trimmed = (query && String(query).trim()) || '';
 
-      // If no results from text search, try keyword matching
-      if (results.length === 0) {
-        const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-        const escapedForRegex = queryWords.map(w => escapeRegex(w));
+      const topPriorityFallback = async () => {
+        return KnowledgeBase.find(base)
+          .select('title content category priority keywords trainingWeight')
+          .sort({ priority: -1, trainingWeight: -1, usageCount: -1 })
+          .limit(limit);
+      };
 
-        if (queryWords.length > 0) {
-          const keywordResults = await KnowledgeBase.find({
-            organization: organizationId,
-            isActive: true,
-            $or: [
-              { keywords: { $in: queryWords } },
-              { title: { $regex: escapedForRegex.join('|'), $options: 'i' } }
-            ]
-          })
-            .select('title content category priority keywords')
-            .sort({ priority: -1, usageCount: -1 })
-            .limit(limit);
+      if (!trimmed) {
+        const entries = await topPriorityFallback();
+        return { entries, fromFallback: true };
+      }
 
-          return keywordResults;
+      // MongoDB text search (needs text index on title/content/keywords)
+      let results = [];
+      try {
+        results = await KnowledgeBase.find({
+          ...base,
+          $text: { $search: trimmed }
+        })
+          .select('title content category priority keywords trainingWeight')
+          .sort({ score: { $meta: 'textScore' }, priority: -1 })
+          .limit(limit);
+      } catch (textErr) {
+        logger.warn('Knowledge base text search skipped', { message: textErr.message });
+      }
+
+      if (results.length > 0) {
+        return { entries: results, fromFallback: false };
+      }
+
+      // Keyword / title match: include 2+ char tokens so short DMs ("hi", "ok", "hii") can still match keywords
+      const queryWords = trimmed
+        .toLowerCase()
+        .split(/\s+/)
+        .map((w) => w.replace(/[^\w]/g, ''))
+        .filter((w) => w.length >= 2)
+        .slice(0, 12);
+
+      if (queryWords.length > 0) {
+        const escapedForRegex = queryWords.map((w) => escapeRegex(w));
+        const keywordResults = await KnowledgeBase.find({
+          ...base,
+          $or: [
+            { keywords: { $in: queryWords } },
+            { title: { $regex: escapedForRegex.join('|'), $options: 'i' } }
+          ]
+        })
+          .select('title content category priority keywords trainingWeight')
+          .sort({ priority: -1, usageCount: -1 })
+          .limit(limit);
+
+        if (keywordResults.length > 0) {
+          return { entries: keywordResults, fromFallback: false };
         }
       }
 
-      return results;
+      // Still nothing: inject highest-priority training articles so DMs/comments still get brand context
+      const fallbackEntries = await topPriorityFallback();
+      return { entries: fallbackEntries, fromFallback: true };
     } catch (error) {
       console.error('Knowledge base search error:', error.message);
-      return [];
+      return { entries: [], fromFallback: false };
     }
   }
 
@@ -182,45 +321,23 @@ Guidelines:
 
 Generate ONLY the post content. No explanations or meta-commentary.`;
 
-    if (this.provider === 'openai') {
-      const response = await axios.post(
-        this.openaiApiUrl,
-        {
-          model: this.openaiModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.8,
-          max_tokens: 500
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 30000
-        }
-      );
-
-      return response.data.choices[0].message.content.trim();
-    } else {
-      // Ollama
-      const response = await axios.post(
-        `${this.ollamaUrl}/api/chat`,
-        {
-          model: this.ollamaModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt }
-          ],
-          stream: false
-        },
-        { timeout: 30000 }
-      );
-
-      return response.data.message.content.trim();
+    if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+      throw new Error('OpenAI API key is not configured');
     }
+    const response = await this._postChatCompletions(
+      {
+        model: this.openaiModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt }
+        ],
+        ...openAIChatCompletionTemperatureField(this.openaiModel, 0.8),
+        ...openAIChatCompletionMaxTokensField(this.openaiModel, 500)
+      },
+      {}
+    );
+
+    return response.data.choices[0].message.content.trim();
   }
 
   /**
@@ -232,76 +349,72 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     const postType = options.postType || 'post';
     const audience = options.audience || '';
     const intent = options.intent || '';
+    const mood = options.mood || '';
     const includeTrend = options.includeTrend;
     let userPrompt = prompt;
     if (audience) userPrompt += ` Target audience: ${audience}.`;
     if (intent) userPrompt += ` Content intent: ${intent}.`;
+    if (mood) userPrompt += ` Writing tone/mood: ${mood}.`;
     if (includeTrend) userPrompt += ' Weave in a relevant current trend or seasonal angle.';
 
     const brandContext = organizationId ? await this._getBrandContext(organizationId) : null;
-    const variants = [];
+    const systemPrompt = this._buildPostVariantSystemPrompt(platforms, postType, brandContext);
+    console.log('[Content Studio] AI system prompt for post variants:\n', systemPrompt);
+    console.log('[Content Studio] AI user prompt for post variants:\n', userPrompt);
+
     const temperatures = [0.7, 0.85, 0.95].slice(0, count);
-    for (let i = 0; i < count; i++) {
-      const content = await this._generateSinglePostWithTemperature(
-        userPrompt,
-        platforms,
-        postType,
-        brandContext,
-        temperatures[i] || 0.8
-      );
-      variants.push({ content: content || '' });
-    }
-    return { variants };
+    const results = await Promise.all(
+      temperatures.map((temp, idx) =>
+        runWithAiContext(
+          {
+            organizationId,
+            userId: options.userId || null,
+            feature: `content_studio.post_variant.${idx}`
+          },
+          () =>
+            this._generateSinglePostWithTemperature(systemPrompt, userPrompt, temp)
+              .then((content) => ({ content: content || '' }))
+              .catch(() => ({ content: '' }))
+        )
+      )
+    );
+    return { variants: results.filter(v => v.content) };
   }
 
-  async _generateSinglePostWithTemperature(prompt, platforms, postType, brandContext, temperature = 0.8) {
+  _buildPostVariantSystemPrompt(platforms, postType, brandContext) {
     const platformNames = platforms.join(', ');
     const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
     const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
-    const systemPrompt = `You are a professional social media content creator. Generate engaging ${postType} content for ${platformNames}.
+    return `You are a professional social media content creator. Generate a SINGLE engaging ${postType} that works across ${platformNames}.
 ${platformGuidelines}
 ${brandSection}
-Guidelines:
+CRITICAL RULES:
+- Output ONE post only. Do NOT split by platform (no "Instagram:", "Facebook:" labels).
 - Be authentic and engaging. Use appropriate emojis sparingly.
-- Include relevant hashtags (3-5 for Instagram, 1-2 for others).
-- Generate ONLY the post content. No explanations or meta-commentary.`;
+- Include 3-5 relevant hashtags at the end.
+- Generate ONLY the post text. No explanations, headers, or meta-commentary.`;
+  }
 
-    if (this.provider === 'openai') {
-      const response = await axios.post(
-        this.openaiApiUrl,
-        {
-          model: this.openaiModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt }
-          ],
-          temperature: Math.min(1, Math.max(0, temperature)),
-          max_tokens: 500
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 30000
-        }
-      );
-      return response.data.choices[0].message.content.trim();
-    } else {
-      const response = await axios.post(
-        `${this.ollamaUrl}/api/chat`,
-        {
-          model: this.ollamaModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt }
-          ],
-          stream: false
-        },
-        { timeout: 30000 }
-      );
-      return response.data.message.content.trim();
+  async _generateSinglePostWithTemperature(systemPrompt, userPrompt, temperature = 0.8) {
+    if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+      throw new Error('OpenAI API key is not configured');
     }
+    const response = await this._postChatCompletions(
+      {
+        model: this.openaiModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        ...openAIChatCompletionTemperatureField(
+          this.openaiModel,
+          Math.min(1, Math.max(0, temperature))
+        ),
+        ...openAIChatCompletionMaxTokensField(this.openaiModel, 500)
+      },
+      {}
+    );
+    return response.data.choices[0].message.content.trim();
   }
 
   /**
@@ -339,157 +452,257 @@ Guidelines:
   }
 
   /**
-   * Generate an image from a text prompt using OpenAI DALL-E (when provider is OpenAI).
-   * @param {string} prompt - Description of the image to generate (e.g. post topic or caption)
-   * @returns {Promise<Buffer|null>} Image buffer or null if not supported / error
+   * Whether an image API error is worth retrying (timeouts, drops, rate limits).
+   * @private
    */
-  async generateImage(prompt) {
-    if (this.provider !== 'openai' || !this.openaiApiKey) {
-      return null;
+  _isTransientImageGenError(error) {
+    const status = error.response?.status;
+    if (status === 429 || status === 502 || status === 503 || status === 504) return true;
+    const code = error.code;
+    if (code && ['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND'].includes(code)) return true;
+    const msg = String(error.message || '').toLowerCase();
+    if (
+      msg.includes('aborted') ||
+      msg.includes('timeout') ||
+      msg.includes('socket') ||
+      msg.includes('hang up') ||
+      msg.includes('econnreset') ||
+      msg.includes('network')
+    ) {
+      return true;
     }
-    try {
-      const imagePrompt = typeof prompt === 'string' && prompt.length > 0
-        ? prompt.substring(0, 1000)
-        : 'Professional social media post image, modern, high quality';
-      const model = process.env.OPENAI_IMAGE_MODEL || 'dall-e-2';
-      const isDallE3 = model.startsWith('dall-e-3');
-      const body = {
-        model,
-        prompt: imagePrompt,
-        n: 1,
-        size: isDallE3 ? '1024x1024' : '1024x1024',
-        response_format: 'url'
-      };
-      if (isDallE3) {
-        body.quality = 'standard';
-      }
-      const response = await axios.post(
-        this.openaiImagesUrl,
-        body,
-        {
-          headers: {
-            Authorization: `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 60000
-        }
-      );
-      const imageUrl = response.data?.data?.[0]?.url;
-      if (!imageUrl) return null;
-      const imgResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-      return Buffer.from(imgResponse.data);
-    } catch (error) {
-      const status = error.response?.status;
-      const data = error.response?.data;
-      logger.warn('AI image generation failed', {
-        error: error.message,
-        status,
-        openaiError: data?.error?.message || data?.message
-      });
-      return null;
-    }
+    return false;
   }
 
   /**
-   * Analyze sentiment of text using AI
-   * This is a centralized sentiment analysis function used across all platforms
-   * Supports both Ollama (local) and OpenAI (cloud)
+   * Generate an image via OpenAI Image API using gpt-image-1.5.
+   * Retries transient failures (aborted connections, timeouts, 429/502/503).
+   * @param {string} prompt - Description of the image to generate
+   * @returns {Promise<Buffer|null>} Image buffer or null on error
+   */
+  async generateImage(prompt) {
+    if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+      return null;
+    }
+
+    const imagePrompt = typeof prompt === 'string' && prompt.length > 0
+      ? prompt.substring(0, 1000)
+      : 'Professional social media post image, modern, high quality';
+
+    const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5';
+    const maxAttempts = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_MAX_RETRIES, 10) || 3, 1), 5);
+    const imageTimeout = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS, 10) || 120000, 60000), 300000);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await axios.post(
+          'https://api.openai.com/v1/images/generations',
+          {
+            model,
+            prompt: imagePrompt,
+            n: 1,
+            size: '1024x1024',
+            quality: 'medium'
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${this.openaiApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: imageTimeout,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+          }
+        );
+
+        const b64 = response.data?.data?.[0]?.b64_json;
+        if (b64) {
+          this._logImageUsage(model, '1024x1024', 'medium');
+          return Buffer.from(b64, 'base64');
+        }
+
+        const imageUrl = response.data?.data?.[0]?.url;
+        if (!imageUrl) return null;
+
+        const imgResponse = await axios.get(imageUrl, {
+          responseType: 'arraybuffer',
+          timeout: 60000,
+          maxContentLength: Infinity
+        });
+        this._logImageUsage(model, '1024x1024', 'medium');
+        return Buffer.from(imgResponse.data);
+      } catch (error) {
+        const status = error.response?.status;
+        const data = error.response?.data;
+        const transient = this._isTransientImageGenError(error);
+        const willRetry = transient && attempt < maxAttempts;
+
+        logger.warn('AI image generation failed', {
+          attempt,
+          maxAttempts,
+          error: error.message,
+          code: error.code,
+          status,
+          openaiError: data?.error?.message || data?.message,
+          willRetry
+        });
+
+        if (willRetry) {
+          const delayMs = Math.min(2000 * 2 ** (attempt - 1), 16000);
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Generate a short video/reel using OpenAI Sora (v1/videos API).
+   * Submits the job, polls for completion, downloads via /content endpoint, returns a Buffer.
+   *
+   * Correct endpoints (as of 2026):
+   *   Submit : POST  https://api.openai.com/v1/videos
+   *   Poll   : GET   https://api.openai.com/v1/videos/{id}
+   *   Download: GET  https://api.openai.com/v1/videos/{id}/content
+   *
+   * @param {string} prompt   - Cinematic direction prompt
+   * @param {object} options
+   * @param {number} [options.duration=4]    - Clip length in seconds; Sora accepts 4 | 8 | 12
+   * @param {string} [options.aspect='9:16'] - '16:9' | '9:16'
+   * @returns {Promise<Buffer|null>}
+   */
+  async generateVideo(prompt, { duration = 4, aspect = '9:16' } = {}) {
+    if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+      logger.warn('[Video] OPENAI_API_KEY not set — video generation skipped.');
+      return null;
+    }
+
+    const model = process.env.OPENAI_VIDEO_MODEL || 'sora-2';
+    const timeoutMs = Math.min(
+      Math.max(parseInt(process.env.OPENAI_VIDEO_TIMEOUT_MS, 10) || 300000, 60000),
+      600000
+    );
+
+    // Sora valid sizes: 720x1280 (9:16), 1280x720 (16:9), 1024x1792 (tall), 1792x1024 (wide)
+    const sizeMap = { '16:9': '1280x720', '9:16': '720x1280' };
+    const size = sizeMap[aspect] || '720x1280';
+
+    // Sora valid seconds values are strings: "4" | "8" | "12"
+    const validSeconds = [4, 8, 12];
+    const nearest = validSeconds.reduce((prev, cur) =>
+      Math.abs(cur - duration) < Math.abs(prev - duration) ? cur : prev
+    );
+    const seconds = String(nearest);
+
+    const videoPrompt = typeof prompt === 'string' && prompt.length > 0
+      ? prompt.substring(0, 2000)
+      : 'A professional social media short video, modern, high quality, no text.';
+
+    const headers = {
+      Authorization: `Bearer ${this.openaiApiKey}`,
+      'Content-Type': 'application/json'
+    };
+
+    // ── Step 1: Submit the video generation job ──────────────────────────────
+    let jobId;
+    try {
+      const submitRes = await axios.post(
+        'https://api.openai.com/v1/videos',
+        { model, prompt: videoPrompt, size, seconds },
+        { headers, timeout: 30000 }
+      );
+      jobId = submitRes.data?.id;
+      if (!jobId) {
+        logger.warn('[Video] Sora did not return a job id', { data: submitRes.data });
+        return null;
+      }
+      logger.info('[Video] Sora job submitted', { jobId, model, size, seconds });
+    } catch (err) {
+      logger.warn('[Video] Sora submit failed', {
+        error: err.message,
+        status: err.response?.status,
+        openaiError: err.response?.data?.error?.message
+      });
+      throw err;
+    }
+
+    // ── Step 2: Poll for completion ──────────────────────────────────────────
+    const pollInterval = 5000;
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, pollInterval));
+
+      let statusRes;
+      try {
+        statusRes = await axios.get(
+          `https://api.openai.com/v1/videos/${jobId}`,
+          { headers, timeout: 15000 }
+        );
+      } catch (pollErr) {
+        logger.warn('[Video] Sora poll request failed (will retry)', {
+          jobId, error: pollErr.message
+        });
+        continue;
+      }
+
+      const status = statusRes.data?.status;
+      logger.info('[Video] Sora job status', { jobId, status, progress: statusRes.data?.progress });
+
+      if (status === 'completed') {
+        // ── Step 3: Download via /content endpoint ────────────────────────────
+        try {
+          const dlRes = await axios.get(
+            `https://api.openai.com/v1/videos/${jobId}/content`,
+            {
+              headers: { Authorization: `Bearer ${this.openaiApiKey}` },
+              responseType: 'arraybuffer',
+              timeout: 120000,
+              maxContentLength: Infinity,
+              maxBodyLength: Infinity
+            }
+          );
+          this._logVideoUsage(model, parseInt(seconds, 10) || 4);
+          return Buffer.from(dlRes.data);
+        } catch (dlErr) {
+          logger.warn('[Video] MP4 download failed', { jobId, error: dlErr.message });
+          return null;
+        }
+      }
+
+      if (status === 'failed') {
+        const reason = statusRes.data?.error?.message || 'Video generation failed';
+        logger.warn('[Video] Sora job failed', { jobId, reason });
+        const err = new Error(reason);
+        err.soraFailed = true;
+        err.soraStatus = status;
+        throw err;
+      }
+
+      // statuses 'queued' | 'in_progress' — keep polling
+    }
+
+    logger.warn('[Video] Sora job timed out', { jobId, timeoutMs });
+    return null;
+  }
+
+  /**
+   * Analyze sentiment of text using OpenAI
    */
   async analyzeSentiment(content) {
     try {
       console.log(`🔍 [AI] Analyzing sentiment for: "${content.substring(0, 50)}..."`);
 
-      if (this.provider === 'ollama') {
-        // Use Ollama (Gemma3) for sentiment analysis
-        const response = await axios.post(
-          `${this.ollamaUrl}/api/chat`,
+      try {
+        const response = await this._postChatCompletions(
           {
-            model: this.ollamaModel,
+            model: this.openaiModel,
             messages: [
               {
                 role: 'system',
-                content: `You are an expert sentiment analysis AI. Analyze the sentiment of customer interactions.
-
-RESPONSE FORMAT (return ONLY this JSON, nothing else):
-{
-  "sentiment": "positive" | "negative" | "neutral",
-  "score": number between -1 and 1,
-  "confidence": number between 0 and 1,
-  "reasoning": "brief explanation"
-}
-
-CLASSIFICATION RULES:
-- positive: Praise, gratitude, satisfaction, enthusiasm, love, excitement
-- negative: Complaints, anger, disappointment, frustration, hate, problems
-- neutral: Questions, information requests, factual statements, neutral observations
-
-SCORING:
-- Very positive: 0.7 to 1.0
-- Mildly positive: 0.3 to 0.7
-- Neutral: -0.3 to 0.3
-- Mildly negative: -0.7 to -0.3
-- Very negative: -1.0 to -0.7
-
-Consider: emojis, capitalization, punctuation, context, sarcasm`
-              },
-              {
-                role: 'user',
-                content: `Analyze this text: "${content}"`
-              }
-            ],
-            stream: false,
-            options: {
-              temperature: 0.2, // Lower temperature for more consistent results
-              num_predict: 150
-            }
-          },
-          { timeout: 30000 }
-        );
-
-        const result = response.data.message.content.trim();
-
-        // Try to parse JSON response
-        let parsedResult;
-        try {
-          // Extract JSON from response (sometimes AI adds extra text)
-          const jsonMatch = result.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            parsedResult = JSON.parse(jsonMatch[0]);
-          } else {
-            throw new Error('No JSON found in response');
-          }
-        } catch (parseError) {
-          // Fallback to text parsing
-          console.warn('Failed to parse JSON, using text parsing:', result);
-          const sentiment = result.includes('positive') ? 'positive' :
-            result.includes('negative') ? 'negative' : 'neutral';
-          parsedResult = {
-            sentiment,
-            score: sentiment === 'positive' ? 0.7 : sentiment === 'negative' ? -0.7 : 0,
-            confidence: 0.75,
-            reasoning: 'Fallback text parsing'
-          };
-        }
-
-        console.log(`✅ [AI] Sentiment: ${parsedResult.sentiment} (score: ${parsedResult.score}, confidence: ${parsedResult.confidence})`);
-
-        return {
-          sentiment: parsedResult.sentiment,
-          sentimentScore: parsedResult.score,
-          sentimentConfidence: parsedResult.confidence,
-          sentimentReasoning: parsedResult.reasoning
-        };
-      } else {
-        // Use OpenAI for sentiment analysis
-        try {
-          const response = await axios.post(
-            this.openaiApiUrl,
-            {
-              model: this.openaiModel,
-              messages: [
-                {
-                  role: 'system',
-                  content: `You are an expert sentiment analysis AI. Analyze customer interactions.
+                content: `You are an expert sentiment analysis AI. Analyze customer interactions.
 
 Respond with ONLY this JSON structure (no other text):
 {
@@ -508,71 +721,60 @@ Scoring:
 - Very positive: 0.7 to 1.0
 - Neutral: -0.3 to 0.3
 - Very negative: -1.0 to -0.7`
-                },
-                {
-                  role: 'user',
-                  content: `Analyze: "${content}"`
-                }
-              ],
-              temperature: 0.2,
-              max_tokens: 150
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${this.openaiApiKey}`,
-                'Content-Type': 'application/json'
               },
-              timeout: 30000
-            }
-          );
+              {
+                role: 'user',
+                content: `Analyze: "${content}"`
+              }
+            ],
+            ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
+            ...openAIChatCompletionMaxTokensField(this.openaiModel, 150)
+          },
+          {}
+        );
 
-          const responseContent = response.data.choices[0].message.content.trim();
+        const responseContent = response.data.choices[0].message.content.trim();
 
-          // Try to parse JSON response
-          let result;
-          try {
-            // Extract JSON from response (sometimes AI adds extra text)
-            const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              result = JSON.parse(jsonMatch[0]);
-            } else {
-              throw new Error('No JSON found in OpenAI response');
-            }
-          } catch (parseError) {
-            // Fallback to text parsing
-            console.warn('⚠️  [AI] Failed to parse OpenAI JSON, using text parsing');
-            const sentiment = responseContent.toLowerCase().includes('positive') ? 'positive' :
-              responseContent.toLowerCase().includes('negative') ? 'negative' : 'neutral';
-            result = {
-              sentiment,
-              score: sentiment === 'positive' ? 0.7 : sentiment === 'negative' ? -0.7 : 0,
-              confidence: 0.75,
-              reasoning: 'Fallback text parsing'
-            };
-          }
-
-          console.log(`✅ [AI] Sentiment: ${result.sentiment} (score: ${result.score}, confidence: ${result.confidence})`);
-
-          return {
-            sentiment: result.sentiment,
-            sentimentScore: result.score,
-            sentimentConfidence: result.confidence,
-            sentimentReasoning: result.reasoning
-          };
-        } catch (apiError) {
-          // Log detailed error for debugging
-          if (apiError.response) {
-            console.error('❌ [AI] OpenAI API Error:', {
-              status: apiError.response.status,
-              statusText: apiError.response.statusText,
-              data: apiError.response.data,
-              model: this.openaiModel
-            });
+        let result;
+        try {
+          const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            result = JSON.parse(jsonMatch[0]);
           } else {
-            console.error('❌ [AI] OpenAI Request Error:', apiError.message);
+            throw new Error('No JSON found in OpenAI response');
           }
-          throw apiError; // Re-throw to trigger fallback
+        } catch (parseError) {
+          console.warn('⚠️  [AI] Failed to parse OpenAI JSON, using text parsing');
+          const sentiment = responseContent.toLowerCase().includes('positive') ? 'positive' :
+            responseContent.toLowerCase().includes('negative') ? 'negative' : 'neutral';
+          result = {
+            sentiment,
+            score: sentiment === 'positive' ? 0.7 : sentiment === 'negative' ? -0.7 : 0,
+            confidence: 0.75,
+            reasoning: 'Fallback text parsing'
+          };
         }
+
+        console.log(`✅ [AI] Sentiment: ${result.sentiment} (score: ${result.score}, confidence: ${result.confidence})`);
+
+        return {
+          sentiment: result.sentiment,
+          sentimentScore: result.score,
+          sentimentConfidence: result.confidence,
+          sentimentReasoning: result.reasoning
+        };
+      } catch (apiError) {
+        if (apiError.response) {
+          console.error('❌ [AI] OpenAI API Error:', {
+            status: apiError.response.status,
+            statusText: apiError.response.statusText,
+            data: apiError.response.data,
+            model: this.openaiModel
+          });
+        } else {
+          console.error('❌ [AI] OpenAI Request Error:', apiError.message);
+        }
+        throw apiError;
       }
     } catch (error) {
       console.error('❌ [AI] Sentiment analysis error:', error.message);
@@ -645,113 +847,10 @@ Scoring:
   }
 
   /**
-   * Generate AI response using Ollama (Gemma3)
-   */
-  async generateResponseOllama(interaction, organizationId = null, knowledgeBase = null) {
-    try {
-      // If knowledgeBase not provided, search for relevant entries
-      let relevantKB = knowledgeBase;
-      if (!relevantKB && organizationId) {
-        relevantKB = await this.searchKnowledgeBase(organizationId, interaction.content, 5);
-
-        // Increment usage count for used KB entries (with error handling)
-        for (const kb of relevantKB) {
-          try {
-            // Ensure usageCount is valid before incrementing
-            if (typeof kb.usageCount !== 'number' || isNaN(kb.usageCount)) {
-              kb.usageCount = 0;
-            }
-            await kb.incrementUsage();
-          } catch (usageError) {
-            console.error('Error incrementing KB usage:', usageError);
-            // Continue processing even if usage increment fails
-          }
-        }
-      }
-
-      // Build context from knowledge base
-      const kbContext = relevantKB && relevantKB.length > 0
-        ? relevantKB.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
-        : '';
-
-      const systemPrompt = `You are a professional customer service representative. 
-Your task is to generate a helpful, friendly, and professional response to customer inquiries.
-
-IMPORTANT GUIDELINES:
-- Be polite, empathetic, and professional
-- Keep responses concise and clear (2-4 sentences)
-- Use a friendly and conversational tone
-- Address the customer's concern directly
-- If the knowledge base contains relevant information, use it to provide accurate answers
-- If you don't have enough information, acknowledge it professionally
-- Do not make promises you can't keep
-- Match the tone to the platform (casual for social media, professional for reviews)
-${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
-
-Generate a response that addresses the customer's message appropriately.`;
-
-      const userPrompt = `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`;
-
-      // Check if Ollama is running
-      try {
-        await axios.get(`${this.ollamaUrl}/api/tags`, { timeout: 5000 });
-      } catch (error) {
-        throw new Error('Ollama is not running. Please start it with: ollama serve');
-      }
-
-      // Generate response using Ollama Chat API
-      const response = await axios.post(
-        `${this.ollamaUrl}/api/chat`,
-        {
-          model: this.ollamaModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
-          stream: false,
-          options: {
-            temperature: 0.7,
-            num_predict: 250  // max tokens
-          }
-        },
-        {
-          timeout: 60000  // 60 second timeout
-        }
-      );
-
-      const generatedResponse = response.data.message.content.trim();
-
-      // Calculate confidence based on KB matches
-      let confidence = 0.7; // Default confidence
-      if (relevantKB && relevantKB.length > 0) {
-        confidence = Math.min(0.95, 0.7 + (relevantKB.length * 0.05));
-      }
-
-      return {
-        content: generatedResponse,
-        confidence: confidence,
-        generatedAt: new Date(),
-        usedKnowledgeBase: relevantKB && relevantKB.length > 0,
-        knowledgeBaseCount: relevantKB ? relevantKB.length : 0
-      };
-    } catch (error) {
-      if (error.code === 'ECONNREFUSED' || error.message.includes('not running')) {
-        console.error('Ollama service is not running. Please start it with: ollama serve');
-        throw new Error('Ollama service is not running. Please start it with: ollama serve');
-      } else if (error.response) {
-        console.error('Ollama API error:', error.response.data);
-        throw new Error(`Ollama API error: ${error.response.data?.error || error.message}`);
-      } else {
-        console.error('Ollama error:', error.message);
-        throw new Error(`Ollama error: ${error.message}`);
-      }
-    }
-  }
-
-  /**
-   * Generate AI response using OpenAI (for production)
+   * Generate AI response using OpenAI
    */
   async generateResponseOpenAI(interaction, organizationId = null, knowledgeBase = null) {
+    let knowledgeBaseFallback = false;
     try {
       // Check if API key is configured
       if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
@@ -759,22 +858,28 @@ Generate a response that addresses the customer's message appropriately.`;
         throw new Error('OpenAI API key is not configured. Please contact your administrator.');
       }
 
-      // If knowledgeBase not provided, search for relevant entries
+      // If knowledgeBase not provided, search for relevant entries (same for DMs, comments, reviews)
       let relevantKB = knowledgeBase;
       if (!relevantKB && organizationId) {
-        relevantKB = await this.searchKnowledgeBase(organizationId, interaction.content, 5);
+        const { entries, fromFallback } = await this.searchKnowledgeBase(
+          organizationId,
+          interaction.content,
+          5
+        );
+        relevantKB = entries;
+        knowledgeBaseFallback = fromFallback;
 
-        // Increment usage count for used KB entries (with error handling)
-        for (const kb of relevantKB) {
-          try {
-            // Ensure usageCount is valid before incrementing
-            if (typeof kb.usageCount !== 'number' || isNaN(kb.usageCount)) {
-              kb.usageCount = 0;
+        // Count real matches only — avoid inflating usage when we inject top-priority fallback context
+        if (!fromFallback && relevantKB && relevantKB.length > 0) {
+          for (const kb of relevantKB) {
+            try {
+              if (typeof kb.usageCount !== 'number' || isNaN(kb.usageCount)) {
+                kb.usageCount = 0;
+              }
+              await kb.incrementUsage();
+            } catch (usageError) {
+              console.error('Error incrementing KB usage:', usageError);
             }
-            await kb.incrementUsage();
-          } catch (usageError) {
-            console.error('Error incrementing KB usage:', usageError);
-            // Continue processing even if usage increment fails
           }
         }
       }
@@ -784,6 +889,34 @@ Generate a response that addresses the customer's message appropriately.`;
         ? relevantKB.map(kb => `${kb.title}: ${kb.content}`).join('\n\n')
         : '';
 
+      // Load per-bucket reply config if interaction is classified
+      const IntentBucket = require('../models/IntentBucket');
+      let bucketContext = '';
+      if (interaction.intentBucket) {
+        try {
+          const bucketConfig = await IntentBucket.findById(interaction.intentBucket)
+            .select('replyTone replyLanguage replyPrompt name')
+            .lean();
+          if (bucketConfig) {
+            let tone = bucketConfig.replyTone;
+            if (!tone && organizationId) {
+              const bc = await BrandConfig.findOne({ organization: organizationId }).select('toneOfVoice').lean();
+              tone = bc?.toneOfVoice || 'professional';
+            }
+            bucketContext += `\nREPLY CONTEXT (Bucket: "${bucketConfig.name}"):`;
+            if (tone) bucketContext += `\n- Tone: ${tone}`;
+            if (bucketConfig.replyLanguage && bucketConfig.replyLanguage !== 'auto') {
+              bucketContext += `\n- Reply Language: ${bucketConfig.replyLanguage}`;
+            }
+            if (bucketConfig.replyPrompt) {
+              bucketContext += `\n- Special Instructions: ${bucketConfig.replyPrompt}`;
+            }
+          }
+        } catch (bucketErr) {
+          console.error('Error loading bucket config for reply:', bucketErr.message);
+        }
+      }
+
       const systemPrompt = `You are a professional customer service representative. 
 Your task is to generate a helpful, friendly, and professional response to customer inquiries.
 
@@ -792,16 +925,18 @@ IMPORTANT GUIDELINES:
 - Keep responses concise and clear (2-4 sentences)
 - Use a friendly and conversational tone
 - Address the customer's concern directly
-- If the knowledge base contains relevant information, use it to provide accurate answers
+- If knowledge base content is provided, ground your answer in that content and prioritize those facts over generic wording
+- Never say placeholders like "[List of services]"; provide real items from the knowledge base
+- If the user asks to list offerings/services/features, return a clear bullet list using names found in the knowledge base
 - If you don't have enough information, acknowledge it professionally
 - Do not make promises you can't keep
 - Match the tone to the platform (casual for social media, professional for reviews)
-${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
+${bucketContext ? `\n${bucketContext}` : ''}
+${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
 
 Generate a response that addresses the customer's message appropriately.`;
 
-      const response = await axios.post(
-        this.openaiApiUrl,
+      const response = await this._postChatCompletions(
         {
           model: this.openaiModel,
           messages: [
@@ -814,23 +949,19 @@ Generate a response that addresses the customer's message appropriately.`;
               content: `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
             }
           ],
-          temperature: 0.7,
-          max_tokens: 250
+          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.7),
+          ...openAIChatCompletionMaxTokensField(this.openaiModel, 250)
         },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        {},
+        { timeout: 120000 }
       );
 
       const generatedResponse = response.data.choices[0].message.content.trim();
 
       // Calculate confidence based on KB matches
-      let confidence = 0.7; // Default confidence
+      let confidence = 0.78; // Default confidence
       if (relevantKB && relevantKB.length > 0) {
-        confidence = Math.min(0.95, 0.7 + (relevantKB.length * 0.05));
+        confidence = Math.min(0.95, 0.78 + (relevantKB.length * 0.04));
       }
 
       return {
@@ -838,7 +969,8 @@ Generate a response that addresses the customer's message appropriately.`;
         confidence: confidence,
         generatedAt: new Date(),
         usedKnowledgeBase: relevantKB && relevantKB.length > 0,
-        knowledgeBaseCount: relevantKB ? relevantKB.length : 0
+        knowledgeBaseCount: relevantKB ? relevantKB.length : 0,
+        knowledgeBaseFallback: knowledgeBaseFallback
       };
     } catch (error) {
       // Handle specific OpenAI API errors
@@ -870,14 +1002,10 @@ Generate a response that addresses the customer's message appropriately.`;
   }
 
   /**
-   * Generate AI response (main method - routes to provider)
+   * Generate AI response (OpenAI)
    */
   async generateResponse(interaction, organizationId = null, knowledgeBase = null) {
-    if (this.provider === 'ollama') {
-      return await this.generateResponseOllama(interaction, organizationId, knowledgeBase);
-    } else {
-      return await this.generateResponseOpenAI(interaction, organizationId, knowledgeBase);
-    }
+    return this.generateResponseOpenAI(interaction, organizationId, knowledgeBase);
   }
 
   /**
@@ -892,67 +1020,38 @@ Generate a response that addresses the customer's message appropriately.`;
     const {
       temperature = 0.7,
       maxTokens = 1000,
-      model = null
+      model = null,
+      feature: optionFeature = null
     } = options;
 
     try {
-      console.log(`🤖 [AI] Generating text using provider: ${this.provider}`);
+      console.log('🤖 [AI] Generating text (OpenAI)');
       console.log(`📝 [AI] System prompt length: ${systemPrompt.length} chars`);
       console.log(`📝 [AI] User prompt length: ${userPrompt.length} chars`);
-      
-      if (this.provider === 'ollama') {
-        console.log(`🦙 [AI] Using Ollama model: ${model || this.ollamaModel}`);
-        const response = await axios.post(
-          `${this.ollamaUrl}/api/chat`,
-          {
-            model: model || this.ollamaModel,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt }
-            ],
-            stream: false,
-            options: {
-              temperature: temperature,
-              num_predict: maxTokens
-            }
-          },
-          { timeout: 60000 }
-        );
 
-        const generatedText = response.data.message.content.trim();
-        console.log(`✅ [AI] Ollama response received: ${generatedText.length} characters`);
-        return generatedText;
-      } else {
-        // OpenAI
-        if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
-          throw new Error('OpenAI API key is not configured');
-        }
-
-        console.log(`🔵 [AI] Using OpenAI model: ${model || this.openaiModel}`);
-        const response = await axios.post(
-          this.openaiApiUrl,
-          {
-            model: model || this.openaiModel,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt }
-            ],
-            temperature: temperature,
-            max_tokens: maxTokens || 4000 // Increased default for longer summaries
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${this.openaiApiKey}`,
-              'Content-Type': 'application/json'
-            },
-            timeout: 60000
-          }
-        );
-
-        const generatedText = response.data.choices[0].message.content.trim();
-        console.log(`✅ [AI] OpenAI response received: ${generatedText.length} characters`);
-        return generatedText;
+      if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+        throw new Error('OpenAI API key is not configured');
       }
+
+      const resolvedModel = normalizeOpenAIModelId(model || this.openaiModel);
+      console.log(`🔵 [AI] Using OpenAI model: ${resolvedModel}`);
+      const response = await this._postChatCompletions(
+        {
+          model: resolvedModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          ...openAIChatCompletionTemperatureField(resolvedModel, temperature),
+          ...openAIChatCompletionMaxTokensField(resolvedModel, maxTokens || 4000)
+        },
+        optionFeature ? { feature: optionFeature } : {},
+        { timeout: 120000 }
+      );
+
+      const generatedText = response.data.choices[0].message.content.trim();
+      console.log(`✅ [AI] OpenAI response received: ${generatedText.length} characters`);
+      return generatedText;
     } catch (error) {
       console.error(`❌ [AI] Text generation error: ${error.message}`);
       if (error.response) {
@@ -968,67 +1067,32 @@ Generate a response that addresses the customer's message appropriately.`;
    */
   async detectIntent(content) {
     try {
-      if (this.provider === 'ollama') {
-        // Use Ollama (Gemma3) for intent detection
-        const response = await axios.post(
-          `${this.ollamaUrl}/api/chat`,
-          {
-            model: this.ollamaModel,
-            messages: [
-              {
-                role: 'system',
-                content: 'Classify the intent of this message. Respond with ONLY one word: "inquiry", "complaint", "praise", "feedback", "support", or "other".'
-              },
-              {
-                role: 'user',
-                content: `Classify: "${content}"`
-              }
-            ],
-            stream: false,
-            options: {
-              temperature: 0.3,
-              num_predict: 10
-            }
-          },
-          { timeout: 30000 }
-        );
-
-        const intent = response.data.message.content.toLowerCase().trim();
-        const validIntents = ['inquiry', 'complaint', 'praise', 'feedback', 'support'];
-
-        return validIntents.includes(intent) ? intent : 'other';
-      } else {
-        // Use OpenAI for intent detection
-        const response = await axios.post(
-          this.openaiApiUrl,
-          {
-            model: this.openaiModel,
-            messages: [
-              {
-                role: 'system',
-                content: 'Classify the intent of this message. Respond with ONLY one word: "inquiry", "complaint", "praise", "feedback", "support", or "other".'
-              },
-              {
-                role: 'user',
-                content: `Classify: "${content}"`
-              }
-            ],
-            temperature: 0.3,
-            max_tokens: 10
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${this.openaiApiKey}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-
-        const intent = response.data.choices[0].message.content.toLowerCase().trim();
-        const validIntents = ['inquiry', 'complaint', 'praise', 'feedback', 'support'];
-
-        return validIntents.includes(intent) ? intent : 'other';
+      if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+        return 'other';
       }
+      const response = await this._postChatCompletions(
+        {
+          model: this.openaiModel,
+          messages: [
+            {
+              role: 'system',
+              content: 'Classify the intent of this message. Respond with ONLY one word: "inquiry", "complaint", "praise", "feedback", "support", or "other".'
+            },
+            {
+              role: 'user',
+              content: `Classify: "${content}"`
+            }
+          ],
+          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
+          ...openAIChatCompletionMaxTokensField(this.openaiModel, 10)
+        },
+        {}
+      );
+
+      const intent = response.data.choices[0].message.content.toLowerCase().trim();
+      const validIntents = ['inquiry', 'complaint', 'praise', 'feedback', 'support'];
+
+      return validIntents.includes(intent) ? intent : 'other';
     } catch (error) {
       console.error('Intent detection error:', error.message);
       return 'other';
@@ -1036,67 +1100,106 @@ Generate a response that addresses the customer's message appropriately.`;
   }
 
   /**
+   * Classify a message into an intent bucket.
+   * 1) Keyword match (case-insensitive) — first bucket whose keywords appear in content wins.
+   * 2) AI fallback — asks the model to pick the best bucket given hints.
+   * 3) Default fallback — returns the bucket marked isDefault if nothing matches.
+   *
+   * @param {string} content - Message text
+   * @param {Array} buckets - Active IntentBucket documents (plain objects with _id, name, keywords, aiPromptHint, isDefault)
+   * @returns {{ bucketId: string|null, method: 'keyword'|'ai'|'default' }}
+   */
+  async classifyIntoBucket(content, buckets) {
+    if (!buckets || buckets.length === 0) {
+      return { bucketId: null, method: 'default' };
+    }
+
+    const lowerContent = (content || '').toLowerCase();
+
+    // Step 1: Keyword match
+    for (const bucket of buckets) {
+      if (!bucket.keywords || bucket.keywords.length === 0) continue;
+      for (const kw of bucket.keywords) {
+        if (kw && lowerContent.includes(kw.toLowerCase())) {
+          return { bucketId: bucket._id.toString(), method: 'keyword' };
+        }
+      }
+    }
+
+    // Step 2: AI classification
+    try {
+      if (this.openaiApiKey && this.openaiApiKey.trim() !== '') {
+        const bucketDescriptions = buckets
+          .filter(b => !b.isDefault)
+          .map(b => `- "${b.name}": ${b.aiPromptHint || 'No description'}`)
+          .join('\n');
+
+        const defaultBucket = buckets.find(b => b.isDefault);
+        const defaultName = defaultBucket ? defaultBucket.name : 'General Queries';
+
+        const systemPrompt = `You are a message classifier. Classify the following message into exactly one of these categories. Respond with ONLY the category name, nothing else.
+
+Categories:
+${bucketDescriptions}
+- "${defaultName}": Anything that does not clearly fit the above categories`;
+
+        const response = await this._postChatCompletions(
+          {
+            model: this.openaiModel,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `Classify: "${content}"` }
+            ],
+            ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
+            ...openAIChatCompletionMaxTokensField(this.openaiModel, 30)
+          },
+          {}
+        );
+
+        const aiChoice = response.data.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
+        const matched = buckets.find(b => b.name.toLowerCase() === aiChoice.toLowerCase());
+        if (matched) {
+          return { bucketId: matched._id.toString(), method: 'ai' };
+        }
+      }
+    } catch (error) {
+      console.error('Bucket AI classification error:', error.message);
+    }
+
+    // Step 3: Default fallback
+    const defaultBucket = buckets.find(b => b.isDefault);
+    return { bucketId: defaultBucket ? defaultBucket._id.toString() : null, method: 'default' };
+  }
+
+  /**
    * Extract topics/keywords from text
    */
   async extractTopics(content) {
     try {
-      if (this.provider === 'ollama') {
-        // Use Ollama (Gemma3) for topic extraction
-        const response = await axios.post(
-          `${this.ollamaUrl}/api/chat`,
-          {
-            model: this.ollamaModel,
-            messages: [
-              {
-                role: 'system',
-                content: 'Extract 2-3 main topics or keywords from the text. Return them as a comma-separated list.'
-              },
-              {
-                role: 'user',
-                content: `Extract topics: "${content}"`
-              }
-            ],
-            stream: false,
-            options: {
-              temperature: 0.3,
-              num_predict: 50
-            }
-          },
-          { timeout: 30000 }
-        );
-
-        const topicsStr = response.data.message.content.trim();
-        return topicsStr.split(',').map(t => t.trim()).filter(t => t);
-      } else {
-        // Use OpenAI for topic extraction
-        const response = await axios.post(
-          this.openaiApiUrl,
-          {
-            model: this.openaiModel,
-            messages: [
-              {
-                role: 'system',
-                content: 'Extract 2-3 main topics or keywords from the text. Return them as a comma-separated list.'
-              },
-              {
-                role: 'user',
-                content: `Extract topics: "${content}"`
-              }
-            ],
-            temperature: 0.3,
-            max_tokens: 50
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${this.openaiApiKey}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-
-        const topicsStr = response.data.choices[0].message.content.trim();
-        return topicsStr.split(',').map(t => t.trim()).filter(t => t);
+      if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
+        return [];
       }
+      const response = await this._postChatCompletions(
+        {
+          model: this.openaiModel,
+          messages: [
+            {
+              role: 'system',
+              content: 'Extract 2-3 main topics or keywords from the text. Return them as a comma-separated list.'
+            },
+            {
+              role: 'user',
+              content: `Extract topics: "${content}"`
+            }
+          ],
+          ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
+          ...openAIChatCompletionMaxTokensField(this.openaiModel, 50)
+        },
+        {}
+      );
+
+      const topicsStr = response.data.choices[0].message.content.trim();
+      return topicsStr.split(',').map(t => t.trim()).filter(t => t);
     } catch (error) {
       console.error('Topic extraction error:', error.message);
       return [];
@@ -1104,17 +1207,54 @@ Generate a response that addresses the customer's message appropriately.`;
   }
 
   /**
-   * Determine if interaction is eligible for auto-reply
+   * Normalize list entries for case-insensitive platform matching
    */
-  canAutoReply(interaction, organizationSettings = {}) {
-    // Check if already replied
-    if (interaction.status === 'replied' || interaction.status === 'resolved') {
-      return false;
-    }
+  _normalizePlatformList(list) {
+    if (!list || !list.length) return [];
+    return list.map((p) => String(p).toLowerCase().trim()).filter(Boolean);
+  }
 
-    // Check if it has replies
-    if (interaction.replies && interaction.replies.length > 0) {
-      return false;
+  /**
+   * True when sentiment analysis has finished with a known label (required for sentiment-based rules).
+   */
+  _hasKnownSentiment(interaction) {
+    const s = interaction.sentiment;
+    return s === 'positive' || s === 'negative' || s === 'neutral';
+  }
+
+  /**
+   * Cheap gate before enqueueing a webhook/sync auto-reply job (avoids useless queue work).
+   * Does not require sentiment — caller still runs full canAutoReply when the job executes.
+   */
+  shouldQueueImmediateAutoReply(interaction, organizationDoc) {
+    if (!organizationDoc?.autoReplySettings) return false;
+    const settings = organizationDoc.autoReplySettings;
+    if (!settings.enabled) return false;
+
+    const plat = (interaction.platform || '').toLowerCase();
+    if (settings.enabledPlatforms && settings.enabledPlatforms.length > 0) {
+      const allowed = this._normalizePlatformList(settings.enabledPlatforms);
+      if (!allowed.includes(plat)) return false;
+    }
+    if (settings.enabledTypes && settings.enabledTypes.length > 0) {
+      if (!settings.enabledTypes.includes(interaction.type)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Determine if interaction is eligible for auto-reply (must match Organization.autoReplySettings).
+   * Note: minConfidence in settings = minimum AI reply confidence (enforced in generateAutoReply), not sentiment score.
+   */
+  async canAutoReply(interaction, organizationSettings = {}) {
+    // One document per DM thread (dm_*_*): replies[] is conversation history, not "already answered this turn"
+    if (!isThreadStyleDm(interaction)) {
+      if (interaction.status === 'replied' || interaction.status === 'resolved') {
+        return false;
+      }
+      if (interaction.replies && interaction.replies.length > 0) {
+        return false;
+      }
     }
 
     // IMPORTANT: Don't reply to replies that are replies to our own replies
@@ -1128,23 +1268,39 @@ Generate a response that addresses the customer's message appropriately.`;
       interaction._needsParentCheck = true;
     }
 
-    // Respect organization settings
-    const settings = organizationSettings.autoReplySettings || {};
+    // Respect organization settings (support plain object or Mongoose doc)
+    const settings =
+      organizationSettings.autoReplySettings ||
+      organizationSettings?.toObject?.()?.autoReplySettings ||
+      {};
 
     if (!settings.enabled) {
       return false;
     }
 
-    // Check platform filters
+    // Platform filters (case-insensitive)
     if (settings.enabledPlatforms && settings.enabledPlatforms.length > 0) {
-      if (!settings.enabledPlatforms.includes(interaction.platform)) {
+      const plat = (interaction.platform || '').toLowerCase();
+      const allowed = this._normalizePlatformList(settings.enabledPlatforms);
+      if (!allowed.includes(plat)) {
         return false;
       }
     }
 
-    // Sentiment filter: control which sentiments to auto-reply to
+    // Interaction type (comment, dm, review, mention)
+    if (settings.enabledTypes && settings.enabledTypes.length > 0) {
+      if (!settings.enabledTypes.includes(interaction.type)) {
+        return false;
+      }
+    }
+
     const sentimentFilter = settings.sentimentFilter || 'all';
     const sentiment = interaction.sentiment;
+
+    // Any non-"all" filter requires a completed sentiment analysis
+    if (sentimentFilter !== 'all' && !this._hasKnownSentiment(interaction)) {
+      return false;
+    }
 
     if (sentimentFilter !== 'all') {
       switch (sentimentFilter) {
@@ -1168,28 +1324,24 @@ Generate a response that addresses the customer's message appropriately.`;
             return false;
           }
           break;
+        default:
+          break;
       }
     }
 
-    // Legacy: Don't auto-reply to negative sentiment (unless explicitly enabled)
-    // This is kept for backward compatibility but sentimentFilter takes precedence
-    if (sentimentFilter === 'all' && interaction.sentiment === 'negative' && !settings.replyToNegative) {
-      return false;
-    }
+    // sentimentFilter === 'all' matches UI "Reply to All Sentiments" — do not also gate on legacy replyToNegative
+    // (use "positive_neutral" or turn off auto-reply for negatives via a dedicated filter if needed)
 
-    // Don't auto-reply if confidence is too low
-    if (interaction.sentimentConfidence && interaction.sentimentConfidence < (settings.minConfidence || 0.7)) {
-      return false;
-    }
-
-    // Don't auto-reply to complaints (unless explicitly enabled)
+    // Complaints: only block when intent is explicitly classified as complaint
     if (interaction.intent === 'complaint' && !settings.replyToComplaints) {
       return false;
     }
 
-    // Check interaction type filters
-    if (settings.enabledTypes && settings.enabledTypes.length > 0) {
-      if (!settings.enabledTypes.includes(interaction.type)) {
+    // Per-bucket reply toggle
+    if (interaction.intentBucket) {
+      const IntentBucket = require('../models/IntentBucket');
+      const bucket = await IntentBucket.findById(interaction.intentBucket).select('replyEnabled').lean();
+      if (bucket && bucket.replyEnabled === false) {
         return false;
       }
     }
@@ -1203,7 +1355,7 @@ Generate a response that addresses the customer's message appropriately.`;
   async generateAutoReply(interaction, organizationId, organizationSettings = {}) {
     try {
       // Check if eligible
-      if (!this.canAutoReply(interaction, organizationSettings)) {
+      if (!(await this.canAutoReply(interaction, organizationSettings))) {
         return {
           eligible: false,
           reason: 'Interaction not eligible for auto-reply based on settings'
@@ -1224,8 +1376,15 @@ Generate a response that addresses the customer's message appropriately.`;
         };
       }
 
-      // Generate response
-      const response = await this.generateResponse(interaction, organizationId);
+      // Generate response (attributed to auto-reply for AiApiUsage)
+      const response = await runWithAiContext(
+        {
+          organizationId,
+          userId: interaction.assignedTo || undefined,
+          feature: 'inbox.auto_reply'
+        },
+        () => this.generateResponse(interaction, organizationId)
+      );
 
       if (!response) {
         return {
@@ -1257,23 +1416,17 @@ Generate a response that addresses the customer's message appropriately.`;
       }
       
       await aiCreditService.deductCredits(organizationId, 1, {
-        operation: 'auto_reply',
-        userId: userId,
-        interactionId: interaction._id.toString(),
-        platform: interaction.platform
+        operation: 'auto_reply', userId: userId,
+        interactionId: interaction._id.toString(), platform: interaction.platform
       });
 
-      return {
-        eligible: true,
-        response: response,
-        creditsUsed: 1
-      };
+      return { eligible: true, response: response, creditsUsed: 1 };
     } catch (error) {
       console.error('Auto-reply generation error:', error.message);
-      return {
-        eligible: false,
-        reason: error.message
-      };
+      // If credits were deducted but something failed after, rollback
+      // Since deduction is the last step before return, rollback only if deduction itself threw
+      // (the aiCreditService.deductCredits rethrows on failure, so no credits were actually taken)
+      return { eligible: false, reason: error.message };
     }
   }
 }

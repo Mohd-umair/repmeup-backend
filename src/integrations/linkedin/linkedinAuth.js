@@ -24,14 +24,28 @@ class LinkedInAuthService {
     // Advanced scopes that require LinkedIn approval
     // Only include if explicitly enabled via environment variable
     const advancedScopes = [];
-    
-    if (process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true') {
-      advancedScopes.push(
-        'w_member_social',        // Post on behalf of user (requires approval)
-        'r_organization_social',   // Read organization posts (requires approval)
-        'w_organization_social',  // Post on behalf of organization (requires approval)
-        'rw_organization_admin'   // Manage organization (requires approval)
-      );
+    const enableAdvanced = process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true';
+    const memberSocialOnly = process.env.LINKEDIN_MEMBER_SOCIAL_ONLY === 'true';
+
+    if (enableAdvanced) {
+      // Member-only: request only w_member_social (approved with Share on LinkedIn Default Tier).
+      // Use this when org scopes are not yet approved to avoid "scope not authorized" errors.
+      if (memberSocialOnly) {
+        advancedScopes.push('w_member_social');
+        // Read member posts + comments for inbox sync (UGC finders, socialActions GET).
+        // Not on Default Tier by default — LinkedIn often requires approval for r_member_social.
+        if (process.env.LINKEDIN_INCLUDE_R_MEMBER_SOCIAL === 'true') {
+          advancedScopes.push('r_member_social');
+        }
+      } else {
+        // Full org access: requires Community Management API approval
+        advancedScopes.push(
+          'w_member_social',
+          'r_organization_social',
+          'w_organization_social',
+          'rw_organization_admin'
+        );
+      }
     }
 
     const scopes = [...basicScopes, ...advancedScopes];
@@ -50,7 +64,14 @@ class LinkedInAuthService {
     console.log('🔗 [LinkedIn] Client ID:', this.clientId?.substring(0, 10) + '...');
     console.log('🔗 [LinkedIn] Redirect URI:', this.redirectUri);
     console.log('🔗 [LinkedIn] Scopes:', scopes.join(', '));
-    console.log('🔗 [LinkedIn] Advanced scopes enabled:', process.env.LINKEDIN_ENABLE_ADVANCED_SCOPES === 'true');
+    console.log(
+      '🔗 [LinkedIn] Advanced scopes enabled:',
+      enableAdvanced,
+      'member-social-only:',
+      memberSocialOnly,
+      'r_member_social:',
+      process.env.LINKEDIN_INCLUDE_R_MEMBER_SOCIAL === 'true'
+    );
     
     return authURL;
   }
@@ -222,6 +243,24 @@ class LinkedInAuthService {
         const savedConnections = [];
 
         for (const org of orgData.organizations) {
+          // Cross-org conflict check: block if this LinkedIn org is already in another workspace
+          const crossOrgConflict = await PlatformConnection.findOne({
+            platform: 'linkedin',
+            'platformData.organizationId': org.id,
+            organization: { $ne: organizationId },
+            isActive: true
+          }).select('organization').lean();
+          if (crossOrgConflict) {
+            console.warn(
+              `[LinkedIn] Skipping org ${org.name} — already connected to another workspace (CROSS_ORG_CONFLICT)`
+            );
+            const err = new Error(
+              `LinkedIn organization "${org.name}" is already connected to another workspace.`
+            );
+            err.code = 'CROSS_ORG_CONFLICT';
+            throw err;
+          }
+
           const connection = await PlatformConnection.findOneAndUpdate(
             {
               organization: organizationId,
@@ -260,6 +299,18 @@ class LinkedInAuthService {
 
         return savedConnections;
       } else {
+        // Cross-org conflict check for personal profile connection
+        const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
+          'linkedin', profile.id, organizationId
+        );
+        if (crossOrgConflict) {
+          const err = new Error(
+            'This LinkedIn account is already connected to another workspace.'
+          );
+          err.code = 'CROSS_ORG_CONFLICT';
+          throw err;
+        }
+
         // Save personal profile connection
         const connection = await PlatformConnection.findOneAndUpdate(
           {

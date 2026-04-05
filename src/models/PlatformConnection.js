@@ -215,5 +215,33 @@ platformConnectionSchema.methods.isTokenExpired = function() {
   return new Date() > this.tokenExpiry;
 };
 
+/**
+ * Returns the conflicting active PlatformConnection if `platformUserId` is
+ * already connected to a DIFFERENT organization on the same platform, or null
+ * if it is safe to connect.
+ *
+ * User-level Facebook tokens (metadata.type === 'user_token') are intentionally
+ * excluded — the same Facebook person may admin pages across multiple workspaces.
+ *
+ * Only active connections are considered; if the other org disconnected the
+ * account (isActive: false) the slot is treated as free.
+ */
+platformConnectionSchema.statics.findCrossOrgConflict = async function(
+  platform,
+  platformUserId,
+  currentOrgId
+) {
+  if (!platformUserId) return null;
+  return this.findOne({
+    platform,
+    platformUserId,
+    organization: { $ne: currentOrgId },
+    isActive: true,
+    'metadata.type': { $ne: 'user_token' }
+  })
+    .select('organization platform platformUsername platformDisplayName')
+    .lean();
+};
+
 module.exports = mongoose.model('PlatformConnection', platformConnectionSchema);
 

@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
 const AICreditUsage = require('../models/AICreditUsage');
@@ -140,6 +141,53 @@ class AICreditService {
   }
 
   /**
+   * Rollback (refund) previously deducted credits when an operation fails after deduction.
+   * @param {String} organizationId
+   * @param {Number} amount - Credits to refund
+   * @param {Object} metadata - Context about why the rollback happened
+   * @returns {Promise<Object>} Updated usage
+   */
+  async rollbackCredits(organizationId, amount = 1, metadata = {}) {
+    if (!amount || amount <= 0) return { success: true, refunded: 0 };
+    try {
+      const result = await Subscription.findOneAndUpdate(
+        { organization: organizationId },
+        { $inc: { 'usage.aiCreditsThisMonth': -amount } },
+        { new: true }
+      );
+
+      if (!result) {
+        console.warn(`⚠️ [AI Credits Rollback] No subscription found for org ${organizationId}`);
+        return { success: false };
+      }
+
+      try {
+        await AICreditUsage.create({
+          organization: organizationId,
+          user: metadata.userId || organizationId,
+          operation: metadata.operation ? `rollback_${metadata.operation}` : 'rollback',
+          creditsUsed: -amount,
+          metadata: {
+            ...metadata,
+            userId: undefined,
+            operation: undefined,
+            reason: metadata.reason || 'Operation failed after deduction'
+          }
+        });
+      } catch (logError) {
+        console.error('Error logging AI credit rollback:', logError);
+      }
+
+      console.log(`↩️ [AI Credits] Rolled back ${amount} credits for org ${organizationId}. New total: ${result.usage.aiCreditsThisMonth}/${result.limits.maxAICreditsPerMonth}`);
+
+      return { success: true, refunded: amount };
+    } catch (error) {
+      console.error('Rollback AI credits error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * Get AI credit usage history for organization
    * @param {String} organizationId
    * @param {Object} options - Query options (page, limit, startDate, endDate)
@@ -181,6 +229,64 @@ class AICreditService {
       };
     } catch (error) {
       console.error('Get AI credit usage history error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Paginated AI credit events for a single user within an organization (super-admin / audit).
+   * @param {String} organizationId
+   * @param {String} userId
+   * @param {Object} options - page, limit (max 200), startDate, endDate
+   */
+  async getUsageHistoryForUser(organizationId, userId, options = {}) {
+    try {
+      const page = Math.max(1, parseInt(options.page, 10) || 1);
+      let limit = parseInt(options.limit, 10) || 25;
+      limit = Math.min(Math.max(1, limit), 200);
+      const skip = (page - 1) * limit;
+
+      const query = { organization: organizationId, user: userId };
+
+      if (options.startDate || options.endDate) {
+        query.createdAt = {};
+        if (options.startDate) query.createdAt.$gte = new Date(options.startDate);
+        if (options.endDate) query.createdAt.$lte = new Date(options.endDate);
+      }
+
+      const [items, total, sumAgg] = await Promise.all([
+        AICreditUsage.find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .select('operation creditsUsed metadata createdAt')
+          .lean(),
+        AICreditUsage.countDocuments(query),
+        AICreditUsage.aggregate([
+          {
+            $match: {
+              organization: new mongoose.Types.ObjectId(String(organizationId)),
+              user: new mongoose.Types.ObjectId(String(userId))
+            }
+          },
+          { $group: { _id: null, totalCredits: { $sum: '$creditsUsed' } } }
+        ])
+      ]);
+
+      const lifetimeCreditsUsed = sumAgg[0]?.totalCredits ?? 0;
+
+      return {
+        items,
+        lifetimeCreditsUsed,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit) || 0
+        }
+      };
+    } catch (error) {
+      console.error('Get AI credit usage history for user error:', error);
       throw error;
     }
   }

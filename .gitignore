@@ -2,10 +2,13 @@
 node_modules/
 package-lock.json
 
-# Environment variables
+# Environment variables — never commit secrets
 .env
 .env.local
 .env.*.local
+.env.production
+.env.staging
+.env.development
 
 
 # Logs

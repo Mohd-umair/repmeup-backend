@@ -1,12 +1,12 @@
 require('dotenv').config();
 const app = require('./app');
+const { getCorsOriginOption } = require('./config/corsOrigins');
 const connectDB = require('./config/database');
 const { connectRedis } = require('./config/redis');
 const http = require('http');
 const socketIO = require('socket.io');
 const logger = require('./config/logger');
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   logger.error('UNCAUGHT EXCEPTION! Shutting down...', {
     error: err.message,
@@ -22,24 +22,33 @@ const server = http.createServer(app);
 // Initialize Socket.IO
 const io = socketIO(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:4200',
-    methods: ['GET', 'POST']
+    origin: getCorsOriginOption(),
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
-// Make io accessible to routes
+// Make io accessible to routes and share via singleton emitter
 app.set('io', io);
+const socketEmitter = require('./utils/socketEmitter');
+socketEmitter.setIO(io);
 
 // Socket.IO connection handler
 io.on('connection', (socket) => {
   logger.debug('Socket client connected', { socketId: socket.id });
 
-  socket.on('join-organization', (organizationId) => {
-    socket.join(`org-${organizationId}`);
-    logger.debug('Socket joined organization', { 
-      socketId: socket.id, 
-      organizationId 
-    });
+  // Frontend emits: emit('join_organization', { organizationId })
+  socket.on('join_organization', (data) => {
+    const orgId = typeof data === 'string' ? data : data?.organizationId;
+    if (orgId) {
+      socket.join(`org-${orgId}`);
+      logger.debug('Socket joined organization room', { socketId: socket.id, orgId });
+    }
+  });
+
+  socket.on('leave_organization', (data) => {
+    const orgId = typeof data === 'string' ? data : data?.organizationId;
+    if (orgId) socket.leave(`org-${orgId}`);
   });
 
   socket.on('disconnect', () => {

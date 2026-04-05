@@ -1,4 +1,25 @@
 const nodemailer = require('nodemailer');
+const {
+  buildWelcomeSignupEmail,
+  buildWelcomeSignupPlainText
+} = require('./emailTemplates/welcomeSignupTemplate');
+
+/** Avoid 535 from accidental spaces/newlines when pasting into .env */
+function smtpEnv(name, fallback = '') {
+  const v = process.env[name];
+  if (v == null) return fallback;
+  return String(v).trim();
+}
+
+/** Plain transactional emails: white page background for all clients */
+function wrapSimpleEmailHtml(innerHtml) {
+  return `<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:24px;background-color:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+${innerHtml}
+</body>
+</html>`;
+}
 
 class EmailService {
   constructor() {
@@ -7,15 +28,42 @@ class EmailService {
   }
 
   initializeTransporter() {
-    this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.hostinger.com',
-      port: parseInt(process.env.SMTP_PORT || '465'),
-      secure: (process.env.SMTP_PORT || '465') === '465', // true for 465, false for 587
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      }
-    });
+    const host = smtpEnv('SMTP_HOST', 'smtpout.secureserver.net');
+    const port = parseInt(smtpEnv('SMTP_PORT', '465'), 10) || 465;
+    const user = smtpEnv('SMTP_USER');
+    const pass = smtpEnv('SMTP_PASS');
+
+    if (!user || !pass) {
+      console.warn('[emailService] SMTP_USER or SMTP_PASS is empty — sending mail will fail until both are set.');
+    }
+
+    const auth = { user, pass };
+
+    // Allow overriding auth method via env (LOGIN, PLAIN, etc.)
+    const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
+    if (authMethod) auth.method = authMethod;
+
+    const options = {
+      host,
+      port,
+      auth,
+      secureConnection: false,
+      requireTLS: true,
+      tls: { ciphers: 'SSLv3' }
+    };
+
+    if (port === 465) {
+      options.secure = true;
+    } else {
+      options.secure = false; // VERY IMPORTANT for port 587: plain socket → STARTTLS
+    }
+
+    if (smtpEnv('SMTP_DEBUG') === 'true') {
+      options.debug = true;
+      options.logger = true;
+    }
+
+    this.transporter = nodemailer.createTransport(options);
   }
 
   /**
@@ -45,6 +93,17 @@ class EmailService {
       };
     } catch (error) {
       console.error('Email send error:', error);
+      if (error.code === 'EAUTH' || String(error.message || '').includes('535')) {
+        console.error(
+          '[emailService] SMTP login rejected (535). Checklist:\n' +
+            '  1) Verify you can log into GoDaddy webmail (https://email.secureserver.net) with the SAME user/password\n' +
+            '  2) SMTP_HOST must be smtpout.secureserver.net for GoDaddy email\n' +
+            '  3) SMTP_USER = full email address (e.g. info@repmeup.in)\n' +
+            '  4) Password in .env with special chars (#$!) → wrap in single quotes: SMTP_PASS=\'pass#here\'\n' +
+            '  5) Try SMTP_PORT=587 if 465 fails (or vice versa)\n' +
+            '  6) SMTP_DEBUG=true for verbose SMTP trace'
+        );
+      }
       return {
         success: false,
         error: error.message
@@ -53,23 +112,35 @@ class EmailService {
   }
 
   /**
-   * Send welcome email
+   * Send welcome email (first-time signup: register, Google OAuth, or team invite with temp password).
    */
   async sendWelcomeEmail(user, tempPassword = null) {
-    const subject = 'Welcome to ORM System';
-    const html = `
-      <h1>Welcome to ORM System, ${user.firstName}!</h1>
-      <p>Your account has been created successfully.</p>
-      ${tempPassword ? `<p><strong>Temporary Password:</strong> ${tempPassword}</p>
-      <p>Please change your password after your first login.</p>` : ''}
-      <p>Get started by connecting your social media accounts and managing all your interactions in one place.</p>
-      <p>Best regards,<br>ORM Team</p>
-    `;
+    const baseUrl = String(process.env.FRONTEND_URL || 'http://localhost:4200').replace(/\/$/, '');
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+    const loginUrl = `${baseUrl}/auth/login`;
+    const dashboardUrl = `${baseUrl}/app/dashboard`;
+
+    const html = buildWelcomeSignupEmail({
+      firstName: user.firstName,
+      tempPassword: tempPassword || null,
+      loginUrl,
+      dashboardUrl,
+      appName
+    });
+    const text = buildWelcomeSignupPlainText({
+      firstName: user.firstName,
+      tempPassword: tempPassword || null,
+      loginUrl,
+      dashboardUrl,
+      appName
+    });
+    const subject = `Welcome to ${appName} — your account is ready`;
 
     return this.sendEmail({
       to: user.email,
       subject,
-      html
+      html,
+      text
     });
   }
 
@@ -78,7 +149,7 @@ class EmailService {
    */
   async sendAssignmentNotification(user, interaction) {
     const subject = `New ${interaction.type} assigned to you`;
-    const html = `
+    const html = wrapSimpleEmailHtml(`
       <h2>New Assignment</h2>
       <p>Hi ${user.firstName},</p>
       <p>A new ${interaction.type} from ${interaction.platform} has been assigned to you.</p>
@@ -87,7 +158,7 @@ class EmailService {
       <p>Sentiment: ${interaction.sentiment || 'Not analyzed'}</p>
       <p><a href="${process.env.FRONTEND_URL}/inbox/${interaction._id}">View and respond</a></p>
       <p>Best regards,<br>ORM System</p>
-    `;
+    `);
 
     return this.sendEmail({
       to: user.email,
@@ -101,14 +172,14 @@ class EmailService {
    */
   async sendNegativeSpikeAlert(user, postId, count) {
     const subject = `Alert: ${count} negative comments detected`;
-    const html = `
+    const html = wrapSimpleEmailHtml(`
       <h2>Negative Comment Alert</h2>
       <p>Hi ${user.firstName},</p>
       <p><strong>Alert:</strong> ${count} negative comments have been detected on a single post.</p>
       <p>This requires immediate attention.</p>
       <p><a href="${process.env.FRONTEND_URL}/inbox?postId=${postId}">View comments</a></p>
       <p>Best regards,<br>ORM System</p>
-    `;
+    `);
 
     return this.sendEmail({
       to: user.email,
@@ -122,7 +193,7 @@ class EmailService {
    */
   async sendDailyDigest(user, stats) {
     const subject = 'Your Daily ORM Digest';
-    const html = `
+    const html = wrapSimpleEmailHtml(`
       <h2>Daily Digest for ${new Date().toLocaleDateString()}</h2>
       <p>Hi ${user.firstName},</p>
       <h3>Today's Summary:</h3>
@@ -137,7 +208,7 @@ class EmailService {
       </ul>
       <p><a href="${process.env.FRONTEND_URL}/inbox">View all interactions</a></p>
       <p>Best regards,<br>ORM System</p>
-    `;
+    `);
 
     return this.sendEmail({
       to: user.email,
@@ -155,14 +226,14 @@ class EmailService {
     const html = `
       <!DOCTYPE html>
       <html>
-      <body style="margin:0;padding:0;background-color:#0a0a0a;font-family:Arial,sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
+      <body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff;padding:40px 20px;">
           <tr>
             <td align="center">
-              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:2px solid #1a1a1a;">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
                 <!-- Header -->
                 <tr>
-                  <td style="background-color:#0a0a0a;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
+                  <td style="background-color:#ffffff;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
                     <span style="font-size:28px;font-weight:900;color:#c8f135;letter-spacing:-1px;">RepMeUp</span>
                   </td>
                 </tr>
@@ -213,6 +284,66 @@ class EmailService {
       subject,
       html
     });
+  }
+
+  /**
+   * Send a 6-digit OTP for passwordless login.
+   */
+  async sendLoginOtpEmail(email, otp, firstName) {
+    const displayName = firstName || email.split('@')[0];
+    const subject = `${otp} — Your RepMeUp login code`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head><meta charset="UTF-8"></head>
+      <body style="margin:0;padding:0;background-color:#0a0a0a;font-family:Arial,Helvetica,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" style="padding:40px 20px;">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;">
+                <!-- Header -->
+                <tr>
+                  <td style="background-color:#0a0a0a;padding:32px 36px;text-align:center;">
+                    <div style="display:inline-block;background-color:#c8f135;padding:12px 24px;border-radius:10px;">
+                      <span style="font-size:20px;font-weight:900;color:#0a0a0a;letter-spacing:-0.5px;">RepMeUp</span>
+                    </div>
+                  </td>
+                </tr>
+                <!-- Body -->
+                <tr>
+                  <td style="padding:36px 36px 28px;">
+                    <h2 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#0a0a0a;">Your login code</h2>
+                    <p style="margin:0 0 28px;color:#555;font-size:15px;line-height:1.6;">
+                      Hi ${displayName}, use the code below to sign in to RepMeUp. This code expires in <strong>10 minutes</strong>.
+                    </p>
+                    <!-- OTP Box -->
+                    <div style="background-color:#f4f4f4;border:2px solid #c8f135;border-radius:14px;padding:28px;text-align:center;margin-bottom:28px;">
+                      <span style="font-size:48px;font-weight:900;letter-spacing:16px;color:#0a0a0a;font-family:'Courier New',monospace;">${otp}</span>
+                    </div>
+                    <p style="margin:0;color:#888;font-size:13px;line-height:1.6;">
+                      If you didn't request this code, you can safely ignore this email. Someone may have typed your email by mistake.
+                    </p>
+                    <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">
+                      For security, never share this code with anyone — RepMeUp will never ask for it.
+                    </p>
+                  </td>
+                </tr>
+                <!-- Footer -->
+                <tr>
+                  <td style="background-color:#f9f9f9;padding:16px 36px;text-align:center;border-top:1px solid #eee;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">© ${new Date().getFullYear()} RepMeUp. All rights reserved.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    return this.sendEmail({ to: email, subject, html });
   }
 }
 

@@ -18,10 +18,10 @@ router.put('/mark-all-read', notificationController.markAllAsRead);
 // Mark notification as read
 router.put('/:id/read', notificationController.markAsRead);
 
-// Delete notification
-router.delete('/:id', notificationController.deleteNotification);
-
-// Clear read notifications
+// Clear read notifications — MUST be before DELETE /:id or "clear-read" is parsed as :id
 router.delete('/clear-read', notificationController.clearReadNotifications);
+
+// Delete single notification
+router.delete('/:id', notificationController.deleteNotification);
 
 module.exports = router;

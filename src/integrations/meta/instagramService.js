@@ -16,38 +16,45 @@ class InstagramService {
     if (!userId) return null;
     const token = typeof accessToken === 'string' ? accessToken.trim() : null;
     if (!token) return null;
-    // Try graph.facebook.com first (same token works for comments there); graph.instagram.com for messaging
-    const urlsToTry = [
-      { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fields: 'name,username,profile_pic,profile_picture_url' },
-      { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fields: 'name,username,profile_pic' }
+
+    // For Instagram DM senders (IGSID), name+profile_pic works without Advanced Access.
+    // username requires instagram_manage_messages Advanced Access — try it, but fall back gracefully.
+    const attemptsPerUrl = [
+      { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fieldSets: ['name,profile_pic,username', 'name,profile_pic'] },
+      { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fieldSets: ['name,username,profile_pic', 'name,profile_pic'] }
     ];
-    for (const { url, name, fields } of urlsToTry) {
-      try {
-        const response = await axios.get(url, {
-          params: { fields, access_token: token },
-          timeout: 5000,
-        });
-        const data = response.data || null;
-        const picUrl = data && (data.profile_pic || data.profile_picture_url);
-        if (data) {
-          if (picUrl) data.profile_pic = data.profile_pic || data.profile_picture_url;
-          return data;
-        }
-      } catch (err) {
-        const msg = err.response?.data?.error?.message || err.message;
-        const code = err.response?.data?.error?.code;
-        // Expected without Advanced Access (instagram_manage_messages) or with invalid token (190)
-        if (code === 200 || code === 190) {
-          // Log once per userId at debug level to avoid noise on every webhook
-          if (!this._profileFailLogged) this._profileFailLogged = new Set();
-          if (!this._profileFailLogged.has(userId)) {
-            this._profileFailLogged.add(userId);
-            console.warn(`[Instagram] User profile unavailable for userId=${userId} (code ${code}). Normal until instagram_manage_messages has Advanced Access.`);
+
+    for (const { url, name: urlName, fieldSets } of attemptsPerUrl) {
+      for (const fields of fieldSets) {
+        try {
+          const response = await axios.get(url, {
+            params: { fields, access_token: token },
+            timeout: 5000
+          });
+          const data = response.data || null;
+          if (data && (data.name || data.username || data.profile_pic)) {
+            // Normalize: always expose profile_pic as the avatar field
+            if (!data.profile_pic && data.profile_picture_url) {
+              data.profile_pic = data.profile_picture_url;
+            }
+            return data;
           }
-        } else {
-          console.warn(`[Instagram] User profile ${name} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
+        } catch (err) {
+          const msg = err.response?.data?.error?.message || err.message;
+          const code = err.response?.data?.error?.code;
+          if (code === 200 || code === 190 || code === 100) {
+            // Permissions or token issue — try the reduced field set next
+            if (!this._profileFailLogged) this._profileFailLogged = new Set();
+            const logKey = `${userId}_${fields}`;
+            if (!this._profileFailLogged.has(logKey)) {
+              this._profileFailLogged.add(logKey);
+              console.warn(`[Instagram] Profile fetch failed for userId=${userId} fields="${fields}" (code ${code}): ${msg?.substring(0, 80)}`);
+            }
+          } else {
+            console.warn(`[Instagram] User profile ${urlName} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
+          }
+          // Try next field set or next URL
         }
-        // Try next URL or return null
       }
     }
     return null;
@@ -82,7 +89,7 @@ class InstagramService {
         const mediaResponse = await axios.get(nextPage, {
           params: {
             access_token: accessToken,
-            fields: 'id,caption,media_type,timestamp,permalink,media_url',
+            fields: 'id,caption,media_type,timestamp,permalink,media_url,like_count',
             limit: 25
           }
         });
@@ -94,6 +101,31 @@ class InstagramService {
         break;
       }
     }
+
+    // Fetch share count for each media via Insights API (in batches of 10 to avoid rate limits)
+    if (allMedia.length > 0) {
+      const BATCH = 10;
+      for (let i = 0; i < allMedia.length; i += BATCH) {
+        const batch = allMedia.slice(i, i + BATCH);
+        await Promise.all(batch.map(async (media) => {
+          try {
+            const res = await axios.get(`${this.baseUrl}/${media.id}/insights`, {
+              params: { metric: 'shares', access_token: accessToken }
+            });
+            const sharesEntry = (res.data.data || []).find(d => d.name === 'shares');
+            // Response can be either values[0].value or total_value.value depending on API version
+            media.share_count =
+              sharesEntry?.total_value?.value ??
+              sharesEntry?.values?.[0]?.value ??
+              0;
+          } catch {
+            // Insights may not be available for all media types (e.g. carousel children, stories)
+            media.share_count = 0;
+          }
+        }));
+      }
+    }
+
     return allMedia;
   }
 
@@ -305,21 +337,30 @@ class InstagramService {
     try {
       const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
+      // Facebook Login flow: conversations must be fetched via the Page ID,
+      // not the Instagram Business Account ID (which requires Instagram Login).
+      const pageId = platformConnection.platformPageId ||
+        platformConnection.platformData?.pageId ||
+        businessAccountId;
 
       if (!businessAccountId) {
         throw new Error('Instagram Business Account ID not found in connection');
+      }
+
+      if (!platformConnection.platformPageId && !platformConnection.platformData?.pageId) {
+        console.warn('⚠️  [Instagram] platformPageId missing — falling back to IG account ID for conversations. Reconnect Instagram to fix this.');
       }
 
       // Log which token is used (masked) for debugging "capability" errors
       const tokenPreview = accessToken
         ? `${String(accessToken).slice(0, 8)}...${String(accessToken).slice(-4)}`
         : '(missing)';
-      console.log(`💬 [Instagram] Fetching DMs for account: ${businessAccountId} (Page ID: ${platformConnection.platformPageId || 'n/a'})`);
-      console.log(`💬 [Instagram] Using token: ${tokenPreview} (from PlatformConnection.accessToken – Page access token for the Facebook Page linked to this IG account)`);
+      console.log(`💬 [Instagram] Fetching DMs via Page ID: ${pageId} (IG account: ${businessAccountId})`);
+      console.log(`💬 [Instagram] Using token: ${tokenPreview}`);
 
-      // Get conversations
+      // Get conversations using Page ID (Facebook Login flow requires /{page-id}/conversations?platform=instagram)
       let allConversations = [];
-      let nextPage = `${this.baseUrl}/${businessAccountId}/conversations`;
+      let nextPage = `${this.baseUrl}/${pageId}/conversations`;
       let pageCount = 0;
       const maxPages = 10;
 
@@ -404,10 +445,21 @@ class InstagramService {
       const interactionMap = new Map();
       const profileCache = new Map();
 
-      // For each conversation, get messages
+      // One interaction per conversation (same as webhook: platformId = dm_igAccountId_senderId)
+      // so we don't create duplicate inbox entries when both webhook and sync run.
       for (const conversation of allConversations) {
         try {
-          // Get messages for this conversation
+          const participants = conversation.participants?.data || [];
+          const otherParticipant = participants.find(p => String(p?.id) !== String(businessAccountId));
+          const otherParticipantId = otherParticipant?.id;
+          if (!otherParticipantId) {
+            console.warn(`[Instagram] Skipping conversation ${conversation.id}: could not determine other participant`);
+            continue;
+          }
+
+          // Same thread ID format as webhook so sync and webhook update the same interaction
+          const threadPlatformId = `dm_${String(businessAccountId)}_${String(otherParticipantId)}`;
+
           let allMessages = [];
           let messagesNextPage = `${this.baseUrl}/${conversation.id}/messages`;
           let messagesPageCount = 0;
@@ -432,58 +484,67 @@ class InstagramService {
             }
           }
 
-          // Process messages (only incoming messages, not sent by us)
+          // Collect only incoming messages (from the other participant) for this conversation
+          const incomingMessages = [];
+          let latestIncoming = null;
           for (const message of allMessages) {
-            // Check if message is from someone else (not from our business account)
-            const isFromUs = message.from?.id === businessAccountId || 
+            const isFromUs = message.from?.id === businessAccountId ||
                             message.from?.id === platformConnection.platformPageId;
-
             if (!isFromUs && message.message) {
-              let authorName = message.from?.name || message.from?.username || 'Unknown User';
-              let avatarUrl = undefined;
-              if (message.from?.id) {
-                if (!profileCache.has(message.from.id)) {
-                  const profile = await this._fetchInstagramUserProfile(accessToken, message.from.id);
-                  profileCache.set(message.from.id, profile);
-                }
-                const profile = profileCache.get(message.from.id);
-                if (profile) {
-                  if (profile.profile_pic) avatarUrl = profile.profile_pic;
-                  if (profile.name) authorName = profile.name;
-                }
-                if (!avatarUrl) {
-                  avatarUrl = `${this.baseUrl}/${message.from.id}/picture?type=normal`;
-                }
+              const ts = message.created_time;
+              const timestamp = typeof ts === 'number' ? ts : (new Date(ts).getTime() / 1000);
+              incomingMessages.push({
+                mid: message.id,
+                text: message.message,
+                timestamp
+              });
+              if (!latestIncoming || new Date(message.created_time) > new Date(latestIncoming.created_time)) {
+                latestIncoming = message;
               }
-              const interaction = {
-                organization: platformConnection.organization,
-                platformConnection: platformConnection._id,
-                platform: 'instagram',
-                type: 'dm',
-                platformId: message.id,
-                threadId: conversation.id,
-                platformUrl: `https://www.instagram.com/direct/inbox/`,
-                content: message.message,
-                author: {
-                  platformId: message.from?.id,
-                  username: message.from?.username || 'unknown',
-                  name: authorName,
-                  avatarUrl
-                },
-                metadata: {
-                  conversationId: conversation.id,
-                  participants: conversation.participants?.data || [],
-                  hasAttachments: !!(message.attachments && message.attachments.data && message.attachments.data.length > 0)
-                },
-                platformCreatedAt: new Date(message.created_time),
-                status: 'unread',
-                sentiment: null
-              };
-
-              interactions.push(interaction);
-              interactionMap.set(message.id, interaction);
             }
           }
+
+          if (incomingMessages.length === 0) continue;
+
+          const authorId = otherParticipantId;
+          if (!profileCache.has(authorId)) {
+            const profile = await this._fetchInstagramUserProfile(accessToken, authorId);
+            profileCache.set(authorId, profile);
+          }
+          const profile = profileCache.get(authorId);
+          let authorName = profile?.name || otherParticipant?.username || 'Unknown User';
+          let avatarUrl = profile?.profile_pic || profile?.profile_picture_url;
+          if (!avatarUrl) avatarUrl = `${this.baseUrl}/${authorId}/picture?type=normal`;
+
+          const interaction = {
+            organization: platformConnection.organization,
+            platformConnection: platformConnection._id,
+            platform: 'instagram',
+            type: 'dm',
+            platformId: threadPlatformId,
+            threadId: otherParticipantId,
+            platformUrl: 'https://www.instagram.com/direct/inbox/',
+            content: latestIncoming.message,
+            author: {
+              platformId: authorId,
+              username: otherParticipant?.username || 'unknown',
+              name: authorName,
+              avatarUrl
+            },
+            metadata: {
+              conversationId: conversation.id,
+              participants: participants,
+              instagramAccountId: businessAccountId,
+              incomingMessages: incomingMessages.slice(-100),
+              lastMid: latestIncoming.id
+            },
+            platformCreatedAt: new Date(latestIncoming.created_time),
+            status: 'unread',
+            sentiment: null
+          };
+
+          interactions.push(interaction);
+          interactionMap.set(threadPlatformId, interaction);
         } catch (error) {
           console.error(`Error processing conversation ${conversation.id}:`, error.message);
           continue;
@@ -514,6 +575,24 @@ class InstagramService {
 
         await Interaction.bulkWrite(bulkOps);
         console.log(`✅ [Instagram] Saved ${interactions.length} DMs to database`);
+      }
+
+      // Always clean up legacy per-message rows (platformId not starting with "dm_").
+      // Old sync code created one row per message (platformId = message.id like "m_xxx").
+      // New code uses one row per conversation (platformId = dm_igAccountId_senderId).
+      // $not: /^dm_/ correctly matches anything NOT starting with "dm_".
+      try {
+        const deleted = await Interaction.deleteMany({
+          organization: platformConnection.organization,
+          platform: 'instagram',
+          type: 'dm',
+          platformId: { $not: /^dm_/ }
+        });
+        if (deleted.deletedCount > 0) {
+          console.log(`✅ [Instagram] Removed ${deleted.deletedCount} legacy per-message DM rows to prevent duplicates`);
+        }
+      } catch (cleanupErr) {
+        console.warn('[Instagram] Legacy DM cleanup failed (non-critical):', cleanupErr.message);
       }
 
       return {
@@ -631,14 +710,18 @@ class InstagramService {
   async sendMessage(recipientId, message, accessToken, pageId, useHumanAgentTag = true) {
     let tokenPageId = null;
     try {
-      const body = {
-        recipient: { id: recipientId },
-        message: { text: message }
-      };
-      if (useHumanAgentTag) {
-        body.messaging_type = 'MESSAGE_TAG';
-        body.tag = 'HUMAN_AGENT';
+      // Take thread control before replying — required when app receives DMs via standby channel.
+      // This makes our app the thread owner so the reply succeeds.
+      try {
+        await axios.post(`${this.baseUrl}/${pageId}/take_thread_control`, null, {
+          params: { recipient_id: recipientId, access_token: accessToken }
+        });
+        console.log('[Instagram] Thread control taken for recipient:', recipientId);
+      } catch (ttcErr) {
+        // Non-fatal: if we're already the thread owner this may fail or be a no-op
+        console.warn('[Instagram] take_thread_control failed (may already be owner):', ttcErr.response?.data?.error?.message || ttcErr.message);
       }
+
       try {
         const meRes = await axios.get(`${this.baseUrl}/me`, {
           params: { fields: 'id', access_token: accessToken },
@@ -653,15 +736,39 @@ class InstagramService {
         const msg = meErr.response?.data?.error?.message || meErr.message;
         console.warn('[Instagram] sendMessage: /me check failed (code', code, '). Cannot confirm token matches pageId.', msg?.substring(0, 80));
       }
-      const response = await axios.post(
-        `${this.baseUrl}/${pageId}/messages`,
-        body,
-        {
-          params: {
-            access_token: accessToken
-          }
+
+      // Try sending; if HUMAN_AGENT tag is not approved (error 10), fall back to RESPONSE.
+      const attemptSend = async (useTag) => {
+        const body = {
+          recipient: { id: recipientId },
+          message: { text: message }
+        };
+        if (useTag) {
+          body.messaging_type = 'MESSAGE_TAG';
+          body.tag = 'HUMAN_AGENT';
+        } else {
+          body.messaging_type = 'RESPONSE';
         }
-      );
+        return axios.post(
+          `${this.baseUrl}/${pageId}/messages`,
+          body,
+          { params: { access_token: accessToken } }
+        );
+      };
+
+      let response;
+      try {
+        response = await attemptSend(useHumanAgentTag);
+      } catch (tagErr) {
+        const tagErrCode = tagErr.response?.data?.error?.code;
+        const tagErrMsg = tagErr.response?.data?.error?.message || '';
+        if (tagErrCode === 10 || tagErrMsg.toLowerCase().includes('human agent')) {
+          console.warn('[Instagram] HUMAN_AGENT tag not approved, retrying with RESPONSE messaging_type');
+          response = await attemptSend(false);
+        } else {
+          throw tagErr;
+        }
+      }
 
       return {
         success: true,
@@ -693,6 +800,88 @@ class InstagramService {
       throw err;
     }
   }
+
+  /**
+   * Send an attachment (image, video, or file) to an Instagram DM recipient.
+   * @param {string} [localFilePath] - If provided, uploads the file directly via
+   *   multipart form-data instead of passing a URL for the platform to download.
+   */
+  async sendMessageWithAttachment(recipientId, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = true, localFilePath = null) {
+    if (!recipientId || !attachmentType || !accessToken || !pageId) {
+      return { success: false, error: 'Missing recipientId, attachmentType, accessToken, or pageId' };
+    }
+    const allowedTypes = ['image', 'video', 'file', 'audio'];
+    if (!allowedTypes.includes(attachmentType)) {
+      return { success: false, error: `attachmentType must be one of: ${allowedTypes.join(', ')}` };
+    }
+    const fs = require('fs');
+    const FormData = require('form-data');
+    const useDirectUpload = localFilePath && fs.existsSync(localFilePath);
+
+    try {
+      await axios.post(`${this.baseUrl}/${pageId}/take_thread_control`, null, {
+        params: { recipient_id: recipientId, access_token: accessToken }
+      }).catch(() => {});
+
+      const apiUrl = `${this.baseUrl}/${pageId}/messages`;
+      const platformType = attachmentType;
+
+      const sendRequest = async (useTag) => {
+        if (useDirectUpload) {
+          const form = new FormData();
+          form.append('recipient', JSON.stringify({ id: recipientId }));
+          form.append('messaging_type', useTag ? 'MESSAGE_TAG' : 'RESPONSE');
+          if (useTag) form.append('tag', 'HUMAN_AGENT');
+          form.append('message', JSON.stringify({
+            attachment: { type: platformType, payload: { is_reusable: false } }
+          }));
+          form.append('filedata', fs.createReadStream(localFilePath));
+          return axios.post(apiUrl, form, {
+            params: { access_token: accessToken },
+            headers: form.getHeaders(),
+            timeout: 30000,
+            maxContentLength: 100 * 1024 * 1024
+          });
+        }
+        const body = {
+          recipient: { id: recipientId },
+          messaging_type: useTag ? 'MESSAGE_TAG' : 'RESPONSE',
+          tag: useTag ? 'HUMAN_AGENT' : undefined,
+          message: {
+            attachment: {
+              type: platformType,
+              payload: { url: attachmentUrl, is_reusable: false }
+            }
+          }
+        };
+        if (!useTag) delete body.tag;
+        return axios.post(apiUrl, body, {
+          params: { access_token: accessToken }
+        });
+      };
+
+      let response;
+      try {
+        response = await sendRequest(useHumanAgentTag);
+      } catch (tagErr) {
+        if (tagErr.response?.data?.error?.code === 10 || (tagErr.response?.data?.error?.message || '').toLowerCase().includes('human agent')) {
+          response = await sendRequest(false);
+        } else {
+          throw tagErr;
+        }
+      }
+      if (caption && caption.trim()) {
+        await this.sendMessage(recipientId, caption.trim(), accessToken, pageId, false);
+      }
+      return { success: true, platformResponseId: response.data?.message_id };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const msg = apiError?.error_user_msg || apiError?.message || error.message;
+      console.error('[Instagram] sendMessageWithAttachment error:', msg);
+      return { success: false, error: msg };
+    }
+  }
+
   /**
    * Create Instagram Media Container
    * Step 1 of publishing process

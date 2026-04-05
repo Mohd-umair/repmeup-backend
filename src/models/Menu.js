@@ -13,7 +13,11 @@ const menuItemSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  
+  queryParams: {
+    type: mongoose.Schema.Types.Mixed,
+    default: undefined
+  },
+
   // Permission control
   requiredRoles: [{
     type: String,

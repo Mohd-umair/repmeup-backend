@@ -41,21 +41,39 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['admin', 'manager', 'agent', 'viewer'],
+    enum: ['super_admin', 'admin', 'manager', 'agent', 'viewer'],
     default: 'agent'
   },
   permissions: [{
     type: String
   }],
+  group: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Group',
+    default: null
+  },
   organization: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Organization',
     required: true
   },
+  assignedBuckets: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'IntentBucket'
+  }],
+  assignedPlatforms: [{
+    type: String,
+    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin']
+  }],
   avatar: String,
   isActive: {
     type: Boolean,
     default: true
+  },
+  /** Soft delete — user cannot sign in; hidden from default super-admin lists */
+  deletedAt: {
+    type: Date,
+    default: null
   },
   isEmailVerified: {
     type: Boolean,
@@ -64,6 +82,10 @@ const userSchema = new mongoose.Schema({
   emailVerificationToken: String,
   passwordResetToken: String,
   passwordResetExpires: Date,
+
+  // Email OTP login (6-digit, expires in 10 minutes)
+  loginOtpCode: { type: String, select: false },
+  loginOtpExpires: { type: Date, select: false },
   lastLogin: Date,
   preferences: {
     notifications: {
@@ -123,6 +145,7 @@ const userSchema = new mongoose.Schema({
 // Indexes
 // Note: email index is automatically created by unique: true
 userSchema.index({ organization: 1, role: 1 });
+userSchema.index({ deletedAt: 1 });
 
 // Hash password before saving (skip for OAuth users without password)
 userSchema.pre('save', async function(next) {

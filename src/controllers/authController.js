@@ -1,5 +1,6 @@
 const authService = require('../services/authService');
 const emailService = require('../services/emailService');
+const userActivityLogService = require('../services/userActivityLogService');
 
 // @desc    Register user & organization
 // @route   POST /api/auth/register
@@ -8,8 +9,24 @@ exports.register = async (req, res, next) => {
   try {
     const result = await authService.register(req.body);
 
-    // Send welcome email
-    await emailService.sendWelcomeEmail(result.user);
+    const orgId =
+      result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'register',
+      path: '/api/auth/register',
+      method: 'POST',
+      statusCode: 201,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
+
+    try {
+      await emailService.sendWelcomeEmail(result.user);
+    } catch (welcomeErr) {
+      console.warn('[auth] Welcome email failed:', welcomeErr.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -33,6 +50,19 @@ exports.login = async (req, res, next) => {
     const { email, password } = req.body;
 
     const result = await authService.login(email, password);
+
+    const orgId =
+      result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'login',
+      path: '/api/auth/login',
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
 
     res.status(200).json({
       success: true,
@@ -141,14 +171,17 @@ exports.createTeamMember = async (req, res, next) => {
       req.body
     );
 
-    // Send welcome email with temp password
-    await emailService.sendWelcomeEmail(result.user, result.tempPassword);
+    try {
+      await emailService.sendWelcomeEmail(result.user, result.tempPassword);
+    } catch (welcomeErr) {
+      console.warn('[auth] Team welcome email failed:', welcomeErr.message);
+    }
 
     res.status(201).json({
       success: true,
       data: {
         user: result.user,
-        message: 'Team member created. Welcome email sent with temporary password.'
+        message: 'Team member created. If email is configured, a welcome message was sent.'
       }
     });
   } catch (error) {
@@ -191,6 +224,63 @@ exports.forgotPassword = async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  }
+};
+
+// @desc    Send 6-digit OTP to email for passwordless login
+// @route   POST /api/auth/send-otp
+// @access  Public
+exports.sendLoginOtp = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required.' });
+    }
+    // Always 200 to avoid user enumeration
+    await authService.sendLoginOtp(email);
+    res.status(200).json({ success: true, message: 'If an account exists, a login code has been sent.' });
+  } catch (error) {
+    if (error.message.includes('Please wait')) {
+      return res.status(429).json({ success: false, error: error.message });
+    }
+    next(error);
+  }
+};
+
+// @desc    Verify OTP and issue auth tokens
+// @route   POST /api/auth/verify-otp
+// @access  Public
+exports.verifyLoginOtp = async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, error: 'Email and OTP are required.' });
+    }
+
+    const result = await authService.verifyLoginOtp(email, otp);
+
+    const orgId = result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'login_otp',
+      path: '/api/auth/verify-otp',
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        token: result.token,
+        refreshToken: result.refreshToken,
+        user: result.user
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
   }
 };
 

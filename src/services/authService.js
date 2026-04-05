@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
+const Group = require('../models/Group');
 const { generateToken, generateRefreshToken } = require('../middlewares/auth');
 const googleAuthService = require('../integrations/google/googleAuthService');
 const emailService = require('./emailService');
@@ -65,36 +66,40 @@ class AuthService {
    */
   async login(email, password) {
     try {
-      // Find user with password field
       const user = await User.findOne({ email })
         .select('+password')
-        .populate('organization');
+        .populate('organization')
+        .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
 
       if (!user) {
         throw new Error('Invalid credentials');
       }
 
-      // Check if user is active
+      if (user.deletedAt) {
+        throw new Error('This account is no longer available.');
+      }
+
       if (!user.isActive) {
         throw new Error('Account is deactivated. Please contact support.');
       }
 
-      // Verify password
       const isPasswordValid = await user.comparePassword(password);
       if (!isPasswordValid) {
         throw new Error('Invalid credentials');
       }
 
-      // Update last login
       user.lastLogin = new Date();
       await user.save();
 
-      // Generate tokens
       const token = generateToken(user._id);
       const refreshToken = generateRefreshToken(user._id);
 
-      // Remove password from response
       const userObj = user.toJSON();
+      const effectiveGroup = await this._resolveEffectiveGroup(user);
+      if (!userObj.group && effectiveGroup) {
+        userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+      }
+      userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
 
       return {
         user: userObj,
@@ -111,11 +116,19 @@ class AuthService {
    */
   async getUserById(userId) {
     try {
-      const user = await User.findById(userId).populate('organization');
+      const user = await User.findById(userId)
+        .populate('organization')
+        .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
       if (!user) {
         throw new Error('User not found');
       }
-      return user;
+      const userObj = user.toJSON();
+      const effectiveGroup = await this._resolveEffectiveGroup(user);
+      if (!userObj.group && effectiveGroup) {
+        userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+      }
+      userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
+      return userObj;
     } catch (error) {
       throw error;
     }
@@ -231,6 +244,12 @@ class AuthService {
       let user = await User.findOne({ email }).populate('organization');
 
       if (user) {
+        if (user.deletedAt) {
+          throw new Error('This account is no longer available.');
+        }
+        if (!user.isActive) {
+          throw new Error('Account is deactivated. Please contact support.');
+        }
         // Block sign-in if RISC reported this Google account as disabled
         if (user.risc && user.risc.googleSignInDisabled) {
           throw new Error(
@@ -291,6 +310,12 @@ class AuthService {
 
         // Populate organization for response
         user = await User.findById(user._id).populate('organization');
+
+        try {
+          await emailService.sendWelcomeEmail(user);
+        } catch (welcomeErr) {
+          console.warn('[auth] Welcome email (Google signup) failed:', welcomeErr.message);
+        }
       }
 
       // Generate tokens
@@ -353,6 +378,108 @@ class AuthService {
     const refreshToken = generateRefreshToken(user._id);
 
     return { token, refreshToken };
+  }
+
+  async _resolveEffectiveGroup(user) {
+    if (user?.group) return user.group;
+    const roleToSlug = {
+      super_admin: 'super-admin',
+      admin: 'admin',
+      manager: 'manager',
+      agent: 'agent',
+      viewer: 'viewer'
+    };
+    const fallbackSlug = roleToSlug[user?.role];
+    if (!fallbackSlug) return null;
+    return Group.findOne({ slug: fallbackSlug, isActive: true })
+      .populate('permissions', 'code name category actions')
+      .lean();
+  }
+
+  _extractPermissionCodes(user, effectiveGroup = null) {
+    const sourceGroup = user.group || effectiveGroup;
+    if (sourceGroup && sourceGroup.permissions && sourceGroup.permissions.length > 0) {
+      return sourceGroup.permissions.map(p => typeof p === 'object' ? p.code : p).filter(Boolean);
+    }
+    if (Array.isArray(user.permissions) && user.permissions.length > 0) {
+      return user.permissions.filter(Boolean);
+    }
+    return [];
+  }
+
+  /**
+   * Generate & store a 6-digit OTP, then email it.
+   * Rate-limited to 1 request per 60 seconds per email.
+   */
+  async sendLoginOtp(email) {
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+    // Always respond with success to avoid user enumeration attacks.
+    // If no account exists we send nothing but don't error.
+    if (!user || !user.isActive || user.deletedAt) return;
+
+    // Rate limit: block if existing OTP was sent less than 60 seconds ago
+    const now = new Date();
+    if (
+      user.loginOtpExpires &&
+      user.loginOtpExpires > new Date(now.getTime() - 9 * 60 * 1000) // within last 9 min
+    ) {
+      // OTP already sent and still fresh — resend is allowed after 60 s
+      const sentAgo = now - (user.loginOtpExpires - 10 * 60 * 1000);
+      if (sentAgo < 60 * 1000) {
+        throw new Error('Please wait a moment before requesting another code.');
+      }
+    }
+
+    // Generate cryptographically random 6-digit OTP
+    const otp = String(crypto.randomInt(100000, 999999));
+
+    // Hash before storing (plain text is only in the email)
+    const hashedOtp = crypto.createHash('sha256').update(otp).digest('hex');
+
+    user.loginOtpCode = hashedOtp;
+    user.loginOtpExpires = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes
+    await user.save({ validateBeforeSave: false });
+
+    await emailService.sendLoginOtpEmail(email, otp, user.firstName);
+  }
+
+  /**
+   * Verify OTP and return auth tokens.
+   */
+  async verifyLoginOtp(email, otp) {
+    const user = await User.findOne({ email: email.toLowerCase().trim() })
+      .select('+loginOtpCode +loginOtpExpires')
+      .populate('organization');
+
+    if (!user || !user.isActive || user.deletedAt) {
+      throw new Error('Invalid or expired code.');
+    }
+
+    if (!user.loginOtpCode || !user.loginOtpExpires) {
+      throw new Error('No active code found. Please request a new one.');
+    }
+
+    if (user.loginOtpExpires < new Date()) {
+      throw new Error('This code has expired. Please request a new one.');
+    }
+
+    const hashedInput = crypto.createHash('sha256').update(String(otp)).digest('hex');
+    if (hashedInput !== user.loginOtpCode) {
+      throw new Error('Incorrect code. Please try again.');
+    }
+
+    // Consume the OTP
+    user.loginOtpCode = undefined;
+    user.loginOtpExpires = undefined;
+    user.isEmailVerified = true;
+    user.lastLogin = new Date();
+    await user.save({ validateBeforeSave: false });
+
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    return { token, refreshToken, user };
   }
 }
 

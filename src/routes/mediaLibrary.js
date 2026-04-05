@@ -1,30 +1,39 @@
 const express = require('express');
 const router = express.Router();
+const path = require('path');
+const fs = require('fs');
 const { protect } = require('../middlewares/auth');
 const { validateMediaUpdate } = require('../middlewares/validation');
 const mediaLibraryController = require('../controllers/mediaLibraryController');
 const multer = require('multer');
-const path = require('path');
+const storageService = require('../services/storageService');
 
 /**
  * Media Library Routes
  * @route /api/media-library
  */
 
-// Configure multer for media library uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/posts'); // Same folder as post media
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'media-' + uniqueSuffix + ext);
+function createUploadStorage() {
+  if (storageService.isS3Configured()) {
+    return multer.memoryStorage();
   }
-});
+  const uploadPath = path.join(__dirname, '../../uploads/posts');
+  return multer.diskStorage({
+    destination: (req, file, cb) => {
+      try {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      } catch (_) {}
+      cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      const ext = path.extname(file.originalname);
+      cb(null, 'media-' + uniqueSuffix + ext);
+    }
+  });
+}
 
 const fileFilter = (req, file, cb) => {
-  // Accept images and videos only
   const allowedMimeTypes = [
     'image/jpeg',
     'image/jpg',
@@ -33,18 +42,26 @@ const fileFilter = (req, file, cb) => {
     'image/webp',
     'video/mp4',
     'video/quicktime',
-    'video/x-msvideo'
+    'video/x-msvideo',
+    'audio/mpeg',
+    'audio/mp3',
+    'audio/mp4',
+    'audio/ogg',
+    'audio/wav',
+    'audio/webm',
+    'audio/x-m4a',
+    'audio/aac'
   ];
 
   if (allowedMimeTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only images and videos are allowed.'), false);
+    cb(new Error('Invalid file type. Only images, videos, and audio are allowed.'), false);
   }
 };
 
 const upload = multer({
-  storage: storage,
+  storage: createUploadStorage(),
   fileFilter: fileFilter,
   limits: {
     fileSize: 100 * 1024 * 1024 // 100MB max

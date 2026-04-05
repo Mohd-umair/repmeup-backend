@@ -23,7 +23,16 @@ const mediaSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  
+  /** When using S3, object key for DeleteObject (filePath stays absolute path for local) */
+  s3Key: {
+    type: String
+  },
+  storageType: {
+    type: String,
+    enum: ['local', 's3'],
+    default: 'local'
+  },
+
   // File metadata
   mimeType: {
     type: String,
@@ -31,7 +40,7 @@ const mediaSchema = new mongoose.Schema({
   },
   mediaType: {
     type: String,
-    enum: ['image', 'video'],
+    enum: ['image', 'video', 'audio'],
     required: true
   },
   size: {

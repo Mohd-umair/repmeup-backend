@@ -1,4 +1,56 @@
 const Organization = require('../models/Organization');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs').promises;
+const storageService = require('../services/storageService');
+
+// ─── Multer setup for logo uploads ────────────────────────────────────────────
+// Use memory storage when S3 is configured to avoid disk dependency
+function buildLogoStorage() {
+  if (storageService.isS3Configured()) {
+    return multer.memoryStorage();
+  }
+  return multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(__dirname, '../../uploads/logos');
+      require('fs').mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase() || '.png';
+      cb(null, `logo-${req.params.id}-${Date.now()}${ext}`);
+    }
+  });
+}
+
+const logoUpload = multer({
+  storage: buildLogoStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
+  fileFilter: (req, file, cb) => {
+    const ok = /jpeg|jpg|png|gif|svg\+xml|webp/.test(file.mimetype);
+    ok ? cb(null, true) : cb(new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)'));
+  }
+}).single('logo');
+
+/**
+ * Get the current authenticated user's organization
+ * GET /api/organizations/me
+ */
+exports.getMyOrganization = async (req, res, next) => {
+  try {
+    const orgId = req.user.organization?._id || req.user.organization;
+    const organization = await Organization.findById(orgId);
+
+    if (!organization) {
+      return res.status(404).json({ success: false, error: 'Organization not found' });
+    }
+
+    res.status(200).json({ success: true, data: organization });
+  } catch (error) {
+    console.error('Get my organization error:', error);
+    next(error);
+  }
+};
 
 /**
  * Get organization details
@@ -184,3 +236,111 @@ exports.getAutoReplySettings = async (req, res, next) => {
   }
 };
 
+/**
+ * Upload / replace organization logo
+ * POST /api/organizations/:id/logo
+ */
+exports.uploadLogo = (req, res, next) => {
+  logoUpload(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ success: false, error: err.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded.' });
+    }
+
+    try {
+      const organization = await Organization.findById(req.params.id);
+      if (!organization) {
+        return res.status(404).json({ success: false, error: 'Organization not found' });
+      }
+
+      if (req.user.organization._id.toString() !== organization._id.toString()) {
+        return res.status(403).json({ success: false, error: 'Access denied' });
+      }
+
+      if (organization.logo) {
+        if (/^https?:\/\//i.test(organization.logo)) {
+          await storageService.deleteObjectFromPublicUrl(organization.logo);
+        } else if (
+          organization.logo.startsWith('/uploads/logos/') ||
+          organization.logo.startsWith('/organizations/logos/')
+        ) {
+          const rel = organization.logo.replace(/^\//, '');
+          const oldPath = path.join(__dirname, '../..', rel);
+          try {
+            await fs.unlink(oldPath);
+          } catch (_) {}
+        }
+      }
+
+      let logoUrl;
+      if (storageService.isS3Configured()) {
+        // memory storage → req.file.buffer; disk storage → read from path
+        const buf = req.file.buffer
+          ? req.file.buffer
+          : await fs.readFile(req.file.path).finally(() => {
+              fs.unlink(req.file.path).catch(() => {});
+            });
+        const ext = path.extname(req.file.originalname).toLowerCase() || '.png';
+        const filename = `logo-${req.params.id}-${Date.now()}${ext}`;
+        const key = storageService.buildLogoKey(req.params.id, filename);
+        const { publicUrl } = await storageService.uploadBuffer(key, buf, req.file.mimetype);
+        logoUrl = publicUrl;
+      } else {
+        logoUrl = `/uploads/logos/${req.file.filename}`;
+      }
+      organization.logo = logoUrl;
+      await organization.save();
+
+      res.status(200).json({
+        success: true,
+        data: { logo: logoUrl },
+        message: 'Logo uploaded successfully'
+      });
+    } catch (error) {
+      console.error('Upload logo error:', error);
+      next(error);
+    }
+  });
+};
+
+/**
+ * Delete organization logo
+ * DELETE /api/organizations/:id/logo
+ */
+exports.deleteLogo = async (req, res, next) => {
+  try {
+    const organization = await Organization.findById(req.params.id);
+    if (!organization) {
+      return res.status(404).json({ success: false, error: 'Organization not found' });
+    }
+
+    if (req.user.organization._id.toString() !== organization._id.toString()) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    if (organization.logo) {
+      if (/^https?:\/\//i.test(organization.logo)) {
+        await storageService.deleteObjectFromPublicUrl(organization.logo);
+      } else if (
+        organization.logo.startsWith('/uploads/logos/') ||
+        organization.logo.startsWith('/organizations/logos/')
+      ) {
+        const rel = organization.logo.replace(/^\//, '');
+        const oldPath = path.join(__dirname, '../..', rel);
+        try {
+          await fs.unlink(oldPath);
+        } catch (_) {}
+      }
+    }
+
+    organization.logo = undefined;
+    await organization.save();
+
+    res.status(200).json({ success: true, message: 'Logo removed successfully' });
+  } catch (error) {
+    console.error('Delete logo error:', error);
+    next(error);
+  }
+};

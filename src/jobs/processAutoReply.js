@@ -5,6 +5,7 @@ const cacheService = require('../services/cacheService');
 const escalationService = require('../services/escalationService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 /**
  * Process auto-reply job
@@ -119,13 +120,13 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: 'Interaction not found' };
     }
 
-    // Check if already replied (IMPORTANT: This prevents duplicate auto-replies)
-    if (interaction.replies && interaction.replies.length > 0) {
+    const threadDm = isThreadStyleDm(interaction);
+
+    if (!threadDm && interaction.replies && interaction.replies.length > 0) {
       return { skipped: true, reason: 'Already has replies' };
     }
 
-    // Check if status is already replied/resolved
-    if (interaction.status === 'replied' || interaction.status === 'resolved') {
+    if (!threadDm && (interaction.status === 'replied' || interaction.status === 'resolved')) {
       return { skipped: true, reason: `Status is ${interaction.status}` };
     }
 
@@ -204,9 +205,23 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: 'Escalated to human agent' };
     }
 
+    // Reload interaction so sentiment / intent from processAI match org filters (sentimentFilter, replyToComplaints, etc.)
+    const interactionForReply = await Interaction.findById(interactionId)
+      .populate('platformConnection');
+    if (!interactionForReply) {
+      return { skipped: true, reason: 'Interaction not found' };
+    }
+    const threadDmReply = isThreadStyleDm(interactionForReply);
+    if (!threadDmReply && interactionForReply.replies && interactionForReply.replies.length > 0) {
+      return { skipped: true, reason: 'Already has replies' };
+    }
+    if (!threadDmReply && (interactionForReply.status === 'replied' || interactionForReply.status === 'resolved')) {
+      return { skipped: true, reason: `Status is ${interactionForReply.status}` };
+    }
+
     // Generate auto-reply
     const autoReply = await aiService.generateAutoReply(
-      interaction,
+      interactionForReply,
       organization._id,
       organization
     );
@@ -216,22 +231,31 @@ async function processSingleInteraction(interactionId, organization) {
     }
     
     logEvents.autoReply.generated({
-      interactionId: interaction._id,
+      interactionId: interactionForReply._id,
       confidence: autoReply.response.confidence,
-      sentiment: interaction.sentiment,
+      sentiment: interactionForReply.sentiment,
       length: autoReply.response.content.length
+    });
+    logger.info('[Auto-reply] Generated reply details', {
+      interactionId: interactionForReply._id?.toString(),
+      platform: interactionForReply.platform,
+      type: interactionForReply.type,
+      usedKnowledgeBase: !!autoReply.response.usedKnowledgeBase,
+      knowledgeBaseCount: autoReply.response.knowledgeBaseCount || 0,
+      knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback,
+      confidence: autoReply.response.confidence
     });
 
     // Check escalation after generating reply (to check AI confidence)
     const postReplyEscalationCheck = await escalationService.shouldEscalate(
-      interaction,
+      interactionForReply,
       organization,
       autoReply.response // Pass AI response with confidence
     );
 
     if (postReplyEscalationCheck.shouldEscalate) {
       await escalationService.escalateInteraction(
-        interaction,
+        interactionForReply,
         organization,
         postReplyEscalationCheck.reasons,
         'ai_confidence',
@@ -243,11 +267,11 @@ async function processSingleInteraction(interactionId, organization) {
 
     // Send if autoSend is enabled and no approval required
     if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
-      const sent = await sendReplyToPlatform(interaction, autoReply.response.content, organization);
+      const sent = await sendReplyToPlatform(interactionForReply, autoReply.response.content, organization);
       if (sent) {
         logEvents.autoReply.sent({
-          interactionId: interaction._id,
-          platform: interaction.platform
+          interactionId: interactionForReply._id,
+          platform: interactionForReply.platform
         });
       }
       return { sent: sent };
@@ -298,15 +322,15 @@ async function processBatchInteractions(organizationId, organization) {
     });
 
     for (const interaction of interactions) {
-      // IMPORTANT: Double-check if already replied (in case it was replied to between query and processing)
-      if (interaction.replies && interaction.replies.length > 0) {
+      const batchThreadDm = isThreadStyleDm(interaction);
+
+      if (!batchThreadDm && interaction.replies && interaction.replies.length > 0) {
         results.skipped++;
         results.details.push({ id: interaction._id, reason: 'Already has replies' });
         continue;
       }
 
-      // Check if status is already replied/resolved
-      if (interaction.status === 'replied' || interaction.status === 'resolved') {
+      if (!batchThreadDm && (interaction.status === 'replied' || interaction.status === 'resolved')) {
         results.skipped++;
         results.details.push({ id: interaction._id, reason: `Status is ${interaction.status}` });
         continue;
@@ -390,9 +414,29 @@ async function processBatchInteractions(organizationId, organization) {
         }
       }
 
+      // Fresh doc so batch jobs respect sentiment / intent after processAI
+      const interactionFresh = await Interaction.findById(interaction._id)
+        .populate('platformConnection');
+      if (!interactionFresh) {
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: 'Interaction not found' });
+        continue;
+      }
+      const freshThreadDm = isThreadStyleDm(interactionFresh);
+      if (!freshThreadDm && interactionFresh.replies && interactionFresh.replies.length > 0) {
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: 'Already has replies' });
+        continue;
+      }
+      if (!freshThreadDm && (interactionFresh.status === 'replied' || interactionFresh.status === 'resolved')) {
+        results.skipped++;
+        results.details.push({ id: interaction._id, reason: `Status is ${interactionFresh.status}` });
+        continue;
+      }
+
       // Generate auto-reply
       const autoReply = await aiService.generateAutoReply(
-        interaction,
+        interactionFresh,
         organizationId,
         organization
       );
@@ -404,20 +448,20 @@ async function processBatchInteractions(organizationId, organization) {
       }
 
       logEvents.autoReply.generated({
-        interactionId: interaction._id,
+        interactionId: interactionFresh._id,
         confidence: autoReply.response.confidence,
-        sentiment: interaction.sentiment,
+        sentiment: interactionFresh.sentiment,
         length: autoReply.response.content.length
       });
       results.processed++;
 
       // Send if autoSend is enabled
       if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
-        const sent = await sendReplyToPlatform(interaction, autoReply.response.content, organization);
+        const sent = await sendReplyToPlatform(interactionFresh, autoReply.response.content, organization);
         if (sent) {
           logEvents.autoReply.sent({
-            interactionId: interaction._id,
-            platform: interaction.platform
+            interactionId: interactionFresh._id,
+            platform: interactionFresh.platform
           });
           results.sent++;
           organization.autoReplySettings.repliesCountToday++;
@@ -458,7 +502,7 @@ async function getConnectionForReply(interaction) {
       organization: interaction.organization,
       platform: 'instagram',
       platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
-      status: 'connected',
+      status: { $in: ['connected', 'available'] },
       isActive: true
     }).lean();
     if (conn) return conn;
@@ -477,7 +521,7 @@ async function getConnectionForReply(interaction) {
       organization: interaction.organization,
       platform: 'facebook',
       platformPageId: { $in: [String(facebookPageId), facebookPageId] },
-      status: 'connected',
+      status: { $in: ['connected', 'available'] },
       isActive: true
     }).lean();
     if (conn) return conn;
@@ -490,10 +534,20 @@ async function getConnectionForReply(interaction) {
 /**
  * Send reply to platform
  */
+const ALLOWED_CONNECTION_STATUS = ['connected', 'available'];
+
 async function sendReplyToPlatform(interaction, content, organization) {
   try {
     const connection = await getConnectionForReply(interaction);
-    if (!connection || connection.status !== 'connected' || !connection.isActive) {
+    if (!connection || !ALLOWED_CONNECTION_STATUS.includes(connection.status) || !connection.isActive) {
+      logger.warn('[Auto-reply] No usable platform connection to send', {
+        platform: interaction.platform,
+        type: interaction.type,
+        interactionId: interaction._id?.toString(),
+        hasConnection: !!connection,
+        status: connection?.status,
+        isActive: connection?.isActive
+      });
       return false;
     }
 
@@ -516,19 +570,37 @@ async function sendReplyToPlatform(interaction, content, organization) {
       const instagramService = require('../integrations/meta/instagramService');
       let result;
       if (interaction.type === 'dm') {
-        const pageId = connection.platformPageId || connection.platformData?.pageId;
+        const pageId =
+          connection.platformPageId ||
+          connection.platformData?.pageId ||
+          connection.metadata?.facebookPageId;
         const recipientId = interaction.author?.platformId;
-        if (pageId && recipientId) {
-          result = await instagramService.sendMessage(
-            recipientId,
-            content,
-            connection.accessToken,
-            pageId,
-            false
-          );
+        if (!pageId || !recipientId) {
+          logger.warn('[Auto-reply] Instagram DM missing pageId or recipientId', {
+            interactionId: interaction._id?.toString(),
+            hasPageId: !!pageId,
+            hasRecipientId: !!recipientId
+          });
+        } else {
+          try {
+            result = await instagramService.sendMessage(
+              recipientId,
+              content,
+              connection.accessToken,
+              pageId,
+              true
+            );
+          } catch (sendErr) {
+            logger.error('[Auto-reply] Instagram DM sendMessage failed', {
+              interactionId: interaction._id?.toString(),
+              error: sendErr.message,
+              platformError: sendErr.platformError
+            });
+            result = null;
+          }
         }
       }
-      if (!result) {
+      if (!result && interaction.type !== 'dm') {
         result = await instagramService.replyToComment(
           interaction.platformId,
           content,
@@ -551,7 +623,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
             content,
             connection.accessToken,
             pageId,
-            false
+            true
           );
         }
       }

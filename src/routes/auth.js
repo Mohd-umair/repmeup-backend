@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const userActivityLogService = require('../services/userActivityLogService');
 const { protect, authorize } = require('../middlewares/auth');
 const { validateRegistration, validateLogin } = require('../middlewares/validation');
 const riscController = require('../controllers/riscController');
@@ -10,6 +11,10 @@ router.post('/register', validateRegistration, authController.register);
 router.post('/login', validateLogin, authController.login);
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password', authController.resetPassword);
+
+// Passwordless login via email OTP
+router.post('/send-otp', authController.sendLoginOtp);
+router.post('/verify-otp', authController.verifyLoginOtp);
 
 // Protected routes
 router.get('/me', protect, authController.getMe);
@@ -141,19 +146,32 @@ router.get('/facebook/callback', async (req, res) => {
     // Get long-lived token
     const tokenData = await metaAuth.getLongLivedToken(shortToken);
     
-    // Get user info first
-    const userInfo = await metaAuth.getUserInfo(tokenData.accessToken);
-    
-    // Save user-level Facebook connection (needed for /me/accounts API calls)
+    // Get user info (optional when rate limited — we'll try minimal info from token and still fetch pages)
+    let userInfo;
     try {
-      await metaAuth.saveFacebookUserConnection(userId, organizationId, tokenData.accessToken, userInfo);
-      console.log(`✅ [Meta] Saved Facebook user-level connection for page management`);
-    } catch (error) {
-      console.error(`⚠️  [Meta] Failed to save user-level connection:`, error.message);
-      // Continue anyway - page connections can still work
+      userInfo = await metaAuth.getUserInfo(tokenData.accessToken);
+    } catch (userInfoError) {
+      if (userInfoError.isRateLimit) {
+        console.warn('[Meta] Get user info rate limited; trying minimal user from token and continuing...');
+        userInfo = await metaAuth.getMinimalUserFromToken(tokenData.accessToken);
+        if (!userInfo) {
+          console.warn('[Meta] Could not get user id from token; skipping user-level connection save');
+        }
+      } else {
+        throw userInfoError;
+      }
     }
     
-    // Get user pages to verify access
+    if (userInfo && userInfo.id) {
+      try {
+        await metaAuth.saveFacebookUserConnection(userId, organizationId, tokenData.accessToken, userInfo);
+        console.log(`✅ [Meta] Saved Facebook user-level connection for page management`);
+      } catch (error) {
+        console.error(`⚠️  [Meta] Failed to save user-level connection:`, error.message);
+      }
+    }
+    
+    // Get user pages to verify access (required for connect flow to succeed)
     const pages = await metaAuth.getUserPages(tokenData.accessToken);
     
     if (pages.length === 0) {
@@ -454,6 +472,23 @@ router.get('/google/callback', async (req, res) => {
     const tokens = await googleAuthService.getTokens(code);
     const profile = await googleAuthService.getUserProfile(tokens.access_token);
     const result = await authController.googleAuth(profile);
+
+    const u = result.user;
+    const uid = u._id || u.id;
+    const org = u.organization;
+    const orgId =
+      org && typeof org === 'object' && org._id ? org._id : org;
+    userActivityLogService.recordAuthEvent({
+      userId: uid,
+      organizationId: orgId,
+      action: 'google_oauth_login',
+      path: '/api/auth/google/callback',
+      method: 'GET',
+      statusCode: 302,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent'],
+      metadata: { isNewUser: Boolean(result.isNewUser) }
+    });
 
     const redirectUrl = `${process.env.FRONTEND_URL}/auth/google-callback?token=${result.token}&refreshToken=${result.refreshToken}&isNewUser=${result.isNewUser}`;
     res.redirect(redirectUrl);

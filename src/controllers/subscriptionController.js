@@ -2,6 +2,9 @@ const Subscription = require('../models/Subscription');
 const PlatformConnection = require('../models/PlatformConnection');
 const Plan = require('../models/Plan');
 const User = require('../models/User');
+const ScheduledPost = require('../models/ScheduledPost');
+const AICreditUsage = require('../models/AICreditUsage');
+const { cancelRazorpaySubscription } = require('./razorpayController');
 
 /**
  * @desc    Get subscription limits and usage for organization
@@ -41,19 +44,55 @@ exports.getLimits = async (req, res, next) => {
       });
     }
 
-    // Count actual connected accounts and active users (keep usage in sync)
-    const connectedAccountsCount = await PlatformConnection.countDocuments({
-      organization: req.user.organization._id,
-      status: 'connected',
-      usesAccountSlot: true
-    });
-    const activeUserCount = await User.countDocuments({
-      organization: req.user.organization._id,
-      isActive: true
-    });
+    // Compute all real-time usage values from actual data
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const [
+      connectedAccountsCount,
+      activeUserCount,
+      postsThisMonthCount,
+      autoRepliesThisMonthCount,
+      aiCreditsAgg
+    ] = await Promise.all([
+      PlatformConnection.countDocuments({
+        organization: req.user.organization._id,
+        status: 'connected',
+        usesAccountSlot: true
+      }),
+      User.countDocuments({
+        organization: req.user.organization._id,
+        isActive: true
+      }),
+      ScheduledPost.countDocuments({
+        organization: req.user.organization._id,
+        status: 'published',
+        publishedAt: { $gte: startOfMonth }
+      }),
+      AICreditUsage.countDocuments({
+        organization: req.user.organization._id,
+        operation: 'auto_reply',
+        createdAt: { $gte: startOfMonth }
+      }),
+      AICreditUsage.aggregate([
+        {
+          $match: {
+            organization: req.user.organization._id,
+            createdAt: { $gte: startOfMonth }
+          }
+        },
+        { $group: { _id: null, total: { $sum: '$creditsUsed' } } }
+      ])
+    ]);
+
+    const aiCreditsThisMonth = aiCreditsAgg[0]?.total ?? 0;
 
     subscription.usage.connectedAccounts = connectedAccountsCount;
     subscription.usage.activeUsers = activeUserCount;
+    subscription.usage.postsThisMonth = postsThisMonthCount;
+    subscription.usage.autoRepliesThisMonth = autoRepliesThisMonthCount;
+    subscription.usage.aiCreditsThisMonth = aiCreditsThisMonth;
     await subscription.save();
 
     // Calculate remaining quota
@@ -79,10 +118,7 @@ exports.getLimits = async (req, res, next) => {
           ...subscription.limits,
           maxAICreditsPerMonth: subscription.limits.maxAICreditsPerMonth || 500
         },
-        usage: {
-          ...subscription.usage,
-          aiCreditsThisMonth: subscription.usage.aiCreditsThisMonth || 0
-        },
+        usage: subscription.usage,
         canConnectMore,
         remaining,
         nextTier: nextTier ? {
@@ -91,7 +127,22 @@ exports.getLimits = async (req, res, next) => {
           maxAccounts: nextTier.limits.maxAccounts,
           price: nextTier.price,
           planId: nextTier.planId
-        } : null
+        } : null,
+        billing: {
+          currentPeriodStart: subscription.currentPeriodStart ?? null,
+          currentPeriodEnd: subscription.currentPeriodEnd ?? null,
+          nextBillingAt: subscription.razorpayNextBillingAt ?? null,
+          cancelAtPeriodEnd: subscription.cancelAtPeriodEnd ?? false,
+          cancelledAt: subscription.cancelledAt ?? null,
+          cancellationReason: subscription.cancellationReason ?? null,
+          pendingDowngradePlanId: subscription.pendingDowngradePlanId ?? null,
+          planHistory: (subscription.planHistory || []).slice(-5).map(h => ({
+            planId: h.planId,
+            planName: h.planName,
+            changedAt: h.changedAt,
+            reason: h.reason || null
+          }))
+        }
       }
     });
   } catch (error) {
@@ -316,6 +367,38 @@ exports.upgradePlan = async (req, res, next) => {
  * @route   POST /api/subscription/cancel
  * @access  Private (Admin)
  */
+exports.reactivateSubscription = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Only administrators can reactivate subscriptions' });
+    }
+
+    const subscription = await Subscription.findOne({ organization: req.user.organization._id });
+    if (!subscription) {
+      return res.status(404).json({ success: false, error: 'Subscription not found' });
+    }
+
+    if (!subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({ success: false, error: 'Subscription is not scheduled for cancellation.' });
+    }
+
+    subscription.cancelAtPeriodEnd = false;
+    subscription.cancelledAt = undefined;
+    subscription.cancelledBy = undefined;
+    subscription.cancellationReason = undefined;
+    if (subscription.status !== 'active') {
+      subscription.status = 'active';
+    }
+
+    await subscription.save();
+
+    res.status(200).json({ success: true, message: 'Subscription reactivated successfully.', data: subscription });
+  } catch (error) {
+    console.error('Reactivate subscription error:', error);
+    next(error);
+  }
+};
+
 exports.cancelSubscription = async (req, res, next) => {
   try {
     if (req.user.role !== 'admin') {
@@ -345,6 +428,11 @@ exports.cancelSubscription = async (req, res, next) => {
 
     if (!cancelAtPeriodEnd) {
       subscription.status = 'cancelled';
+    }
+
+    // Also cancel the active Razorpay subscription (at cycle end to match cancelAtPeriodEnd)
+    if (subscription.razorpaySubscriptionId) {
+      await cancelRazorpaySubscription(subscription.razorpaySubscriptionId);
     }
 
     await subscription.save();

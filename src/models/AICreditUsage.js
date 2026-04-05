@@ -20,22 +20,36 @@ const aiCreditUsageSchema = new mongoose.Schema({
     type: String,
     required: true,
     enum: [
+      'unknown',
       'post_generation',
       'post_variants',
       'post_variants_image',
+      'post_variants_video',
       'content_analysis',
       'sentiment_analysis',
       'knowledge_base_analysis',
       'knowledge_base_from_url',
       'ai_response',
-      'auto_reply'
+      'ai_assist',
+      'ai_assist_regenerate',
+      'auto_reply',
+      'rollback',
+      'rollback_ai_response',
+      'rollback_ai_assist',
+      'rollback_ai_assist_regenerate',
+      'rollback_post_generation',
+      'rollback_post_variants',
+      'rollback_post_variants_image',
+      'rollback_post_variants_video',
+      'rollback_knowledge_base_from_url',
+      'rollback_ai_response_auto_reply',
+      'rollback_ai_response_test'
     ],
     index: true
   },
   creditsUsed: {
     type: Number,
-    required: true,
-    min: 1
+    required: true
   },
   metadata: {
     type: mongoose.Schema.Types.Mixed,

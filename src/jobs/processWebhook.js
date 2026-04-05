@@ -3,6 +3,9 @@ const PlatformConnection = require('../models/PlatformConnection');
 const { aiQueue } = require('../config/queue');
 const logger = require('../config/logger');
 const instagramService = require('../integrations/meta/instagramService');
+const { emitToOrg } = require('../utils/socketEmitter');
+const cacheService = require('../services/cacheService');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 /**
  * Process webhook events from social media platforms
@@ -58,25 +61,42 @@ module.exports = async function processWebhook(job) {
         type: interaction.type,
         contentPreview: interaction.content?.substring(0, 100)
       });
-      
-      // IMPORTANT: Check if interaction already has replies
-      // If it does, skip auto-reply queueing (it's already been replied to)
+
+      // Invalidate inbox list cache so next GET /api/inbox returns this interaction (fixes DMs not showing until refresh/sync)
+      if (organizationId) {
+        cacheService.delPattern(`interactions:${organizationId}*`).catch(err => {
+          jobLogger.warn('Failed to invalidate inbox cache', { err: err?.message });
+        });
+      }
+
+      // Per-comment / per-message interactions: skip if we already answered that item.
+      // DM threads (platformId dm_*_*): one doc per conversation — replies[] is thread history; still queue AI for each new message.
       const hasReplies = interaction.replies && interaction.replies.length > 0;
       const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
-      
-      if (hasReplies || isAlreadyReplied) {
+      const threadDm = isThreadStyleDm(interaction);
+
+      if (!threadDm && (hasReplies || isAlreadyReplied)) {
         console.log(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
       } else {
-        // Trigger AI processing (only for new, unreplied interactions)
-        await aiQueue.add({
-          interactionId: interaction._id
-        }, {
-          attempts: 3,
-          backoff: 2000,
-          jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
-        });
+        // Thread DMs reuse one interaction id per conversation — jobId must include message id or each new message would be deduped by Bull
+        const mid = interaction.metadata?.lastMid;
+        const aiJobId =
+          threadDm && mid
+            ? `ai-${interaction._id}-${mid}`
+            : `ai-${interaction._id}`;
 
-        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}`);
+        await aiQueue.add(
+          {
+            interactionId: interaction._id
+          },
+          {
+            attempts: 3,
+            backoff: 2000,
+            jobId: aiJobId
+          }
+        );
+
+        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}${threadDm && mid ? ` (mid ${mid})` : ''}`);
 
         // Queue auto-reply if webhook mode is enabled
         const autoReplyScheduler = require('../services/autoReplyScheduler');
@@ -169,6 +189,38 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
 }
 
 /**
+ * Meta sometimes delivers a user-shared post in DM with is_echo:true, sender=IG business id, recipient=user id.
+ * We still want an inbox thread for the user who shared the post.
+ */
+function isInstagramSharePostEcho(event, message, igAccountId) {
+  if (!message?.is_echo || !igAccountId) return false;
+  if (String(event.sender?.id) !== String(igAccountId) || !event.recipient?.id) return false;
+  const atts = message.attachments || [];
+  return atts.some(
+    (a) =>
+      a.type === 'share' ||
+      a.type === 'ig_post' ||
+      !!(a.payload && a.payload.ig_post_media_id)
+  );
+}
+
+/** Pick best attachment for shared IG post / media in DMs. */
+function buildInstagramDmAttachmentFields(message) {
+  const atts = message.attachments || [];
+  const primary =
+    atts.find((a) => a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id)) ||
+    atts.find((a) => a.type === 'share') ||
+    atts[0];
+  const p = primary?.payload || {};
+  return {
+    attachmentType: primary?.type || 'file',
+    attachmentUrl: p.url || null,
+    igPostMediaId: p.ig_post_media_id || null,
+    shareTitle: typeof p.title === 'string' ? p.title : null
+  };
+}
+
+/**
  * Handle Instagram webhook
  * Supports two payload formats:
  * 1. Graph API (comments): entry[].changes[] with field "comments" or "messages"
@@ -215,54 +267,94 @@ async function handleInstagramWebhook(payload, organizationId) {
       });
     }
 
-    // One conversation thread per sender: platformId = dm_igAccountId_senderId (not per-message mid)
+    // One conversation thread per customer: platformId = dm_igAccountId_<userId> (not per-message mid)
     for (const event of allMessageEvents) {
       const message = event.message;
       if (!message) {
         // message_edit, reaction, read, etc. — skip (or could update thread in future)
         continue;
       }
-      if (message.is_echo || message.is_deleted || message.is_unsupported) {
+      if (message.is_deleted || message.is_unsupported) {
         logger.info('[processWebhook] Instagram: skipping message', {
-          is_echo: !!message.is_echo,
           is_deleted: !!message.is_deleted,
           is_unsupported: !!message.is_unsupported
         });
         continue;
       }
 
-      const senderId = event.sender?.id;
-      const mid = message.mid;
-      const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
-      if (!mid || !senderId) {
-        logger.warn('[processWebhook] Instagram: message missing mid or senderId', { mid: !!mid, senderId: !!senderId });
+      const sharePostEcho = isInstagramSharePostEcho(event, message, igAccountId);
+      if (message.is_echo && !sharePostEcho) {
+        logger.info('[processWebhook] Instagram: skipping message', {
+          is_echo: true,
+          reason: 'echo (not user-shared post)'
+        });
         continue;
       }
 
-      // Webhook only sends sender.id; fetch username/name/profile_pic from Instagram User Profile API.
+      // Normal DM: partner is sender. Share-post echo: sender is IG account, partner is recipient (the user).
+      const partnerId = sharePostEcho ? event.recipient?.id : event.sender?.id;
+      const mid = message.mid;
+      const { attachmentType, attachmentUrl, igPostMediaId, shareTitle } = buildInstagramDmAttachmentFields(message);
+      const text =
+        message.text ||
+        shareTitle ||
+        (igPostMediaId ? '[Shared Instagram post]' : attachmentType ? `[${attachmentType}]` : '');
+      if (!mid || !partnerId) {
+        logger.warn('[processWebhook] Instagram: message missing mid or partnerId', {
+          mid: !!mid,
+          partnerId: !!partnerId,
+          sharePostEcho
+        });
+        continue;
+      }
+
+      if (sharePostEcho) {
+        logger.info('[processWebhook] Instagram: processing share/ig_post echo as incoming DM', {
+          partnerId: String(partnerId),
+          igPostMediaId: igPostMediaId || undefined
+        });
+      }
+
+      // Webhook only sends ids; fetch username/name/profile_pic from Instagram User Profile API.
       // Must use the token of the IG account that *received* the DM (Meta requirement).
       const profile = await fetchInstagramAuthorProfile(
         organizationId,
-        senderId,
+        String(partnerId),
         dmReceiverConnection?.accessToken || null
       );
       if (!profile.username && !profile.name && !profile.avatarUrl) {
         // Expected when app lacks Advanced Access; interaction is still created with platformId
-        logger.debug('[processWebhook] Instagram DM: no profile for senderId', { senderId, hasReceiverToken: !!dmReceiverConnection?.accessToken });
+        logger.debug('[processWebhook] Instagram DM: no profile for partnerId', {
+          partnerId: String(partnerId),
+          hasReceiverToken: !!dmReceiverConnection?.accessToken
+        });
       }
       const author = {
-        platformId: senderId,
+        platformId: String(partnerId),
         username: profile.username,
         name: profile.name || profile.username || 'Instagram User'
       };
       if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
-      // One thread per conversation (IG account + sender), not per message
-      const threadPlatformId = `dm_${String(igAccountId)}_${String(senderId)}`;
-      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
+      // One thread per conversation (IG account + customer), not per message
+      const threadPlatformId = `dm_${String(igAccountId)}_${String(partnerId)}`;
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author').lean();
       if (existing && existing.metadata?.lastMid === mid) {
-        return await Interaction.findById(existing._id);
+        // Meta webhook retry — do not re-queue AI / auto-reply
+        logger.debug('[processWebhook] Instagram DM duplicate mid (webhook retry)', { threadPlatformId, mid });
+        return null;
       }
+
+      // Always update author so profile pic / username show up once the API returns them.
+      // If the profile fetch returned richer data than what's stored, overwrite.
+      const existingAuthor = existing?.author || {};
+      const mergedAuthor = {
+        platformId: String(partnerId),
+        username: profile.username || existingAuthor.username || undefined,
+        name: profile.name || existingAuthor.name || profile.username || existingAuthor.username || 'Instagram User'
+      };
+      if (profile.avatarUrl) mergedAuthor.avatarUrl = profile.avatarUrl;
+      else if (existingAuthor.avatarUrl) mergedAuthor.avatarUrl = existingAuthor.avatarUrl;
 
       const updateFields = {
         organization: organizationId,
@@ -270,28 +362,51 @@ async function handleInstagramWebhook(payload, organizationId) {
         type: 'dm',
         platformId: threadPlatformId,
         content: text,
-        author,
-        threadId: senderId,
+        author: mergedAuthor,
+        threadId: String(partnerId),
         platformCreatedAt: new Date(event.timestamp),
         'metadata.lastMid': mid,
-        'metadata.instagramAccountId': igAccountId
+        'metadata.instagramAccountId': igAccountId,
+        status: 'unread',
+        isRead: false
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
-      const interaction = await Interaction.findOneAndUpdate(
+      // Step 1: Upsert the thread (create or update non-message fields)
+      // Do not put status/isRead in $setOnInsert — they are already in $set (MongoDB conflicts same path in both operators)
+      await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
+        { $set: updateFields },
+        { upsert: true }
+      );
+
+      // Step 2: Only append message if this mid is not already in the array.
+      // This prevents duplicates when Meta retries the same webhook event.
+      const incomingMsg = { mid, text, timestamp: event.timestamp };
+      if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
+      if (attachmentType) incomingMsg.attachmentType = attachmentType;
+      if (igPostMediaId) incomingMsg.igPostMediaId = igPostMediaId;
+      await Interaction.updateOne(
+        { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
         {
-          $set: updateFields,
-          $setOnInsert: { status: 'unread', isRead: false },
           $push: {
             'metadata.incomingMessages': {
-              $each: [{ mid, text, timestamp: event.timestamp }],
+              $each: [incomingMsg],
               $slice: -100
             }
           }
-        },
-        { upsert: true, new: true }
+        }
       );
+
+      const interaction = await Interaction.findOne({ platformId: threadPlatformId });
+
+      // Emit real-time socket event so the frontend inbox updates instantly
+      if (interaction && organizationId) {
+        emitToOrg(organizationId.toString(), 'new_interaction', {
+          interaction: interaction.toObject()
+        });
+      }
+
       return interaction;
     }
 
@@ -299,8 +414,15 @@ async function handleInstagramWebhook(payload, organizationId) {
     const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'comments') {
-        // New comment: fetch commenter profile for inbox avatar
         const comment = change.value;
+        // Skip our own replies: when the connected IG account replies, from.id equals the account id.
+        if (comment.from && String(comment.from.id) === String(igAccountId)) {
+          return null;
+        }
+
+        const parentCommentId = comment.parent_id != null && comment.parent_id !== '' ? String(comment.parent_id) : null;
+        const isReply = !!parentCommentId;
+
         const authorId = comment.from?.id;
         const avatarUrl = await fetchInstagramAuthorAvatar(organizationId, authorId);
         const author = {
@@ -310,26 +432,123 @@ async function handleInstagramWebhook(payload, organizationId) {
         };
         if (avatarUrl) author.avatarUrl = avatarUrl;
 
+        // Instagram may send timestamp as seconds, ms, or under different key; ensure valid Date
+        const rawTs = comment.timestamp ?? comment.created_time ?? entry.time;
+        let platformCreatedAt = new Date();
+        if (rawTs != null) {
+          const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+          if (Number.isFinite(ms)) platformCreatedAt = new Date(ms);
+        }
+
+        const updatePayload = {
+          organization: organizationId,
+          platform: 'instagram',
+          type: 'comment',
+          platformId: comment.id,
+          content: comment.text,
+          author,
+          metadata: {
+            postId: comment.media?.id,
+            postUrl: `https://www.instagram.com/p/${comment.media?.id}`
+          },
+          platformCreatedAt
+        };
+        if (isReply && parentCommentId) {
+          updatePayload.parentId = parentCommentId; // So this reply shows in the parent thread, not as new conversation
+        }
+
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.id },
+          {
+            $set: updatePayload,
+            $setOnInsert: { status: 'unread', isRead: false }
+          },
+          { upsert: true, new: true }
+        );
+
+        if (interaction && organizationId) {
+          if (isReply && parentCommentId) {
+            // Reply: bump parent to top; do not emit this reply as a new conversation
+            const parent = await Interaction.findOne({
+              platformId: parentCommentId,
+              organization: organizationId
+            }).lean();
+            if (parent) {
+              emitToOrg(organizationId.toString(), 'new_interaction', {
+                interaction: parent
+              });
+            }
+          } else {
+            // Top-level comment: emit so it appears in the list
+            emitToOrg(organizationId.toString(), 'new_interaction', {
+              interaction: interaction.toObject()
+            });
+          }
+        }
+
+        return interaction;
+      }
+
+      if (change.field === 'mentions') {
+        const mention = change.value || {};
+        const mentionId =
+          mention.id ||
+          mention.comment_id ||
+          mention.media_id ||
+          `${entry.id}_${mention.timestamp || entry.time || Date.now()}`;
+
+        const authorId = mention.from?.id || mention.user_id || mention.username;
+        const avatarUrl = authorId ? await fetchInstagramAuthorAvatar(organizationId, authorId) : null;
+        const author = {
+          platformId: authorId,
+          username: mention.from?.username || mention.username || 'Instagram User',
+          name: mention.from?.username || mention.username || 'Instagram User'
+        };
+        if (avatarUrl) author.avatarUrl = avatarUrl;
+
+        const mentionText =
+          mention.text ||
+          mention.caption ||
+          mention.message ||
+          (mention.media_id ? 'You were mentioned on Instagram media.' : 'You were mentioned on Instagram.');
+
+        const rawTs = mention.timestamp ?? mention.created_time ?? entry.time;
+        let mentionCreatedAt = new Date();
+        if (rawTs != null) {
+          const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+          if (Number.isFinite(ms)) mentionCreatedAt = new Date(ms);
+        }
+
+        const interaction = await Interaction.findOneAndUpdate(
+          { platformId: String(mentionId) },
           {
             $set: {
               organization: organizationId,
               platform: 'instagram',
-              type: 'comment',
-              platformId: comment.id,
-              content: comment.text,
+              type: 'mention',
+              platformId: String(mentionId),
+              content: mentionText,
               author,
+              platformCreatedAt: mentionCreatedAt,
               metadata: {
-                postId: comment.media?.id,
-                postUrl: `https://www.instagram.com/p/${comment.media?.id}`
-              },
-              platformCreatedAt: new Date(comment.timestamp)
+                mentionId: mention.id || null,
+                mediaId: mention.media_id || null,
+                commentId: mention.comment_id || null,
+                postId: mention.media_id || null,
+                postUrl: mention.media_id ? `https://www.instagram.com/p/${mention.media_id}` : null,
+                rawMention: mention
+              }
             },
             $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
+
+        if (interaction && organizationId) {
+          emitToOrg(organizationId.toString(), 'new_interaction', {
+            interaction: interaction.toObject()
+          });
+        }
 
         return interaction;
       }
@@ -346,6 +565,13 @@ async function handleInstagramWebhook(payload, organizationId) {
         };
         if (avatarUrl) author.avatarUrl = avatarUrl;
 
+        const rawTs = message.timestamp ?? entry.time;
+        let msgPlatformCreatedAt = new Date();
+        if (rawTs != null) {
+          const ms = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+          if (Number.isFinite(ms)) msgPlatformCreatedAt = new Date(ms);
+        }
+
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
@@ -357,7 +583,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               content: message.message?.text || message.text,
               author,
               threadId: message.conversation_id,
-              platformCreatedAt: new Date(message.timestamp)
+              platformCreatedAt: msgPlatformCreatedAt
             },
             $setOnInsert: { status: 'unread', isRead: false }
           },
@@ -378,6 +604,21 @@ async function handleInstagramWebhook(payload, organizationId) {
     console.error('Instagram webhook handler error:', error);
     throw error;
   }
+}
+
+/**
+ * Parse timestamp from Meta webhooks. Facebook often sends Unix seconds; convert to Date.
+ * @param {number|string} value - Unix seconds, ms, or ISO string
+ * @returns {Date}
+ */
+function parseMetaTimestamp(value) {
+  if (value == null) return new Date();
+  if (typeof value === 'number') {
+    const ms = value < 1e12 ? value * 1000 : value;
+    return new Date(ms);
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed) : new Date();
 }
 
 /**
@@ -420,22 +661,30 @@ async function handleFacebookWebhook(payload, organizationId) {
 
       const senderId = event.sender?.id;
       const mid = message.mid;
-      const text = message.text || (message.attachments && message.attachments[0] ? `[${message.attachments[0].type || 'attachment'}]` : '');
+      const attachment = message.attachments && message.attachments[0] ? message.attachments[0] : null;
+      const attachmentType = attachment ? (attachment.type || 'file') : null;
+      const attachmentUrl = attachment && attachment.payload && attachment.payload.url ? attachment.payload.url : null;
+      const text = message.text || (attachment ? `[${attachmentType}]` : '');
       if (!mid || !senderId) continue;
 
       const profile = await fetchFacebookSenderProfile(organizationId, pageId, senderId, pageConnection?.accessToken);
       const author = {
         platformId: senderId,
-        username: profile.name,
-        name: profile.name
+        username: profile.name || 'Messenger User',
+        name: profile.name || 'Messenger User'
       };
-      if (profile.profilePic) author.avatarUrl = profile.profilePic;
+      if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
       const threadPlatformId = `dm_${String(pageId)}_${String(senderId)}`;
       const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
       if (existing && existing.metadata?.lastMid === mid) {
-        return await Interaction.findById(existing._id);
+        logger.debug('[processWebhook] Facebook DM duplicate mid (webhook retry)', { threadPlatformId, mid });
+        return null;
       }
+
+      const incomingMsg = { mid, text, timestamp: event.timestamp };
+      if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
+      if (attachmentType) incomingMsg.attachmentType = attachmentType;
 
       const updateFields = {
         organization: organizationId,
@@ -447,7 +696,9 @@ async function handleFacebookWebhook(payload, organizationId) {
         threadId: senderId,
         platformCreatedAt: new Date(event.timestamp),
         'metadata.lastMid': mid,
-        'metadata.facebookPageId': pageId
+        'metadata.facebookPageId': pageId,
+        status: 'unread',
+        isRead: false
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
@@ -455,10 +706,9 @@ async function handleFacebookWebhook(payload, organizationId) {
         { platformId: threadPlatformId },
         {
           $set: updateFields,
-          $setOnInsert: { status: 'unread', isRead: false },
           $push: {
             'metadata.incomingMessages': {
-              $each: [{ mid, text, timestamp: event.timestamp }],
+              $each: [incomingMsg],
               $slice: -100
             }
           }
@@ -472,39 +722,71 @@ async function handleFacebookWebhook(payload, organizationId) {
     const changes = entry.changes || [];
     for (const change of changes) {
       if (change.field === 'feed' && change.value.item === 'comment') {
-        // New comment on post
         const comment = change.value;
+        // Skip our own replies: when the Page replies to a comment, Facebook sends a webhook with
+        // comment.from.id = pageId. Do not create a new conversation for those — they already
+        // exist in the thread as interaction.replies.
+        if (comment.from && String(comment.from.id) === String(pageId)) {
+          return null;
+        }
+
+        // New comment on post (from a user) — fetch commenter profile for avatar
+        const commenterProfile = await fetchFacebookSenderProfile(organizationId, pageId, comment.from?.id, pageConnection?.accessToken);
+        const author = {
+          platformId: comment.from.id,
+          username: commenterProfile.name || comment.from.name || 'Facebook User',
+          name: commenterProfile.name || comment.from.name || 'Facebook User'
+        };
+        if (commenterProfile.avatarUrl) author.avatarUrl = commenterProfile.avatarUrl;
+
+        // Facebook sends created_time in Unix seconds; parse so SLA/Overdue is correct
+        const platformCreatedAt = parseMetaTimestamp(comment.created_time);
+
+        const updateFields = {
+          organization: organizationId,
+          platform: 'facebook',
+          type: 'comment',
+          platformId: comment.comment_id,
+          content: comment.message,
+          author,
+          metadata: {
+            postId: comment.post_id,
+            postUrl: `https://www.facebook.com/${comment.post_id}`,
+            facebookPageId: pageId
+          },
+          platformCreatedAt
+        };
+        if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.comment_id },
           {
-            $set: {
-              organization: organizationId,
-              platform: 'facebook',
-              type: 'comment',
-              platformId: comment.comment_id,
-              content: comment.message,
-              author: {
-                platformId: comment.from.id,
-                name: comment.from.name
-              },
-              metadata: {
-                postId: comment.post_id,
-                postUrl: `https://www.facebook.com/${comment.post_id}`
-              },
-              platformCreatedAt: new Date(comment.created_time)
-            },
+            $set: updateFields,
             $setOnInsert: { status: 'unread', isRead: false }
           },
           { upsert: true, new: true }
         );
 
+        // Emit so inbox list updates immediately without sync/poll
+        if (interaction && organizationId) {
+          emitToOrg(organizationId.toString(), 'new_interaction', {
+            interaction: interaction.toObject ? interaction.toObject() : interaction
+          });
+        }
+
         return interaction;
       }
 
       if (change.field === 'conversations') {
-        // Legacy format: New message
+        // Legacy format: New message — fetch sender profile for avatar
         const message = change.value;
+        const senderProfile = await fetchFacebookSenderProfile(organizationId, pageId, message.from?.id, pageConnection?.accessToken);
+        const author = {
+          platformId: message.from.id,
+          username: senderProfile.name || message.from.name || 'Facebook User',
+          name: senderProfile.name || message.from.name || 'Facebook User'
+        };
+        if (senderProfile.avatarUrl) author.avatarUrl = senderProfile.avatarUrl;
 
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
@@ -515,12 +797,9 @@ async function handleFacebookWebhook(payload, organizationId) {
               type: 'dm',
               platformId: message.id,
               content: message.message,
-              author: {
-                platformId: message.from.id,
-                name: message.from.name
-              },
+              author,
               threadId: message.thread_id,
-              platformCreatedAt: new Date(message.created_time)
+              platformCreatedAt: parseMetaTimestamp(message.created_time)
             },
             $setOnInsert: { status: 'unread', isRead: false }
           },
@@ -539,8 +818,14 @@ async function handleFacebookWebhook(payload, organizationId) {
 }
 
 /**
- * Fetch Facebook Messenger sender profile (name, profile_pic) for PSID.
- * Uses Graph API GET /{psid}?fields=name,profile_pic with Page access token.
+ * Fetch Facebook user profile (name + CDN avatar URL) for a PSID or commenter user ID.
+ *
+ * Uses  GET /{id}?fields=name,first_name,last_name,picture{url}
+ * `picture{url}` asks Graph to return the actual CDN URL (fbsbx.com / lookaside) rather than
+ * the redirect endpoint, so we can store and display it in the browser without any auth.
+ *
+ * Returns { name, avatarUrl } — both may be undefined when the API call fails or the user
+ * has restricted their profile visibility.
  */
 async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTokenFromConnection = null) {
   if (!psid) return {};
@@ -558,18 +843,27 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
   if (!token) return {};
   try {
     const axios = require('axios');
-    const baseUrl = `https://graph.facebook.com/v18.0`;
+    const baseUrl = 'https://graph.facebook.com/v18.0';
     const res = await axios.get(`${baseUrl}/${psid}`, {
-      params: { fields: 'name,profile_pic', access_token: token },
+      // picture{url} returns the resolved CDN URL directly.
+      // picture.data.is_silhouette === true means no real photo (privacy / no photo set).
+      params: { fields: 'name,first_name,last_name,picture{url}', access_token: token },
       timeout: 5000
     });
     const data = res.data || {};
-    return {
-      name: data.name || undefined,
-      profilePic: data.profile_pic || undefined
-    };
+    const name = data.name || (data.first_name && data.last_name
+      ? `${data.first_name} ${data.last_name}`.trim()
+      : data.first_name || data.last_name);
+    // picture.data[0].url when using {url} sub-selection, or picture.data.url for plain picture
+    const picData = Array.isArray(data.picture?.data) ? data.picture.data[0] : data.picture?.data;
+    const avatarUrl = picData?.url || data.picture?.url || undefined;
+    return { name: name || undefined, avatarUrl };
   } catch (err) {
-    console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid, err.response?.data?.error?.message || err.message);
+    // Suppress the warning for 403 (privacy / no permission) — expected for many users.
+    if (err.response?.status !== 403) {
+      console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid,
+        err.response?.data?.error?.message || err.message);
+    }
     return {};
   }
 }

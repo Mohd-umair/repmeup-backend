@@ -33,6 +33,13 @@ exports.protect = async (req, res, next) => {
         });
       }
 
+      if (user.deletedAt) {
+        return res.status(401).json({
+          success: false,
+          error: 'User account has been removed'
+        });
+      }
+
       if (!user.isActive) {
         return res.status(401).json({
           success: false,

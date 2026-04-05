@@ -1,5 +1,5 @@
 const Joi = require('joi');
-const { escapeHtml, sanitizeString } = require('../utils/sanitize');
+const { sanitizeString } = require('../utils/sanitize');
 
 const objectId = () => Joi.string().pattern(/^[0-9a-fA-F]{24}$/);
 const dateRange = () => Joi.object({
@@ -49,13 +49,47 @@ exports.validateLogin = (req, res, next) => {
   next();
 };
 
+const CONTACT_SUBJECTS = [
+  'general',
+  'demo',
+  'support',
+  'sales',
+  'billing',
+  'partnership',
+  'other'
+];
+
+exports.validateContactInquiry = (req, res, next) => {
+  const schema = Joi.object({
+    name: Joi.string().trim().min(2).max(200).required(),
+    email: Joi.string().email().required(),
+    phone: Joi.string().trim().max(40).allow('', null),
+    company: Joi.string().trim().max(200).allow('', null),
+    subject: Joi.string().valid(...CONTACT_SUBJECTS).required(),
+    message: Joi.string().trim().min(10).max(10000).required(),
+    intent: Joi.string().trim().max(64).allow('', null)
+  });
+
+  const { error } = schema.validate(req.body, { abortEarly: true, stripUnknown: true });
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      error: error.details[0].message
+    });
+  }
+
+  next();
+};
+
 // Validate interaction reply
 exports.validateReply = (req, res, next) => {
   const schema = Joi.object({
-    content: Joi.string().required().max(10000),
+    content: Joi.string().allow('').max(10000).optional(),
     useTemplate: Joi.boolean().optional(),
     templateId: objectId().optional(),
-    templateVariables: Joi.object().optional()
+    templateVariables: Joi.object().optional(),
+    attachmentUrl: Joi.string().uri({ scheme: ['http', 'https', 'data'] }).optional(),
+    attachmentType: Joi.string().valid('image', 'video', 'file', 'audio').optional()
   });
 
   const { error } = schema.validate(req.body);
@@ -67,14 +101,18 @@ exports.validateReply = (req, res, next) => {
     });
   }
 
-  // Sanitize content for safe storage/reflection
-  if (req.body.content) req.body.content = escapeHtml(req.body.content);
-  if (req.body.templateVariables && typeof req.body.templateVariables === 'object') {
-    const sanitized = {};
-    for (const [k, v] of Object.entries(req.body.templateVariables)) {
-      sanitized[k] = typeof v === 'string' ? escapeHtml(v) : v;
-    }
-    req.body.templateVariables = sanitized;
+  const hasContent = typeof req.body.content === 'string' && req.body.content.trim().length > 0;
+  const hasAttachment = req.body.attachmentUrl && req.body.attachmentType;
+  if (!hasContent && !hasAttachment) {
+    return res.status(400).json({
+      success: false,
+      error: 'Either content or attachment (attachmentUrl + attachmentType) is required'
+    });
+  }
+
+  /* Plain text for JSON API — do not HTML-escape (shows as &quot; in Angular {{ }}) */
+  if (req.body.content && typeof req.body.content === 'string') {
+    req.body.content = req.body.content.trim();
   }
   next();
 };
@@ -320,7 +358,9 @@ exports.validateInboxAssign = (req, res, next) => {
 
   const { error } = schema.validate(req.body);
   if (error) return res.status(400).json({ success: false, error: error.details[0].message });
-  if (req.body.reason) req.body.reason = escapeHtml(req.body.reason);
+  if (req.body.reason && typeof req.body.reason === 'string') {
+    req.body.reason = req.body.reason.trim();
+  }
   next();
 };
 
@@ -342,7 +382,9 @@ exports.validateInboxAddNote = (req, res, next) => {
 
   const { error } = schema.validate(req.body);
   if (error) return res.status(400).json({ success: false, error: error.details[0].message });
-  if (req.body.note) req.body.note = escapeHtml(req.body.note);
+  if (req.body.note && typeof req.body.note === 'string') {
+    req.body.note = req.body.note.trim();
+  }
   next();
 };
 
@@ -407,7 +449,9 @@ exports.validateInboxEscalate = (req, res, next) => {
 
   const { error } = schema.validate(req.body);
   if (error) return res.status(400).json({ success: false, error: error.details[0].message });
-  if (req.body.reason) req.body.reason = escapeHtml(req.body.reason);
+  if (req.body.reason && typeof req.body.reason === 'string') {
+    req.body.reason = req.body.reason.trim();
+  }
   next();
 };
 

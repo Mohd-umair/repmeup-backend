@@ -4,6 +4,105 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 const { escapeRegex } = require('../utils/sanitize');
+const { parsePagination, paginationMeta } = require('../utils/pagination');
+const { runWithAiContext } = require('../services/aiRequestContext');
+
+const KB_SOURCE_ENUM = ['manual', 'pdf', 'url', 'import'];
+
+/**
+ * Org-wide KB analytics (not filtered by list search) for dashboard sidebar.
+ */
+function buildKbAnalyticsPipeline(organizationMatch) {
+  return [
+    { $match: organizationMatch },
+    {
+      $facet: {
+        counts: [
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              active: { $sum: { $cond: [{ $ne: ['$isActive', false] }, 1, 0] } },
+              inactive: { $sum: { $cond: [{ $eq: ['$isActive', false] }, 1, 0] } },
+              used: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$usageCount', 0] }, 0] }, 1, 0] } },
+              neverUsed: { $sum: { $cond: [{ $lte: [{ $ifNull: ['$usageCount', 0] }, 0] }, 1, 0] } },
+              totalUsage: { $sum: { $ifNull: ['$usageCount', 0] } },
+              avgTrainingWeight: { $avg: { $ifNull: ['$trainingWeight', 5] } },
+              highWeight: {
+                $sum: { $cond: [{ $gte: [{ $ifNull: ['$trainingWeight', 5] }, 9] }, 1, 0] }
+              },
+              midWeight: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $gte: [{ $ifNull: ['$trainingWeight', 5] }, 5] },
+                        { $lte: [{ $ifNull: ['$trainingWeight', 5] }, 8] }
+                      ]
+                    },
+                    1,
+                    0
+                  ]
+                }
+              },
+              lowWeight: {
+                $sum: { $cond: [{ $lte: [{ $ifNull: ['$trainingWeight', 5] }, 4] }, 1, 0] }
+              }
+            }
+          }
+        ],
+        topUsed: [
+          { $match: { usageCount: { $gt: 0 } } },
+          { $sort: { usageCount: -1 } },
+          { $limit: 8 },
+          { $project: { title: 1, usageCount: 1, source: 1, type: 1 } }
+        ],
+        bySource: [{ $group: { _id: '$source', count: { $sum: 1 } } }],
+        byType: [{ $group: { _id: '$type', count: { $sum: 1 } } }, { $sort: { count: -1 } }],
+        topTags: [
+          { $unwind: { path: '$tags', preserveNullAndEmptyArrays: false } },
+          { $group: { _id: '$tags', count: { $sum: 1 } } },
+          { $sort: { count: -1 } },
+          { $limit: 8 }
+        ]
+      }
+    }
+  ];
+}
+
+function formatKbAnalytics(facetRow) {
+  const row = facetRow || {};
+  const c = row.counts?.[0] || {};
+  const bySource = { manual: 0, pdf: 0, url: 0, import: 0 };
+  (row.bySource || []).forEach(({ _id, count }) => {
+    if (_id != null && Object.prototype.hasOwnProperty.call(bySource, _id)) {
+      bySource[_id] = count;
+    }
+  });
+  const avg = c.avgTrainingWeight;
+  return {
+    totalEntries: c.total || 0,
+    activeCount: c.active || 0,
+    inactiveCount: c.inactive || 0,
+    usedEntries: c.used || 0,
+    neverUsedEntries: c.neverUsed || 0,
+    totalUsage: c.totalUsage || 0,
+    avgTrainingWeight: avg != null ? Math.round(avg * 10) / 10 : 0,
+    highWeightCount: c.highWeight || 0,
+    midWeightCount: c.midWeight || 0,
+    lowWeightCount: c.lowWeight || 0,
+    topUsed: (row.topUsed || []).map((d) => ({
+      _id: d._id,
+      title: d.title,
+      usageCount: d.usageCount,
+      source: d.source,
+      type: d.type
+    })),
+    bySource,
+    byType: (row.byType || []).map(({ _id, count }) => ({ type: _id || 'general', count })),
+    topTags: (row.topTags || []).map(({ _id, count }) => ({ tag: _id, count }))
+  };
+}
 
 // Services (Dependency Injection - SOLID Principle)
 const webScraperService = require('../services/webScraperService');
@@ -40,17 +139,23 @@ const upload = multer({
 });
 
 /**
- * Get all knowledge base entries
+ * Get knowledge base entries (paginated; same envelope as GET /api/users)
  * GET /api/knowledge-base
  */
 exports.getAllKnowledgeBase = async (req, res) => {
   try {
-    const { category, search, page = 1, limit = 20 } = req.query;
+    const { category, search, source } = req.query;
+    let { page, limit } = parsePagination(req.query);
+    const orgId = req.user.organization._id || req.user.organization;
 
-    const query = { organization: req.user.organization };
+    const query = { organization: orgId };
 
     if (category) {
       query.category = category;
+    }
+
+    if (source && KB_SOURCE_ENUM.includes(source)) {
+      query.source = source;
     }
 
     if (search && typeof search === 'string' && search.trim()) {
@@ -62,24 +167,30 @@ exports.getAllKnowledgeBase = async (req, res) => {
       ];
     }
 
-    const knowledgeBase = await KnowledgeBase.find(query)
-      .sort({ priority: -1, createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .populate('createdBy', 'firstName lastName email');
+    const total = await KnowledgeBase.countDocuments(query);
+    const pages = Math.ceil(total / limit) || 1;
+    if (page > pages) page = pages;
+    const skip = (page - 1) * limit;
 
-    const count = await KnowledgeBase.countDocuments(query);
+    const orgMatch = { organization: orgId };
+
+    const [knowledgeBase, analyticsAgg] = await Promise.all([
+      KnowledgeBase.find(query)
+        .sort({ priority: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('createdBy', 'firstName lastName email')
+        .lean(),
+      KnowledgeBase.aggregate(buildKbAnalyticsPipeline(orgMatch))
+    ]);
+
+    const analytics = formatKbAnalytics(analyticsAgg[0]);
 
     res.json({
       success: true,
-      data: {
-        knowledgeBase,
-        pagination: {
-          total: count,
-          page: parseInt(page),
-          pages: Math.ceil(count / limit)
-        }
-      }
+      data: knowledgeBase,
+      pagination: paginationMeta(total, page, limit),
+      analytics
     });
   } catch (error) {
     console.error('Get knowledge base error:', error);
@@ -127,7 +238,11 @@ exports.getKnowledgeBaseById = async (req, res) => {
  */
 exports.createManualKnowledgeBase = async (req, res) => {
   try {
-    const { title, content, category, tags, priority, metadata } = req.body;
+    const {
+      title, content, category, tags, priority, metadata,
+      trainingContext, trainingWeight, isTrainingData, isActive,
+      templateFields
+    } = req.body;
 
     const knowledgeBase = new KnowledgeBase({
       title,
@@ -135,6 +250,11 @@ exports.createManualKnowledgeBase = async (req, res) => {
       category,
       tags: tags || [],
       priority: priority || 1,
+      trainingContext: trainingContext || '',
+      trainingWeight: trainingWeight != null ? Number(trainingWeight) : 5,
+      isTrainingData: isTrainingData !== undefined ? Boolean(isTrainingData) : true,
+      isActive: isActive !== undefined ? Boolean(isActive) : true,
+      templateFields: Array.isArray(templateFields) ? templateFields : [],
       source: 'manual',
       metadata: metadata || {},
       organization: req.user.organization,
@@ -217,6 +337,8 @@ exports.createPDFKnowledgeBase = async (req, res) => {
  * Uses WebScraperService and ContentSummarizerService (SOLID principles)
  */
 exports.createURLKnowledgeBase = async (req, res) => {
+  let kbCreditsDeducted = 0;
+  const kbOrgId = req.user.organization._id || req.user.organization;
   try {
     const { url, title, category, tags, priority, focus = 'overview', targetWordCount, targetTagCount } = req.body;
 
@@ -263,15 +385,20 @@ exports.createURLKnowledgeBase = async (req, res) => {
 
     // Step 2: Generate AI summary (ContentSummarizerService - Single Responsibility)
     console.log(`🤖 [KB] Generating AI summary...`);
-    const summaryData = await contentSummarizerService.summarize(
-      scrapedData.content,
+    const summaryData = await runWithAiContext(
       {
-        title: title || scrapedData.title,
-        url: url,
-        focus: focus,
-        targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
-        targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
-      }
+        organizationId: kbOrgId,
+        userId: req.user._id,
+        feature: 'knowledge_base.from_url'
+      },
+      () =>
+        contentSummarizerService.summarize(scrapedData.content, {
+          title: title || scrapedData.title,
+          url: url,
+          focus: focus,
+          targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
+          targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
+        })
     );
     console.log(`✅ [KB] Summary generated: ${summaryData.summaryLength} characters (${summaryData.compressionRatio} of original)`);
 
@@ -312,17 +439,11 @@ exports.createURLKnowledgeBase = async (req, res) => {
       summaryData.tags.length
     );
 
-    await aiCreditService.deductCredits(
-      req.user.organization._id || req.user.organization,
-      actualCost,
-      {
-        operation: 'knowledge_base_from_url',
-        userId: req.user._id,
-        url: url,
-        wordCount: actualWordCount,
-        tagCount: summaryData.tags.length
-      }
-    );
+    await aiCreditService.deductCredits(kbOrgId, actualCost, {
+      operation: 'knowledge_base_from_url', userId: req.user._id,
+      url: url, wordCount: actualWordCount, tagCount: summaryData.tags.length
+    });
+    kbCreditsDeducted = actualCost;
 
     res.status(201).json({
       success: true,
@@ -342,9 +463,11 @@ exports.createURLKnowledgeBase = async (req, res) => {
   } catch (error) {
     console.error('Create URL knowledge base error:', error);
     
-    // Provide more specific error messages
+    if (kbCreditsDeducted > 0) {
+      await aiCreditService.rollbackCredits(kbOrgId, kbCreditsDeducted, { operation: 'knowledge_base_from_url', userId: req.user?._id, reason: error.message });
+    }
+
     let errorMessage = 'Failed to process URL. Please check the URL and try again.';
-    
     if (error.message.includes('timeout')) {
       errorMessage = 'The website took too long to respond. Please try again or use a different URL.';
     } else if (error.message.includes('not found') || error.message.includes('404')) {
@@ -358,8 +481,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
     }
 
     res.status(500).json({
-      success: false,
-      error: errorMessage,
+      success: false, error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -371,7 +493,10 @@ exports.createURLKnowledgeBase = async (req, res) => {
  */
 exports.updateKnowledgeBase = async (req, res) => {
   try {
-    const { title, content, category, tags, priority, metadata, isActive } = req.body;
+    const {
+      title, content, category, tags, priority, metadata, isActive,
+      trainingContext, trainingWeight, isTrainingData, templateFields
+    } = req.body;
 
     const knowledgeBase = await KnowledgeBase.findOne({
       _id: req.params.id,
@@ -385,14 +510,17 @@ exports.updateKnowledgeBase = async (req, res) => {
       });
     }
 
-    // Update fields
-    if (title) knowledgeBase.title = title;
-    if (content) knowledgeBase.content = content;
-    if (category) knowledgeBase.category = category;
-    if (tags) knowledgeBase.tags = tags;
-    if (priority !== undefined) knowledgeBase.priority = priority;
-    if (metadata) knowledgeBase.metadata = { ...knowledgeBase.metadata, ...metadata };
-    if (isActive !== undefined) knowledgeBase.isActive = isActive;
+    if (title !== undefined)           knowledgeBase.title = title;
+    if (content !== undefined)         knowledgeBase.content = content;
+    if (category !== undefined)        knowledgeBase.category = category;
+    if (tags !== undefined)            knowledgeBase.tags = tags;
+    if (priority !== undefined)        knowledgeBase.priority = priority;
+    if (metadata !== undefined)        knowledgeBase.metadata = { ...knowledgeBase.metadata, ...metadata };
+    if (isActive !== undefined)        knowledgeBase.isActive = isActive;
+    if (trainingContext !== undefined)  knowledgeBase.trainingContext = trainingContext;
+    if (trainingWeight !== undefined)   knowledgeBase.trainingWeight = Number(trainingWeight);
+    if (isTrainingData !== undefined)   knowledgeBase.isTrainingData = Boolean(isTrainingData);
+    if (Array.isArray(templateFields))  knowledgeBase.templateFields = templateFields;
 
     knowledgeBase.updatedBy = req.user.id;
 

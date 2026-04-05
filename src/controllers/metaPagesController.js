@@ -229,7 +229,22 @@ exports.connectSelectedPages = async (req, res, next) => {
         continue;
       }
 
-      // Check if page is already connected
+      // Check cross-org conflict first (page already in another workspace)
+      const fbCrossOrg = await PlatformConnection.findCrossOrgConflict(
+        'facebook', pageId, organizationId
+      );
+      if (fbCrossOrg) {
+        results.failed.push({
+          pageId,
+          pageName: pageData.name,
+          reason: 'This Facebook page is already connected to another workspace.',
+          code: 'CROSS_ORG_CONFLICT',
+          platform: 'facebook'
+        });
+        continue;
+      }
+
+      // Check if page is already connected to this org
       const existingFacebookConnection = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'facebook',
@@ -287,7 +302,22 @@ exports.connectSelectedPages = async (req, res, next) => {
       // Connect Instagram if requested and available
       if (includeInstagram && pageData.instagram_business_account) {
         const instagramId = pageData.instagram_business_account.id;
-        
+
+        // Check cross-org conflict for Instagram
+        const igCrossOrg = await PlatformConnection.findCrossOrgConflict(
+          'instagram', instagramId, organizationId
+        );
+        if (igCrossOrg) {
+          results.failed.push({
+            pageId: instagramId,
+            pageName: pageData.instagram_business_account.username,
+            reason: 'This Instagram account is already connected to another workspace.',
+            code: 'CROSS_ORG_CONFLICT',
+            platform: 'instagram'
+          });
+          continue;
+        }
+
         const existingInstagramConnection = await PlatformConnection.findOne({
           organization: organizationId,
           platform: 'instagram',
@@ -361,6 +391,84 @@ exports.connectSelectedPages = async (req, res, next) => {
     });
   } catch (error) {
     console.error('❌ [Meta Pages] Error connecting pages:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Re-subscribe connected Facebook Pages and Instagram accounts to app webhooks.
+ *          Use this after webhook field changes (e.g. mentions) so existing connections receive events.
+ * @route   POST /api/meta/pages/resubscribe-webhooks
+ * @access  Private
+ */
+exports.resubscribeFacebookWebhooks = async (req, res, next) => {
+  try {
+    const organizationId = req.user.organization._id || req.user.organization;
+
+    const fbConnections = await PlatformConnection.find({
+      organization: organizationId,
+      platform: 'facebook',
+      platformPageId: { $exists: true, $ne: null },
+      isActive: true,
+      status: 'connected'
+    }).select('platformPageId platformUsername accessToken').lean();
+
+    const igConnections = await PlatformConnection.find({
+      organization: organizationId,
+      platform: 'instagram',
+      platformUserId: { $exists: true, $ne: null },
+      isActive: true,
+      status: 'connected'
+    }).select('platformUserId platformUsername accessToken').lean();
+
+    if (fbConnections.length === 0 && igConnections.length === 0) {
+      return res.json({
+        success: true,
+        data: { subscribed: 0, failed: 0, pages: [], instagram: [] },
+        message: 'No connected Facebook/Instagram accounts to resubscribe.'
+      });
+    }
+
+    const results = { subscribed: 0, failed: 0, pages: [], instagram: [] };
+    for (const conn of fbConnections) {
+      try {
+        await metaAuth.subscribePageToWebhook(conn.platformPageId, conn.accessToken);
+        results.subscribed++;
+        results.pages.push({ pageId: conn.platformPageId, name: conn.platformUsername, ok: true });
+      } catch (err) {
+        results.failed++;
+        results.pages.push({
+          pageId: conn.platformPageId,
+          name: conn.platformUsername,
+          ok: false,
+          error: err.message || 'Subscription failed'
+        });
+      }
+    }
+
+    for (const conn of igConnections) {
+      try {
+        await metaAuth.subscribeInstagramToWebhook(conn.platformUserId, conn.accessToken);
+        results.subscribed++;
+        results.instagram.push({ instagramId: conn.platformUserId, name: conn.platformUsername, ok: true });
+      } catch (err) {
+        results.failed++;
+        results.instagram.push({
+          instagramId: conn.platformUserId,
+          name: conn.platformUsername,
+          ok: false,
+          error: err.message || 'Subscription failed'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: results,
+      message: `Re-subscribed ${results.subscribed} Facebook/Instagram webhook subscription(s). ${results.failed} failed.`
+    });
+  } catch (error) {
+    console.error('❌ [Meta Pages] Error resubscribing webhooks:', error);
     next(error);
   }
 };

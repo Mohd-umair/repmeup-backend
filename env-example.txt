@@ -4,6 +4,13 @@
 NODE_ENV=development
 PORT=3000
 
+# Super Admin (for scripts/createSuperAdmin.js and admin panel login)
+# SUPER_ADMIN_EMAIL=admin@repmeup.com
+# SUPER_ADMIN_PASSWORD=YourSecurePassword123
+# SUPER_ADMIN_FIRST_NAME=Super
+# SUPER_ADMIN_LAST_NAME=Admin
+# Super Admin Panel APIs: /api/super-admin/* (JWT + role super_admin|admin). See docs/SUPER_ADMIN_API.md
+
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017/orm_development
 
@@ -24,6 +31,7 @@ JWT_REFRESH_EXPIRE=30d
 
 # Frontend
 FRONTEND_URL=http://localhost:4200
+# Comma-separate for super admin panel (port 4201): http://localhost:4200,http://localhost:4201
 CORS_ORIGIN=http://localhost:4200
 
 # Meta/Facebook/Instagram/WhatsApp
@@ -47,30 +55,58 @@ GOOGLE_REDIRECT_URI=http://localhost:3000/api/platforms/google/callback
 LINKEDIN_CLIENT_ID=your_linkedin_client_id
 LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
 LINKEDIN_REDIRECT_URI=http://localhost:3000/api/auth/linkedin/callback
-# Set to 'true' only after LinkedIn approves advanced scopes (posting/comments)
-LINKEDIN_ENABLE_ADVANCED_SCOPES=false
+# Repmeup use case: organizations post on their LinkedIn Company Page. That requires Community Management API approval.
+# Set to 'true' once LinkedIn approves Community Management API (org posting/comments).
+LINKEDIN_ENABLE_ADVANCED_SCOPES=true
+# Only set to 'true' as a temporary workaround: request only w_member_social so "Connect LinkedIn" doesn't error.
+# With this on, Company Page will NOT be available—orgs cannot post as their page until you set this back to false and have org approval.
+# LINKEDIN_MEMBER_SOCIAL_ONLY=true
+#
+# Member inbox (list YOUR posts + read comments): posting uses w_member_social; READ APIs need r_member_social.
+# Add r_member_social to your LinkedIn app (Products/scopes) if LinkedIn allows, then:
+# LINKEDIN_INCLUDE_R_MEMBER_SOCIAL=true
+# Reconnect LinkedIn. If OAuth errors on scope, request r_member_social access from LinkedIn Developer Support.
+#
+# If publish returns 403 partnerApiPostsExternal.CREATE and you connected a Company Page:
+# - For Page posting: you need Community Management API approval from LinkedIn (no code fix).
+# - To post as the person's profile instead (while still having a page on the connection), set:
+# LINKEDIN_POST_AS_PERSON=true
+# Then restart API and reconnect LinkedIn so the token includes w_member_social.
 # Webhook configuration (requires special LinkedIn API access)
 LINKEDIN_WEBHOOK_VERIFY_TOKEN=your_secure_random_token_here
 LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here
 
-# AI Provider Selection
-# Use 'ollama' for development (local Gemma3), 'openai' for production
-AI_PROVIDER=ollama  # Options: 'ollama' (dev) or 'openai' (production)
-
-# Ollama Configuration (for development with Gemma3)
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=gemma3:270m  # Your installed model: gemma3:270m
-
-# OpenAI Configuration (for production - comment out during dev)
+# AI (OpenAI only — chat, sentiment, inbox replies, content generation)
 # Get your API key from: https://platform.openai.com/api-keys
-# Format: sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-# OPENAI_API_KEY=your_openai_api_key
+# OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # OPENAI_MODEL=gpt-4
+# Newer models (use exact API ids, lowercase — e.g. not "GPT-5.3"):
+# OPENAI_MODEL=gpt-5.3-chat-latest
+# OPENAI_MODEL=gpt-5.2
+# OPENAI_MODEL=gpt-4o
+# Image generation model (OpenAI Image API):
+# OPENAI_IMAGE_MODEL=gpt-image-1.5
+# Optional: retries for transient errors (aborted, timeouts, 429/502/503); default 3
+# OPENAI_IMAGE_MAX_RETRIES=3
+# Optional: per-request timeout ms; default 120000 (2 min)
+# OPENAI_IMAGE_TIMEOUT_MS=120000
 
-# Email Service (SendGrid)
-SENDGRID_API_KEY=your_sendgrid_api_key
-FROM_EMAIL=noreply@yourdomain.com
-FROM_NAME=ORM System
+# Email — GoDaddy Workspace / Professional Email (domain + email on GoDaddy, hosting on Hostinger)
+# GoDaddy outgoing SMTP server: smtpout.secureserver.net
+# Port 465 = SSL (recommended) | 587 = STARTTLS
+# SMTP_USER = full GoDaddy email address (e.g. info@repmeup.in)
+# SMTP_PASS = the mailbox password (same one you use to log into GoDaddy webmail)
+# Password with # $ ! chars → wrap in single quotes: SMTP_PASS='pass#here'
+# If auth still fails: log into GoDaddy webmail first with same user/pass to verify credentials work.
+# Verbose SMTP trace on server: SMTP_DEBUG=true
+SMTP_HOST=smtpout.secureserver.net
+SMTP_PORT=465
+SMTP_USER=info@repmeup.in
+SMTP_PASS=your_godaddy_mailbox_password
+FROM_EMAIL=info@repmeup.in
+FROM_NAME=RepMeUp
+# SMTP_AUTH_METHOD=LOGIN
+# SMTP_DEBUG=true
 
 # Rate limiting (optional; defaults: 1000 req/15 min per IP, or 10000 in development)
 # RATE_LIMIT_MAX_REQUESTS=5000
@@ -83,4 +119,3 @@ ALLOWED_FILE_TYPES=image/jpeg,image/png,image/gif,image/webp
 
 # Logging
 LOG_LEVEL=debug
-

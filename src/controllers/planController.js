@@ -1,4 +1,5 @@
 const Plan = require('../models/Plan');
+const planAdminService = require('../services/planAdminService');
 
 /**
  * Plan Management Controller
@@ -53,12 +54,14 @@ exports.getAllPlansAdmin = async (req, res, next) => {
       });
     }
 
-    const plans = await Plan.find().sort({ displayOrder: 1, tier: 1 });
+    const plans = await Plan.find().sort({ displayOrder: 1, tier: 1 }).lean();
+    const countMap = await planAdminService.getSubscriptionCountMap();
+    const data = planAdminService.attachSubscriptionCounts(plans, countMap);
 
     res.status(200).json({
       success: true,
-      data: plans,
-      count: plans.length
+      data,
+      count: data.length
     });
   } catch (error) {
     console.error('Get all plans admin error:', error);
@@ -209,10 +212,14 @@ exports.updatePlan = async (req, res, next) => {
     plan.updatedBy = req.user._id;
     await plan.save();
 
+    // Keep org subscriptions aligned with template (limits/features/name/tier).
+    const syncedSubscriptionCount = await planAdminService.syncSubscriptionsFromPlan(plan);
+
     res.status(200).json({
       success: true,
       data: plan,
-      message: 'Plan updated successfully'
+      message: 'Plan updated successfully',
+      syncedSubscriptionCount
     });
   } catch (error) {
     console.error('Update plan error:', error);

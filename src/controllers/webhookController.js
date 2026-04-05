@@ -213,19 +213,35 @@ exports.webhookHealth = async (req, res) => {
 /**
  * Verify Facebook webhook
  * GET /api/webhooks/facebook
+ * Meta sends: hub.mode=subscribe&hub.verify_token=YOUR_TOKEN&hub.challenge=CHALLENGE
+ * We must respond 200 with body = challenge if token matches META_WEBHOOK_VERIFY_TOKEN.
  */
 exports.verifyFacebookWebhook = (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('Facebook webhook verification request:', { mode, token });
+  const expectedToken = process.env.META_WEBHOOK_VERIFY_TOKEN;
+  const tokenMatches = !!expectedToken && token === expectedToken;
 
-  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+  console.log('Facebook webhook verification request:', {
+    mode,
+    hasToken: !!token,
+    tokenLength: token?.length,
+    hasChallenge: !!challenge,
+    tokenMatches
+  });
+
+  if (mode === 'subscribe' && tokenMatches && challenge) {
     console.log('Facebook webhook verified successfully');
     res.status(200).send(challenge);
   } else {
-    console.error('Facebook webhook verification failed');
+    const reason = !mode || mode !== 'subscribe' ? 'mode not subscribe'
+      : !expectedToken ? 'META_WEBHOOK_VERIFY_TOKEN not set in env'
+      : !tokenMatches ? 'verify token does not match META_WEBHOOK_VERIFY_TOKEN'
+      : !challenge ? 'missing hub.challenge'
+      : 'unknown';
+    console.error('Facebook webhook verification failed:', reason);
     res.sendStatus(403);
   }
 };
@@ -235,30 +251,55 @@ exports.verifyFacebookWebhook = (req, res) => {
  * POST /api/webhooks/facebook
  */
 exports.handleFacebookWebhook = async (req, res) => {
+  // Log every POST immediately (even empty body) so we know if Meta is calling
+  console.log('[Facebook Webhook] POST hit – Meta is calling this URL');
+
   try {
-    // Log immediately so we can see if Meta is hitting this endpoint at all
+    // If we get a body but no entry/object, log raw keys to debug Meta's payload format
+    const hasBody = !!req.body;
+    const bodyKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
+    const obj = req.body?.object;
+    const entryCount = req.body?.entry?.length ?? 0;
+    const firstEntry = req.body?.entry?.[0];
+    const pageId = firstEntry?.id;
+    const hasMessaging = !!(firstEntry?.messaging && firstEntry.messaging.length > 0);
+
     console.log('[Facebook Webhook] POST received', {
-      hasBody: !!req.body,
-      object: req.body?.object,
-      entryCount: req.body?.entry?.length ?? 0
+      hasBody,
+      object: obj,
+      entryCount,
+      pageId: pageId || '(no entry.id)',
+      hasMessaging,
+      messagingCount: firstEntry?.messaging?.length ?? 0
     });
 
+    // When Meta sends something but entry is empty, show what we got so we can fix parsing
+    if (hasBody && (entryCount === 0 || !obj)) {
+      console.log('[Facebook Webhook] Payload keys:', bodyKeys.join(', '), '| body.entry type:', Array.isArray(req.body?.entry) ? 'array' : typeof req.body?.entry);
+    }
+
     const { webhookQueue } = require('../config/queue');
-    
-    console.log('Facebook webhook received:', JSON.stringify(req.body, null, 2));
 
     // Acknowledge receipt immediately
     res.sendStatus(200);
 
-    // Process webhook asynchronously
-    const entry = req.body.entry?.[0];
-    if (!entry) {
-      console.log('No entry in Facebook webhook payload');
+    // Only process Page webhooks (messages, feed, etc.). Ignore others (e.g. object: 'permissions')
+    if (obj !== 'page') {
+      if (obj) console.log('[Facebook Webhook] Ignoring non-page object:', obj);
       return;
     }
 
-    // Determine organization from page ID
-    const pageId = entry.id;
+    if (!firstEntry) {
+      console.log('[Facebook Webhook] No entry in payload – nothing to process');
+      return;
+    }
+
+    // For debugging: if this is a messaging event but we'll skip, log why
+    if (hasMessaging) {
+      console.log('[Facebook Webhook] Messenger DM event: pageId=%s, sender=%s', pageId, firstEntry.messaging?.[0]?.sender?.id);
+    }
+
+    // Determine organization from page ID (must match a connected Page in the app)
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'facebook',
@@ -267,7 +308,7 @@ exports.handleFacebookWebhook = async (req, res) => {
     });
 
     if (!connection) {
-      console.log(`No active Facebook connection found for page: ${pageId}`);
+      console.log('[Facebook Webhook] No active Facebook connection found for pageId:', pageId, '- Ensure this Page is connected in the app (Settings → Connect Facebook → Page Manager) and that the Page you messaged is the same one.');
       return;
     }
 
@@ -284,7 +325,7 @@ exports.handleFacebookWebhook = async (req, res) => {
       }
     });
 
-    console.log('Facebook webhook queued for processing');
+    console.log('[Facebook Webhook] Queued for processing, pageId=%s', pageId);
   } catch (error) {
     console.error('Facebook webhook handler error:', error);
     // Don't send error response as we already sent 200
@@ -321,20 +362,26 @@ exports.handleInstagramWebhook = async (req, res) => {
     // Acknowledge receipt immediately so Meta doesn't retry
     res.sendStatus(200);
 
+    console.log('📩 [Instagram Webhook] Received POST:', JSON.stringify(req.body, null, 2));
+
     const entry = req.body.entry?.[0];
     if (!entry) {
       console.log('No entry in Instagram webhook payload');
       return;
     }
 
-    // Don't skip when standby has messages — we'll process standby in the job (same as incoming DMs)
+    // Process DMs (messaging/standby), comments, or mentions
     const hasMessaging = entry.messaging && entry.messaging.length > 0;
     const hasStandby = entry.standby && entry.standby.length > 0;
-    if (!hasMessaging && !hasStandby) {
+    const hasChanges = entry.changes && entry.changes.length > 0;
+    const hasCommentChange = hasChanges && entry.changes.some(c => c.field === 'comments');
+    const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
+    if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) {
       return;
     }
 
     const instagramId = entry.id;
+    const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
@@ -343,8 +390,34 @@ exports.handleInstagramWebhook = async (req, res) => {
     });
 
     if (!connection) {
-      console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. DM was sent to this IG account — connect it in Settings → Page Manager to receive DMs here.`);
+      if (isMetaTestEvent && hasMentionChange) {
+        console.log('[Instagram Webhook] Received Meta test mention event (entry.id=0). This confirms callback URL works.');
+      } else {
+        console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. Connect this Instagram in Settings → Page Manager to receive DMs/comments/mentions here.`);
+      }
       return;
+    }
+
+    // If DM arrived in standby, take thread control immediately so we can reply later.
+    // "Take control of conversations" must be ON in the Page's app settings for this to work.
+    if (hasStandby && !hasMessaging) {
+      const axios = require('axios');
+      const pageId = connection.platformPageId || connection.platformData?.pageId;
+      const accessToken = connection.accessToken;
+      if (pageId && accessToken) {
+        for (const event of entry.standby) {
+          const senderId = event.sender?.id;
+          if (!senderId) continue;
+          try {
+            await axios.post(`https://graph.facebook.com/v19.0/${pageId}/take_thread_control`, null, {
+              params: { recipient_id: senderId, access_token: accessToken }
+            });
+            console.log(`[Instagram Webhook] ✅ Took thread control for standby sender ${senderId}`);
+          } catch (ttcErr) {
+            console.warn(`[Instagram Webhook] ⚠️ take_thread_control failed for ${senderId}:`, ttcErr.response?.data?.error?.message || ttcErr.message);
+          }
+        }
+      }
     }
 
     const organizationId = connection.organization.toString();
@@ -720,26 +793,27 @@ exports.handleWhatsAppWebhook = async (req, res) => {
               console.error('❌ [WhatsApp] Failed to mark as read:', readError.message);
             }
 
-            // Queue for auto-reply processing
-            const organization = connection.organization;
-            if (organization.autoReplySettings && organization.autoReplySettings.enabled) {
-              try {
-                const { autoReplyQueue } = require('../config/queue');
-                await autoReplyQueue.add({
-                  interactionId: savedInteraction._id.toString(),
-                  organizationId: connection.organization._id.toString(),
-                  platform: 'whatsapp'
-                }, {
+            // Full AI pipeline + auto-reply queue (respects triggerMode, platforms, types, delay)
+            try {
+              const { aiQueue } = require('../config/queue');
+              const autoReplyScheduler = require('../services/autoReplyScheduler');
+              await aiQueue.add(
+                { interactionId: savedInteraction._id },
+                {
                   attempts: 3,
-                  backoff: {
-                    type: 'exponential',
-                    delay: 2000
-                  }
-                });
-                console.log(`✅ [WhatsApp] Queued for auto-reply: ${savedInteraction._id}`);
-              } catch (queueError) {
-                console.error('❌ [WhatsApp] Failed to queue auto-reply:', queueError.message);
+                  backoff: 2000,
+                  jobId: `ai-${savedInteraction._id}`
+                }
+              );
+              const queued = await autoReplyScheduler.queueImmediateAutoReply(
+                savedInteraction._id.toString(),
+                connection.organization._id.toString()
+              );
+              if (queued) {
+                console.log(`✅ [WhatsApp] AI + auto-reply queued: ${savedInteraction._id}`);
               }
+            } catch (queueError) {
+              console.error('❌ [WhatsApp] Failed to queue AI/auto-reply:', queueError.message);
             }
           }
         } 

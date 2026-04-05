@@ -68,8 +68,8 @@ router.get('/auto-reply', protect, async (req, res) => {
       // AI service
       aiService: {
         provider: aiService.provider,
-        model: aiService.provider === 'openai' ? aiService.openaiModel : aiService.ollamaModel,
-        hasApiKey: aiService.provider === 'openai' ? !!aiService.openaiApiKey : true
+        model: aiService.openaiModel,
+        hasApiKey: !!(aiService.openaiApiKey && aiService.openaiApiKey.trim())
       },
 
       // Scheduled jobs
@@ -139,7 +139,7 @@ router.get('/auto-reply', protect, async (req, res) => {
     diagnostics.interactions.eligibleForAutoReply = await Interaction.countDocuments(eligibleQuery);
 
     for (const interaction of eligibleInteractions) {
-      const canReply = aiService.canAutoReply(interaction, organization);
+      const canReply = await aiService.canAutoReply(interaction, organization);
       diagnostics.interactions.samples.push({
         _id: interaction._id,
         platform: interaction.platform,

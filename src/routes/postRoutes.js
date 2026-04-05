@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middlewares/auth');
+const { protect, authorize } = require('../middlewares/auth');
 const postController = require('../controllers/postController');
 const path = require('path');
 const fs = require('fs');
+const Media = require('../models/Media');
 
 /**
  * Post Routes
@@ -59,22 +60,28 @@ router.get('/test-media-url', async (req, res) => {
 });
 
 // @route   GET /api/posts/media/:filename
-// @desc    Serve uploaded media files (public for Instagram API)
+// @desc    Serve uploaded media files (public for Instagram API); S3-backed library items redirect
 // @access  Public (needed for Instagram to access the media)
-router.get('/media/:filename', (req, res) => {
+router.get('/media/:filename', async (req, res) => {
   try {
-    const filename = req.params.filename;
+    const filename = path.basename(req.params.filename || '');
+    if (!filename || filename === '.' || filename === '..') {
+      return res.status(400).json({ message: 'Invalid filename' });
+    }
     const filePath = path.join(__dirname, '../../uploads/posts', filename);
-    
+
     console.log(`📁 [Media] Serving file: ${filename}`);
     console.log(`📍 [Media] File path: ${filePath}`);
     console.log(`📋 [Media] Request headers:`, {
       'user-agent': req.get('user-agent'),
       'range': req.get('range')
     });
-    
-    // Check if file exists first
+
     if (!fs.existsSync(filePath)) {
+      const doc = await Media.findOne({ filename }).select('publicUrl').lean();
+      if (doc?.publicUrl && /^https?:\/\//i.test(String(doc.publicUrl))) {
+        return res.redirect(302, doc.publicUrl);
+      }
       console.error(`❌ [Media] File not found: ${filename}`);
       return res.status(404).json({ message: 'Media file not found' });
     }
@@ -139,9 +146,29 @@ router.get('/media/:filename', (req, res) => {
 router.post('/generate', protect, postController.generatePostWithAI);
 
 // @route   POST /api/posts/generate-variants
-// @desc    Generate N post variants for Content Studio
+// @desc    Generate N text variants for Content Studio (images handled separately)
 // @access  Private
 router.post('/generate-variants', protect, postController.generatePostVariantsWithAI);
+
+// @route   POST /api/posts/generate-variant-image
+// @desc    Generate one AI image for a single variant (called per-variant by frontend)
+// @access  Private
+router.post('/generate-variant-image', protect, postController.generateVariantImage);
+
+// @route   POST /api/posts/generate-variant-video
+// @desc    Submit an AI video generation job (returns jobId immediately)
+// @access  Private
+router.post('/generate-variant-video', protect, postController.generateVariantVideo);
+
+// @route   GET /api/posts/video-job/:jobId
+// @desc    Poll the status of a video generation job
+// @access  Private
+router.get('/video-job/:jobId', protect, postController.getVideoJobStatus);
+
+// @route   POST /api/posts/save-draft
+// @desc    Save an AI-generated variant as a draft ScheduledPost
+// @access  Private
+router.post('/save-draft', protect, postController.saveDraft);
 
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately
@@ -158,6 +185,36 @@ router.post('/schedule', protect, postController.schedulePost);
 // @access  Private
 router.post('/to-approval', protect, postController.sendToApproval);
 
+// @route   GET /api/posts/drafts
+// @desc    Get all draft posts
+// @access  Private
+router.get('/drafts', protect, postController.getDraftPosts);
+
+// @route   PATCH /api/posts/drafts/:id
+// @desc    Update draft content
+// @access  Private
+router.patch('/drafts/:id', protect, postController.updateDraft);
+
+// @route   PATCH /api/posts/drafts/:id/schedule
+// @desc    Schedule a draft
+// @access  Private
+router.patch('/drafts/:id/schedule', protect, postController.scheduleDraft);
+
+// @route   PATCH /api/posts/drafts/:id/send-to-approval
+// @desc    Move an existing draft to pending_approval
+// @access  Private
+router.patch('/drafts/:id/send-to-approval', protect, postController.sendDraftToApproval);
+
+// @route   DELETE /api/posts/drafts/:id
+// @desc    Delete a draft
+// @access  Private
+router.delete('/drafts/:id', protect, postController.deleteDraft);
+
+// @route   POST /api/posts/drafts/:id/publish
+// @desc    Publish a draft immediately
+// @access  Private
+router.post('/drafts/:id/publish', protect, postController.publishDraft);
+
 // @route   GET /api/posts/scheduled
 // @desc    Get all scheduled posts
 // @access  Private
@@ -173,15 +230,30 @@ router.get('/dashboard-counts', protect, postController.getDashboardCounts);
 // @access  Private
 router.get('/pending-approval', protect, postController.getPendingApprovalPosts);
 
+// @route   GET /api/posts/approval-history
+// @desc    Get full approval history (pending + approved + rejected) for the current user or whole org
+// @access  Private
+router.get('/approval-history', protect, postController.getApprovalHistory);
+
 // @route   PATCH /api/posts/:id/approve
 // @desc    Approve a post (optionally set scheduledFor)
-// @access  Private
-router.patch('/:id/approve', protect, postController.approvePost);
+// @access  Private — admin, manager, super_admin only
+router.patch('/:id/approve', protect, authorize('admin', 'manager', 'super_admin'), postController.approvePost);
 
 // @route   PATCH /api/posts/:id/reject
 // @desc    Reject a post
-// @access  Private
-router.patch('/:id/reject', protect, postController.rejectPost);
+// @access  Private — admin, manager, super_admin only
+router.patch('/:id/reject', protect, authorize('admin', 'manager', 'super_admin'), postController.rejectPost);
+
+// @route   PATCH /api/posts/:id/update-pending
+// @desc    Edit content and/or replace media before approving (admin/manager)
+// @access  Private — admin, manager, super_admin only
+router.patch('/:id/update-pending', protect, authorize('admin', 'manager', 'super_admin'), postController.updatePendingPostByAdmin);
+
+// @route   PATCH /api/posts/:id/resubmit
+// @desc    Agent edits rejected post content and resubmits for approval
+// @access  Private (post creator only)
+router.patch('/:id/resubmit', protect, postController.resubmitPost);
 
 // @route   GET /api/posts/published
 // @desc    Get all published posts

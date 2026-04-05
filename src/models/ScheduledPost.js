@@ -24,7 +24,7 @@ const scheduledPostSchema = new mongoose.Schema({
   },
   postType: {
     type: String,
-    enum: ['post', 'story', 'reel', 'short'],
+    enum: ['post', 'story', 'reel', 'short', 'video'],
     default: 'post'
   },
   platformConnection: {

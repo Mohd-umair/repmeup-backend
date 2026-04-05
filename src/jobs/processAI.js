@@ -1,10 +1,15 @@
 const Interaction = require('../models/Interaction');
+const IntentBucket = require('../models/IntentBucket');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const User = require('../models/User');
+const Organization = require('../models/Organization');
+const { resolveEscalationAssignmentUsers } = require('../services/autoAssignmentPoolService');
+const { runWithAiContext } = require('../services/aiRequestContext');
 const aiService = require('../services/aiService');
 const emailService = require('../services/emailService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
+const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 
 /**
  * Process AI analysis for an interaction
@@ -30,21 +35,26 @@ module.exports = async function processAI(job) {
       return { skipped: true, reason: 'Interaction not found' };
     }
 
-    // IMPORTANT: Skip if interaction already has replies (already been replied to)
-    if (interaction.replies && interaction.replies.length > 0) {
+    const threadDm = isThreadStyleDm(interaction);
+
+    if (!threadDm && interaction.replies && interaction.replies.length > 0) {
       jobLogger.debug('Skipping - interaction already has replies', { replyCount: interaction.replies.length });
       return { skipped: true, reason: 'Already has replies' };
     }
 
-    // Skip if already replied/resolved
-    if (interaction.status === 'replied' || interaction.status === 'resolved') {
+    if (!threadDm && (interaction.status === 'replied' || interaction.status === 'resolved')) {
       jobLogger.debug('Skipping - interaction status', { status: interaction.status });
       return { skipped: true, reason: `Status is ${interaction.status}` };
     }
 
+    const orgIdCtx = interaction.organization?._id || interaction.organization;
+
     // Step 1: Analyze sentiment
     jobLogger.debug('Analyzing sentiment');
-    const sentimentResult = await aiService.analyzeSentiment(interaction.content);
+    const sentimentResult = await runWithAiContext(
+      { organizationId: orgIdCtx, feature: 'processAI.sentiment' },
+      () => aiService.analyzeSentiment(interaction.content)
+    );
     
     interaction.sentiment = sentimentResult.sentiment;
     interaction.sentimentScore = sentimentResult.sentimentScore;
@@ -52,12 +62,38 @@ module.exports = async function processAI(job) {
 
     // Step 2: Detect intent
     jobLogger.debug('Detecting intent');
-    const intent = await aiService.detectIntent(interaction.content);
+    const intent = await runWithAiContext(
+      { organizationId: orgIdCtx, feature: 'processAI.detect_intent' },
+      () => aiService.detectIntent(interaction.content)
+    );
     interaction.intent = intent;
+
+    // Step 2b: Classify into intent bucket
+    jobLogger.debug('Classifying into intent bucket');
+    try {
+      const orgId = interaction.organization?._id || interaction.organization;
+      const activeBuckets = await IntentBucket.find({ organization: orgId, isActive: true }).sort({ order: 1 }).lean();
+      if (activeBuckets.length > 0) {
+        const bucketResult = await runWithAiContext(
+          { organizationId: orgIdCtx, feature: 'processAI.classify_bucket' },
+          () => aiService.classifyIntoBucket(interaction.content, activeBuckets)
+        );
+        if (bucketResult.bucketId) {
+          interaction.intentBucket = bucketResult.bucketId;
+          interaction.bucketAssignedBy = bucketResult.method;
+          jobLogger.debug('Bucket assigned', { bucketId: bucketResult.bucketId, method: bucketResult.method });
+        }
+      }
+    } catch (bucketErr) {
+      jobLogger.warn('Bucket classification failed (non-fatal)', { error: bucketErr.message });
+    }
 
     // Step 3: Extract topics
     jobLogger.debug('Extracting topics');
-    const topics = await aiService.extractTopics(interaction.content);
+    const topics = await runWithAiContext(
+      { organizationId: orgIdCtx, feature: 'processAI.extract_topics' },
+      () => aiService.extractTopics(interaction.content)
+    );
     interaction.topics = topics;
 
     // Step 4: Get knowledge base for AI response
@@ -67,24 +103,30 @@ module.exports = async function processAI(job) {
       isTrainingData: true
     }).sort({ trainingWeight: -1 }).limit(10);
 
+    const populatedOrg = interaction.organization && typeof interaction.organization === 'object'
+      ? interaction.organization
+      : null;
+    const orgId = populatedOrg?._id || interaction.organization;
+
     // Step 5: Generate AI response suggestion
     jobLogger.debug('Generating AI response');
-    const aiResponse = await aiService.generateResponse(interaction, knowledgeBase);
+    const aiResponse = await runWithAiContext(
+      { organizationId: orgIdCtx, feature: 'processAI.generate_response' },
+      () => aiService.generateResponse(interaction, orgId, knowledgeBase)
+    );
     
     if (aiResponse) {
       interaction.aiSuggestion = aiResponse;
     }
 
-    // Step 6: Determine if auto-reply eligible
-    interaction.autoReplyEligible = aiService.canAutoReply(interaction);
+    // Step 6: Determine if auto-reply eligible (pass populated org so settings are evaluated)
+    interaction.autoReplyEligible = await aiService.canAutoReply(interaction, populatedOrg || {});
 
     // Step 7: Check if should auto-reply or assign to agent
     if (interaction.autoReplyEligible && aiResponse) {
       jobLogger.debug('Interaction eligible for auto-reply');
     } else {
-      // Assign to agent only if organization has auto-assign enabled
-      const organization = interaction.organization && typeof interaction.organization === 'object' ? interaction.organization : null;
-      const autoAssign = organization?.escalationSettings?.autoAssign !== false;
+      const autoAssign = populatedOrg?.escalationSettings?.autoAssign !== false;
       if (autoAssign) {
         jobLogger.debug('Assigning to agent (auto-assign enabled)');
         await assignToAgent(interaction, 'ai_unable');
@@ -129,23 +171,56 @@ module.exports = async function processAI(job) {
  */
 async function assignToAgent(interaction, reason) {
   try {
-    // Find available agent (least busy)
-    const agents = await User.find({
-      organization: interaction.organization,
-      role: 'agent',
-      isActive: true
-    });
+    const orgId = interaction.organization?._id || interaction.organization;
+    const orgDoc =
+      interaction.organization &&
+      typeof interaction.organization === 'object' &&
+      interaction.organization.escalationSettings
+        ? interaction.organization
+        : await Organization.findById(orgId);
 
-    if (agents.length === 0) {
-      logger.warn('No agents available for assignment', { 
-        organizationId: interaction.organization.toString() 
+    if (!orgDoc) {
+      logger.warn('Organization not found for assignment', {
+        organizationId: String(orgId)
       });
       return;
     }
 
-    // Count current assignments for each agent
+    const poolUsers = await resolveEscalationAssignmentUsers(orgDoc);
+
+    if (poolUsers.length === 0) {
+      logger.warn('No users available for assignment', {
+        organizationId: orgId.toString()
+      });
+      return;
+    }
+
+    const agentOnly = poolUsers.filter((u) => u.role === 'agent');
+
+    const bucketId = interaction.intentBucket ? interaction.intentBucket.toString() : null;
+    const platform = interaction.platform ? interaction.platform.toLowerCase() : null;
+
+    const matchedAgents = agentOnly.filter((agent) => {
+      const hasBuckets = Array.isArray(agent.assignedBuckets) && agent.assignedBuckets.length > 0;
+      const hasPlatforms = Array.isArray(agent.assignedPlatforms) && agent.assignedPlatforms.length > 0;
+
+      if (!hasBuckets && !hasPlatforms) return false;
+
+      const bucketMatch = !hasBuckets || (bucketId && agent.assignedBuckets.some((b) => b.toString() === bucketId));
+      const platformMatch = !hasPlatforms || (platform && agent.assignedPlatforms.includes(platform));
+
+      return bucketMatch && platformMatch;
+    });
+
+    const pool =
+      agentOnly.length > 0
+        ? matchedAgents.length > 0
+          ? matchedAgents
+          : agentOnly
+        : poolUsers;
+
     const agentWorkload = await Promise.all(
-      agents.map(async (agent) => {
+      pool.map(async (agent) => {
         const count = await Interaction.countDocuments({
           assignedTo: agent._id,
           status: { $in: ['assigned', 'unread'] }
@@ -154,20 +229,19 @@ async function assignToAgent(interaction, reason) {
       })
     );
 
-    // Sort by workload (ascending) and get least busy agent
     agentWorkload.sort((a, b) => a.count - b.count);
     const selectedAgent = agentWorkload[0].agent;
 
-    // Assign
     await interaction.assignTo(selectedAgent._id, null, reason);
-
-    // Send notification email
     await emailService.sendAssignmentNotification(selectedAgent, interaction);
 
-    console.log(`Assigned interaction ${interaction._id} to agent ${selectedAgent.email}`);
+    console.log(
+      `Assigned interaction ${interaction._id} to agent ${selectedAgent.email}` +
+      (matchedAgents.length > 0 ? ' (bucket/platform match)' : ' (fallback)')
+    );
 
   } catch (error) {
-    logger.error('Agent assignment error', { 
+    logger.error('Agent assignment error', {
       error: error.message,
       interactionId: interaction._id.toString()
     });

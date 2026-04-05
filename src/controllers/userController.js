@@ -3,6 +3,8 @@ const Organization = require('../models/Organization');
 const Subscription = require('../models/Subscription');
 const Interaction = require('../models/Interaction');
 const { escapeRegex } = require('../utils/sanitize');
+const userActivityLogService = require('../services/userActivityLogService');
+const { parsePagination, paginationMeta } = require('../utils/pagination');
 
 // @desc    Get all users in organization
 // @route   GET /api/users
@@ -11,9 +13,10 @@ exports.getUsers = async (req, res, next) => {
   try {
     const { role, status, search } = req.query;
     const organizationId = req.user.organization._id;
+    const { page, limit, skip } = parsePagination(req.query);
 
-    // Build query
-    const query = { organization: organizationId };
+    // Build query (exclude soft-deleted)
+    const query = { organization: organizationId, deletedAt: null };
 
     if (role) {
       query.role = role;
@@ -32,11 +35,17 @@ exports.getUsers = async (req, res, next) => {
       ];
     }
 
-    const users = await User.find(query)
-      .select('-password')
-      .sort({ createdAt: -1 });
+    const [total, users] = await Promise.all([
+      User.countDocuments(query),
+      User.find(query)
+        .select('-password')
+        .populate('assignedBuckets', 'name color')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+    ]);
 
-    // Get assigned task counts for each user
+    // Get assigned task counts for each user on this page
     const usersWithStats = await Promise.all(
       users.map(async (user) => {
         const assignedTasks = await Interaction.countDocuments({
@@ -60,8 +69,8 @@ exports.getUsers = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      count: usersWithStats.length,
-      data: usersWithStats
+      data: usersWithStats,
+      pagination: paginationMeta(total, page, limit)
     });
   } catch (error) {
     console.error('Get users error:', error);
@@ -76,7 +85,8 @@ exports.getUserById = async (req, res, next) => {
   try {
     const user = await User.findOne({
       _id: req.params.id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     }).select('-password');
 
     if (!user) {
@@ -133,7 +143,7 @@ exports.createUser = async (req, res, next) => {
       });
     }
 
-    const { email, password, firstName, lastName, role } = req.body;
+    const { email, password, firstName, lastName, role, assignedBuckets, assignedPlatforms } = req.body;
     const organizationId = req.user.organization._id;
 
     // Check if email already exists
@@ -163,7 +173,7 @@ exports.createUser = async (req, res, next) => {
     }
 
     // Create user
-    const user = await User.create({
+    const userData = {
       email: email.toLowerCase(),
       password,
       firstName,
@@ -171,7 +181,11 @@ exports.createUser = async (req, res, next) => {
       role: role || 'agent',
       organization: organizationId,
       isActive: true
-    });
+    };
+    if (Array.isArray(assignedBuckets)) userData.assignedBuckets = assignedBuckets;
+    if (Array.isArray(assignedPlatforms)) userData.assignedPlatforms = assignedPlatforms;
+
+    const user = await User.create(userData);
 
     // Update organization and subscription user counts
     await Organization.findByIdAndUpdate(organizationId, {
@@ -212,12 +226,13 @@ exports.createUser = async (req, res, next) => {
 exports.updateUser = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { firstName, lastName, role, isActive, preferences } = req.body;
+    const { firstName, lastName, role, isActive, preferences, assignedBuckets, assignedPlatforms } = req.body;
 
     // Check if user exists in same organization
     const userToUpdate = await User.findOne({
       _id: id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     });
 
     if (!userToUpdate) {
@@ -261,6 +276,8 @@ exports.updateUser = async (req, res, next) => {
     if (role && canUpdateOthers) updateData.role = role;
     if (typeof isActive === 'boolean' && canUpdateOthers) updateData.isActive = isActive;
     if (preferences) updateData.preferences = { ...userToUpdate.preferences, ...preferences };
+    if (Array.isArray(assignedBuckets) && canUpdateOthers) updateData.assignedBuckets = assignedBuckets;
+    if (Array.isArray(assignedPlatforms) && canUpdateOthers) updateData.assignedPlatforms = assignedPlatforms;
 
     const updatedUser = await User.findByIdAndUpdate(
       id,
@@ -306,7 +323,8 @@ exports.deleteUser = async (req, res, next) => {
     // Check if user exists in same organization
     const userToDelete = await User.findOne({
       _id: id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     });
 
     if (!userToDelete) {
@@ -366,7 +384,8 @@ exports.getUserStats = async (req, res, next) => {
     // Check if user exists in same organization
     const user = await User.findOne({
       _id: id,
-      organization: req.user.organization._id
+      organization: req.user.organization._id,
+      deletedAt: null
     }).select('-password');
 
     if (!user) {
@@ -534,6 +553,7 @@ exports.getAvailableAgents = async (req, res, next) => {
     // Get all active agents and managers
     const agents = await User.find({
       organization: organizationId,
+      deletedAt: null,
       isActive: true,
       role: { $in: ['agent', 'manager', 'admin'] }
     })
@@ -570,6 +590,35 @@ exports.getAvailableAgents = async (req, res, next) => {
     });
   } catch (error) {
     console.error('Get available agents error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    SPA navigation beacon (page / route views)
+ * @route   POST /api/users/me/activity
+ * @access  Private
+ */
+exports.recordClientNavigation = async (req, res, next) => {
+  try {
+    const route = typeof req.body?.route === 'string' ? req.body.route.trim() : '';
+    if (!route || route.length > 512) {
+      return res.status(400).json({
+        success: false,
+        error: 'route is required (max 512 characters)'
+      });
+    }
+    const title =
+      typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 200) : undefined;
+    const referrer =
+      typeof req.body?.referrer === 'string' ? req.body.referrer.trim().slice(0, 512) : undefined;
+    const meta = {};
+    if (title) meta.title = title;
+    if (referrer) meta.referrer = referrer;
+
+    userActivityLogService.recordNavigation(req, route, meta);
+    return res.status(204).send();
+  } catch (error) {
     next(error);
   }
 };

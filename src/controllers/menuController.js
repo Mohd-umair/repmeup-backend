@@ -1,4 +1,77 @@
 const Menu = require('../models/Menu');
+const User = require('../models/User');
+const Group = require('../models/Group');
+const { DEFAULT_SUBMENU_PACKS } = require('../config/defaultMenuSubmenus');
+
+function menuIdStr(id) {
+  if (id == null) return '';
+  return id.toString();
+}
+
+/**
+ * Build grouped menus: top-level only, with nested `children` from parentId (already permission-filtered).
+ */
+function buildGroupedMenuTree(accessibleMenus) {
+  const byParent = new Map();
+  accessibleMenus.forEach((m) => {
+    if (!m.parentId) return;
+    const pid = menuIdStr(m.parentId);
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid).push(m);
+  });
+  byParent.forEach((arr) => arr.sort((a, b) => (a.order || 0) - (b.order || 0)));
+
+  const topLevel = accessibleMenus.filter((m) => !m.parentId);
+
+  const enriched = topLevel.map((parent) => {
+    const kids = byParent.get(menuIdStr(parent._id)) || [];
+    if (kids.length === 0) return { ...parent };
+    return { ...parent, children: kids };
+  });
+
+  const groupedMenus = { main: [], management: [], settings: [] };
+  enriched.forEach((menu) => {
+    if (groupedMenus[menu.group]) {
+      groupedMenus[menu.group].push(menu);
+    }
+  });
+  return groupedMenus;
+}
+
+function passesMenuRoles(requiredRoles, userRole, isBypassRole) {
+  if (isBypassRole) return true;
+  if (!requiredRoles || requiredRoles.length === 0) return true;
+  return requiredRoles.includes(userRole);
+}
+
+function passesMenuPermissions(requiredPermissions, permissionSet, isBypassRole, user) {
+  if (isBypassRole) return true;
+  if (user?.role === 'admin' && permissionSet.size === 0) return true;
+  if (!requiredPermissions || requiredPermissions.length === 0) return true;
+  if (permissionSet.size === 0) return false;
+  return requiredPermissions.every((p) => permissionSet.has(p));
+}
+
+async function resolveEffectiveGroupForMenuUser(user) {
+  if (user?.group && Array.isArray(user.group.permissions) && user.group.permissions.length > 0) {
+    return user.group;
+  }
+
+  const roleToSlug = {
+    super_admin: 'super-admin',
+    admin: 'admin',
+    manager: 'manager',
+    agent: 'agent',
+    viewer: 'viewer'
+  };
+
+  const slug = roleToSlug[user?.role];
+  if (!slug) return null;
+
+  return Group.findOne({ slug, isActive: true })
+    .populate('permissions', 'code')
+    .lean();
+}
 
 /**
  * @desc    Get user's accessible menus
@@ -7,86 +80,67 @@ const Menu = require('../models/Menu');
  */
 exports.getMenus = async (req, res, next) => {
   try {
-    const user = req.user;
-    
-    console.log('🔍 [Menu] User requesting menus:', {
-      email: user.email,
-      role: user.role,
-      permissions: user.permissions
-    });
+    const baseUser = req.user;
+    const user = await User.findById(baseUser._id)
+      .select('email role permissions group')
+      .populate({
+        path: 'group',
+        populate: { path: 'permissions', select: 'code' }
+      })
+      .lean();
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'User not found' });
+    }
 
-    // Fetch all active menus
+    const effectiveGroup = await resolveEffectiveGroupForMenuUser(user);
+    const groupCodes = Array.isArray(effectiveGroup?.permissions)
+      ? effectiveGroup.permissions.map((p) => (typeof p === 'object' ? p.code : p)).filter(Boolean)
+      : [];
+    const directCodes = Array.isArray(user.permissions) ? user.permissions.filter(Boolean) : [];
+    const permissionCodes = [...new Set([...groupCodes, ...directCodes])];
+    const permissionSet = new Set(permissionCodes);
+    const isBypassRole = user.role === 'super_admin';
+    
+    // Fetch all active menus (single source of truth from DB config)
     const allMenus = await Menu.find({ isActive: true })
       .sort({ group: 1, order: 1 })
       .lean();
-    
-    console.log(`📋 [Menu] Found ${allMenus.length} active menus in database`);
 
     // Filter menus based on user permissions
-    const accessibleMenus = allMenus.filter(menu => {
-      // Check role requirements
+    const accessibleMenus = allMenus.filter((menu) => {
+      if (isBypassRole) {
+        return true;
+      }
+
       if (menu.requiredRoles && menu.requiredRoles.length > 0) {
-        if (!menu.requiredRoles.includes(user.role)) {
-          console.log(`❌ [Menu] ${menu.label} - Role '${user.role}' not in required roles: [${menu.requiredRoles.join(', ')}]`);
+        const bypassRoleCheck = user.role === 'admin';
+        if (!bypassRoleCheck && !menu.requiredRoles.includes(user.role)) {
           return false;
         }
       }
 
-      // Check permission requirements
       if (menu.requiredPermissions && menu.requiredPermissions.length > 0) {
-        if (!user.permissions || !Array.isArray(user.permissions)) {
-          return false;
-        }
+        // Org admins often lack every granular code (e.g. posts.manage); route guards still apply on navigation.
+        const bypassPermCheck = user.role === 'admin';
+        if (!bypassPermCheck) {
+          if (permissionSet.size === 0) {
+            return false;
+          }
 
-        const hasAllPermissions = menu.requiredPermissions.every(
-          permission => user.permissions.includes(permission)
-        );
+          const hasAllPermissions = menu.requiredPermissions.every((permission) =>
+            permissionSet.has(permission)
+          );
 
-        if (!hasAllPermissions) {
-          return false;
+          if (!hasAllPermissions) {
+            return false;
+          }
         }
       }
 
-      console.log(`✅ [Menu] ${menu.label} - Accessible`);
       return true;
     });
-    
-    console.log(`✅ [Menu] User has access to ${accessibleMenus.length} menus`);
 
-    // Ensure Content menu exists (for apps that were seeded before Content was added)
-    const hasContentMenu = accessibleMenus.some(m => m.route === '/app/content');
-    const canAccessContent = ['admin', 'manager', 'agent'].includes(user.role);
-    if (!hasContentMenu && canAccessContent) {
-      const contentMenu = {
-        _id: 'content-default',
-        label: 'Content',
-        icon: '📄',
-        route: '/app/content',
-        requiredRoles: ['admin', 'manager', 'agent'],
-        order: 5,
-        group: 'main',
-        isActive: true,
-        badge: { enabled: false, source: 'none' }
-      };
-      accessibleMenus.push(contentMenu);
-      accessibleMenus.sort((a, b) => {
-        const g = (m) => (m.group === 'main' ? 0 : m.group === 'management' ? 1 : 2);
-        return g(a) - g(b) || (a.order || 0) - (b.order || 0);
-      });
-    }
-
-    // Group menus by group
-    const groupedMenus = {
-      main: [],
-      management: [],
-      settings: []
-    };
-
-    accessibleMenus.forEach(menu => {
-      if (groupedMenus[menu.group]) {
-        groupedMenus[menu.group].push(menu);
-      }
-    });
+    const groupedMenus = buildGroupedMenuTree(accessibleMenus);
 
     res.status(200).json({
       success: true,
@@ -281,22 +335,6 @@ exports.seedMenus = async (req, res, next) => {
         }
       },
       {
-        label: 'Publish',
-        icon: '✈️',
-        route: '/app/publish',
-        order: 4,
-        group: 'main',
-        requiredRoles: ['admin', 'manager', 'agent']
-      },
-      {
-        label: 'Content',
-        icon: '📄',
-        route: '/app/content',
-        order: 5,
-        group: 'main',
-        requiredRoles: ['admin', 'manager', 'agent']
-      },
-      {
         label: 'Knowledge Base',
         icon: '🧠',
         route: '/app/knowledge-base',
@@ -333,15 +371,197 @@ exports.seedMenus = async (req, res, next) => {
       }
     ];
 
-    const menus = await Menu.insertMany(defaultMenus);
+    const inserted = await Menu.insertMany(defaultMenus);
+
+    const publishParent = await Menu.create({
+      label: 'Publish',
+      icon: '✈️',
+      route: '/app/publish',
+      order: 4,
+      group: 'main',
+      requiredRoles: ['admin', 'manager', 'agent'],
+      requiredPermissions: []
+    });
+
+    const publishChildren = await Menu.insertMany([
+      {
+        label: 'Create',
+        icon: '✏️',
+        route: '/app/publish',
+        order: 1,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.create']
+      },
+      {
+        label: 'Calendar',
+        icon: '📅',
+        route: '/app/publish/calendar',
+        order: 2,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      },
+      {
+        label: 'Published',
+        icon: '📋',
+        route: '/app/content',
+        queryParams: { view: 'published' },
+        order: 3,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      }
+    ]);
+
+    const extraMenus = [];
+    for (const pack of DEFAULT_SUBMENU_PACKS) {
+      if (pack.parentRoute === '/app/publish') continue;
+      const parent = await Menu.findOne({
+        route: pack.parentRoute,
+        $or: [{ parentId: null }, { parentId: { $exists: false } }]
+      });
+      if (!parent) continue;
+      const docs = pack.children.map((c) => ({
+        ...c,
+        group: parent.group || 'main',
+        parentId: parent._id,
+        isActive: true
+      }));
+      const created = await Menu.insertMany(docs);
+      extraMenus.push(...created);
+    }
+
+    const menus = [...inserted, publishParent, ...publishChildren, ...extraMenus];
 
     res.status(201).json({
       success: true,
       data: menus,
-      message: `${menus.length} menus seeded successfully`
+      message: `${menus.length} menus seeded (Publish, Analytics, Settings submenus from DB)`
     });
   } catch (error) {
     console.error('Seed menus error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Add Publish submenus (Create, Calendar, Published) for existing installs — idempotent
+ * @route   POST /api/menus/migrate-publish-submenus
+ * @access  Private (Admin)
+ */
+exports.migratePublishSubmenus = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Only administrators can run menu migration'
+      });
+    }
+
+    const publishParent = await Menu.findOne({
+      route: '/app/publish',
+      $or: [{ parentId: null }, { parentId: { $exists: false } }]
+    });
+
+    if (!publishParent) {
+      return res.status(404).json({
+        success: false,
+        error: 'Top-level Publish menu not found. Create one or reseed menus.'
+      });
+    }
+
+    const existing = await Menu.countDocuments({ parentId: publishParent._id });
+    if (existing > 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'Publish submenus already exist',
+        data: { created: 0, existing }
+      });
+    }
+
+    const publishChildren = await Menu.insertMany([
+      {
+        label: 'Create',
+        icon: '✏️',
+        route: '/app/publish',
+        order: 1,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.create']
+      },
+      {
+        label: 'Calendar',
+        icon: '📅',
+        route: '/app/publish/calendar',
+        order: 2,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      },
+      {
+        label: 'Published',
+        icon: '📋',
+        route: '/app/content',
+        queryParams: { view: 'published' },
+        order: 3,
+        group: 'main',
+        parentId: publishParent._id,
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['posts.read']
+      }
+    ]);
+
+    res.status(201).json({
+      success: true,
+      message: 'Publish submenus created',
+      data: { created: publishChildren.length }
+    });
+  } catch (error) {
+    console.error('migratePublishSubmenus error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Point /app/content menu items at platform library (strip ?view=published). Idempotent.
+ * @route   POST /api/menus/migrate-content-menu-library
+ * @access  Private (Admin)
+ */
+exports.migrateContentMenuLibrary = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Only administrators can run menu migration'
+      });
+    }
+
+    const cleared = await Menu.updateMany(
+      { route: '/app/content', 'queryParams.view': 'published' },
+      { $unset: { queryParams: 1 } }
+    );
+
+    const relabeled = await Menu.updateMany(
+      { route: '/app/content', label: 'Published' },
+      { $set: { label: 'Content', icon: '📚' } }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Content menu opens platform library; RepMeUp published is available from the Content page tab.',
+      data: {
+        clearedPublishedQueryParam: cleared.modifiedCount,
+        relabeledPublishedToContent: relabeled.modifiedCount
+      }
+    });
+  } catch (error) {
+    console.error('migrateContentMenuLibrary error:', error);
     next(error);
   }
 };

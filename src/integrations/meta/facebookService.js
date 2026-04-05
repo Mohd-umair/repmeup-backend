@@ -24,26 +24,58 @@ class FacebookService {
     if (!platformPageId) {
       throw new Error('Facebook Page ID is missing. Please reconnect your Facebook account.');
     }
-    let allPosts = [];
-    let nextPage = `${this.baseURL}/${platformPageId}/feed`;
-    let pageCount = 0;
     const maxPages = 10;
-    const fields = 'id,message,created_time,full_picture,permalink_url,attachments{media_type,type}';
-    while (nextPage && pageCount < maxPages) {
+    // Start with full fields; fallback to minimal fields if API returns 400 (e.g. permission on attachments)
+    const fieldsSets = [
+      'id,message,created_time,full_picture,permalink_url,attachments{media_type,type},reactions.summary(true),shares',
+      'id,message,created_time,full_picture,permalink_url,reactions.summary(true),shares',
+      'id,message,created_time,full_picture,permalink_url'
+    ];
+    for (const fields of fieldsSets) {
+      let allPosts = [];
+      let nextPage = `${this.baseURL}/${platformPageId}/feed`;
+      let pageCount = 0;
       try {
-        const response = await axios.get(nextPage, {
-          params: { fields, limit: 25, access_token: accessToken }
-        });
-        const posts = response.data.data || [];
-        allPosts = allPosts.concat(posts);
-        nextPage = response.data.paging?.next;
-        pageCount++;
+        while (nextPage && pageCount < maxPages) {
+          const response = await axios.get(nextPage, {
+            params: { fields, limit: 25, access_token: accessToken }
+          });
+          const posts = response.data.data || [];
+          allPosts = allPosts.concat(posts);
+          nextPage = response.data.paging?.next;
+          pageCount++;
+        }
+        if (allPosts.length > 0) {
+          const sample = allPosts[0];
+          console.log(`[Facebook] getPagePosts using fields: ${fields.substring(0, 60)}...`);
+          console.log(`[Facebook] Sample post reactions:`, JSON.stringify(sample.reactions ?? 'MISSING'));
+          console.log(`[Facebook] Sample post shares:`, JSON.stringify(sample.shares ?? 'MISSING'));
+        }
+        return allPosts;
       } catch (error) {
-        console.error(`[Facebook] getPagePosts error:`, error.message);
+        const fbError = error.response?.data?.error;
+        const code = fbError?.code;
+        const message = fbError?.message || error.message;
+        const subcode = fbError?.error_subcode;
+        console.error('[Facebook] getPagePosts error:', message, code != null ? `(code ${code})` : '', subcode != null ? `subcode ${subcode}` : '');
+        if (error.response?.data && !fbError) {
+          console.error('[Facebook] getPagePosts response:', JSON.stringify(error.response.data).slice(0, 400));
+        }
+        // Code 10 = permission required (e.g. pages_read_engagement). Retrying with minimal fields won't help.
+        if (code === 10 && (message || '').toLowerCase().includes('pages_read_engagement')) {
+          const err = new Error('This Page was connected without the "pages_read_engagement" permission. Please reconnect your Facebook Page in Settings → Manage Pages & Accounts so we can read its posts.');
+          err.code = 'FACEBOOK_PERMISSION_MISSING';
+          err.fbCode = 10;
+          throw err;
+        }
+        if (error.response?.status === 400 && fieldsSets.indexOf(fields) < fieldsSets.length - 1) {
+          console.warn('[Facebook] getPagePosts retrying with minimal fields');
+          continue;
+        }
         break;
       }
     }
-    return allPosts;
+    return [];
   }
 
   /**
@@ -59,28 +91,124 @@ class FacebookService {
     if (!pageId || !recipientPsid || !accessToken) {
       return { success: false, error: 'Missing pageId, recipientPsid, or accessToken' };
     }
-    try {
+
+    const attemptSend = async (useTag) => {
       const body = {
         recipient: { id: String(recipientPsid) },
         message: { text: String(text) }
       };
-      if (useHumanAgentTag) {
+      if (useTag) {
         body.messaging_type = 'MESSAGE_TAG';
         body.tag = 'HUMAN_AGENT';
       } else {
         body.messaging_type = 'RESPONSE';
       }
-      const response = await axios.post(
+      return axios.post(
         `${this.baseURL}/${pageId}/messages`,
         body,
         { params: { access_token: accessToken }, timeout: 15000 }
       );
+    };
+
+    try {
+      let response;
+      try {
+        response = await attemptSend(useHumanAgentTag);
+      } catch (tagErr) {
+        const tagErrCode = tagErr.response?.data?.error?.code;
+        const tagErrMsg = tagErr.response?.data?.error?.message || '';
+        // Error 100 = HUMAN_AGENT tag not approved — fall back to RESPONSE messaging type
+        if (tagErrCode === 100 || tagErrMsg.toLowerCase().includes('human agent')) {
+          console.warn('[Facebook] HUMAN_AGENT tag not approved, retrying with RESPONSE messaging_type');
+          response = await attemptSend(false);
+        } else {
+          throw tagErr;
+        }
+      }
       const messageId = response.data?.message_id;
       return { success: true, platformResponseId: messageId };
     } catch (err) {
       const apiError = err.response?.data?.error;
       const message = apiError?.message || err.message;
       console.error('[Facebook] sendMessage error:', message, apiError?.code);
+      return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Send an attachment (image, video, or file) via Messenger.
+   * @param {string} [localFilePath] - If provided, uploads the file directly via
+   *   multipart form-data instead of passing a URL for Facebook to download.
+   *   This is more reliable behind tunnels (ngrok) and for formats like audio/webm.
+   */
+  async sendMessageWithAttachment(recipientPsid, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = false, localFilePath = null) {
+    if (!pageId || !recipientPsid || !accessToken || !attachmentType) {
+      return { success: false, error: 'Missing pageId, recipientPsid, accessToken, or attachmentType' };
+    }
+    const allowedTypes = ['image', 'video', 'file', 'audio'];
+    if (!allowedTypes.includes(attachmentType)) {
+      return { success: false, error: `attachmentType must be one of: ${allowedTypes.join(', ')}` };
+    }
+    const fs = require('fs');
+    const FormData = require('form-data');
+    const useDirectUpload = localFilePath && fs.existsSync(localFilePath);
+
+    try {
+      const apiUrl = `${this.baseURL}/${pageId}/messages`;
+      const platformType = attachmentType;
+
+      const sendRequest = async (useTag) => {
+        if (useDirectUpload) {
+          const form = new FormData();
+          form.append('recipient', JSON.stringify({ id: String(recipientPsid) }));
+          form.append('messaging_type', useTag ? 'MESSAGE_TAG' : 'RESPONSE');
+          if (useTag) form.append('tag', 'HUMAN_AGENT');
+          form.append('message', JSON.stringify({
+            attachment: { type: platformType, payload: { is_reusable: false } }
+          }));
+          form.append('filedata', fs.createReadStream(localFilePath));
+          return axios.post(apiUrl, form, {
+            params: { access_token: accessToken },
+            headers: form.getHeaders(),
+            timeout: 30000,
+            maxContentLength: 100 * 1024 * 1024
+          });
+        }
+        const body = {
+          recipient: { id: String(recipientPsid) },
+          messaging_type: useTag ? 'MESSAGE_TAG' : 'RESPONSE',
+          tag: useTag ? 'HUMAN_AGENT' : undefined,
+          message: {
+            attachment: {
+              type: platformType,
+              payload: { url: String(attachmentUrl), is_reusable: false }
+            }
+          }
+        };
+        if (!useTag) delete body.tag;
+        return axios.post(apiUrl, body, {
+          params: { access_token: accessToken }, timeout: 15000
+        });
+      };
+
+      let response;
+      try {
+        response = await sendRequest(useHumanAgentTag);
+      } catch (tagErr) {
+        if (tagErr.response?.data?.error?.code === 100 || (tagErr.response?.data?.error?.message || '').toLowerCase().includes('human agent')) {
+          response = await sendRequest(false);
+        } else {
+          throw tagErr;
+        }
+      }
+      if (caption && caption.trim()) {
+        await this.sendMessage(recipientPsid, caption.trim(), accessToken, pageId, false);
+      }
+      return { success: true, platformResponseId: response.data?.message_id };
+    } catch (err) {
+      const apiError = err.response?.data?.error;
+      const message = apiError?.message || err.message;
+      console.error('[Facebook] sendMessageWithAttachment error:', message);
       return { success: false, error: message };
     }
   }
@@ -152,8 +280,10 @@ class FacebookService {
             try {
               const commentsResponse = await axios.get(commentsNextPage, {
                 params: {
-                  fields: 'id,message,from,created_time,attachment,parent,permalink_url,comment_count',
-                  limit: 100, // Facebook allows up to 100 comments per request
+                  // from{picture{url}} fetches the commenter's actual CDN avatar URL so we never
+                  // have to store a graph.facebook.com redirect URL that requires auth in the browser.
+                  fields: 'id,message,from{id,name,picture{url}},created_time,attachment,parent,permalink_url,comment_count',
+                  limit: 100,
                   access_token: accessToken
                 }
               });
@@ -176,7 +306,7 @@ class FacebookService {
                       `${this.baseURL}/${comment.id}/comments`,
                       {
                         params: {
-                          fields: 'id,message,from,created_time,attachment,parent,permalink_url',
+                          fields: 'id,message,from{id,name,picture{url}},created_time,attachment,parent,permalink_url',
                           limit: 100,
                           access_token: accessToken
                         }
@@ -223,6 +353,11 @@ class FacebookService {
         // Determine parentId: use parentCommentId if it's a reply, otherwise use parent.id
         const parentId = comment.parentCommentId || comment.parent?.id || null;
 
+        // Extract the CDN avatar URL returned by from{picture{url}}.
+        // This is a publicly-accessible CDN URL (fbsbx.com / lookaside.fbsbx.com).
+        // Store as avatarUrl so the browser can display it without auth.
+        const authorAvatarUrl = comment.from?.picture?.data?.url || comment.from?.picture?.url || null;
+
         const interaction = {
           organization: organization,
           platformConnection: platformConnection._id,
@@ -235,16 +370,15 @@ class FacebookService {
             platformId: comment.from?.id,
             username: comment.from?.name || 'Unknown User',
             name: comment.from?.name || 'Unknown User',
-            profilePicture: comment.from?.id 
-              ? `https://graph.facebook.com/${comment.from.id}/picture?type=small`
-              : null
+            avatarUrl: authorAvatarUrl  // CDN URL — no auth required in browser
           },
           parentId: parentId, // For threaded comments (replies)
           metadata: {
             postId: comment.postId,
             postMessage: comment.postMessage,
             hasAttachment: !!comment.attachment,
-            isReply: !!parentId // Flag to indicate if this is a reply
+            isReply: !!parentId,
+            facebookPageId: platformConnection.platformPageId
           },
           platformCreatedAt: new Date(comment.created_time),
           status: 'unread',
@@ -303,7 +437,7 @@ class FacebookService {
         `${this.baseURL}/${platformPageId}/ratings`,
         {
           params: {
-            fields: 'created_time,recommendation_type,review_text,reviewer,rating,open_graph_story',
+            fields: 'created_time,recommendation_type,review_text,reviewer{id,name,picture{url}},rating,open_graph_story',
             limit: 50,
             access_token: accessToken
           }
@@ -328,9 +462,7 @@ class FacebookService {
             platformId: review.reviewer?.id,
             username: review.reviewer?.name || 'Unknown User',
             name: review.reviewer?.name || 'Unknown User',
-            profilePicture: review.reviewer?.id 
-              ? `https://graph.facebook.com/${review.reviewer.id}/picture?type=small`
-              : null
+            avatarUrl: review.reviewer?.picture?.data?.url || review.reviewer?.picture?.url || null
           },
           rating: review.rating || 0,
           metadata: {

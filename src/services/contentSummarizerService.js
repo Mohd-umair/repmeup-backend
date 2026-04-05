@@ -132,7 +132,8 @@ Remember: Your summary MUST be approximately ${targetWordCount || 500} words. Th
       console.log(`🤖 [Summarizer] Calling AI service (target: ${requestedWords} words, maxTokens: ${maxTokens})...`);
       let summary = await aiService.generateText(systemPrompt, userPrompt, {
         temperature: 0.3,
-        maxTokens: maxTokens
+        maxTokens: maxTokens,
+        feature: 'knowledge_base.summarize'
       });
       const wordCount = summary.trim().split(/\s+/).length;
       console.log(`✅ [Summarizer] AI summary received: ${summary.length} characters, ~${wordCount} words (target: ${requestedWords} words)`);
@@ -175,7 +176,7 @@ Format: ["Point 1", "Point 2", "Point 3"]`;
         const response = await aiService.generateText(
           'You are a data extraction assistant. Extract key points and return ONLY a valid JSON array of strings.',
           prompt,
-          { temperature: 0.2, maxTokens: 500 }
+          { temperature: 0.2, maxTokens: 500, feature: 'knowledge_base.key_points' }
         );
 
         // Try to parse JSON from response
@@ -213,7 +214,7 @@ Format: ["tag1", "tag2", "tag3"]`;
         const response = await aiService.generateText(
           'You are a keyword extraction assistant. Extract relevant tags and return ONLY a valid JSON array of strings.',
           prompt,
-          { temperature: 0.2, maxTokens: 300 }
+          { temperature: 0.2, maxTokens: 300, feature: 'knowledge_base.tags' }
         );
 
         const jsonMatch = response.match(/\[[\s\S]*\]/);

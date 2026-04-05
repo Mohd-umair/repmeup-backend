@@ -172,6 +172,18 @@ exports.handleGoogleCallback = async (req, res, next) => {
         platformConnection.isActive = true;
         platformConnection.lastSyncAt = new Date();
       } else {
+        // Cross-org conflict check: block if this account is active in another workspace
+        const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
+          platform, userInfo.platformUserId, organizationId
+        );
+        if (crossOrgConflict) {
+          const err = new Error(
+            `This ${platform} account is already connected to another workspace.`
+          );
+          err.code = 'CROSS_ORG_CONFLICT';
+          throw err;
+        }
+
         // Create new connection
         platformConnection = new PlatformConnection({
           organization: organizationId,
@@ -611,14 +623,21 @@ exports.syncPlatform = async (req, res, next) => {
       console.log(`🗑️  [Cache] Invalidated interaction cache: ${cachePattern}`);
     }
       
+    const linkedInHint = result.linkedInSyncHint;
+    const message =
+      result.count > 0
+        ? `Sync completed. Found ${result.count} new interactions. ${autoReplyQueued} auto-replies queued.`
+        : linkedInHint
+          ? 'Sync completed. No new interactions. LinkedIn did not allow listing posts (read access)—see data.linkedInSyncHint or server logs.'
+          : 'Sync completed. No new interactions found.';
+
     res.status(200).json({
       success: true,
-      message: result.count > 0 
-        ? `Sync completed. Found ${result.count} new interactions. ${autoReplyQueued} auto-replies queued.` 
-        : 'Sync completed. No new interactions found.',
+      message,
       data: {
         interactionsAdded: result.count,
-        autoRepliesQueued: autoReplyQueued
+        autoRepliesQueued: autoReplyQueued,
+        ...(linkedInHint && { linkedInSyncHint })
       }
     });
   } catch (error) {
@@ -758,6 +777,18 @@ exports.connectWhatsApp = async (req, res, next) => {
         success: false,
         error: 'WhatsApp already connected',
         message: 'This organization already has an active WhatsApp connection'
+      });
+    }
+
+    // Cross-org conflict check: block if this phone number is active in another workspace
+    const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
+      'whatsapp', whatsappService.phoneNumberId, organizationId
+    );
+    if (crossOrgConflict) {
+      return res.status(409).json({
+        success: false,
+        error: 'This WhatsApp number is already connected to another workspace.',
+        code: 'CROSS_ORG_CONFLICT'
       });
     }
 
