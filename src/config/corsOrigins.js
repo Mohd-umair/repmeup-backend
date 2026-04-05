@@ -11,7 +11,6 @@ function getCorsOriginList() {
     .filter(Boolean);
 }
 
-/** Express `cors` package `origin` option: string | RegExp | (origin, cb) | true */
 function getCorsOriginOption() {
   const list = getCorsOriginList();
   if (list.length === 0) return true;

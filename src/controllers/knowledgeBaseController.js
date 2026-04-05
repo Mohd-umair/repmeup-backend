@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const { escapeRegex } = require('../utils/sanitize');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
+const { runWithAiContext } = require('../services/aiRequestContext');
 
 const KB_SOURCE_ENUM = ['manual', 'pdf', 'url', 'import'];
 
@@ -384,15 +385,20 @@ exports.createURLKnowledgeBase = async (req, res) => {
 
     // Step 2: Generate AI summary (ContentSummarizerService - Single Responsibility)
     console.log(`🤖 [KB] Generating AI summary...`);
-    const summaryData = await contentSummarizerService.summarize(
-      scrapedData.content,
+    const summaryData = await runWithAiContext(
       {
-        title: title || scrapedData.title,
-        url: url,
-        focus: focus,
-        targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
-        targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
-      }
+        organizationId: kbOrgId,
+        userId: req.user._id,
+        feature: 'knowledge_base.from_url'
+      },
+      () =>
+        contentSummarizerService.summarize(scrapedData.content, {
+          title: title || scrapedData.title,
+          url: url,
+          focus: focus,
+          targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
+          targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
+        })
     );
     console.log(`✅ [KB] Summary generated: ${summaryData.summaryLength} characters (${summaryData.compressionRatio} of original)`);
 

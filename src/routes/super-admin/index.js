@@ -8,6 +8,7 @@ const { protect } = require('../../middlewares/auth');
 const { requireSuperAdminAccess } = require('../../middlewares/superAdminAccess');
 const superAdminController = require('../../controllers/superAdminController');
 const superAdminMenuController = require('../../controllers/superAdminMenuController');
+const contactInquiryController = require('../../controllers/contactInquiryController');
 const gpController = require('../../controllers/groupPermissionController');
 
 router.use(protect);
@@ -37,8 +38,10 @@ router.delete('/menus/:id', superAdminMenuController.deleteMenu);
 router.post('/menus/bootstrap-defaults', superAdminMenuController.bootstrapDefaultSubmenus);
 
 router.get('/plans', superAdminController.listPlans);
+router.get('/contact-inquiries', contactInquiryController.listForSuperAdmin);
 router.get('/transactions', superAdminController.listTransactions);
 router.get('/dashboard/stats', superAdminController.getDashboardStats);
+router.get('/ai-usage', superAdminController.getAiUsage);
 router.get('/organizations', superAdminController.listOrganizations);
 router.post(
   '/organizations/:organizationId/users',

@@ -1,4 +1,6 @@
 const axios = require('axios');
+const { getAiRequestContext, runWithAiContext } = require('./aiRequestContext');
+const aiApiUsageService = require('./aiApiUsageService');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const BrandConfig = require('../models/BrandConfig');
 const aiCreditService = require('./aiCreditService');
@@ -71,6 +73,70 @@ class AIService {
 
     console.log('🤖 AI Provider: OPENAI');
     console.log(`📝 OpenAI Model: ${this.openaiModel}`);
+  }
+
+  _mergeAiLogContext(overrides = {}) {
+    const store = getAiRequestContext();
+    return {
+      organizationId: overrides.organizationId !== undefined ? overrides.organizationId : store.organizationId,
+      userId: overrides.userId !== undefined ? overrides.userId : store.userId,
+      feature: overrides.feature || store.feature || 'unknown',
+      metadata: overrides.metadata || {}
+    };
+  }
+
+  /**
+   * Chat completions POST with token usage persisted to AiApiUsage (non-blocking).
+   */
+  async _postChatCompletions(requestBody, logOverrides = {}, axiosConfig = {}) {
+    const ctx = this._mergeAiLogContext(logOverrides);
+    const defaultAxios = {
+      headers: {
+        Authorization: `Bearer ${this.openaiApiKey}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    };
+    const response = await axios.post(this.openaiApiUrl, requestBody, { ...defaultAxios, ...axiosConfig });
+    const usage = response.data?.usage;
+    if (usage) {
+      aiApiUsageService.recordChatUsage({
+        organizationId: ctx.organizationId,
+        userId: ctx.userId,
+        feature: ctx.feature,
+        model: requestBody.model || this.openaiModel,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
+        totalTokens: usage.total_tokens,
+        metadata: ctx.metadata
+      });
+    }
+    return response;
+  }
+
+  _logImageUsage(model, size, quality) {
+    const ctx = this._mergeAiLogContext({});
+    aiApiUsageService.recordImageUsage({
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      feature: ctx.feature || 'image.generation',
+      model,
+      size,
+      quality,
+      metadata: {}
+    });
+  }
+
+  _logVideoUsage(model, durationSeconds) {
+    const ctx = this._mergeAiLogContext({});
+    aiApiUsageService.recordVideoUsage({
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      feature: ctx.feature || 'video.generation',
+      model,
+      durationSeconds,
+      metadata: {}
+    });
   }
 
   /**
@@ -258,8 +324,7 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
       throw new Error('OpenAI API key is not configured');
     }
-    const response = await axios.post(
-      this.openaiApiUrl,
+    const response = await this._postChatCompletions(
       {
         model: this.openaiModel,
         messages: [
@@ -269,13 +334,7 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
         ...openAIChatCompletionTemperatureField(this.openaiModel, 0.8),
         ...openAIChatCompletionMaxTokensField(this.openaiModel, 500)
       },
-      {
-        headers: {
-          Authorization: `Bearer ${this.openaiApiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 30000
-      }
+      {}
     );
 
     return response.data.choices[0].message.content.trim();
@@ -305,10 +364,18 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
 
     const temperatures = [0.7, 0.85, 0.95].slice(0, count);
     const results = await Promise.all(
-      temperatures.map(temp =>
-        this._generateSinglePostWithTemperature(systemPrompt, userPrompt, temp)
-          .then(content => ({ content: content || '' }))
-          .catch(() => ({ content: '' }))
+      temperatures.map((temp, idx) =>
+        runWithAiContext(
+          {
+            organizationId,
+            userId: options.userId || null,
+            feature: `content_studio.post_variant.${idx}`
+          },
+          () =>
+            this._generateSinglePostWithTemperature(systemPrompt, userPrompt, temp)
+              .then((content) => ({ content: content || '' }))
+              .catch(() => ({ content: '' }))
+        )
       )
     );
     return { variants: results.filter(v => v.content) };
@@ -332,8 +399,7 @@ CRITICAL RULES:
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
       throw new Error('OpenAI API key is not configured');
     }
-    const response = await axios.post(
-      this.openaiApiUrl,
+    const response = await this._postChatCompletions(
       {
         model: this.openaiModel,
         messages: [
@@ -346,13 +412,7 @@ CRITICAL RULES:
         ),
         ...openAIChatCompletionMaxTokensField(this.openaiModel, 500)
       },
-      {
-        headers: {
-          Authorization: `Bearer ${this.openaiApiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 30000
-      }
+      {}
     );
     return response.data.choices[0].message.content.trim();
   }
@@ -456,7 +516,10 @@ CRITICAL RULES:
         );
 
         const b64 = response.data?.data?.[0]?.b64_json;
-        if (b64) return Buffer.from(b64, 'base64');
+        if (b64) {
+          this._logImageUsage(model, '1024x1024', 'medium');
+          return Buffer.from(b64, 'base64');
+        }
 
         const imageUrl = response.data?.data?.[0]?.url;
         if (!imageUrl) return null;
@@ -466,6 +529,7 @@ CRITICAL RULES:
           timeout: 60000,
           maxContentLength: Infinity
         });
+        this._logImageUsage(model, '1024x1024', 'medium');
         return Buffer.from(imgResponse.data);
       } catch (error) {
         const status = error.response?.status;
@@ -600,6 +664,7 @@ CRITICAL RULES:
               maxBodyLength: Infinity
             }
           );
+          this._logVideoUsage(model, parseInt(seconds, 10) || 4);
           return Buffer.from(dlRes.data);
         } catch (dlErr) {
           logger.warn('[Video] MP4 download failed', { jobId, error: dlErr.message });
@@ -631,8 +696,7 @@ CRITICAL RULES:
       console.log(`🔍 [AI] Analyzing sentiment for: "${content.substring(0, 50)}..."`);
 
       try {
-        const response = await axios.post(
-          this.openaiApiUrl,
+        const response = await this._postChatCompletions(
           {
             model: this.openaiModel,
             messages: [
@@ -666,13 +730,7 @@ Scoring:
             ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
             ...openAIChatCompletionMaxTokensField(this.openaiModel, 150)
           },
-          {
-            headers: {
-              Authorization: `Bearer ${this.openaiApiKey}`,
-              'Content-Type': 'application/json'
-            },
-            timeout: 30000
-          }
+          {}
         );
 
         const responseContent = response.data.choices[0].message.content.trim();
@@ -878,8 +936,7 @@ ${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be gen
 
 Generate a response that addresses the customer's message appropriately.`;
 
-      const response = await axios.post(
-        this.openaiApiUrl,
+      const response = await this._postChatCompletions(
         {
           model: this.openaiModel,
           messages: [
@@ -895,12 +952,8 @@ Generate a response that addresses the customer's message appropriately.`;
           ...openAIChatCompletionTemperatureField(this.openaiModel, 0.7),
           ...openAIChatCompletionMaxTokensField(this.openaiModel, 250)
         },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        {},
+        { timeout: 120000 }
       );
 
       const generatedResponse = response.data.choices[0].message.content.trim();
@@ -967,7 +1020,8 @@ Generate a response that addresses the customer's message appropriately.`;
     const {
       temperature = 0.7,
       maxTokens = 1000,
-      model = null
+      model = null,
+      feature: optionFeature = null
     } = options;
 
     try {
@@ -981,8 +1035,7 @@ Generate a response that addresses the customer's message appropriately.`;
 
       const resolvedModel = normalizeOpenAIModelId(model || this.openaiModel);
       console.log(`🔵 [AI] Using OpenAI model: ${resolvedModel}`);
-      const response = await axios.post(
-        this.openaiApiUrl,
+      const response = await this._postChatCompletions(
         {
           model: resolvedModel,
           messages: [
@@ -992,13 +1045,8 @@ Generate a response that addresses the customer's message appropriately.`;
           ...openAIChatCompletionTemperatureField(resolvedModel, temperature),
           ...openAIChatCompletionMaxTokensField(resolvedModel, maxTokens || 4000)
         },
-        {
-          headers: {
-            Authorization: `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 60000
-        }
+        optionFeature ? { feature: optionFeature } : {},
+        { timeout: 120000 }
       );
 
       const generatedText = response.data.choices[0].message.content.trim();
@@ -1022,8 +1070,7 @@ Generate a response that addresses the customer's message appropriately.`;
       if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
         return 'other';
       }
-      const response = await axios.post(
-        this.openaiApiUrl,
+      const response = await this._postChatCompletions(
         {
           model: this.openaiModel,
           messages: [
@@ -1039,12 +1086,7 @@ Generate a response that addresses the customer's message appropriately.`;
           ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
           ...openAIChatCompletionMaxTokensField(this.openaiModel, 10)
         },
-        {
-          headers: {
-            Authorization: `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        {}
       );
 
       const intent = response.data.choices[0].message.content.toLowerCase().trim();
@@ -1101,8 +1143,7 @@ Categories:
 ${bucketDescriptions}
 - "${defaultName}": Anything that does not clearly fit the above categories`;
 
-        const response = await axios.post(
-          this.openaiApiUrl,
+        const response = await this._postChatCompletions(
           {
             model: this.openaiModel,
             messages: [
@@ -1112,12 +1153,7 @@ ${bucketDescriptions}
             ...openAIChatCompletionTemperatureField(this.openaiModel, 0.2),
             ...openAIChatCompletionMaxTokensField(this.openaiModel, 30)
           },
-          {
-            headers: {
-              Authorization: `Bearer ${this.openaiApiKey}`,
-              'Content-Type': 'application/json'
-            }
-          }
+          {}
         );
 
         const aiChoice = response.data.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
@@ -1143,8 +1179,7 @@ ${bucketDescriptions}
       if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
         return [];
       }
-      const response = await axios.post(
-        this.openaiApiUrl,
+      const response = await this._postChatCompletions(
         {
           model: this.openaiModel,
           messages: [
@@ -1160,12 +1195,7 @@ ${bucketDescriptions}
           ...openAIChatCompletionTemperatureField(this.openaiModel, 0.3),
           ...openAIChatCompletionMaxTokensField(this.openaiModel, 50)
         },
-        {
-          headers: {
-            Authorization: `Bearer ${this.openaiApiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        {}
       );
 
       const topicsStr = response.data.choices[0].message.content.trim();
@@ -1346,8 +1376,15 @@ ${bucketDescriptions}
         };
       }
 
-      // Generate response
-      const response = await this.generateResponse(interaction, organizationId);
+      // Generate response (attributed to auto-reply for AiApiUsage)
+      const response = await runWithAiContext(
+        {
+          organizationId,
+          userId: interaction.assignedTo || undefined,
+          feature: 'inbox.auto_reply'
+        },
+        () => this.generateResponse(interaction, organizationId)
+      );
 
       if (!response) {
         return {

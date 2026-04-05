@@ -310,6 +310,12 @@ class AuthService {
 
         // Populate organization for response
         user = await User.findById(user._id).populate('organization');
+
+        try {
+          await emailService.sendWelcomeEmail(user);
+        } catch (welcomeErr) {
+          console.warn('[auth] Welcome email (Google signup) failed:', welcomeErr.message);
+        }
       }
 
       // Generate tokens
