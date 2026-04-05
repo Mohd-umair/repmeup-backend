@@ -227,6 +227,25 @@ async function processSingleInteraction(interactionId, organization) {
       return { skipped: true, reason: `Status is ${interactionForReply.status}` };
     }
 
+    // Skip if a human agent read the interaction during the delay window.
+    // isRead is reset to false on every new inbound webhook message, so this
+    // only fires when an agent opened this specific message before the job ran.
+    if (interactionForReply.isRead && interactionForReply.readBy) {
+      logger.info('[Auto-reply] Skipped — human agent read the interaction during the delay window', {
+        interactionId: interactionForReply._id?.toString(),
+        readBy: interactionForReply.readBy?.toString(),
+        readAt: interactionForReply.readAt
+      });
+      // Still escalate if rules triggered, but do not generate an AI reply
+      if (escalationCheck.shouldEscalate) {
+        await escalationService.escalateInteraction(
+          interactionForReply, organization,
+          escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
+        );
+      }
+      return { skipped: true, reason: 'Human agent is handling this interaction' };
+    }
+
     // Generate auto-reply
     const autoReply = await aiService.generateAutoReply(
       interactionForReply,
