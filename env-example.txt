@@ -46,6 +46,10 @@ WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
 WHATSAPP_BUSINESS_ACCOUNT_ID=your_business_account_id
 WHATSAPP_ACCESS_TOKEN=your_whatsapp_access_token
 
+# New support ticket alerts (POST /api/tickets) — email only
+# Default recipient: umair9317@gmail.com (override with ADMIN_SUPPORT_TICKET_EMAIL)
+# ADMIN_SUPPORT_TICKET_EMAIL=umair9317@gmail.com
+
 # Google/YouTube
 GOOGLE_CLIENT_ID=your_google_client_id
 GOOGLE_CLIENT_SECRET=your_google_client_secret

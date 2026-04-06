@@ -2917,7 +2917,7 @@ exports.getBucketView = async (req, res) => {
         const matchQuery = { ...baseMatch, intentBucket: bucket._id };
         const [interactions, total] = await Promise.all([
           Interaction.find(matchQuery)
-            .sort({ platformCreatedAt: 1 })
+            .sort({ platformCreatedAt: -1 })
             .limit(safeLimit)
             .populate('assignedTo', 'firstName lastName email')
             .populate('labels', 'name color icon')
@@ -2934,7 +2934,7 @@ exports.getBucketView = async (req, res) => {
     unassignedMatch.$and = [...(unassignedMatch.$and || []), { $or: [{ intentBucket: { $exists: false } }, { intentBucket: null }] }];
     const [unassignedInteractions, unassignedTotal] = await Promise.all([
       Interaction.find(unassignedMatch)
-        .sort({ platformCreatedAt: 1 })
+        .sort({ platformCreatedAt: -1 })
         .limit(safeLimit)
         .populate('assignedTo', 'firstName lastName email')
         .populate('labels', 'name color icon')
