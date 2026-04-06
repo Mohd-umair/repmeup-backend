@@ -263,6 +263,18 @@ const organizationSchema = new mongoose.Schema({
         }
       }
     },
+    // Layer 1 — Intent-based hard routing: buckets that always skip AI and go straight to human
+    alwaysHumanBuckets: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'IntentBucket'
+    }],
+
+    // Handoff message sent to customer when AI routes to human (Layer 1 & 2)
+    handoffMessageTemplate: {
+      type: String,
+      default: "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this."
+    },
+
     // Round-robin state
     lastAssignedAgentIndex: {
       type: Number,

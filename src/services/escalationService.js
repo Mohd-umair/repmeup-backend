@@ -119,6 +119,14 @@ class EscalationService {
       reasons.push(`Urgency detected: ${urgencyKeywords.keywords.join(', ')}`);
     }
 
+    // Soft Rule 7: Conversation loop detection (30 points)
+    // Fires when a customer keeps returning to the same thread after AI replies without resolution
+    const sameTopicReplies = interaction.escalationMetadata?.sameTopicReplies || 0;
+    if (sameTopicReplies >= 2) {
+      escalationScore += 30;
+      reasons.push(`Conversation loop detected — customer returned ${sameTopicReplies} time(s) without resolution`);
+    }
+
     // ESCALATION THRESHOLD: Score >= 50
     const shouldEscalate = escalationScore >= 50;
 
@@ -249,6 +257,41 @@ class EscalationService {
       found: foundKeywords.length > 0,
       keywords: foundKeywords
     };
+  }
+
+  /**
+   * Layer 1 — Intent-based hard routing.
+   * Returns { shouldRoute: true, reason } when the interaction's intentBucket is in the org's
+   * alwaysHumanBuckets list. These conversations skip AI generation entirely and go straight
+   * to a human agent (account-specific lookups, billing disputes, legal, etc.)
+   *
+   * @param {Object} interaction - Interaction document (intentBucket must be populated or ObjectId)
+   * @param {Object} organization - Organization document with escalationSettings
+   * @returns {{ shouldRoute: boolean, reason?: string }}
+   */
+  checkIntentRouting(interaction, organization) {
+    const alwaysHumanBuckets = organization.escalationSettings?.alwaysHumanBuckets || [];
+
+    if (!interaction.intentBucket || alwaysHumanBuckets.length === 0) {
+      return { shouldRoute: false };
+    }
+
+    const bucketId = interaction.intentBucket._id
+      ? interaction.intentBucket._id.toString()
+      : interaction.intentBucket.toString();
+
+    const isAlwaysHuman = alwaysHumanBuckets.some(
+      (id) => id.toString() === bucketId
+    );
+
+    if (isAlwaysHuman) {
+      return {
+        shouldRoute: true,
+        reason: 'Intent bucket configured for direct human routing (account/billing/legal queries)'
+      };
+    }
+
+    return { shouldRoute: false };
   }
 
   /**

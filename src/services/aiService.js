@@ -865,8 +865,16 @@ Scoring: very positive 0.7-1.0, neutral -0.3 to 0.3, very negative -1.0 to -0.7`
 
   /**
    * Generate AI response using OpenAI
+   * @param {Object} interaction
+   * @param {string|null} organizationId
+   * @param {Array|null} knowledgeBase
+   * @param {Object} [options]
+   * @param {boolean} [options.withSelfAssessment=false] - When true the LLM is asked to assess
+   *   whether it can resolve the query before replying. Returns an additional `resolvable` flag
+   *   and `resolvableReason`. Used by generateAutoReply to implement Layer 2 proactive routing.
    */
-  async generateResponseOpenAI(interaction, organizationId = null, knowledgeBase = null) {
+  async generateResponseOpenAI(interaction, organizationId = null, knowledgeBase = null, options = {}) {
+    const withSelfAssessment = options.withSelfAssessment === true;
     let knowledgeBaseFallback = false;
     try {
       // Check if API key is configured
@@ -939,10 +947,7 @@ Scoring: very positive 0.7-1.0, neutral -0.3 to 0.3, very negative -1.0 to -0.7`
         }
       }
 
-      const systemPrompt = `You are a professional customer service representative. 
-Your task is to generate a helpful, friendly, and professional response to customer inquiries.
-
-IMPORTANT GUIDELINES:
+      const baseGuidelines = `IMPORTANT GUIDELINES:
 - Be polite, empathetic, and professional
 - Keep responses concise and clear (2-4 sentences)
 - Use a friendly and conversational tone
@@ -954,7 +959,93 @@ IMPORTANT GUIDELINES:
 - Do not make promises you can't keep
 - Match the tone to the platform (casual for social media, professional for reviews)
 ${bucketContext ? `\n${bucketContext}` : ''}
-${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
+${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}`;
+
+      // Layer 2: self-assessment mode — LLM reports whether it can resolve the query
+      if (withSelfAssessment) {
+        const selfAssessSystemPrompt = `You are a professional customer service AI. Before composing a reply, assess whether you can fully resolve this query WITHOUT needing access to:
+- Private account data (order history, transaction records, account details)
+- Real-time system data (live inventory, delivery tracking, live status)
+- Internal tools, back-office systems, or human judgment
+
+${baseGuidelines}
+
+Respond ONLY with this exact JSON (no other text, no markdown fences):
+{
+  "resolvable": true or false,
+  "reason": "if false: one-sentence explanation of why you cannot resolve it without private data",
+  "confidence": 0.0 to 1.0,
+  "reply": "your complete customer-facing response"
+}`;
+
+        const selfAssessResponse = await this._postChatCompletions(
+          {
+            model: this.openaiModel,
+            messages: [
+              { role: 'system', content: selfAssessSystemPrompt },
+              {
+                role: 'user',
+                content: `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
+              }
+            ],
+            ...openAIChatCompletionTemperatureField(this.openaiModel, 0.7),
+            ...openAIChatCompletionMaxTokensField(this.openaiModel, 400)
+          },
+          {},
+          { timeout: 120000 }
+        );
+
+        const rawSelfAssess = selfAssessResponse.data.choices[0].message.content.trim();
+        let parsed = null;
+        try {
+          const jsonMatch = rawSelfAssess.match(/\{[\s\S]*\}/);
+          parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawSelfAssess);
+        } catch {
+          // JSON parse failed — treat as resolvable, use raw text as reply
+          logger.warn('[AI] Self-assessment JSON parse failed, falling back to raw reply', {
+            interactionId: interaction._id?.toString()
+          });
+        }
+
+        if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim()) {
+          const resolvable = parsed.resolvable !== false; // default to true if field missing
+          const confidence = typeof parsed.confidence === 'number'
+            ? Math.max(0, Math.min(1, parsed.confidence))
+            : (relevantKB && relevantKB.length > 0 ? Math.min(0.95, 0.78 + relevantKB.length * 0.04) : 0.78);
+
+          return {
+            content: parsed.reply.trim(),
+            confidence,
+            resolvable,
+            resolvableReason: resolvable ? null : (parsed.reason || 'Requires access to private account or system data'),
+            generatedAt: new Date(),
+            usedKnowledgeBase: relevantKB && relevantKB.length > 0,
+            knowledgeBaseCount: relevantKB ? relevantKB.length : 0,
+            knowledgeBaseFallback
+          };
+        }
+
+        // Fallback: parse failed or malformed — treat raw text as resolvable reply
+        const fallbackConfidence = relevantKB && relevantKB.length > 0
+          ? Math.min(0.95, 0.78 + relevantKB.length * 0.04)
+          : 0.78;
+        return {
+          content: rawSelfAssess,
+          confidence: fallbackConfidence,
+          resolvable: true,
+          resolvableReason: null,
+          generatedAt: new Date(),
+          usedKnowledgeBase: relevantKB && relevantKB.length > 0,
+          knowledgeBaseCount: relevantKB ? relevantKB.length : 0,
+          knowledgeBaseFallback
+        };
+      }
+
+      // Standard mode (no self-assessment)
+      const systemPrompt = `You are a professional customer service representative. 
+Your task is to generate a helpful, friendly, and professional response to customer inquiries.
+
+${baseGuidelines}
 
 Generate a response that addresses the customer's message appropriately.`;
 
@@ -989,6 +1080,8 @@ Generate a response that addresses the customer's message appropriately.`;
       return {
         content: generatedResponse,
         confidence: confidence,
+        resolvable: true,
+        resolvableReason: null,
         generatedAt: new Date(),
         usedKnowledgeBase: relevantKB && relevantKB.length > 0,
         knowledgeBaseCount: relevantKB ? relevantKB.length : 0,
@@ -1500,14 +1593,14 @@ Topics: 2-3 keywords only.${bucketSection}`;
         };
       }
 
-      // Generate response (attributed to auto-reply for AiApiUsage)
+      // Generate response with self-assessment (Layer 2: LLM reports resolvable flag)
       const { result: response, aiApiUsageId } = await runWithAiContextAndUsageId(
         {
           organizationId,
           userId: interaction.assignedTo || undefined,
           feature: 'inbox.auto_reply'
         },
-        () => this.generateResponse(interaction, organizationId)
+        () => this.generateResponseOpenAI(interaction, organizationId, null, { withSelfAssessment: true })
       );
 
       if (!response) {
@@ -1517,7 +1610,39 @@ Topics: 2-3 keywords only.${bucketSection}`;
         };
       }
 
-      // Check confidence threshold
+      // Layer 2: AI self-assessed that it cannot resolve this query — route to human
+      if (response.resolvable === false) {
+        logger.info('[Auto-reply] AI self-assessed as unresolvable — routing to human', {
+          interactionId: interaction._id?.toString(),
+          reason: response.resolvableReason
+        });
+        // Deduct credits: we still made the AI call
+        try {
+          const User = require('../models/User');
+          let uid = interaction.assignedTo;
+          if (!uid) {
+            const adminUser = await User.findOne({
+              organization: organizationId,
+              role: { $in: ['admin', 'manager'] }
+            }).select('_id');
+            uid = adminUser?._id;
+          }
+          await aiCreditService.deductCredits(
+            organizationId, 1,
+            { operation: 'auto_reply_unresolvable', userId: uid, interactionId: interaction._id.toString(), platform: interaction.platform },
+            { aiApiUsageId }
+          );
+        } catch { /* credit deduction failure is non-fatal */ }
+
+        return {
+          eligible: true,
+          resolvable: false,
+          resolvableReason: response.resolvableReason,
+          creditsUsed: 1
+        };
+      }
+
+      // Check confidence threshold (applied only when AI thinks it can resolve)
       const minConfidence = organizationSettings.autoReplySettings?.minConfidence || 0.7;
       if (response.confidence < minConfidence) {
         return {
