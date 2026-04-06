@@ -121,6 +121,7 @@ const bullBoardAdapter = require('./config/bullBoard');
 app.use('/admin/queues', bullBoardAdapter.getRouter());
 
 // API routes
+app.use('/api/public', require('./routes/public'));
 app.use('/api/contact', require('./routes/contact'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/inbox', require('./routes/inbox'));
