@@ -146,6 +146,7 @@ app.use('/api/brand-config', require('./routes/brandConfig'));
 app.use('/api/intent-buckets', require('./routes/intentBuckets'));
 app.use('/api/trends', require('./routes/trends'));
 app.use('/api/audit-logs', require('./routes/auditLog'));
+app.use('/api/tickets', require('./routes/tickets'));
 // app.use('/api/labels', require('./routes/labels'));
 // app.use('/api/templates', require('./routes/templates'));
 

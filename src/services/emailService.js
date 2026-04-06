@@ -345,6 +345,58 @@ class EmailService {
 
     return this.sendEmail({ to: email, subject, html });
   }
+
+  /**
+   * Notify internal admin inbox when a user raises a support ticket.
+   */
+  async sendSupportTicketAdminAlert({ to, ticket, raiser, organizationName }) {
+    const esc = (v) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+    const safeOrg = esc(organizationName || '—');
+    const raiserName = esc(
+      raiser
+        ? `${raiser.firstName || ''} ${raiser.lastName || ''}`.trim() || raiser.email
+        : 'Unknown'
+    );
+    const raiserEmail = esc(raiser?.email || '—');
+    const descPreview =
+      ticket.description.length > 2000
+        ? `${ticket.description.slice(0, 2000)}…`
+        : ticket.description;
+    const descHtml = esc(descPreview);
+
+    const subject = `[${appName}] New ticket: ${ticket.subject}`;
+    const html = wrapSimpleEmailHtml(`
+      <h2>New support ticket</h2>
+      <p><strong>Ticket ID:</strong> ${ticket._id}</p>
+      <p><strong>Subject:</strong> ${esc(ticket.subject)}</p>
+      <p><strong>Category:</strong> ${esc(ticket.category)}</p>
+      <p><strong>Priority:</strong> ${esc(ticket.priority)}</p>
+      <p><strong>Organization:</strong> ${safeOrg}</p>
+      <p><strong>Raised by:</strong> ${raiserName} &lt;${raiserEmail}&gt;</p>
+      <h3>Description</h3>
+      <pre style="white-space:pre-wrap;font-family:inherit;background:#f3f4f6;padding:12px;border-radius:8px;">${descHtml}</pre>
+      <p style="color:#6b7280;font-size:13px;">Reply in the admin panel or your ticket workflow.</p>
+    `);
+
+    const text = [
+      `New support ticket (${appName})`,
+      `ID: ${ticket._id}`,
+      `Subject: ${ticket.subject}`,
+      `Category: ${ticket.category}`,
+      `Priority: ${ticket.priority}`,
+      `Organization: ${safeOrg}`,
+      `Raised by: ${raiserName} <${raiserEmail}>`,
+      '',
+      ticket.description
+    ].join('\n');
+
+    return this.sendEmail({ to, subject, html, text });
+  }
 }
 
 module.exports = new EmailService();
