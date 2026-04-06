@@ -264,12 +264,103 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       return { skipped: true, reason: 'Human agent is handling this interaction' };
     }
 
+    // ─── LAYER 3: Conversation loop detection ──────────────────────────────────
+    // For thread-style DMs where the AI has already replied at least once:
+    // increment sameTopicReplies so the escalation scorer can detect unresolved loops.
+    if (threadDmReply && (interactionForReply.autoReplyCount || 0) >= 1) {
+      try {
+        await Interaction.updateOne(
+          { _id: interactionForReply._id },
+          { $inc: { 'escalationMetadata.sameTopicReplies': 1 } }
+        );
+        // Keep in-memory copy in sync for the escalation check below
+        if (!interactionForReply.escalationMetadata) {
+          interactionForReply.escalationMetadata = {};
+        }
+        interactionForReply.escalationMetadata.sameTopicReplies =
+          (interactionForReply.escalationMetadata.sameTopicReplies || 0) + 1;
+
+        logger.info('[Auto-reply] Layer 3: sameTopicReplies incremented', {
+          interactionId: interactionForReply._id?.toString(),
+          sameTopicReplies: interactionForReply.escalationMetadata.sameTopicReplies
+        });
+      } catch (loopErr) {
+        logger.warn('[Auto-reply] Layer 3: failed to increment sameTopicReplies', { error: loopErr.message });
+      }
+    }
+
+    // ─── LAYER 1: Intent-based hard routing ────────────────────────────────────
+    // Certain intent buckets (billing disputes, account security, legal, etc.) must
+    // always skip AI and go directly to a human agent — zero false positives.
+    if (organization.escalationSettings?.enabled) {
+      const intentRouting = escalationService.checkIntentRouting(interactionForReply, organization);
+      if (intentRouting.shouldRoute) {
+        logger.info('[Auto-reply] Layer 1: intent routing to human — skipping AI generation', {
+          interactionId: interactionForReply._id?.toString(),
+          reason: intentRouting.reason,
+          bucket: interactionForReply.intentBucket?.toString()
+        });
+
+        // Send handoff acknowledgment to customer first
+        const handoffMsg =
+          organization.escalationSettings?.handoffMessageTemplate ||
+          "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this.";
+        let handoffSent = false;
+        if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+          handoffSent = await sendReplyToPlatform(interactionForReply, handoffMsg, organization);
+        }
+
+        // Then escalate to human
+        await escalationService.escalateInteraction(
+          interactionForReply, organization,
+          [intentRouting.reason], 'intent_routing', { intentBucket: interactionForReply.intentBucket?.toString() }
+        );
+
+        logger.info('[Auto-reply] Layer 1: escalated after intent routing', {
+          interactionId: interactionForReply._id?.toString(),
+          handoffSent
+        });
+        return { sent: handoffSent, escalated: true, reason: 'intent_routing' };
+      }
+    }
+
     // Generate auto-reply
     const autoReply = await aiService.generateAutoReply(
       interactionForReply,
       organization._id,
       organization
     );
+
+    // ─── LAYER 2: AI self-assessment — unresolvable signal ────────────────────
+    // The LLM assessed that it cannot resolve this without private account/system data.
+    // Send a handoff acknowledgment and route directly to a human agent.
+    if (autoReply.eligible && autoReply.resolvable === false) {
+      logger.info('[Auto-reply] Layer 2: AI unresolvable — routing to human with handoff message', {
+        interactionId: interactionForReply._id?.toString(),
+        reason: autoReply.resolvableReason
+      });
+
+      const handoffMsg =
+        organization.escalationSettings?.handoffMessageTemplate ||
+        "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this.";
+      let handoffSent = false;
+      if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+        handoffSent = await sendReplyToPlatform(interactionForReply, handoffMsg, organization);
+      }
+
+      await escalationService.escalateInteraction(
+        interactionForReply, organization,
+        [`AI self-assessed as unresolvable: ${autoReply.resolvableReason || 'requires private data'}`],
+        'ai_unresolvable',
+        { resolvableReason: autoReply.resolvableReason }
+      );
+
+      logger.info('[Auto-reply] Layer 2: escalated after AI unresolvable assessment', {
+        interactionId: interactionForReply._id?.toString(),
+        handoffSent
+      });
+      return { sent: handoffSent, escalated: true, reason: 'ai_unresolvable' };
+    }
 
     if (!autoReply.eligible) {
       // Reply not eligible (settings gate) — log clearly so the user can diagnose in console

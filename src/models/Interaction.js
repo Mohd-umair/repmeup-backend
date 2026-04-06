@@ -171,7 +171,7 @@ const interactionSchema = new mongoose.Schema({
   escalatedAt: Date,
   escalationType: {
     type: String,
-    enum: ['auto', 'manual', 'keyword', 'sentiment', 'reply_limit', 'ai_confidence']
+    enum: ['auto', 'manual', 'keyword', 'sentiment', 'reply_limit', 'ai_confidence', 'intent_routing', 'ai_unresolvable']
   },
   escalationMetadata: {
     triggerKeywords: [String],
@@ -183,7 +183,12 @@ const interactionSchema = new mongoose.Schema({
       type: Number,
       default: 0
     },
-    customerFrustrationIndicators: [String]
+    customerFrustrationIndicators: [String],
+    // Layer 3: counts how many times customer returned after an AI reply without resolution
+    sameTopicReplies: {
+      type: Number,
+      default: 0
+    }
   },
   
   // Assignment
