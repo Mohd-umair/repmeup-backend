@@ -63,10 +63,34 @@ exports.getMyTickets = async (req, res, next) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
-    const status = req.query.status;
 
     const filter = { raisedBy: req.user._id };
-    if (status) filter.status = status;
+
+    const status = req.query.status;
+    if (status && ['open', 'in_progress', 'resolved', 'closed'].includes(status)) {
+      filter.status = status;
+    }
+
+    const category = req.query.category;
+    if (category && ['bug', 'feature_request', 'billing', 'general'].includes(category)) {
+      filter.category = category;
+    }
+
+    const priority = req.query.priority;
+    if (priority && ['low', 'medium', 'high'].includes(priority)) {
+      filter.priority = priority;
+    }
+
+    const rawQ = String(req.query.q || req.query.search || '')
+      .trim()
+      .slice(0, 200);
+    if (rawQ.length > 0) {
+      const escaped = rawQ.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { subject: { $regex: escaped, $options: 'i' } },
+        { description: { $regex: escaped, $options: 'i' } }
+      ];
+    }
 
     const [tickets, total] = await Promise.all([
       SupportTicket.find(filter)
@@ -81,7 +105,7 @@ exports.getMyTickets = async (req, res, next) => {
       success: true,
       data: {
         tickets,
-        pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+        pagination: { total, page, limit, pages: Math.ceil(total / limit) || 1 }
       }
     });
   } catch (err) {

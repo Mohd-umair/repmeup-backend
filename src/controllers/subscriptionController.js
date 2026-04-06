@@ -135,7 +135,6 @@ exports.getLimits = async (req, res, next) => {
           cancelAtPeriodEnd: subscription.cancelAtPeriodEnd ?? false,
           cancelledAt: subscription.cancelledAt ?? null,
           cancellationReason: subscription.cancellationReason ?? null,
-          pendingDowngradePlanId: subscription.pendingDowngradePlanId ?? null,
           planHistory: (subscription.planHistory || []).slice(-5).map(h => ({
             planId: h.planId,
             planName: h.planName,
@@ -325,11 +324,10 @@ exports.upgradePlan = async (req, res, next) => {
       });
     }
 
-    // Check if downgrade
     if (newPlan.tier < subscription.tier) {
       return res.status(400).json({
         success: false,
-        error: 'Cannot downgrade plan. Please contact support.'
+        error: 'Changing to a lower-tier plan is not supported. Contact support if you need help.'
       });
     }
 

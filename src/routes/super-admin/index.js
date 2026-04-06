@@ -11,6 +11,7 @@ const superAdminMenuController = require('../../controllers/superAdminMenuContro
 const contactInquiryController = require('../../controllers/contactInquiryController');
 const gpController = require('../../controllers/groupPermissionController');
 const ticketController = require('../../controllers/ticketController');
+const superAdminFaqController = require('../../controllers/superAdminFaqController');
 
 router.use(protect);
 router.use(requireSuperAdminAccess);
@@ -37,6 +38,10 @@ router.post('/menus', superAdminMenuController.createMenu);
 router.put('/menus/:id', superAdminMenuController.updateMenu);
 router.delete('/menus/:id', superAdminMenuController.deleteMenu);
 router.post('/menus/bootstrap-defaults', superAdminMenuController.bootstrapDefaultSubmenus);
+
+router.get('/faqs', superAdminFaqController.listFaqs);
+router.put('/faqs', superAdminFaqController.syncFaqs);
+router.post('/faqs/seed-defaults', superAdminFaqController.seedDefaults);
 
 // Support tickets
 router.get('/tickets', ticketController.superAdminListTickets);

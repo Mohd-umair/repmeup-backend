@@ -136,12 +136,6 @@ const subscriptionSchema = new mongoose.Schema({
     },
     reason: String
   }],
-  
-  // Downgrade scheduled at period end (set planId here; applied by subscription.completed webhook)
-  pendingDowngradePlanId: {
-    type: String,
-    default: null
-  },
 
   // Cancellation
   cancelledAt: Date,

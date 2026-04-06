@@ -25,7 +25,7 @@ const planSchema = new mongoose.Schema({
     trim: true,
   },
   
-  // Plan tier (for upgrade/downgrade logic)
+  // Plan tier (ordering for upgrades; lower tiers are not self-serve)
   tier: {
     type: Number,
     required: true,

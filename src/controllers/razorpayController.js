@@ -75,6 +75,13 @@ exports.createSubscription = async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Subscription record not found' });
     }
 
+    if (plan.tier < subscription.tier) {
+      return res.status(400).json({
+        success: false,
+        error: 'Changing to a lower-tier plan is not supported. Contact support if you need help.'
+      });
+    }
+
     // Cancel previous Razorpay subscription if one exists and is active
     if (subscription.razorpaySubscriptionId) {
       try {
@@ -185,6 +192,13 @@ exports.verifyPayment = async (req, res, next) => {
     });
     if (!subscription) {
       return res.status(404).json({ success: false, error: 'Subscription not found' });
+    }
+
+    if (plan.tier < subscription.tier) {
+      return res.status(400).json({
+        success: false,
+        error: 'Changing to a lower-tier plan is not supported. Contact support if you need help.'
+      });
     }
 
     // Record plan history
@@ -407,7 +421,7 @@ async function handleSubscriptionCompleted(payload) {
   const subscription = await Subscription.findOne({ razorpaySubscriptionId: rzpSub.id });
   if (!subscription) return;
 
-  // Downgrade to free plan when subscription ends
+  // Revert to free plan when paid subscription ends
   const freePlan = await Plan.getByPlanId('free');
   if (freePlan) {
     subscription.planHistory.push({
@@ -425,7 +439,7 @@ async function handleSubscriptionCompleted(payload) {
   subscription.status = 'cancelled';
   subscription.razorpaySubscriptionId = undefined;
   await subscription.save();
-  logger.info('[Razorpay Webhook] Subscription completed — downgraded to free', { razorpaySubscriptionId: rzpSub.id });
+  logger.info('[Razorpay Webhook] Subscription completed — reverted to free plan', { razorpaySubscriptionId: rzpSub.id });
 }
 
 async function handlePaymentFailed(payload) {

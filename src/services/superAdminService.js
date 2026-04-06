@@ -133,7 +133,7 @@ class SuperAdminService {
           'planId planName tier status billingCycle ' +
           'currentPeriodStart currentPeriodEnd razorpayNextBillingAt ' +
           'cancelAtPeriodEnd cancelledAt cancellationReason ' +
-          'pendingDowngradePlanId planHistory razorpaySubscriptionId'
+          'planHistory razorpaySubscriptionId'
         )
         .lean()
     ]);
@@ -152,7 +152,6 @@ class SuperAdminService {
           cancelAtPeriodEnd: subscription.cancelAtPeriodEnd ?? false,
           cancelledAt: subscription.cancelledAt ?? null,
           cancellationReason: subscription.cancellationReason ?? null,
-          pendingDowngradePlanId: subscription.pendingDowngradePlanId ?? null,
           planHistory: (subscription.planHistory || []).slice(-10).map(h => ({
             planId: h.planId,
             planName: h.planName,
