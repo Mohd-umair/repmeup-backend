@@ -1489,8 +1489,8 @@ class InstagramService {
    * @param {string} input     - shortcode or full Instagram post URL
    */
   async resolveShortcodeToMediaId(igUserId, accessToken, input) {
-    // Extract shortcode from URL if a full URL was passed
-    const urlMatch = input && input.match(/instagram\.com\/p\/([A-Za-z0-9_-]+)/);
+    // Extract shortcode — handles instagram.com/p/SC and instagram.com/username/p/SC
+    const urlMatch = input && input.match(/instagram\.com\/(?:[^/?#]+\/)?p\/([A-Za-z0-9_-]+)/);
     const shortcode = urlMatch ? urlMatch[1] : (input || '').trim();
 
     if (!shortcode) return null;

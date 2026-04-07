@@ -1,5 +1,6 @@
 const Product = require('../models/Product');
 const Organization = require('../models/Organization');
+const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const instagramService = require('../integrations/meta/instagramService');
 const logger = require('../config/logger');
@@ -147,12 +148,80 @@ exports.deleteProduct = async (req, res, next) => {
 // ─────────────────────────────────────────────
 // LINK / UNLINK INSTAGRAM POST
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// RECENT INSTAGRAM POSTS (from inbox interactions)
+// ─────────────────────────────────────────────
+/**
+ * Returns unique Instagram posts that have received comments in the org's inbox.
+ * Each entry has: postId, commentCount, lastCommentAt, alreadyLinked (bool),
+ * linkedProductName (string | null).
+ */
+exports.getRecentPosts = async (req, res, next) => {
+  try {
+    const orgId = req.user.organization._id;
+
+    // Aggregate unique postIds from Instagram comment interactions (last 90 days)
+    const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+    const rows = await Interaction.aggregate([
+      {
+        $match: {
+          organization: orgId,
+          platform: 'instagram',
+          type: 'comment',
+          'metadata.postId': { $exists: true, $ne: null },
+          createdAt: { $gte: since }
+        }
+      },
+      {
+        $group: {
+          _id: '$metadata.postId',
+          commentCount: { $sum: 1 },
+          lastCommentAt: { $max: '$createdAt' }
+        }
+      },
+      { $sort: { lastCommentAt: -1 } },
+      { $limit: 50 }
+    ]);
+
+    // Find which postIds are already linked to a product in this org
+    const allPostIds = rows.map(r => r._id);
+    const linkedProducts = await Product.find({
+      organization: orgId,
+      instagramPostIds: { $in: allPostIds }
+    }).select('name instagramPostIds').lean();
+
+    // Build a quick lookup: postId → product name
+    const linkedMap = {};
+    for (const p of linkedProducts) {
+      for (const pid of p.instagramPostIds) {
+        if (allPostIds.includes(pid)) {
+          linkedMap[pid] = p.name;
+        }
+      }
+    }
+
+    const data = rows.map(r => ({
+      postId: r._id,
+      commentCount: r.commentCount,
+      lastCommentAt: r.lastCommentAt,
+      alreadyLinked: !!linkedMap[r._id],
+      linkedProductName: linkedMap[r._id] || null
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
 /**
  * Extract shortcode from a full Instagram URL or a plain shortcode string.
  * Returns the shortcode, or the original string if it is already numeric.
  */
 function extractShortcode(input) {
-  const urlMatch = (input || '').match(/instagram\.com\/p\/([A-Za-z0-9_-]+)/);
+  // Handles both instagram.com/p/SHORTCODE and instagram.com/username/p/SHORTCODE
+  const urlMatch = (input || '').match(/instagram\.com\/(?:[^/?#]+\/)?p\/([A-Za-z0-9_-]+)/);
   return urlMatch ? urlMatch[1] : (input || '').trim();
 }
 
@@ -247,7 +316,10 @@ exports.resolvePostId = async (req, res, next) => {
 
 exports.unlinkPost = async (req, res, next) => {
   try {
-    const { postId } = req.params;
+    // Accept postId from body (POST /unlink) or params (DELETE /:postId legacy)
+    const postId = req.body?.postId || req.params.postId;
+
+    if (!postId) return res.status(400).json({ success: false, error: 'postId is required' });
 
     const product = await Product.findOneAndUpdate(
       { _id: req.params.id, organization: req.user.organization._id },
