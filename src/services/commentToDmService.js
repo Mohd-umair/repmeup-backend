@@ -280,8 +280,22 @@ async function processCommentForProduct(interaction, organizationId) {
       dmPreview: dmText.substring(0, 100)
     });
 
-    await instagramService.sendMessage(String(commenterId), dmText, accessToken, pageId, false);
-    svcLogger.info('[commentToDm] Product DM sent successfully', { commenterId, productId: product._id });
+    // ── Send DM via Private Reply (uses comment_id — no 24-hour window) ──
+    // Falls back to the regular sendMessage if private reply fails (e.g. comment
+    // is older than 7 days, or the private reply was already sent for this comment).
+    let dmSendMethod = 'private_reply';
+    try {
+      await instagramService.sendPrivateReply(interaction.platformId, dmText, accessToken, pageId);
+    } catch (privateReplyErr) {
+      svcLogger.warn('[commentToDm] sendPrivateReply failed — falling back to sendMessage', {
+        commentId: interaction.platformId,
+        commenterId,
+        error: privateReplyErr.message
+      });
+      dmSendMethod = 'send_message_fallback';
+      await instagramService.sendMessage(String(commenterId), dmText, accessToken, pageId, false);
+    }
+    svcLogger.info('[commentToDm] Product DM sent successfully', { commenterId, productId: product._id, dmSendMethod });
 
     // ── 9. Record the order ───────────────────────────────────────────
     await ProductOrder.create({

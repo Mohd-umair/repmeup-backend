@@ -802,6 +802,45 @@ class InstagramService {
   }
 
   /**
+   * Send a Private Reply DM to the author of an Instagram comment.
+   *
+   * Uses `recipient.comment_id` instead of `recipient.id`, which bypasses the
+   * 24-hour messaging window and works for brand-new users who have never
+   * messaged the business before. Valid within 7 days of the comment.
+   *
+   * @param {string} commentId  - IG comment ID (the platformId stored on the Interaction)
+   * @param {string} message    - Text to send
+   * @param {string} accessToken - Page access token
+   * @param {string} pageId     - Facebook Page ID that owns the Instagram account
+   * @returns {{ success: true, platformResponseId: string }}
+   */
+  async sendPrivateReply(commentId, message, accessToken, pageId) {
+    try {
+      const response = await axios.post(
+        `${this.baseUrl}/${pageId}/messages`,
+        {
+          recipient: { comment_id: String(commentId) },
+          message: { text: message },
+          messaging_type: 'RESPONSE'
+        },
+        { params: { access_token: accessToken } }
+      );
+
+      return {
+        success: true,
+        platformResponseId: response.data.message_id
+      };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const userMsg = apiError?.message || error.message;
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
+    }
+  }
+
+  /**
    * Send an attachment (image, video, or file) to an Instagram DM recipient.
    * @param {string} [localFilePath] - If provided, uploads the file directly via
    *   multipart form-data instead of passing a URL for the platform to download.
