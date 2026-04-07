@@ -13,6 +13,9 @@ router.post('/', productController.createProduct);
 router.put('/:id', productController.updateProduct);
 router.delete('/:id', productController.deleteProduct);
 
+// Resolve Instagram post shortcode → numeric media ID (must be before /:id routes)
+router.get('/resolve-post', productController.resolvePostId);
+
 // Post-product mapping
 router.post('/:id/posts', productController.linkPost);
 router.delete('/:id/posts/:postId', productController.unlinkPost);

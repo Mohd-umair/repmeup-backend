@@ -1,5 +1,7 @@
 const Product = require('../models/Product');
 const Organization = require('../models/Organization');
+const PlatformConnection = require('../models/PlatformConnection');
+const instagramService = require('../integrations/meta/instagramService');
 const logger = require('../config/logger');
 
 // Default settings returned when the org's commentToDmSettings subdocument is missing or empty
@@ -145,19 +147,99 @@ exports.deleteProduct = async (req, res, next) => {
 // ─────────────────────────────────────────────
 // LINK / UNLINK INSTAGRAM POST
 // ─────────────────────────────────────────────
+/**
+ * Extract shortcode from a full Instagram URL or a plain shortcode string.
+ * Returns the shortcode, or the original string if it is already numeric.
+ */
+function extractShortcode(input) {
+  const urlMatch = (input || '').match(/instagram\.com\/p\/([A-Za-z0-9_-]+)/);
+  return urlMatch ? urlMatch[1] : (input || '').trim();
+}
+
+/**
+ * Resolve the Instagram numeric media ID for a given shortcode using the
+ * connected Instagram business account's media list.
+ * Returns { numericId, shortcode } or null.
+ */
+async function resolvePostIds(orgId, rawInput) {
+  const shortcode = extractShortcode(rawInput);
+
+  // Already a numeric ID — nothing to resolve
+  if (/^\d+$/.test(shortcode)) {
+    return { numericId: shortcode, shortcode: null };
+  }
+
+  const conn = await PlatformConnection.findOne({
+    organization: orgId,
+    platform: 'instagram',
+    isConnected: true
+  }).select('accessToken platformUserId').lean();
+
+  if (!conn?.accessToken || !conn?.platformUserId) return null;
+
+  return instagramService.resolveShortcodeToMediaId(conn.platformUserId, conn.accessToken, shortcode);
+}
+
 exports.linkPost = async (req, res, next) => {
   try {
     const { postId } = req.body;
     if (!postId) return res.status(400).json({ success: false, error: 'postId is required' });
 
+    const orgId = req.user.organization._id;
+    const shortcode = extractShortcode(postId);
+
+    // Values to add — always add the raw/shortcode form; also add numeric ID if resolvable
+    const idsToAdd = new Set([shortcode]);
+
+    const resolved = await resolvePostIds(orgId, postId);
+    if (resolved?.numericId) {
+      idsToAdd.add(resolved.numericId);
+    }
+
     const product = await Product.findOneAndUpdate(
-      { _id: req.params.id, organization: req.user.organization._id },
-      { $addToSet: { instagramPostIds: String(postId) } },
+      { _id: req.params.id, organization: orgId },
+      { $addToSet: { instagramPostIds: { $each: [...idsToAdd] } } },
       { new: true }
     );
 
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
-    res.json({ success: true, data: product });
+
+    res.json({
+      success: true,
+      data: product,
+      resolved: resolved ? { shortcode: resolved.shortcode || shortcode, numericId: resolved.numericId } : null
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// RESOLVE POST ID (helper endpoint — returns the numeric media ID for a URL/shortcode)
+// ─────────────────────────────────────────────
+exports.resolvePostId = async (req, res, next) => {
+  try {
+    const { postId } = req.query;
+    if (!postId) return res.status(400).json({ success: false, error: 'postId query param is required' });
+
+    const orgId = req.user.organization._id;
+    const shortcode = extractShortcode(postId);
+
+    // Already numeric
+    if (/^\d+$/.test(shortcode)) {
+      return res.json({ success: true, data: { numericId: shortcode, shortcode: null, alreadyNumeric: true } });
+    }
+
+    const resolved = await resolvePostIds(orgId, postId);
+    if (!resolved?.numericId) {
+      return res.json({
+        success: false,
+        error: 'Could not resolve this shortcode to a numeric media ID. Make sure RepMeUp is connected to the Instagram account that owns this post.',
+        data: { shortcode }
+      });
+    }
+
+    res.json({ success: true, data: { shortcode, numericId: resolved.numericId } });
   } catch (err) {
     next(err);
   }
