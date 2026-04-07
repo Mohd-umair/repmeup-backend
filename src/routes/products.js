@@ -16,9 +16,13 @@ router.delete('/:id', productController.deleteProduct);
 // Resolve Instagram post shortcode → numeric media ID (must be before /:id routes)
 router.get('/resolve-post', productController.resolvePostId);
 
+// Recent Instagram posts seen in the inbox (for easy post-to-product linking)
+router.get('/recent-posts', productController.getRecentPosts);
+
 // Post-product mapping
 router.post('/:id/posts', productController.linkPost);
-router.delete('/:id/posts/:postId', productController.unlinkPost);
+router.post('/:id/posts/unlink', productController.unlinkPost);   // body: { postId } — safe for full-URL postIds
+router.delete('/:id/posts/:postId', productController.unlinkPost); // legacy param-based route
 
 // Comment-to-DM settings
 router.get('/settings/comment-to-dm', productController.getCommentToDmSettings);
