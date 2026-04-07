@@ -2,6 +2,18 @@ const Product = require('../models/Product');
 const Organization = require('../models/Organization');
 const logger = require('../config/logger');
 
+// Default settings returned when the org's commentToDmSettings subdocument is missing or empty
+const DEFAULT_COMMENT_TO_DM_SETTINGS = {
+  enabled: false,
+  triggerKeywords: ['price', 'buy', 'cost', 'order', 'purchase', 'how much', 'interested', 'want this', 'where to buy', 'link'],
+  publicReplyTemplate: "Hi {{username}}! 👋 We've sent you the details in DM. 😊",
+  dmTemplate: "Hi {{username}}! 👋 Thanks for your interest.\n\n🛍️ *{{product_name}}*\n💵 Price: {{currency}} {{price}}\n📦 Sizes: {{sizes}}\n\n👉 Order here: {{payment_url}}\n\nFeel free to DM us if you have questions! 😊",
+  confirmationTemplate: "Hi {{username}}! 🎉 Your order for *{{product_name}}* has been confirmed! We'll be in touch with shipping details soon. Thank you! 🙏",
+  deduplicateDms: true,
+  maxDmsPerDay: 200,
+  defaultProductId: null
+};
+
 // ─────────────────────────────────────────────
 // LIST
 // ─────────────────────────────────────────────
@@ -189,8 +201,9 @@ exports.getProductsByPost = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
-// UPDATE COMMENT-TO-DM SETTINGS
+// GET / UPDATE COMMENT-TO-DM SETTINGS
 // ─────────────────────────────────────────────
+
 exports.getCommentToDmSettings = async (req, res, next) => {
   try {
     const org = await Organization.findById(req.user.organization._id)
@@ -198,7 +211,11 @@ exports.getCommentToDmSettings = async (req, res, next) => {
       .lean();
 
     if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
-    res.json({ success: true, data: org.commentToDmSettings || {} });
+
+    // Merge with defaults so the UI always gets a complete, valid settings object
+    // even for orgs that existed before this feature was added.
+    const merged = { ...DEFAULT_COMMENT_TO_DM_SETTINGS, ...(org.commentToDmSettings || {}) };
+    res.json({ success: true, data: merged });
   } catch (err) {
     next(err);
   }
@@ -206,7 +223,10 @@ exports.getCommentToDmSettings = async (req, res, next) => {
 
 exports.updateCommentToDmSettings = async (req, res, next) => {
   try {
-    const allowed = ['enabled', 'triggerKeywords', 'publicReplyTemplate', 'dmTemplate', 'confirmationTemplate', 'deduplicateDms', 'maxDmsPerDay'];
+    const allowed = [
+      'enabled', 'triggerKeywords', 'publicReplyTemplate', 'dmTemplate',
+      'confirmationTemplate', 'deduplicateDms', 'maxDmsPerDay', 'defaultProductId'
+    ];
     const update = {};
     allowed.forEach(f => {
       if (req.body[f] !== undefined) update[`commentToDmSettings.${f}`] = req.body[f];
@@ -218,7 +238,34 @@ exports.updateCommentToDmSettings = async (req, res, next) => {
       { new: true, select: 'commentToDmSettings' }
     );
 
-    res.json({ success: true, data: org.commentToDmSettings });
+    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+
+    const merged = { ...DEFAULT_COMMENT_TO_DM_SETTINGS, ...(org.commentToDmSettings || {}) };
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// DIAGNOSTIC: DRY-RUN TEST AUTOMATION
+// ─────────────────────────────────────────────
+
+/**
+ * @desc    Runs a dry-run of the comment-to-DM automation and returns a step-by-step checklist.
+ *          Does NOT send any real DMs. Helps users diagnose why automation isn't firing.
+ * @route   POST /api/products/debug/test-automation
+ * @access  Private
+ */
+exports.testAutomation = async (req, res, next) => {
+  try {
+    const { postId, commentText = 'price' } = req.body;
+    const organizationId = req.user.organization._id.toString();
+
+    const { dryRunDiagnostic } = require('../services/commentToDmService');
+    const result = await dryRunDiagnostic(organizationId, postId, commentText);
+
+    res.json({ success: true, data: result });
   } catch (err) {
     next(err);
   }

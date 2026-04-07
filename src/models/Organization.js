@@ -222,6 +222,16 @@ const organizationSchema = new mongoose.Schema({
       type: String,
       default: 'Hi {{username}}! 🎉 Your order for *{{product_name}}* has been confirmed! We\'ll be in touch with shipping details soon. Thank you! 🙏'
     },
+    /**
+     * Optional fallback product sent when a comment matches a keyword but the
+     * post has no product explicitly linked via instagramPostIds.
+     */
+    defaultProductId: {
+      type: require('mongoose').Schema.Types.ObjectId,
+      ref: 'Product',
+      default: null
+    },
+
     /** Skip sending a DM if one was already sent to this user for this post */
     deduplicateDms: {
       type: Boolean,
