@@ -13,6 +13,7 @@
  *  8. Record a ProductOrder for deduplication and payment correlation.
  */
 
+const axios = require('axios');
 const Organization = require('../models/Organization');
 const Product = require('../models/Product');
 const ProductOrder = require('../models/ProductOrder');
@@ -90,6 +91,47 @@ async function processCommentForProduct(interaction, organizationId) {
       instagramPostIds: String(postId),
       isActive: true
     }).lean();
+
+    // ── Shortcode fallback ─────────────────────────────────────────────
+    // The webhook delivers a numeric media ID (e.g. "17881020939515532") but the
+    // user may have stored the URL shortcode (e.g. "DWlBp0ZgG2C"). Fetch the
+    // shortcode from the Instagram Graph API and retry the lookup.
+    if (!products.length && /^\d+$/.test(String(postId))) {
+      try {
+        const conn = await PlatformConnection.findOne({
+          organization: organizationId,
+          platform: 'instagram',
+          isConnected: true
+        }).select('accessToken').lean();
+
+        if (conn?.accessToken) {
+          const resp = await axios.get(`https://graph.facebook.com/v18.0/${postId}`, {
+            params: { fields: 'shortcode', access_token: conn.accessToken },
+            timeout: 5000
+          });
+          const shortcode = resp.data?.shortcode;
+          if (shortcode) {
+            svcLogger.info('[commentToDm] Resolved numeric postId to shortcode — retrying product lookup', { postId, shortcode });
+            products = await Product.find({
+              organization: organizationId,
+              instagramPostIds: shortcode,
+              isActive: true
+            }).lean();
+
+            // Also backfill the numeric ID into the product so future lookups are instant
+            if (products.length) {
+              await Product.updateMany(
+                { _id: { $in: products.map(p => p._id) } },
+                { $addToSet: { instagramPostIds: String(postId) } }
+              );
+              svcLogger.info('[commentToDm] Backfilled numeric postId into product instagramPostIds', { postId, shortcode });
+            }
+          }
+        }
+      } catch (resolveErr) {
+        svcLogger.warn('[commentToDm] Could not resolve numeric postId to shortcode', { postId, err: resolveErr.message });
+      }
+    }
 
     // Fallback: use defaultProductId if no product is linked to this specific post
     if (!products.length && settings.defaultProductId) {
