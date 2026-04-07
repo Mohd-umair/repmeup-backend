@@ -1475,6 +1475,59 @@ class InstagramService {
       throw new Error('Failed to create carousel post');
     }
   }
+
+  /**
+   * Given an Instagram URL or shortcode (e.g. "DWmafyLADDF" or
+   * "https://www.instagram.com/p/DWmafyLADDF/"), look up all media for the
+   * connected Instagram account and return the numeric media ID that matches.
+   *
+   * Returns { numericId, shortcode } on success, or null if not found / on error.
+   * Scans up to the 200 most-recent posts (2 pages of 100).
+   *
+   * @param {string} igUserId  - The connected IG business account user ID
+   * @param {string} accessToken
+   * @param {string} input     - shortcode or full Instagram post URL
+   */
+  async resolveShortcodeToMediaId(igUserId, accessToken, input) {
+    // Extract shortcode from URL if a full URL was passed
+    const urlMatch = input && input.match(/instagram\.com\/p\/([A-Za-z0-9_-]+)/);
+    const shortcode = urlMatch ? urlMatch[1] : (input || '').trim();
+
+    if (!shortcode) return null;
+
+    // If the input is already a numeric ID, no resolution needed
+    if (/^\d+$/.test(shortcode)) {
+      return { numericId: shortcode, shortcode: null };
+    }
+
+    const fields = 'id,shortcode';
+    let url = `${this.baseUrl}/${igUserId}/media`;
+    let pagesChecked = 0;
+
+    try {
+      while (url && pagesChecked < 2) {
+        const response = await axios.get(url, {
+          params: pagesChecked === 0 ? { fields, limit: 100, access_token: accessToken } : { access_token: accessToken },
+          timeout: 10000
+        });
+
+        const items = response.data?.data || [];
+        const match = items.find(m => m.shortcode === shortcode);
+        if (match) {
+          return { numericId: match.id, shortcode: match.shortcode };
+        }
+
+        // Next page
+        url = response.data?.paging?.next || null;
+        pagesChecked++;
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.warn(`[Instagram] resolveShortcodeToMediaId failed for shortcode="${shortcode}":`, msg);
+    }
+
+    return null;
+  }
 }
 
 module.exports = new InstagramService();
