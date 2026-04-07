@@ -72,6 +72,6 @@ const productOrderSchema = new mongoose.Schema({
 
 // Fast deduplication lookup: did we already DM this user for this product+post combo?
 productOrderSchema.index({ organization: 1, instagramUserId: 1, instagramPostId: 1 });
-productOrderSchema.index({ orderToken: 1 });
+// Note: orderToken already has a unique index via `unique: true` in the schema field — no duplicate needed.
 
 module.exports = mongoose.model('ProductOrder', productOrderSchema);

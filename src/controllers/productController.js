@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Product = require('../models/Product');
 const Organization = require('../models/Organization');
 const Interaction = require('../models/Interaction');
@@ -166,7 +167,7 @@ exports.getRecentPosts = async (req, res, next) => {
     const rows = await Interaction.aggregate([
       {
         $match: {
-          organization: orgId,
+          organization: new mongoose.Types.ObjectId(orgId),
           platform: 'instagram',
           type: 'comment',
           'metadata.postId': { $exists: true, $ne: null },
