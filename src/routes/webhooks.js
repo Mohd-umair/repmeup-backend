@@ -29,6 +29,9 @@ router.post('/linkedin', webhookController.handleLinkedInWebhook);
 router.get('/whatsapp', webhookController.verifyWhatsAppWebhook);
 router.post('/whatsapp', webhookController.handleWhatsAppWebhook);
 
+// Product payment confirmation (from any payment provider)
+router.post('/product-payment', webhookController.handleProductPaymentWebhook);
+
 // Health check
 router.get('/health', webhookController.webhookHealth);
 

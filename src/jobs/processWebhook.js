@@ -69,6 +69,14 @@ module.exports = async function processWebhook(job) {
         });
       }
 
+      // Comment-to-DM selling flow: fire-and-forget (errors are caught inside the service)
+      if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+        const commentToDmService = require('../services/commentToDmService');
+        commentToDmService.processCommentForProduct(interaction, organizationId).catch(err => {
+          jobLogger.warn('commentToDmService fire-and-forget error', { err: err?.message });
+        });
+      }
+
       // Per-comment / per-message interactions: skip if we already answered that item.
       // DM threads (platformId dm_*_*): one doc per conversation — replies[] is thread history; still queue AI for each new message.
       const hasReplies = interaction.replies && interaction.replies.length > 0;

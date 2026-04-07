@@ -184,6 +184,63 @@ const organizationSchema = new mongoose.Schema({
     }
   },
 
+  // Instagram Comment-to-DM selling automation
+  commentToDmSettings: {
+    enabled: {
+      type: Boolean,
+      default: false
+    },
+    /**
+     * Keywords that signal purchase/buying intent in a comment.
+     * Case-insensitive, partial-word match (contains).
+     */
+    triggerKeywords: {
+      type: [String],
+      default: ['price', 'buy', 'cost', 'order', 'purchase', 'how much', 'interested', 'want this', 'where to buy', 'link']
+    },
+    /**
+     * Text posted publicly as a comment reply (safe stub — never contains payment link).
+     * Supports: {{username}}
+     */
+    publicReplyTemplate: {
+      type: String,
+      default: 'Hi {{username}}! 👋 We\'ve sent you the details in DM. 😊'
+    },
+    /**
+     * DM body template.
+     * Supports: {{product_name}}, {{price}}, {{currency}}, {{sizes}}, {{colors}}, {{payment_url}}, {{description}}
+     */
+    dmTemplate: {
+      type: String,
+      default: 'Hi {{username}}! 👋 Thanks for your interest.\n\n🛍️ *{{product_name}}*\n💵 Price: {{currency}} {{price}}\n📦 Sizes: {{sizes}}\n\n👉 Order here: {{payment_url}}\n\nFeel free to DM us if you have questions! 😊'
+    },
+    /**
+     * Confirmation DM sent after payment is received.
+     * Supports: {{product_name}}, {{username}}
+     */
+    confirmationTemplate: {
+      type: String,
+      default: 'Hi {{username}}! 🎉 Your order for *{{product_name}}* has been confirmed! We\'ll be in touch with shipping details soon. Thank you! 🙏'
+    },
+    /** Skip sending a DM if one was already sent to this user for this post */
+    deduplicateDms: {
+      type: Boolean,
+      default: true
+    },
+    /** Maximum product DMs to send per day across the whole org */
+    maxDmsPerDay: {
+      type: Number,
+      default: 200
+    },
+    dmsSentToday: {
+      type: Number,
+      default: 0
+    },
+    dmsSentResetDate: {
+      type: Date
+    }
+  },
+
   // Human agent escalation settings
   escalationSettings: {
     enabled: {
