@@ -101,16 +101,20 @@ async function processCommentForProduct(interaction, organizationId) {
         const conn = await PlatformConnection.findOne({
           organization: organizationId,
           platform: 'instagram',
-          isConnected: true
+          status: 'connected'
         }).select('accessToken').lean();
 
-        if (conn?.accessToken) {
+        if (!conn?.accessToken) {
+          svcLogger.warn('[commentToDm] Shortcode fallback skipped — no connected Instagram account found for org', { organizationId });
+        } else {
           const resp = await axios.get(`https://graph.facebook.com/v18.0/${postId}`, {
             params: { fields: 'shortcode', access_token: conn.accessToken },
             timeout: 5000
           });
           const shortcode = resp.data?.shortcode;
-          if (shortcode) {
+          if (!shortcode) {
+            svcLogger.warn('[commentToDm] Instagram Graph API returned no shortcode for postId', { postId, response: resp.data });
+          } else {
             svcLogger.info('[commentToDm] Resolved numeric postId to shortcode — retrying product lookup', { postId, shortcode });
             products = await Product.find({
               organization: organizationId,

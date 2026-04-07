@@ -242,7 +242,7 @@ async function resolvePostIds(orgId, rawInput) {
   const conn = await PlatformConnection.findOne({
     organization: orgId,
     platform: 'instagram',
-    isConnected: true
+    status: 'connected'
   }).select('accessToken platformUserId').lean();
 
   if (!conn?.accessToken || !conn?.platformUserId) return null;
