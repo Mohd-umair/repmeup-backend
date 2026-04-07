@@ -842,3 +842,115 @@ exports.handleWhatsAppWebhook = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Product Payment Webhook
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @desc    Handle payment confirmation from any payment provider.
+ *          Matches the order by orderToken, sends a confirmation DM, and updates the order.
+ * @route   POST /api/webhooks/product-payment
+ * @access  Public (verified by HMAC or shared secret header)
+ *
+ * Expected payload:
+ *   { order_token: string, payment_ref?: string, [signature]: string }
+ *
+ * HMAC verification (optional but recommended):
+ *   Set PRODUCT_PAYMENT_SECRET in env; caller must include header `x-repmeup-sig` = HMAC-SHA256(body, secret).
+ */
+exports.handleProductPaymentWebhook = async (req, res) => {
+  // Always ack early so payment provider doesn't retry while we process
+  res.sendStatus(200);
+
+  try {
+    const crypto = require('crypto');
+    const secret = process.env.PRODUCT_PAYMENT_SECRET;
+
+    // If secret is configured, verify the signature
+    if (secret) {
+      const sig = req.headers['x-repmeup-sig'] || req.headers['x-webhook-sig'] || '';
+      const rawBody = typeof req.rawBody === 'string'
+        ? req.rawBody
+        : JSON.stringify(req.body);
+      const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+      if (sig !== expected) {
+        console.warn('[ProductPayment] Invalid signature — request rejected');
+        return;
+      }
+    }
+
+    const { order_token: orderToken, payment_ref: paymentRef } = req.body || {};
+    if (!orderToken) {
+      console.warn('[ProductPayment] Missing order_token in payload');
+      return;
+    }
+
+    const ProductOrder = require('../models/ProductOrder');
+    const Organization = require('../models/Organization');
+    const Product = require('../models/Product');
+    const commentToDmService = require('../services/commentToDmService');
+
+    const order = await ProductOrder.findOne({ orderToken }).populate('product');
+    if (!order) {
+      console.warn('[ProductPayment] No ProductOrder found for token', orderToken);
+      return;
+    }
+
+    if (order.status === 'paid') {
+      console.log('[ProductPayment] Order already marked paid — skipping duplicate webhook', orderToken);
+      return;
+    }
+
+    const product = order.product;
+    const organizationId = order.organization.toString();
+
+    // Load confirmation template from org settings
+    const org = await Organization.findById(organizationId).select('commentToDmSettings').lean();
+    const template = org?.commentToDmSettings?.confirmationTemplate ||
+      'Hi! 🎉 Your order for *{{product_name}}* has been confirmed! We\'ll be in touch with shipping details soon. Thank you! 🙏';
+
+    const dmText = commentToDmService.buildTemplate(template, {
+      product_name: product?.name || 'your order',
+      username: 'there'
+    });
+
+    // Resolve Instagram platform connection for this org
+    const conn = await PlatformConnection.findOne({
+      organization: organizationId,
+      platform: 'instagram',
+      isActive: true
+    }).select('accessToken platformData platformPageId platformUserId').lean();
+
+    if (!conn) {
+      console.warn('[ProductPayment] No Instagram connection for org', organizationId);
+      return;
+    }
+
+    const accessToken = conn.accessToken;
+    const pageId = conn.platformData?.pageId || conn.platformPageId || conn.platformUserId;
+
+    try {
+      await require('../integrations/meta/instagramService').sendMessage(
+        order.instagramUserId,
+        dmText,
+        accessToken,
+        pageId,
+        false
+      );
+      console.log('[ProductPayment] Confirmation DM sent to', order.instagramUserId);
+    } catch (dmErr) {
+      console.error('[ProductPayment] Failed to send confirmation DM:', dmErr.message);
+    }
+
+    // Update order status
+    order.status = 'paid';
+    order.paymentRef = paymentRef || null;
+    order.paidAt = new Date();
+    await order.save();
+
+    console.log('[ProductPayment] Order updated to paid', orderToken);
+  } catch (err) {
+    console.error('[ProductPayment] Webhook handler error:', err.message);
+  }
+};
+

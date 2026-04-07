@@ -334,6 +334,19 @@ const interactionSchema = new mongoose.Schema({
   firstResponseTime: Number, // in milliseconds
   averageResponseTime: Number,
   
+  // Chat summary (manual or AI-generated)
+  summary: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  summaryGeneratedAt: Date,
+  summaryGeneratedBy: {
+    type: String,
+    enum: ['ai', 'manual'],
+    default: null
+  },
+
   // Internal collaboration
   internalNotes: [{
     _id: {

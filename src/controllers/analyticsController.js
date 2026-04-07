@@ -230,10 +230,29 @@ exports.getDashboard = async (req, res, next) => {
         }
       ]),
 
-      // Intent breakdown
+      // Intent breakdown — group by custom intentBucket (org-defined buckets)
       Interaction.aggregate([
-        { $match: { ...matchFilter, intent: { $exists: true, $ne: null } } },
-        { $group: { _id: '$intent', count: { $sum: 1 } } },
+        { $match: { ...matchFilter, intentBucket: { $exists: true, $ne: null } } },
+        { $group: { _id: '$intentBucket', count: { $sum: 1 } } },
+        {
+          $lookup: {
+            from: 'intentbuckets',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'bucket'
+          }
+        },
+        { $unwind: { path: '$bucket', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 1,
+            count: 1,
+            name:  { $ifNull: ['$bucket.name',  'Unknown'] },
+            color: { $ifNull: ['$bucket.color', '#6B7280'] },
+            icon:  { $ifNull: ['$bucket.icon',  'fas fa-tag'] },
+            order: { $ifNull: ['$bucket.order', 999] }
+          }
+        },
         { $sort: { count: -1 } }
       ]),
 
@@ -415,10 +434,15 @@ exports.getDashboard = async (req, res, next) => {
     const within24Hours = distribution.find(d => d._id === 60)?.count || 0;
     const over24Hours = distribution.find(d => d._id === 1440)?.count || 0;
 
-    // Intent data
+    // Intent data — keyed by bucket ObjectId string; includes meta for display
     const intentData = {};
+    const intentMeta = {};
     const intentTotal = intentBreakdown.reduce((sum, i) => sum + i.count, 0);
-    intentBreakdown.forEach(i => { intentData[i._id] = i.count; });
+    intentBreakdown.forEach(i => {
+      const key = i._id.toString();
+      intentData[key] = i.count;
+      intentMeta[key] = { name: i.name, color: i.color, icon: i.icon };
+    });
 
     // AI vs Human reply data
     const aiHumanData = aiVsHumanReplies[0] || { aiReplies: 0, humanReplies: 0, totalReplies: 0 };
@@ -490,6 +514,7 @@ exports.getDashboard = async (req, res, next) => {
       },
       intentBreakdown: {
         data: intentData,
+        meta: intentMeta,
         total: intentTotal
       },
       aiVsHuman: {

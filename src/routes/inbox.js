@@ -58,6 +58,10 @@ router.delete('/:id/replies/:replyId', inboxController.deleteReply);
 // Generate AI suggested reply for interaction
 router.post('/:id/suggest-reply', inboxController.suggestReply);
 
+// Chat summary: AI-generate (POST) or save manual (PUT)
+router.post('/:id/summary/generate', inboxController.generateSummary);
+router.put('/:id/summary', inboxController.saveSummary);
+
 // Generate AI-assisted replies (short, detailed, sales)
 router.post('/:id/ai-assist', inboxController.aiAssist);
 
