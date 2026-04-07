@@ -21,4 +21,7 @@ router.delete('/:id/posts/:postId', productController.unlinkPost);
 router.get('/settings/comment-to-dm', productController.getCommentToDmSettings);
 router.put('/settings/comment-to-dm', productController.updateCommentToDmSettings);
 
+// Diagnostic dry-run (does not send real DMs)
+router.post('/debug/test-automation', productController.testAutomation);
+
 module.exports = router;
