@@ -13,6 +13,12 @@ const productSchema = new mongoose.Schema({
     index: true
   },
 
+  sku: {
+    type: String,
+    trim: true,
+    index: true
+  },
+
   name: {
     type: String,
     required: true,
@@ -99,6 +105,7 @@ const productSchema = new mongoose.Schema({
 
 productSchema.index({ organization: 1, isActive: 1 });
 productSchema.index({ organization: 1, instagramPostIds: 1 });
+productSchema.index({ organization: 1, sku: 1 }, { unique: true, partialFilterExpression: { sku: { $exists: true, $type: 'string' } } });
 
 /** Returns the effective price after discount */
 productSchema.virtual('effectivePrice').get(function () {

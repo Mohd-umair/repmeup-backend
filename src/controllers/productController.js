@@ -1,10 +1,10 @@
-const mongoose = require('mongoose');
 const Product = require('../models/Product');
 const Organization = require('../models/Organization');
-const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const instagramService = require('../integrations/meta/instagramService');
 const logger = require('../config/logger');
+const xlsx = require('xlsx');
+const axios = require('axios');
 
 // Default settings returned when the org's commentToDmSettings subdocument is missing or empty
 const DEFAULT_COMMENT_TO_DM_SETTINGS = {
@@ -149,72 +149,6 @@ exports.deleteProduct = async (req, res, next) => {
 // ─────────────────────────────────────────────
 // LINK / UNLINK INSTAGRAM POST
 // ─────────────────────────────────────────────
-// ─────────────────────────────────────────────
-// RECENT INSTAGRAM POSTS (from inbox interactions)
-// ─────────────────────────────────────────────
-/**
- * Returns unique Instagram posts that have received comments in the org's inbox.
- * Each entry has: postId, commentCount, lastCommentAt, alreadyLinked (bool),
- * linkedProductName (string | null).
- */
-exports.getRecentPosts = async (req, res, next) => {
-  try {
-    const orgId = req.user.organization._id;
-
-    // Aggregate unique postIds from Instagram comment interactions (last 90 days)
-    const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-
-    const rows = await Interaction.aggregate([
-      {
-        $match: {
-          organization: new mongoose.Types.ObjectId(orgId),
-          platform: 'instagram',
-          type: 'comment',
-          'metadata.postId': { $exists: true, $ne: null },
-          createdAt: { $gte: since }
-        }
-      },
-      {
-        $group: {
-          _id: '$metadata.postId',
-          commentCount: { $sum: 1 },
-          lastCommentAt: { $max: '$createdAt' }
-        }
-      },
-      { $sort: { lastCommentAt: -1 } },
-      { $limit: 50 }
-    ]);
-
-    // Find which postIds are already linked to a product in this org
-    const allPostIds = rows.map(r => r._id);
-    const linkedProducts = await Product.find({
-      organization: orgId,
-      instagramPostIds: { $in: allPostIds }
-    }).select('name instagramPostIds').lean();
-
-    // Build a quick lookup: postId → product name
-    const linkedMap = {};
-    for (const p of linkedProducts) {
-      for (const pid of p.instagramPostIds) {
-        if (allPostIds.includes(pid)) {
-          linkedMap[pid] = p.name;
-        }
-      }
-    }
-
-    const data = rows.map(r => ({
-      postId: r._id,
-      commentCount: r.commentCount,
-      lastCommentAt: r.lastCommentAt,
-      alreadyLinked: !!linkedMap[r._id],
-      linkedProductName: linkedMap[r._id] || null
-    }));
-
-    res.json({ success: true, data });
-  } catch (err) {
-    next(err);
-  }
-};
 
 /**
  * Extract shortcode from a full Instagram URL or a plain shortcode string.
@@ -403,25 +337,360 @@ exports.updateCommentToDmSettings = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
-// DIAGNOSTIC: DRY-RUN TEST AUTOMATION
+// IMPORT EXCEL/CSV PRODUCTS
 // ─────────────────────────────────────────────
-
-/**
- * @desc    Runs a dry-run of the comment-to-DM automation and returns a step-by-step checklist.
- *          Does NOT send any real DMs. Helps users diagnose why automation isn't firing.
- * @route   POST /api/products/debug/test-automation
- * @access  Private
- */
-exports.testAutomation = async (req, res, next) => {
+exports.importProducts = async (req, res, next) => {
   try {
-    const { postId, commentText = 'price' } = req.body;
-    const organizationId = req.user.organization._id.toString();
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
 
-    const { dryRunDiagnostic } = require('../services/commentToDmService');
-    const result = await dryRunDiagnostic(organizationId, postId, commentText);
+    const orgId = req.user.organization._id;
+    const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = xlsx.utils.sheet_to_json(sheet);
 
-    res.json({ success: true, data: result });
+    if (!data || data.length === 0) {
+      return res.status(400).json({ success: false, error: 'Empty or invalid file' });
+    }
+
+    const bulkOps = [];
+    let processedCount = 0;
+
+    for (const row of data) {
+      const sku = row['SKU'] ? String(row['SKU']).trim() : null;
+      const name = row['Name'] ? String(row['Name']).trim() : null;
+      
+      if (!name) continue; // Name is required
+
+      const price = Number(row['Price']) || 0;
+      const currency = row['Currency'] ? String(row['Currency']).trim() : 'AED';
+      const description = row['Description'] ? String(row['Description']).trim() : '';
+      const discountPercent = Number(row['Discount']) || 0;
+      const stock = row['Stock'] != null && row['Stock'] !== '' ? Number(row['Stock']) : null;
+      const paymentUrl = row['Payment URL'] ? String(row['Payment URL']).trim() : '';
+      
+      const images = row['Images'] ? String(row['Images']).split(',').map(s => s.trim()).filter(Boolean) : [];
+      const sizes = row['Sizes'] ? String(row['Sizes']).split(',').map(s => s.trim()).filter(Boolean) : [];
+      const colors = row['Colors'] ? String(row['Colors']).split(',').map(s => s.trim()).filter(Boolean) : [];
+
+      const productData = {
+        organization: orgId,
+        name,
+        description,
+        price,
+        currency,
+        discountPercent,
+        stock,
+        paymentUrl,
+        images,
+        sizes,
+        colors,
+        isActive: true,
+        createdBy: req.user._id
+      };
+
+      if (sku) {
+        productData.sku = sku;
+        bulkOps.push({
+          updateOne: {
+            filter: { organization: orgId, sku },
+            update: { $set: productData },
+            upsert: true
+          }
+        });
+      } else {
+        // Fallback to name if no SKU provided
+        bulkOps.push({
+          updateOne: {
+            filter: { organization: orgId, name },
+            update: { $set: productData },
+            upsert: true
+          }
+        });
+      }
+
+      processedCount++;
+    }
+
+    if (bulkOps.length > 0) {
+      const result = await Product.bulkWrite(bulkOps);
+      res.json({
+        success: true,
+        data: {
+          upsertedCount: result.upsertedCount,
+          modifiedCount: result.modifiedCount,
+          matchedCount: result.matchedCount,
+          totalProcessed: processedCount
+        }
+      });
+    } else {
+      res.json({ success: true, data: { upsertedCount: 0, modifiedCount: 0, matchedCount: 0, totalProcessed: 0 } });
+    }
+
   } catch (err) {
+    logger.error(`[importProducts] Error: ${err.message}`);
     next(err);
   }
 };
+
+// ─────────────────────────────────────────────
+// SHARED BULK-WRITE HELPER
+// ─────────────────────────────────────────────
+
+/**
+ * Build a bulkWrite ops array from a normalised product list and execute it.
+ * Each item must have at least { name }. Optional: { sku, price, currency,
+ * description, discountPercent, stock, paymentUrl, images, sizes, colors }.
+ */
+async function runBulkUpsert(items, orgId, userId) {
+  const bulkOps = [];
+  let processedCount = 0;
+
+  for (const item of items) {
+    const name = item.name ? String(item.name).trim() : null;
+    if (!name) continue;
+
+    const productData = {
+      organization: orgId,
+      name,
+      description: item.description ? String(item.description).trim() : '',
+      price: Number(item.price) || 0,
+      currency: item.currency ? String(item.currency).trim() : 'USD',
+      discountPercent: Number(item.discountPercent) || 0,
+      stock: item.stock != null && item.stock !== '' ? Number(item.stock) : null,
+      paymentUrl: item.paymentUrl ? String(item.paymentUrl).trim() : '',
+      images: Array.isArray(item.images) ? item.images.filter(Boolean) : [],
+      sizes: Array.isArray(item.sizes) ? item.sizes.filter(Boolean) : [],
+      colors: Array.isArray(item.colors) ? item.colors.filter(Boolean) : [],
+      isActive: true,
+      createdBy: userId
+    };
+
+    const sku = item.sku ? String(item.sku).trim() : null;
+    if (sku) productData.sku = sku;
+
+    bulkOps.push({
+      updateOne: {
+        filter: sku ? { organization: orgId, sku } : { organization: orgId, name },
+        update: { $set: productData },
+        upsert: true
+      }
+    });
+    processedCount++;
+  }
+
+  if (bulkOps.length === 0) {
+    return { upsertedCount: 0, modifiedCount: 0, matchedCount: 0, totalProcessed: 0 };
+  }
+
+  const result = await Product.bulkWrite(bulkOps);
+  return {
+    upsertedCount: result.upsertedCount,
+    modifiedCount: result.modifiedCount,
+    matchedCount: result.matchedCount,
+    totalProcessed: processedCount
+  };
+}
+
+// ─────────────────────────────────────────────
+// IMPORT FROM WOOCOMMERCE
+// ─────────────────────────────────────────────
+exports.importFromWooCommerce = async (req, res, next) => {
+  try {
+    const { storeUrl, consumerKey, consumerSecret } = req.body;
+    if (!storeUrl || !consumerKey || !consumerSecret) {
+      return res.status(400).json({ success: false, error: 'storeUrl, consumerKey and consumerSecret are required' });
+    }
+
+    const orgId = req.user.organization._id;
+    const base = storeUrl.replace(/\/$/, '');
+    const allProducts = [];
+    let page = 1;
+    const perPage = 100;
+
+    // Paginate through all products
+    while (true) {
+      const response = await axios.get(`${base}/wp-json/wc/v3/products`, {
+        params: { per_page: perPage, page, status: 'publish' },
+        auth: { username: consumerKey, password: consumerSecret },
+        timeout: 20000
+      });
+
+      const batch = response.data;
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      allProducts.push(...batch);
+      if (batch.length < perPage) break;
+      page++;
+    }
+
+    if (allProducts.length === 0) {
+      return res.json({ success: true, data: { upsertedCount: 0, modifiedCount: 0, matchedCount: 0, totalProcessed: 0 } });
+    }
+
+    // Normalise WooCommerce → our schema
+    const items = allProducts.map(p => ({
+      sku: p.sku || null,
+      name: p.name || '',
+      description: p.short_description
+        ? p.short_description.replace(/<[^>]*>/g, '').trim()
+        : (p.description ? p.description.replace(/<[^>]*>/g, '').trim() : ''),
+      price: parseFloat(p.price) || parseFloat(p.regular_price) || 0,
+      currency: 'USD', // WooCommerce doesn't return currency per product
+      discountPercent: 0,
+      stock: p.manage_stock ? (p.stock_quantity ?? null) : null,
+      paymentUrl: p.permalink || '',
+      images: (p.images || []).map(img => img.src).filter(Boolean),
+      sizes: (p.attributes || [])
+        .filter(a => /size/i.test(a.name))
+        .flatMap(a => a.options || []),
+      colors: (p.attributes || [])
+        .filter(a => /colou?r/i.test(a.name))
+        .flatMap(a => a.options || [])
+    }));
+
+    const summary = await runBulkUpsert(items, orgId, req.user._id);
+    res.json({ success: true, data: summary });
+
+  } catch (err) {
+    logger.error(`[importFromWooCommerce] Error: ${err.message}`);
+    if (err.response) {
+      return res.status(502).json({ success: false, error: `WooCommerce API error: ${err.response.status} — ${err.response.data?.message || 'unexpected response'}` });
+    }
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// IMPORT FROM SHOPIFY
+// ─────────────────────────────────────────────
+exports.importFromShopify = async (req, res, next) => {
+  try {
+    const { storeDomain, accessToken } = req.body;
+    if (!storeDomain || !accessToken) {
+      return res.status(400).json({ success: false, error: 'storeDomain and accessToken are required' });
+    }
+
+    const orgId = req.user.organization._id;
+    const domain = storeDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const allProducts = [];
+    let pageInfo = null;
+
+    // Shopify cursor-based pagination
+    while (true) {
+      const params = { limit: 250, status: 'active', fields: 'id,title,body_html,variants,images' };
+      if (pageInfo) params.page_info = pageInfo;
+
+      const response = await axios.get(`https://${domain}/admin/api/2024-01/products.json`, {
+        params,
+        headers: { 'X-Shopify-Access-Token': accessToken },
+        timeout: 20000
+      });
+
+      const batch = response.data.products || [];
+      allProducts.push(...batch);
+
+      // Extract next page cursor from Link header
+      const linkHeader = response.headers['link'] || '';
+      const nextMatch = linkHeader.match(/<[^>]+page_info=([^&>]+)[^>]*>;\s*rel="next"/);
+      if (nextMatch) {
+        pageInfo = nextMatch[1];
+      } else {
+        break;
+      }
+    }
+
+    if (allProducts.length === 0) {
+      return res.json({ success: true, data: { upsertedCount: 0, modifiedCount: 0, matchedCount: 0, totalProcessed: 0 } });
+    }
+
+    // Normalise Shopify → our schema
+    const items = allProducts.map(p => {
+      const variant = (p.variants || [])[0] || {};
+      return {
+        sku: variant.sku || null,
+        name: p.title || '',
+        description: p.body_html ? p.body_html.replace(/<[^>]*>/g, '').trim() : '',
+        price: parseFloat(variant.price) || 0,
+        currency: 'USD',
+        discountPercent: variant.compare_at_price && parseFloat(variant.compare_at_price) > parseFloat(variant.price)
+          ? Math.round((1 - parseFloat(variant.price) / parseFloat(variant.compare_at_price)) * 100)
+          : 0,
+        stock: variant.inventory_quantity != null ? variant.inventory_quantity : null,
+        paymentUrl: '',
+        images: (p.images || []).map(img => img.src).filter(Boolean),
+        sizes: (p.variants || [])
+          .map(v => v.option1)
+          .filter(v => v && !/^\d/.test(v)), // crude: skip pure-numeric variant options (prices)
+        colors: []
+      };
+    });
+
+    const summary = await runBulkUpsert(items, orgId, req.user._id);
+    res.json({ success: true, data: summary });
+
+  } catch (err) {
+    logger.error(`[importFromShopify] Error: ${err.message}`);
+    if (err.response) {
+      return res.status(502).json({ success: false, error: `Shopify API error: ${err.response.status} — ${err.response.data?.errors || 'unexpected response'}` });
+    }
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// IMPORT FROM CUSTOM API URL
+// ─────────────────────────────────────────────
+exports.importFromUrl = async (req, res, next) => {
+  try {
+    const { url, authHeader } = req.body;
+    if (!url) {
+      return res.status(400).json({ success: false, error: 'url is required' });
+    }
+
+    const orgId = req.user.organization._id;
+
+    const headers = { Accept: 'application/json' };
+    if (authHeader) headers['Authorization'] = authHeader;
+
+    const response = await axios.get(url, { headers, timeout: 20000 });
+    let raw = response.data;
+
+    // Unwrap common envelope shapes: { data: [...] }, { products: [...] }, { items: [...] }
+    if (!Array.isArray(raw)) {
+      raw = raw.data || raw.products || raw.items || raw.results || Object.values(raw).find(Array.isArray) || [];
+    }
+
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return res.status(422).json({ success: false, error: 'Could not find a product array in the API response. Make sure the endpoint returns an array of products (or wraps it in a "data", "products", or "items" key).' });
+    }
+
+    // Best-effort field mapping — accepts both snake_case and camelCase keys
+    const items = raw.map(p => ({
+      sku: p.sku || p.SKU || null,
+      name: p.name || p.title || p.product_name || '',
+      description: p.description || p.body_html || p.short_description || '',
+      price: parseFloat(p.price || p.sale_price || p.regular_price || 0) || 0,
+      currency: p.currency || p.currency_code || 'USD',
+      discountPercent: Number(p.discountPercent || p.discount_percent || p.discount || 0) || 0,
+      stock: p.stock != null ? Number(p.stock) : (p.stock_quantity != null ? Number(p.stock_quantity) : null),
+      paymentUrl: p.paymentUrl || p.payment_url || p.permalink || p.url || '',
+      images: Array.isArray(p.images) ? p.images.map(img => (typeof img === 'string' ? img : img.src || img.url || '')).filter(Boolean)
+        : (p.image ? [p.image] : []),
+      sizes: Array.isArray(p.sizes) ? p.sizes : (p.sizes ? String(p.sizes).split(',').map(s => s.trim()).filter(Boolean) : []),
+      colors: Array.isArray(p.colors) ? p.colors : (p.colors ? String(p.colors).split(',').map(s => s.trim()).filter(Boolean) : [])
+    }));
+
+    const summary = await runBulkUpsert(items, orgId, req.user._id);
+    res.json({ success: true, data: summary });
+
+  } catch (err) {
+    logger.error(`[importFromUrl] Error: ${err.message}`);
+    if (err.response) {
+      return res.status(502).json({ success: false, error: `Remote API error: ${err.response.status} — ${err.response.statusText}` });
+    }
+    next(err);
+  }
+};
+

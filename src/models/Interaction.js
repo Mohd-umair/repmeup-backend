@@ -259,6 +259,12 @@ const interactionSchema = new mongoose.Schema({
     postId: String,
     postUrl: String,
     postAuthor: String,
+    // Post/video title and thumbnail (stored at interaction creation time)
+    postTitle: String,        // Generic post title (Facebook, LinkedIn, Twitter/X)
+    postThumbnailUrl: String, // Generic post thumbnail
+    videoTitle: String,       // YouTube video title
+    videoThumbnailUrl: String, // YouTube video thumbnail
+    mediaCaption: String,     // Instagram/Facebook media caption (first 200 chars)
     
     // For Instagram/Facebook DM thread: history of incoming messages (chat-style)
     incomingMessages: [{

@@ -227,6 +227,7 @@ class InstagramService {
                 postId: media.id,
                 postUrl: media.permalink,
                 mediaType: media.media_type,
+                mediaCaption: media.caption ? String(media.caption).slice(0, 200) : null,
                 likeCount: comment.like_count || 0
               },
               platformCreatedAt: new Date(comment.timestamp),
@@ -258,6 +259,7 @@ class InstagramService {
                   metadata: {
                     postId: media.id,
                     postUrl: media.permalink,
+                    mediaCaption: media.caption ? String(media.caption).slice(0, 200) : null,
                     parentCommentId: comment.id,
                     isReply: true
                   },
@@ -1565,6 +1567,29 @@ class InstagramService {
       console.warn(`[Instagram] resolveShortcodeToMediaId failed for shortcode="${shortcode}":`, msg);
     }
 
+    return null;
+  }
+
+  /**
+   * Resolve a numeric Graph API media ID to its public Instagram shortcode permalink.
+   * e.g. "18104377792903993" → "https://www.instagram.com/p/DWfGl70lIGM/"
+   * Returns null if the call fails or the ID is not a valid media.
+   */
+  async fetchMediaPermalink(accessToken, mediaId) {
+    if (!accessToken || !mediaId) return null;
+    try {
+      const response = await axios.get(`${this.baseUrl}/${mediaId}`, {
+        params: { fields: 'permalink', access_token: accessToken },
+        timeout: 8000
+      });
+      const permalink = response.data?.permalink;
+      if (permalink) {
+        console.log(`[Instagram] Resolved media ${mediaId} → ${permalink}`);
+        return permalink;
+      }
+    } catch (err) {
+      console.warn(`[Instagram] fetchMediaPermalink failed for ${mediaId}:`, err?.response?.data?.error?.message || err.message);
+    }
     return null;
   }
 }

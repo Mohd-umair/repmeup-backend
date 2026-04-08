@@ -326,86 +326,6 @@ async function processCommentForProduct(interaction, organizationId) {
 }
 
 /**
- * Dry-run version of processCommentForProduct.
- * Returns a diagnostic checklist instead of actually sending a DM.
- * Used by the /debug/test-automation endpoint.
- */
-async function dryRunDiagnostic(organizationId, postId, commentText) {
-  const result = {
-    steps: [],
-    passed: false,
-    blockedAt: null
-  };
-
-  const step = (name, ok, detail = '') => {
-    result.steps.push({ name, ok, detail });
-    if (!ok && !result.blockedAt) result.blockedAt = name;
-  };
-
-  // Step 1: Settings
-  const org = await Organization.findById(organizationId).select('commentToDmSettings').lean();
-  const settings = org?.commentToDmSettings || {};
-  step('automation_enabled', !!settings.enabled,
-    settings.enabled ? 'Automation is ON' : 'Automation is OFF — toggle the switch and save settings');
-
-  if (!settings.enabled) return result;
-
-  // Step 2: Keywords
-  const text = (commentText || '').toLowerCase();
-  const keywords = (settings.triggerKeywords || []).map(k => k.toLowerCase().trim()).filter(Boolean);
-  const kwMatch = keywords.some(kw => text.includes(kw));
-  step('keyword_match', kwMatch,
-    kwMatch
-      ? `Keyword matched in "${text.substring(0, 50)}"`
-      : `No keyword found. Comment: "${text.substring(0, 50)}" — Keywords: ${keywords.join(', ')}`);
-
-  if (!kwMatch) return result;
-
-  // Step 3: postId present
-  const hasPostId = !!(postId && String(postId).trim());
-  step('post_id_present', hasPostId,
-    hasPostId ? `postId: ${postId}` : 'postId is missing — Instagram webhook may not have included media.id for this comment');
-
-  if (!hasPostId) return result;
-
-  // Step 4: Product linked to post
-  let products = await Product.find({
-    organization: organizationId,
-    instagramPostIds: String(postId),
-    isActive: true
-  }).lean();
-
-  let usedFallback = false;
-  if (!products.length && settings.defaultProductId) {
-    const def = await Product.findOne({ _id: settings.defaultProductId, organization: organizationId, isActive: true }).lean();
-    if (def) { products = [def]; usedFallback = true; }
-  }
-
-  step('product_linked', products.length > 0,
-    products.length > 0
-      ? `Found ${products.length} product(s)${usedFallback ? ' via defaultProductId fallback' : ''}: ${products.map(p => p.name).join(', ')}`
-      : `No product linked to postId "${postId}" and no defaultProductId set — open the product card and add this postId under "Manage Posts"`);
-
-  if (!products.length) return result;
-
-  // Step 5: Platform connection
-  const conn = await PlatformConnection.findOne({
-    organization: organizationId,
-    platform: 'instagram',
-    isActive: true
-  }).select('_id platformUserId').lean();
-
-  step('platform_connection', !!conn,
-    conn ? `Instagram connection found (id: ${conn._id})` : 'No active Instagram connection — go to Settings → Platforms and reconnect Instagram');
-
-  if (!conn) return result;
-
-  result.passed = true;
-  result.product = { _id: products[0]._id, name: products[0].name };
-  return result;
-}
-
-/**
  * Simple Mustache-style template filler.
  * Replaces {{key}} tokens with values from vars.
  */
@@ -415,4 +335,4 @@ function buildTemplate(template, vars) {
   );
 }
 
-module.exports = { processCommentForProduct, dryRunDiagnostic, buildTemplate };
+module.exports = { processCommentForProduct, buildTemplate };

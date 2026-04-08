@@ -1,11 +1,20 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const { protect } = require('../middlewares/auth');
 const productController = require('../controllers/productController');
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.use(protect);
 
 // ── Static/named routes MUST come before /:id ──────────────────────────────
+// Import products — Excel/CSV
+router.post('/import', upload.single('file'), productController.importProducts);
+// Import from external platforms
+router.post('/import/woocommerce', productController.importFromWooCommerce);
+router.post('/import/shopify', productController.importFromShopify);
+router.post('/import/url', productController.importFromUrl);
 // Comment-to-DM settings
 router.get('/settings/comment-to-dm', productController.getCommentToDmSettings);
 router.put('/settings/comment-to-dm', productController.updateCommentToDmSettings);
@@ -13,14 +22,8 @@ router.put('/settings/comment-to-dm', productController.updateCommentToDmSetting
 // Resolve Instagram post shortcode → numeric media ID
 router.get('/resolve-post', productController.resolvePostId);
 
-// Recent Instagram posts seen in the inbox (for easy post-to-product linking)
-router.get('/recent-posts', productController.getRecentPosts);
-
 // Posts by Instagram post ID
 router.get('/by-post/:postId', productController.getProductsByPost);
-
-// Diagnostic dry-run (does not send real DMs)
-router.post('/debug/test-automation', productController.testAutomation);
 
 // ── Catalog CRUD ────────────────────────────────────────────────────────────
 router.get('/', productController.getProducts);

@@ -448,6 +448,13 @@ async function handleInstagramWebhook(payload, organizationId) {
           if (Number.isFinite(ms)) platformCreatedAt = new Date(ms);
         }
 
+        // Resolve the proper shortcode permalink (e.g. /p/DWfGl70lIGM/) via Graph API
+        const mediaId = comment.media?.id;
+        let postUrl = null;
+        if (mediaId && dmReceiverConnection?.accessToken) {
+          postUrl = await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mediaId);
+        }
+
         const updatePayload = {
           organization: organizationId,
           platform: 'instagram',
@@ -456,8 +463,8 @@ async function handleInstagramWebhook(payload, organizationId) {
           content: comment.text,
           author,
           metadata: {
-            postId: comment.media?.id,
-            postUrl: `https://www.instagram.com/p/${comment.media?.id}`
+            postId: mediaId,
+            postUrl
           },
           platformCreatedAt
         };
@@ -538,12 +545,14 @@ async function handleInstagramWebhook(payload, organizationId) {
               content: mentionText,
               author,
               platformCreatedAt: mentionCreatedAt,
-              metadata: {
+                metadata: {
                 mentionId: mention.id || null,
                 mediaId: mention.media_id || null,
                 commentId: mention.comment_id || null,
                 postId: mention.media_id || null,
-                postUrl: mention.media_id ? `https://www.instagram.com/p/${mention.media_id}` : null,
+                postUrl: mention.media_id && dmReceiverConnection?.accessToken
+                  ? await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mention.media_id)
+                  : null,
                 rawMention: mention
               }
             },
