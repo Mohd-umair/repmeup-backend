@@ -3,6 +3,8 @@ const auditLogController = require('./auditLogController');
 const aiService = require('../services/aiService');
 const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
 const aiCreditService = require('../services/aiCreditService');
+const brandProfileService = require('../services/brandProfileService');
+const PlatformPost = require('../models/PlatformPost');
 
 /**
  * @desc    Get brand config for current user's organization
@@ -182,6 +184,70 @@ exports.retrainVoice = async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to update voice trained timestamp'
+    });
+  }
+};
+
+/**
+ * @desc    Analyze recent posts and build brand profile
+ * @route   POST /api/brand-config/analyze
+ * @access  Private (admin/manager)
+ */
+exports.analyzeBrandProfile = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, error: 'Organization not found' });
+    }
+
+    const postCount = await PlatformPost.countDocuments({ organization: organizationId });
+    if (postCount < 3) {
+      return res.status(400).json({
+        success: false,
+        error: `Need at least 3 synced posts to analyze (you have ${postCount}). Sync your platforms first.`
+      });
+    }
+
+    const result = await brandProfileService.analyzeOrgContent(organizationId);
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+
+    const config = await BrandConfig.findOne({ organization: organizationId });
+    res.status(200).json({ success: true, data: config });
+  } catch (error) {
+    console.error('Analyze brand profile error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Brand profile analysis failed'
+    });
+  }
+};
+
+/**
+ * @desc    Save manual overrides for auto-analyzed brand profile values
+ * @route   PUT /api/brand-config/profile-overrides
+ * @access  Private (admin/manager)
+ */
+exports.updateProfileOverrides = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, error: 'Organization not found' });
+    }
+
+    const config = await BrandConfig.findOneAndUpdate(
+      { organization: organizationId },
+      { $set: { brandProfileOverrides: req.body.overrides || null } },
+      { new: true, upsert: true }
+    );
+
+    res.status(200).json({ success: true, data: config });
+  } catch (error) {
+    console.error('Update profile overrides error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update overrides'
     });
   }
 };

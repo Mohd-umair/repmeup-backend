@@ -1,11 +1,12 @@
 require('dotenv').config();
 const connectDB = require('./config/database');
 const { connectRedis } = require('./config/redis');
-const { webhookQueue, aiQueue, autoReplyQueue, scheduledPublishQueue } = require('./config/queue');
+const { webhookQueue, aiQueue, autoReplyQueue, scheduledPublishQueue, brandAnalysisQueue } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
 const processAutoReply = require('./jobs/processAutoReply');
 const processScheduledPublish = require('./jobs/processScheduledPublish');
+const processBrandAnalysis = require('./jobs/processBrandAnalysis');
 
 // Concurrency from env
 const WEBHOOK_CONCURRENCY = parseInt(process.env.WEBHOOK_CONCURRENCY) || 10;
@@ -51,7 +52,13 @@ async function startWorker() {
       return await processScheduledPublish();
     });
     console.log('✅ Scheduled publish processor started (every 1 min)');
-    
+
+    brandAnalysisQueue.process(2, async (job) => {
+      console.log(`\n🎨 [Worker] Processing brand analysis job ${job.id}`);
+      return await processBrandAnalysis(job);
+    });
+    console.log('✅ Brand analysis queue processor started (concurrency: 2)');
+
     console.log('✨ Worker started successfully with concurrency:');
     console.log(`   Webhook: ${WEBHOOK_CONCURRENCY}`);
     console.log(`   AI: ${AI_CONCURRENCY}`);
@@ -64,6 +71,7 @@ async function startWorker() {
       await aiQueue.close();
       await autoReplyQueue.close();
       await scheduledPublishQueue.close();
+      await brandAnalysisQueue.close();
       process.exit(0);
     });
     
@@ -73,6 +81,7 @@ async function startWorker() {
       await aiQueue.close();
       await autoReplyQueue.close();
       await scheduledPublishQueue.close();
+      await brandAnalysisQueue.close();
       process.exit(0);
     });
     

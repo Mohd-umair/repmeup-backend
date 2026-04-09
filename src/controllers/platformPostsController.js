@@ -1,9 +1,11 @@
 const mongoose = require('mongoose');
 const PlatformConnection = require('../models/PlatformConnection');
 const PlatformPost = require('../models/PlatformPost');
+const BrandConfig = require('../models/BrandConfig');
 const Interaction = require('../models/Interaction');
 const facebookService = require('../integrations/meta/facebookService');
 const instagramService = require('../integrations/meta/instagramService');
+const { brandAnalysisQueue, queueConfig } = require('../config/queue');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
 
 /**
@@ -340,6 +342,22 @@ exports.syncPlatformPosts = async (req, res, next) => {
     const totalLikes = normalized.reduce((s, p) => s + (p.likeCount || 0), 0);
     const totalShares = normalized.reduce((s, p) => s + (p.shareCount || 0), 0);
     console.log(`[PlatformPosts] Sync complete: ${upserted} posts, total likes=${totalLikes}, total shares=${totalShares}`);
+
+    // Auto-trigger brand profile analysis when 5+ posts exist and never analyzed before
+    if (upserted >= 1) {
+      try {
+        const totalPosts = await PlatformPost.countDocuments({ organization: organizationId });
+        if (totalPosts >= 5) {
+          const config = await BrandConfig.findOne({ organization: organizationId }).select('brandProfile.analyzedAt').lean();
+          if (!config?.brandProfile?.analyzedAt) {
+            await brandAnalysisQueue.add({ organizationId: String(organizationId) }, { ...queueConfig, jobId: `brand-analysis-${organizationId}` });
+            console.log(`[PlatformPosts] Queued brand analysis for org ${organizationId} (${totalPosts} posts)`);
+          }
+        }
+      } catch (triggerErr) {
+        console.warn('[PlatformPosts] Brand analysis trigger failed (non-fatal):', triggerErr.message);
+      }
+    }
 
     res.status(200).json({
       success: true,

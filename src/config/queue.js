@@ -22,6 +22,7 @@ const aiQueue = new Queue('ai-processing', queueOptions);
 const notificationQueue = new Queue('notifications', queueOptions);
 const autoReplyQueue = new Queue('auto-reply', queueOptions);
 const scheduledPublishQueue = new Queue('scheduled-publish', queueOptions);
+const brandAnalysisQueue = new Queue('brand-analysis', queueOptions);
 
 // Configure job settings (memory-efficient)
 const queueConfig = {
@@ -35,7 +36,7 @@ const queueConfig = {
 };
 
 // Error handling for all queues
-const queues = [webhookQueue, syncQueue, aiQueue, notificationQueue, autoReplyQueue, scheduledPublishQueue];
+const queues = [webhookQueue, syncQueue, aiQueue, notificationQueue, autoReplyQueue, scheduledPublishQueue, brandAnalysisQueue];
 
 queues.forEach(queue => {
   queue.on('error', (error) => {
@@ -58,6 +59,7 @@ module.exports = {
   notificationQueue,
   autoReplyQueue,
   scheduledPublishQueue,
+  brandAnalysisQueue,
   queueConfig
 };
 
