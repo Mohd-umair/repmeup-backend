@@ -3,6 +3,7 @@ const { getAiRequestContext, runWithAiContext, runWithAiContextAndUsageId } = re
 const aiApiUsageService = require('./aiApiUsageService');
 const KnowledgeBase = require('../models/KnowledgeBase');
 const BrandConfig = require('../models/BrandConfig');
+const BrandReferenceImage = require('../models/BrandReferenceImage');
 const aiCreditService = require('./aiCreditService');
 const logger = require('../config/logger');
 const { escapeRegex } = require('../utils/sanitize');
@@ -88,6 +89,12 @@ class AIService {
     // Defaults to gpt-4o-mini; override with OPENAI_CLASSIFICATION_MODEL env var.
     this.classificationModel = normalizeOpenAIModelId(
       process.env.OPENAI_CLASSIFICATION_MODEL || 'gpt-4o-mini'
+    );
+    // Vision-capable model for image analysis tasks. Must support image_url content.
+    // gpt-4o supports vision; the primary model (gpt-5.3-chat-latest) does not.
+    // Override with OPENAI_VISION_MODEL env var if needed.
+    this.visionModel = normalizeOpenAIModelId(
+      process.env.OPENAI_VISION_MODEL || 'gpt-4o'
     );
 
     /** Kept for diagnostics / compatibility — AI stack is OpenAI-only */
@@ -325,9 +332,97 @@ class AIService {
       if (config.legalDisclaimers && config.legalDisclaimers.trim()) {
         parts.push(`Include this disclaimer when relevant: ${config.legalDisclaimers.trim()}`);
       }
+
+      const bp = config.brandProfile;
+      const ov = config.brandProfileOverrides || {};
+      if (bp && bp.analyzedAt) {
+        const ws = ov.writingStyle || bp.writingStyle;
+        if (ws) parts.push(`Writing style: ${ws}.`);
+        const eu = ov.emojiUsage || bp.emojiUsage;
+        if (eu && eu !== 'moderate') parts.push(`Emoji usage: ${eu}.`);
+        const re = ov.recurringEmojis || bp.recurringEmojis;
+        if (re && re.length) parts.push(`Frequently uses emojis: ${re.join(', ')}.`);
+        const pd = ov.personalityDescriptors || bp.personalityDescriptors;
+        if (pd && pd.length) parts.push(`Brand character: ${pd.join(', ')}.`);
+        const hs = ov.hashtagStrategy || bp.hashtagStrategy;
+        if (hs && hs.avgCount) {
+          let hsText = `Hashtag strategy: ~${hs.avgCount} per post`;
+          if (hs.branded?.length) hsText += `, branded: ${hs.branded.join(' ')}`;
+          if (hs.generic?.length) hsText += `, mix generic: ${hs.generic.slice(0, 5).join(' ')}`;
+          parts.push(hsText + '.');
+        }
+        const cta = ov.ctaStyle || bp.ctaStyle;
+        if (cta && cta.length) parts.push(`CTA style: ${cta.join(', ')}.`);
+        const im = ov.imageMood || bp.imageMood;
+        if (im) parts.push(`Visual mood: ${im}.`);
+        const cp = ov.colorPalette || bp.colorPalette;
+        if (cp && cp.length) parts.push(`Color palette: ${cp.join(', ')}.`);
+      }
+
       return parts.length ? parts.join(' ') : null;
     } catch (err) {
       logger.warn('Brand context fetch failed', { organizationId, err: err.message });
+      return null;
+    }
+  }
+
+  /**
+   * Build a visual style instruction block for image generation prompts.
+   * Combines BrandConfig.brandProfile visual fields with aggregated reference image analysis.
+   * @param {string} organizationId
+   * @returns {Promise<string|null>}
+   */
+  async _getVisualStyleContext(organizationId) {
+    if (!organizationId) return null;
+    try {
+      const [config, refImages] = await Promise.all([
+        BrandConfig.findOne({ organization: organizationId }).select('brandProfile brandProfileOverrides').lean(),
+        BrandReferenceImage.find({ organization: organizationId, analysis: { $ne: null } }).limit(20).lean()
+      ]);
+
+      const bp = config?.brandProfile;
+      const ov = config?.brandProfileOverrides || {};
+      const parts = [];
+
+      const palette = ov.colorPalette || bp?.colorPalette;
+      if (palette?.length) parts.push(`Color palette: ${palette.join(', ')}`);
+
+      const comp = ov.visualComposition || bp?.visualComposition;
+      if (comp) parts.push(`Composition: ${comp}`);
+
+      const typo = ov.typographyStyle || bp?.typographyStyle;
+      if (typo) parts.push(`Typography: ${typo}`);
+
+      const mood = ov.imageMood || bp?.imageMood;
+      if (mood) parts.push(`Mood: ${mood}`);
+
+      const logo = ov.logoPlacement || bp?.logoPlacement;
+      if (logo && logo !== 'none detected') parts.push(`Logo: ${logo}`);
+
+      if (refImages.length) {
+        const colorFreq = {};
+        const compFreq = {};
+        const moodFreq = {};
+        for (const ri of refImages) {
+          const a = ri.analysis;
+          (a.dominantColors || []).forEach(c => { colorFreq[c] = (colorFreq[c] || 0) + 1; });
+          if (a.compositionType) compFreq[a.compositionType] = (compFreq[a.compositionType] || 0) + 1;
+          if (a.mood) moodFreq[a.mood] = (moodFreq[a.mood] || 0) + 1;
+        }
+        if (!palette?.length) {
+          const topColors = Object.entries(colorFreq).sort((a, b) => b[1] - a[1]).slice(0, 5).map(e => e[0]);
+          if (topColors.length) parts.push(`Reference colors: ${topColors.join(', ')}`);
+        }
+        const topComp = Object.entries(compFreq).sort((a, b) => b[1] - a[1])[0]?.[0];
+        if (topComp && !comp) parts.push(`Reference composition: ${topComp}`);
+        const topMood = Object.entries(moodFreq).sort((a, b) => b[1] - a[1])[0]?.[0];
+        if (topMood && !mood) parts.push(`Reference mood: ${topMood}`);
+      }
+
+      if (!parts.length) return null;
+      return `Visual style requirements (follow strictly):\n- ${parts.join('\n- ')}`;
+    } catch (err) {
+      logger.warn('Visual style context fetch failed', { organizationId, err: err.message });
       return null;
     }
   }
@@ -473,6 +568,82 @@ Generate ONLY the post text. No explanations, headers, or meta-commentary.`;
   }
 
   /**
+   * Generate an event/seasonal post by compositing three layers:
+   *  1) Brand identity (from BrandConfig.brandProfile)
+   *  2) Event style (from EventTemplate.eventStyle)
+   *  3) User intent (the user's message/prompt)
+   *
+   * @param {object} opts
+   * @param {string} opts.organizationId
+   * @param {string} opts.eventTemplateId
+   * @param {string} opts.prompt - The user's message / greeting / offer text
+   * @param {string[]} opts.platforms
+   * @param {string} [opts.userId]
+   * @returns {Promise<{ text: string, imagePrompt: string }>}
+   */
+  async generateEventPost(opts) {
+    const { organizationId, eventTemplateId, prompt, platforms, userId } = opts;
+    const EventTemplate = require('../models/EventTemplate');
+
+    const [brandCtx, visualCtx, template] = await Promise.all([
+      this._getBrandContext(organizationId),
+      this._getVisualStyleContext(organizationId),
+      EventTemplate.findById(eventTemplateId).lean()
+    ]);
+
+    if (!template) throw new Error('Event template not found');
+
+    const eventStyle = template.eventStyle || {};
+    const eventName = template.name || template.eventType;
+
+    const eventLayerParts = [];
+    if (eventStyle.dominantColors?.length) eventLayerParts.push(`Event accent colors: ${eventStyle.dominantColors.join(', ')}`);
+    if (eventStyle.decorativeElements?.length) eventLayerParts.push(`Decorative elements: ${eventStyle.decorativeElements.join(', ')}`);
+    if (eventStyle.mood) eventLayerParts.push(`Event mood: ${eventStyle.mood}`);
+    if (eventStyle.typography) eventLayerParts.push(`Event typography: ${eventStyle.typography}`);
+    const eventLayer = eventLayerParts.length
+      ? `Event style for "${eventName}" (blend with brand, 60% brand / 40% event):\n- ${eventLayerParts.join('\n- ')}`
+      : `Event: ${eventName}`;
+
+    const textSystemPrompt = `You are a social media content creator. Write a ${eventName} post for ${platforms.join(', ')}.
+${brandCtx ? `\nBrand guidelines:\n${brandCtx}\n` : ''}
+${eventLayer}
+
+User message: ${prompt}
+
+Return ONLY the post text (caption + hashtags). Keep the brand voice while incorporating seasonal greetings and event spirit.`;
+
+    const textResponse = await runWithAiContext(
+      { organizationId, userId, feature: 'event_post.text' },
+      () => this._postChatCompletions({
+        model: this.openaiModel,
+        messages: [
+          { role: 'system', content: textSystemPrompt },
+          { role: 'user', content: prompt }
+        ],
+        ...this._tempTokenConfig(0.8, 600)
+      })
+    );
+    const generatedText = textResponse.data?.choices?.[0]?.message?.content || '';
+
+    const imagePromptParts = [`Create a social media post image for ${eventName}.`];
+    if (visualCtx) imagePromptParts.push(visualCtx);
+    imagePromptParts.push(eventLayer);
+    imagePromptParts.push(`Content: "${prompt}"`);
+    const imagePrompt = imagePromptParts.join('\n');
+
+    return { text: generatedText, imagePrompt };
+  }
+
+  _tempTokenConfig(temp, max) {
+    const model = (this.openaiModel || '').toLowerCase();
+    const tokenField = /^gpt-5|^o[134]/.test(model)
+      ? { max_completion_tokens: max }
+      : { max_tokens: max };
+    return { temperature: temp, ...tokenField };
+  }
+
+  /**
    * Whether an image API error is worth retrying (timeouts, drops, rate limits).
    * @private
    */
@@ -499,16 +670,25 @@ Generate ONLY the post text. No explanations, headers, or meta-commentary.`;
    * Generate an image via OpenAI Image API using gpt-image-1.5.
    * Retries transient failures (aborted connections, timeouts, 429/502/503).
    * @param {string} prompt - Description of the image to generate
+   * @param {string} [organizationId] - If provided, visual style context is injected
    * @returns {Promise<Buffer|null>} Image buffer or null on error
    */
-  async generateImage(prompt) {
+  async generateImage(prompt, organizationId = null) {
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
       return null;
     }
 
-    const imagePrompt = typeof prompt === 'string' && prompt.length > 0
-      ? prompt.substring(0, 1000)
+    let basePrompt = typeof prompt === 'string' && prompt.length > 0
+      ? prompt
       : 'Professional social media post image, modern, high quality';
+
+    if (organizationId) {
+      const visualCtx = await this._getVisualStyleContext(organizationId);
+      if (visualCtx) {
+        basePrompt = `${visualCtx}\n\n${basePrompt}`;
+      }
+    }
+    const imagePrompt = basePrompt.substring(0, 1500);
 
     const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5';
     const maxAttempts = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_MAX_RETRIES, 10) || 3, 1), 5);
