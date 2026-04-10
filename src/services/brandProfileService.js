@@ -1,3 +1,4 @@
+const axios = require('axios');
 const PlatformPost = require('../models/PlatformPost');
 const BrandConfig = require('../models/BrandConfig');
 const aiService = require('./aiService');
@@ -137,24 +138,39 @@ class BrandProfileService {
 
   /** @private */
   async _analyzeVisuals(posts) {
-    const imageUrls = posts
-      .filter(p => {
-        if (!p.mediaUrl) return false;
-        if (p.mediaType !== 'image' && p.mediaType !== 'carousel') return false;
-        // OpenAI Vision requires a publicly accessible HTTPS URL — skip local/relative paths
-        try { return new URL(p.mediaUrl).protocol === 'https:'; } catch { return false; }
-      })
-      .slice(0, 5)
-      .map(p => p.mediaUrl);
+    const candidates = posts
+      .filter(p => p.mediaUrl && (p.mediaType === 'image' || p.mediaType === 'carousel'))
+      .slice(0, 5);
 
-    if (!imageUrls.length) return null;
+    if (!candidates.length) return null;
+
+    // Download images and convert to base64 data URLs.
+    // Social platform CDN URLs (Instagram/Facebook) are often short-lived signed URLs
+    // that OpenAI cannot fetch, so we must inline them.
+    const imageContents = [];
+    for (const post of candidates) {
+      try {
+        const resp = await axios.get(post.mediaUrl, { responseType: 'arraybuffer', timeout: 10000 });
+        const mime = resp.headers['content-type'] || 'image/jpeg';
+        const b64 = Buffer.from(resp.data).toString('base64');
+        imageContents.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${b64}`, detail: 'low' } });
+      } catch (dlErr) {
+        logger.warn('Brand visual analysis: could not download image, skipping', {
+          url: post.mediaUrl?.substring(0, 120),
+          error: dlErr.message
+        });
+      }
+    }
+
+    if (!imageContents.length) {
+      logger.warn('Brand visual analysis: no images could be downloaded, skipping visual analysis');
+      return null;
+    }
 
     const content = [
-      { type: 'text', text: `Analyze the visual style across these ${imageUrls.length} brand images.` }
+      { type: 'text', text: `Analyze the visual style across these ${imageContents.length} brand images.` },
+      ...imageContents
     ];
-    for (const url of imageUrls) {
-      content.push({ type: 'image_url', image_url: { url, detail: 'low' } });
-    }
 
     try {
       const response = await aiService._postChatCompletions(
@@ -167,12 +183,19 @@ class BrandProfileService {
           max_tokens: 500
         },
         { feature: 'brand_profile.visual_analysis' },
-        { timeout: 60000 }
+        { timeout: 90000 }
       );
       const text = response.data?.choices?.[0]?.message?.content;
       return safeParseJSON(text);
     } catch (err) {
-      logger.error('Brand profile visual analysis failed', { error: err.message });
+      const detail = err.response?.data || err.response?.status || err.message;
+      logger.error('Brand profile visual analysis failed', {
+        error: err.message,
+        status: err.response?.status,
+        openaiError: JSON.stringify(detail),
+        model: aiService.visionModel,
+        imageCount: imageContents.length
+      });
       return null;
     }
   }

@@ -251,3 +251,32 @@ exports.updateProfileOverrides = async (req, res) => {
     });
   }
 };
+
+/**
+ * @desc    Clear / reset the AI-analyzed brand profile (keeps manual settings)
+ * @route   DELETE /api/brand-config/brand-profile
+ * @access  Private (admin/manager)
+ */
+exports.clearBrandProfile = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, error: 'Organization not found' });
+    }
+
+    const config = await BrandConfig.findOneAndUpdate(
+      { organization: organizationId },
+      { $set: { brandProfile: {}, brandProfileOverrides: null } },
+      { new: true }
+    );
+
+    if (!config) {
+      return res.status(404).json({ success: false, error: 'Brand config not found' });
+    }
+
+    res.status(200).json({ success: true, data: config, message: 'Brand profile cleared' });
+  } catch (error) {
+    console.error('Clear brand profile error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to clear profile' });
+  }
+};

@@ -494,7 +494,11 @@ class InstagramService {
                             message.from?.id === platformConnection.platformPageId;
             if (!isFromUs && message.message) {
               const ts = message.created_time;
-              const timestamp = typeof ts === 'number' ? ts : (new Date(ts).getTime() / 1000);
+              // Store timestamp in MILLISECONDS for consistent frontend rendering.
+              // created_time from Graph API is an ISO string; getTime() returns ms.
+              const timestamp = typeof ts === 'number'
+                ? (ts < 10_000_000_000 ? ts * 1000 : ts)  // if already seconds, convert to ms
+                : new Date(ts).getTime();
               incomingMessages.push({
                 mid: message.id,
                 text: message.message,

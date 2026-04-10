@@ -160,13 +160,20 @@ exports.styleSummary = async (req, res) => {
 };
 
 async function _analyzeImageAsync(docId, imageUrl) {
-  // OpenAI Vision requires a publicly accessible HTTPS URL
-  let isPublic = false;
-  try { isPublic = new URL(imageUrl).protocol === 'https:'; } catch { /* invalid URL */ }
-  if (!isPublic) {
-    logger.warn('Reference image analysis skipped: URL is not a public HTTPS URL', { docId, imageUrl });
+  const axios = require('axios');
+
+  // Download image and convert to base64 to avoid URL accessibility issues
+  let dataUrl;
+  try {
+    const resp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+    const mime = resp.headers['content-type'] || 'image/jpeg';
+    const b64 = Buffer.from(resp.data).toString('base64');
+    dataUrl = `data:${mime};base64,${b64}`;
+  } catch (dlErr) {
+    logger.warn('Reference image analysis: could not download image', { docId, url: imageUrl?.substring(0, 120), error: dlErr.message });
     return;
   }
+
   try {
     const response = await aiService._postChatCompletions(
       {
@@ -175,7 +182,7 @@ async function _analyzeImageAsync(docId, imageUrl) {
           { role: 'system', content: IMAGE_ANALYSIS_PROMPT },
           { role: 'user', content: [
             { type: 'text', text: 'Analyze this brand reference image.' },
-            { type: 'image_url', image_url: { url: imageUrl, detail: 'low' } }
+            { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } }
           ]}
         ],
         max_tokens: 400
@@ -189,7 +196,8 @@ async function _analyzeImageAsync(docId, imageUrl) {
       await BrandReferenceImage.updateOne({ _id: docId }, { $set: { analysis: parsed } });
     }
   } catch (err) {
-    logger.warn('Reference image AI analysis error', { docId, error: err.message });
+    const detail = err.response?.data || err.message;
+    logger.warn('Reference image AI analysis error', { docId, error: err.message, openaiError: JSON.stringify(detail) });
   }
 }
 
