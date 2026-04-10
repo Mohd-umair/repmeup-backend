@@ -15,6 +15,7 @@ router.put('/', authorize('admin', 'manager'), brandConfigController.updateBrand
 router.post('/retrain', authorize('admin', 'manager'), brandConfigController.retrainVoice);
 router.post('/analyze', authorize('admin', 'manager'), brandConfigController.analyzeBrandProfile);
 router.put('/profile-overrides', authorize('admin', 'manager'), brandConfigController.updateProfileOverrides);
+router.delete('/brand-profile', authorize('admin', 'manager'), brandConfigController.clearBrandProfile);
 
 // Reference images
 router.get('/reference-images', refImageController.list);

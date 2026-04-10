@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
 const { protect } = require('../middlewares/auth');
 const { validateMediaUpdate } = require('../middlewares/validation');
 const mediaLibraryController = require('../controllers/mediaLibraryController');
@@ -65,6 +66,33 @@ const upload = multer({
   fileFilter: fileFilter,
   limits: {
     fileSize: 100 * 1024 * 1024 // 100MB max
+  }
+});
+
+// @route   GET /api/media-library/proxy?url=...
+// @desc    Server-side image proxy — downloads external image and streams it back so the
+//          browser can draw it on a canvas without CORS taint issues (OpenAI CDN, etc.)
+// @access  Private
+router.get('/proxy', protect, async (req, res) => {
+  const { url } = req.query;
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ error: 'url query param required' });
+  }
+  try {
+    const decoded = decodeURIComponent(url);
+    new URL(decoded); // validate it's a real URL
+    const response = await axios.get(decoded, {
+      responseType: 'arraybuffer',
+      timeout: 15000,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const contentType = response.headers['content-type'] || 'image/jpeg';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(Buffer.from(response.data));
+  } catch (err) {
+    res.status(502).json({ error: 'Failed to fetch image', detail: err.message });
   }
 });
 

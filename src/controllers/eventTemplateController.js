@@ -104,6 +104,19 @@ exports.remove = async (req, res) => {
 };
 
 async function _analyzeEventImageAsync(templateId, imageUrl) {
+  const axios = require('axios');
+
+  let dataUrl;
+  try {
+    const resp = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+    const mime = resp.headers['content-type'] || 'image/jpeg';
+    const b64 = Buffer.from(resp.data).toString('base64');
+    dataUrl = `data:${mime};base64,${b64}`;
+  } catch (dlErr) {
+    logger.warn('Event template analysis: could not download image', { templateId, url: imageUrl?.substring(0, 120), error: dlErr.message });
+    return;
+  }
+
   try {
     const response = await aiService._postChatCompletions(
       {
@@ -112,7 +125,7 @@ async function _analyzeEventImageAsync(templateId, imageUrl) {
           { role: 'system', content: EVENT_STYLE_PROMPT },
           { role: 'user', content: [
             { type: 'text', text: 'Analyze this seasonal/event reference image.' },
-            { type: 'image_url', image_url: { url: imageUrl, detail: 'low' } }
+            { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } }
           ]}
         ],
         max_tokens: 400
@@ -126,7 +139,8 @@ async function _analyzeEventImageAsync(templateId, imageUrl) {
       await EventTemplate.updateOne({ _id: templateId }, { $set: { eventStyle: parsed } });
     }
   } catch (err) {
-    logger.warn('Event template AI analysis error', { templateId, error: err.message });
+    const detail = err.response?.data || err.message;
+    logger.warn('Event template AI analysis error', { templateId, error: err.message, openaiError: JSON.stringify(detail) });
   }
 }
 
