@@ -156,8 +156,11 @@ class AIService {
     return response;
   }
 
-  _logImageUsage(model, size, quality, prompt = '') {
+  _logImageUsage(model, size, quality, prompt = '', apiUsage = null) {
     const ctx = this._mergeAiLogContext({});
+    // gpt-image-1 returns usage.input_tokens / usage.output_tokens / usage.total_tokens
+    const usage = apiUsage || {};
+    const inputTokensDetails = usage.input_tokens_details || {};
     aiApiUsageService.recordImageUsage({
       organizationId: ctx.organizationId,
       userId: ctx.userId,
@@ -165,6 +168,11 @@ class AIService {
       model,
       size,
       quality,
+      promptTokens: Number(usage.input_tokens) || 0,
+      inputTextTokens: Number(inputTokensDetails.text_tokens) || 0,
+      inputImageTokens: Number(inputTokensDetails.image_tokens) || 0,
+      completionTokens: Number(usage.output_tokens) || 0,
+      totalTokens: Number(usage.total_tokens) || 0,
       metadata: { prompt: prompt ? String(prompt).substring(0, 3000) : '' }
     });
   }
@@ -429,23 +437,44 @@ class AIService {
 
   /**
    * Use GPT-4o Vision to analyze up to 3 reference images and produce a detailed,
-   * structured style specification. Also returns the raw image URLs so they can be
-   * passed directly to the /v1/images/edits endpoint as visual references.
+   * structured style specification. Result is cached on BrandConfig for 24h and
+   * invalidated when reference images change — avoiding a Vision API call on every
+   * generation (Design Memory Phase 1).
    * @param {string} organizationId
-   * @returns {Promise<{ stylePrompt: string|null, imageUrls: string[] }>}
+   * @returns {Promise<{ stylePrompt: string|null, imageUrls: string[], styleSpec: object|null }>}
    */
   async _getReferenceOnlyContext(organizationId) {
-    if (!organizationId) return { stylePrompt: null, imageUrls: [] };
+    if (!organizationId) return { stylePrompt: null, imageUrls: [], styleSpec: null };
     try {
       const refImages = await BrandReferenceImage.find({
         organization: organizationId,
         imageUrl: { $exists: true, $ne: '' }
       }).sort({ createdAt: -1 }).limit(5).lean();
 
-      if (!refImages.length) return { stylePrompt: null, imageUrls: [] };
+      if (!refImages.length) return { stylePrompt: null, imageUrls: [], styleSpec: null };
 
       // Collect raw URLs for passing to the /v1/images/edits endpoint
       const imageUrls = refImages.slice(0, 2).map(ri => ri.imageUrl);
+
+      // ── Style Cache Check ──────────────────────────────────────────────────
+      // Hash the top-2 image URLs + a version tag — if they haven't changed and cache is < 24h, skip Vision call
+      // Bump STYLE_PROMPT_VERSION whenever the prompt template changes to force cache invalidation
+      const STYLE_PROMPT_VERSION = 'v2-no-text';
+      const crypto = require('crypto');
+      const imageUrlsHash = crypto.createHash('md5').update(imageUrls.join('|') + STYLE_PROMPT_VERSION).digest('hex');
+      const brandConfig = await BrandConfig.findOne({ organization: organizationId }).lean();
+      const cache = brandConfig?.styleCache;
+      const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+      const cacheValid = cache?.spec &&
+        cache.imageUrlsHash === imageUrlsHash &&
+        cache.analyzedAt &&
+        (Date.now() - new Date(cache.analyzedAt).getTime()) < CACHE_TTL_MS;
+
+      if (cacheValid) {
+        logger.info('Style cache HIT — skipping Vision API call', { organizationId });
+        return { stylePrompt: cache.spec, imageUrls, styleSpec: null };
+      }
+      logger.info('Style cache MISS — running Vision analysis', { organizationId });
 
       // Download images and convert to base64 data URLs for vision analysis
       const imageContents = [];
@@ -506,7 +535,7 @@ Respond with ONLY this JSON (no markdown, no explanation):
       );
 
       const text = response.data?.choices?.[0]?.message?.content;
-      if (!text) return { stylePrompt: null, imageUrls };
+      if (!text) return { stylePrompt: null, imageUrls, styleSpec: null };
 
       let styleSpec;
       try {
@@ -518,7 +547,8 @@ Respond with ONLY this JSON (no markdown, no explanation):
         logger.warn('Vision style spec parse failed, using raw text', { text: text.substring(0, 200) });
         return {
           stylePrompt: `STYLE SPECIFICATION from reference images (follow exactly):\n${text.substring(0, 1200)}`,
-          imageUrls
+          imageUrls,
+          styleSpec: null
         };
       }
 
@@ -557,12 +587,21 @@ Respond with ONLY this JSON (no markdown, no explanation):
       lines.push('- Maintain visual consistency: same color scheme, same layout patterns, same illustration style');
       lines.push('- Do NOT introduce new visual styles or deviate from the references');
       lines.push('- Keep layout, spacing, and typography similar to the references');
-      lines.push('- All text rendered in the image MUST be meaningful, correctly spelled, and in English unless another language is explicitly specified — NO gibberish, NO placeholder text, NO random characters');
+      lines.push('- CRITICAL TEXT RULE: Any text visible in the image (on signs, doors, laptop screens, product packaging, posters, props, or any surface) MUST be real, meaningful English words relevant to the post topic. No gibberish, no nonsense words, no random characters, no placeholder text under any circumstance. If a brand logo appears on any surface, render the exact logo provided in the reference images — never invent a fictional logo or brand name.');
 
-      return { stylePrompt: lines.join('\n'), imageUrls };
+      const stylePrompt = lines.join('\n');
+
+      // ── Save to Style Cache ─────────────────────────────────────────────────
+      BrandConfig.updateOne(
+        { organization: organizationId },
+        { $set: { styleCache: { spec: stylePrompt, analyzedAt: new Date(), imageUrlsHash } } },
+        { upsert: false }
+      ).catch(err => logger.warn('Style cache save failed (non-blocking)', { organizationId, err: err.message }));
+
+      return { stylePrompt, imageUrls, styleSpec };
     } catch (err) {
       logger.warn('Reference-only context (vision) failed', { organizationId, err: err.message });
-      return { stylePrompt: null, imageUrls: [] };
+      return { stylePrompt: null, imageUrls: [], styleSpec: null };
     }
   }
 
@@ -839,11 +878,51 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
 
     let referenceImageUrls = [];
 
+    let capturedStyleSpec = null;
+
+    // Fetch org logo — added as the last reference image so the model sees it directly.
+    // No text-based name instruction: the logo image IS the brand identity.
+    let orgLogoUrl = null;
+    if (organizationId) {
+      try {
+        const Organization = require('../models/Organization');
+        const org = await Organization.findById(organizationId).select('logo').lean();
+        if (org?.logo) {
+          orgLogoUrl = org.logo;
+          basePrompt += `\n\nBRAND LOGO: The last reference image is the organisation's official logo. If any branded surface appears in the scene (signs, screens, packaging, walls), reproduce this exact logo visually — copy its colours, shape, and lettering precisely from the reference. Do not invent or alter the logo.`;
+        }
+      } catch (e) { /* non-blocking */ }
+    }
+
     if (organizationId) {
       if (options.referenceOnly) {
         const refCtx = await this._getReferenceOnlyContext(organizationId);
         if (refCtx.stylePrompt) basePrompt = `${refCtx.stylePrompt}\n\n${basePrompt}`;
         if (refCtx.imageUrls?.length) referenceImageUrls = refCtx.imageUrls;
+        if (refCtx.styleSpec) capturedStyleSpec = refCtx.styleSpec;
+
+        // Design Memory Phase 3 — inject top-performing past styles to guide generation
+        try {
+          const designMemoryService = require('./designMemoryService');
+          const topStyles = await designMemoryService.getTopStyleSpecs(organizationId, 3);
+          if (topStyles.length) {
+            const topStyleLines = topStyles
+              .filter(s => s.layoutType || (s.colors && s.colors.length))
+              .map((s, i) => {
+                const parts = [];
+                if (s.layoutType) parts.push(`layout: ${s.layoutType}`);
+                if (s.colors && s.colors.length) parts.push(`colors: ${s.colors.join(', ')}`);
+                if (s.style) parts.push(`style: ${s.style}`);
+                if (s.medium) parts.push(`medium: ${s.medium}`);
+                return `  ${i + 1}. ${parts.join(', ')} (engagement score: ${s.designScore || 0})`;
+              });
+            if (topStyleLines.length) {
+              basePrompt = `${basePrompt}\n\nHigh-performing design patterns for this brand (use as additional inspiration, do not override the main style spec):\n${topStyleLines.join('\n')}`;
+            }
+          }
+        } catch (memErr) {
+          logger.warn('Design memory blend failed (non-blocking)', { organizationId, err: memErr.message });
+        }
       } else {
         const visualCtx = await this._getVisualStyleContext(organizationId);
         if (visualCtx) basePrompt = `${visualCtx}\n\n${basePrompt}`;
@@ -863,13 +942,20 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
         basePrompt = `${basePrompt}\n\nOccasion visual style (highest priority): ${parts.join(' ')}`;
       }
     }
-    const imagePrompt = basePrompt.substring(0, 4000);
+    // Hard-enforcement suffix appended to every prompt regardless of path
+    const textEnforcementSuffix = '\n\nABSOLUTE RULE — TEXT QUALITY: Any text visible anywhere in the image (on signs, doors, screens, packaging, labels, posters, props, or any surface) MUST be real, meaningful, correctly spelled English words relevant to the post topic. No gibberish. No nonsense words. No random characters. No placeholder text. If the prompt specifies an exact headline, render it exactly. If a brand logo is shown in a reference image, reproduce that exact logo on branded surfaces — never invent a fictional logo. Violation of this rule makes the image completely unusable for professional use.';
+    const imagePrompt = (basePrompt + textEnforcementSuffix).substring(0, 4000);
 
     const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
     const size = '1024x1024';
     const quality = 'medium';
     const maxAttempts = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_MAX_RETRIES, 10) || 3, 1), 5);
     const imageTimeout = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS, 10) || 120000, 60000), 300000);
+
+    // Add org logo as the last reference image so the model can reproduce it on branded surfaces
+    if (orgLogoUrl && !referenceImageUrls.includes(orgLogoUrl)) {
+      referenceImageUrls = [...referenceImageUrls, orgLogoUrl];
+    }
 
     // Choose endpoint: /images/edits (with reference images) or /images/generations
     const useEditsEndpoint = referenceImageUrls.length > 0;
@@ -919,10 +1005,12 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
           );
         }
 
+        const apiUsage = response.data?.usage || null;
+
         const b64 = response.data?.data?.[0]?.b64_json;
         if (b64) {
-          this._logImageUsage(model, size, quality, imagePrompt);
-          return Buffer.from(b64, 'base64');
+          this._logImageUsage(model, size, quality, imagePrompt, apiUsage);
+          return { buffer: Buffer.from(b64, 'base64'), styleSpec: capturedStyleSpec, imagePrompt };
         }
 
         const imageUrl = response.data?.data?.[0]?.url;
@@ -933,8 +1021,8 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
           timeout: 60000,
           maxContentLength: Infinity
         });
-        this._logImageUsage(model, size, quality, imagePrompt);
-        return Buffer.from(imgResponse.data);
+        this._logImageUsage(model, size, quality, imagePrompt, apiUsage);
+        return { buffer: Buffer.from(imgResponse.data), styleSpec: capturedStyleSpec, imagePrompt };
       } catch (error) {
         const status = error.response?.status;
         const data = error.response?.data;

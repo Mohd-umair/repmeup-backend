@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const AiApiUsage = require('../models/AiApiUsage');
-const { estimateChatUsd, estimateImageUsd, estimateVideoUsd } = require('./openaiPricing');
+const { estimateChatUsd, estimateImageUsd, estimateImageUsdFromTokens, estimateVideoUsd } = require('./openaiPricing');
 const logger = require('../config/logger');
 const { noteLastAiApiUsageId } = require('./aiRequestContext');
 
@@ -90,20 +90,40 @@ async function persistImageUsage(params) {
     model,
     size,
     quality,
+    // Token counts returned by gpt-image-1 (may all be 0 if API didn't return them)
+    promptTokens = 0,
+    inputTextTokens = 0,
+    inputImageTokens = 0,
+    completionTokens = 0,
+    totalTokens = 0,
     metadata = {}
   } = params;
-  const est = estimateImageUsd(size, quality);
+
+  const pt = Number(promptTokens) || 0;
+  const iText = Number(inputTextTokens) || 0;
+  const iImg  = Number(inputImageTokens) || 0;
+  const ct = Number(completionTokens) || 0;
+  const tt = Number(totalTokens) || pt + ct;
+
+  // Use token-based cost if tokens were returned; otherwise fall back to flat-rate estimate
+  const est = estimateImageUsdFromTokens(iText || pt, iImg, ct, size, quality);
+
   const doc = await AiApiUsage.create({
     organization: toObjectIdOrNull(organizationId),
     user: toObjectIdOrNull(userId),
     feature,
     apiKind: 'image',
     model: model || '',
-    promptTokens: 0,
-    completionTokens: 0,
-    totalTokens: 0,
+    promptTokens: pt,
+    completionTokens: ct,
+    totalTokens: tt,
     estimatedUsd: est,
-    metadata: { ...metadata, size, quality }
+    metadata: {
+      ...metadata,
+      size,
+      quality,
+      ...(iText > 0 || iImg > 0 ? { inputTextTokens: iText, inputImageTokens: iImg } : {})
+    }
   });
   noteLastAiApiUsageId(doc._id);
 }

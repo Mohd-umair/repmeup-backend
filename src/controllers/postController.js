@@ -420,16 +420,13 @@ function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantInde
   // Sanitize topic — strip IP/copyright terms so DALL-E safety system doesn't reject
   const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 120);
 
-  // Derive a short thematic hint from the post content (first sentence, sanitized, ≤80 chars)
-  const rawHint = variantContent
-    ? variantContent.split(/[.\n!?]/)[0].trim()
-    : '';
-  const contentHint = sanitizeForImagePrompt(rawHint).substring(0, 80);
+  // NOTE: variantContent (caption) is intentionally NOT included in the image prompt.
+  // AI image models distort brand names and unusual words from captions. The caption
+  // is shown as post text outside the image — never rendered inside it.
 
   const promptParts = [
     styleDesc,
     `Subject: ${safeTopic}`,
-    contentHint ? `Theme: ${contentHint}` : '',
     moodPart,
     lightingPart,
     compositionPart,
@@ -437,10 +434,9 @@ function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantInde
     anglePart,
     variationNote,
     contentType === 'image-layover'
-      ? `Include the headline text "${safeTopic.split(' ').slice(0, 8).join(' ')}" as a bold, stylish graphic overlay in the scene, modern typography, high contrast — text rendered in the image itself.`
-      : 'No text overlays, no watermarks, no logos, no words.',
+      ? `HEADLINE TEXT (render exactly as written, exactly these words): "${safeTopic.split(' ').slice(0, 8).join(' ')}". Bold modern typography, high contrast. No other words or text anywhere else in the image.`
+      : 'Do NOT render any brand name, company name, or organisation name as text inside the image — brands are represented by their logo only. Any other text visible (on signs, screens, props) must be real, common English words relevant to the topic.',
     'Ultra high quality, suitable for professional social media post.',
-    'Any text in the image must be meaningful, correctly spelled, and in English unless another language is specified.',
     `seed:${Date.now() % 100000 + variantIndex * 13337}`  // soft uniqueness token
   ].filter(Boolean);
 
@@ -474,16 +470,13 @@ exports.generateVariantImage = async (req, res) => {
     let imagePrompt;
     if (isReferenceMode) {
       const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 120);
-      const rawHint = variantContent ? variantContent.split(/[.\n!?]/)[0].trim() : '';
-      const contentHint = sanitizeForImagePrompt(rawHint).substring(0, 80);
+      // Caption text is intentionally excluded — AI models distort brand names and unusual words.
       imagePrompt = [
         `Social media post about: ${safeTopic}`,
-        contentHint ? `Theme: ${contentHint}` : '',
         contentType === 'image-layover'
-          ? `Include the headline "${safeTopic.split(' ').slice(0, 8).join(' ')}" as a bold text overlay in the design.`
-          : '',
+          ? `HEADLINE TEXT (render exactly as written, exactly these words): "${safeTopic.split(' ').slice(0, 8).join(' ')}". No other words or text anywhere else in the image.`
+          : 'Do NOT render any brand name, company name, or organisation name as text inside the image — brands are represented by their logo only. Any other text visible (on signs, screens, props) must be real, common English words relevant to the topic.',
         'High quality, platform-ready.',
-        'IMPORTANT: All text rendered inside the image MUST be meaningful, correctly spelled, and in English unless another language is explicitly specified. No gibberish, no placeholder text, no random characters.',
         `seed:${Date.now() % 100000 + (typeof variantIndex === 'number' ? variantIndex : 0) * 13337}`
       ].filter(Boolean).join(', ');
     } else {
@@ -521,7 +514,7 @@ exports.generateVariantImage = async (req, res) => {
       }
     }
 
-    const { result: buffer, aiApiUsageId } = await runWithAiContextAndUsageId(
+    const { result: genResult, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId,
         userId,
@@ -529,6 +522,11 @@ exports.generateVariantImage = async (req, res) => {
       },
       () => aiService.generateImage(imagePrompt, imageOrgId, imageOptions)
     );
+    // generateImage now returns { buffer, styleSpec, imagePrompt } or null
+    const buffer = genResult?.buffer ?? null;
+    const capturedStyleSpec = genResult?.styleSpec ?? null;
+    const capturedImagePrompt = genResult?.imagePrompt ?? imagePrompt;
+
     if (!buffer) {
       return res.status(500).json({ success: false, message: 'Image generation failed. Please try again.' });
     }
@@ -648,8 +646,16 @@ exports.generateVariantImage = async (req, res) => {
 
     const updatedCredits = await aiCreditService.getUsage(organizationId);
 
+    const designDna = {
+      generationPrompt: capturedImagePrompt,
+      layoutType: capturedStyleSpec?.layout || null,
+      colors: capturedStyleSpec?.colorPalette || [],
+      medium: capturedStyleSpec?.medium || null,
+      style: capturedStyleSpec?.style || null
+    };
+
     res.status(200).json({
-      success: true, imageUrl, savedToLibrary,
+      success: true, imageUrl, savedToLibrary, designDna,
       credits: { used: 1, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
     });
   } catch (error) {
@@ -886,7 +892,7 @@ exports.saveDraft = async (req, res) => {
     const {
       platform, content, postType, mediaUrl, generatedBy,
       topic, audience, intent, mood, contentType, postFormat,
-      visualStyle, logoOverlay, logoPosition
+      visualStyle, logoOverlay, logoPosition, designDna
     } = req.body;
     const organizationId = req.user.organization?._id || req.user.organization;
     const userId = req.user._id;
@@ -923,7 +929,14 @@ exports.saveDraft = async (req, res) => {
         postFormat: postFormat || 'post',
         visualStyle: visualStyle || '',
         logoOverlay: logoOverlay || false,
-        logoPosition: logoPosition || 'bottom-right'
+        logoPosition: logoPosition || 'bottom-right',
+        // Design DNA — stored for the learning loop (Phase 3)
+        generationPrompt: designDna?.generationPrompt || null,
+        layoutType: designDna?.layoutType || null,
+        colors: designDna?.colors || [],
+        medium: designDna?.medium || null,
+        style: designDna?.style || null,
+        designScore: null
       }
     };
 
@@ -967,7 +980,7 @@ exports.publishPost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds, mediaUrl, generatedBy } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds, mediaUrl, generatedBy, designDna } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -1027,7 +1040,17 @@ exports.publishPost = async (req, res) => {
         platformConnection: connection._id,
         content: content.trim(),
         postType: postType || 'post',
-        generatedBy: generatedBy === 'ai' ? 'ai' : 'human'
+        generatedBy: generatedBy === 'ai' ? 'ai' : 'human',
+        ...(designDna ? {
+          metadata: {
+            generationPrompt: designDna.generationPrompt || null,
+            layoutType: designDna.layoutType || null,
+            colors: designDna.colors || [],
+            medium: designDna.medium || null,
+            style: designDna.style || null,
+            designScore: null
+          }
+        } : {})
       };
 
       // Check if using media from library or uploading new media

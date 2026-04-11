@@ -76,6 +76,17 @@ const brandConfigSchema = new mongoose.Schema({
   brandProfileOverrides: {
     type: mongoose.Schema.Types.Mixed,
     default: null
+  },
+
+  /**
+   * Cached result of GPT-4o Vision analysis of reference images.
+   * TTL: 24h. Invalidated when reference images change (imageUrlsHash mismatch).
+   * Saves a Vision API call on every subsequent generation within the cache window.
+   */
+  styleCache: {
+    spec: { type: String, default: null },
+    analyzedAt: { type: Date, default: null },
+    imageUrlsHash: { type: String, default: null }
   }
 }, {
   timestamps: true
