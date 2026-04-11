@@ -229,7 +229,7 @@ exports.generatePostVariantsWithAI = async (req, res) => {
   let creditsDeducted = 0;
   let organizationId;
   try {
-    const { topic, platforms, count, audience, intent, mood, includeTrend, postType } = req.body;
+    const { topic, platforms, count, audience, intent, mood, includeTrend, postType, generationMode, eventTemplateId } = req.body;
     organizationId = req.user.organization?._id || req.user.organization;
 
     if (!topic || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
@@ -253,16 +253,35 @@ exports.generatePostVariantsWithAI = async (req, res) => {
         feature: 'content_studio.post_variants'
       },
       () =>
-        aiService.generatePostVariants(topic, platforms, {
-          count: variantCount,
-          organizationId,
-          userId: req.user._id,
-          postType: postType || 'post',
-          audience: audience || '',
-          intent: intent || '',
-          mood: mood || '',
-          includeTrend: !!includeTrend
-        })
+        (async () => {
+          let occasionContext = null;
+          if (eventTemplateId) {
+            const EventTemplate = require('../models/EventTemplate');
+            const tpl = await EventTemplate.findOne({ _id: eventTemplateId, organization: organizationId }).lean();
+            if (tpl) {
+              occasionContext = {
+                name: tpl.name,
+                eventType: tpl.eventType,
+                sampleCaption: tpl.sampleCaption || '',
+                hashtags: tpl.hashtags || [],
+                cta: tpl.cta || '',
+                eventStyle: tpl.eventStyle || null
+              };
+            }
+          }
+          return aiService.generatePostVariants(topic, platforms, {
+            count: variantCount,
+            organizationId,
+            userId: req.user._id,
+            postType: postType || 'post',
+            audience: audience || '',
+            intent: intent || '',
+            mood: mood || '',
+            includeTrend: !!includeTrend,
+            generationMode: generationMode || 'instant',
+            occasionContext
+          });
+        })()
     );
 
     await aiCreditService.deductCredits(
@@ -421,6 +440,7 @@ function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantInde
       ? `Include the headline text "${safeTopic.split(' ').slice(0, 8).join(' ')}" as a bold, stylish graphic overlay in the scene, modern typography, high contrast — text rendered in the image itself.`
       : 'No text overlays, no watermarks, no logos, no words.',
     'Ultra high quality, suitable for professional social media post.',
+    'Any text in the image must be meaningful, correctly spelled, and in English unless another language is specified.',
     `seed:${Date.now() % 100000 + variantIndex * 13337}`  // soft uniqueness token
   ].filter(Boolean);
 
@@ -431,7 +451,7 @@ exports.generateVariantImage = async (req, res) => {
   let creditsDeducted = 0;
   let organizationId;
   try {
-    const { topic, variantContent, imageConfig, variantIndex, contentType, logoOverlay, logoPosition, logoUrl } = req.body;
+    const { topic, variantContent, imageConfig, variantIndex, contentType, generationMode, logoOverlay, logoPosition, logoUrl, eventTemplateId, includePeople, peopleNationality } = req.body;
     organizationId = req.user.organization?._id || req.user.organization;
     const userId = req.user._id;
 
@@ -447,14 +467,59 @@ exports.generateVariantImage = async (req, res) => {
       });
     }
 
-    const imagePrompt = buildImagePrompt({
-      topic,
-      variantContent,
-      imageConfig: imageConfig || {},
-      variantIndex: typeof variantIndex === 'number' ? variantIndex : 0,
-      contentType: contentType || ''
-    });
+    // In reference mode the visual style context from reference images fully controls output.
+    // Using a neutral subject-only prompt prevents the photography defaults in buildImagePrompt
+    // from overriding the graphic-design / illustrated style of the uploaded brand references.
+    const isReferenceMode = generationMode === 'reference';
+    let imagePrompt;
+    if (isReferenceMode) {
+      const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 120);
+      const rawHint = variantContent ? variantContent.split(/[.\n!?]/)[0].trim() : '';
+      const contentHint = sanitizeForImagePrompt(rawHint).substring(0, 80);
+      imagePrompt = [
+        `Social media post about: ${safeTopic}`,
+        contentHint ? `Theme: ${contentHint}` : '',
+        contentType === 'image-layover'
+          ? `Include the headline "${safeTopic.split(' ').slice(0, 8).join(' ')}" as a bold text overlay in the design.`
+          : '',
+        'High quality, platform-ready.',
+        'IMPORTANT: All text rendered inside the image MUST be meaningful, correctly spelled, and in English unless another language is explicitly specified. No gibberish, no placeholder text, no random characters.',
+        `seed:${Date.now() % 100000 + (typeof variantIndex === 'number' ? variantIndex : 0) * 13337}`
+      ].filter(Boolean).join(', ');
+    } else {
+      imagePrompt = buildImagePrompt({
+        topic,
+        variantContent,
+        imageConfig: imageConfig || {},
+        variantIndex: typeof variantIndex === 'number' ? variantIndex : 0,
+        contentType: contentType || ''
+      });
+    }
+
+    if (includePeople) {
+      const nationalityPart = peopleNationality ? `${peopleNationality} ` : '';
+      imagePrompt += ` Include ${nationalityPart}people naturally in the scene — diverse, authentic, candid.`;
+    } else {
+      imagePrompt += ' Do NOT include any people, faces, or human figures in the image.';
+    }
+
     console.log('[Content Studio] AI image prompt (variant %d):\n', variantIndex, imagePrompt);
+
+    // Determine which brand context to apply based on the requested generation mode:
+    // 'instant'     → no brand context (generic AI generation)
+    // 'brand-voice' → full visual style context (brand profile + reference images)
+    // 'reference'   → reference images only (ignores brand profile visuals)
+    const imageOrgId = generationMode && generationMode !== 'instant' ? organizationId : null;
+    const imageOptions = generationMode === 'reference' ? { referenceOnly: true } : {};
+
+    // If an occasion template is selected, append its visual style as priority context
+    if (eventTemplateId) {
+      const EventTemplate = require('../models/EventTemplate');
+      const tpl = await EventTemplate.findOne({ _id: eventTemplateId, organization: organizationId }).lean();
+      if (tpl?.eventStyle) {
+        imageOptions.occasionVisualStyle = tpl.eventStyle;
+      }
+    }
 
     const { result: buffer, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
@@ -462,7 +527,7 @@ exports.generateVariantImage = async (req, res) => {
         userId,
         feature: `content_studio.variant_image.${typeof variantIndex === 'number' ? variantIndex : 0}`
       },
-      () => aiService.generateImage(imagePrompt)
+      () => aiService.generateImage(imagePrompt, imageOrgId, imageOptions)
     );
     if (!buffer) {
       return res.status(500).json({ success: false, message: 'Image generation failed. Please try again.' });
