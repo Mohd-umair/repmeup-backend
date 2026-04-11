@@ -28,9 +28,21 @@ exports.list = async (req, res) => {
 exports.create = async (req, res) => {
   try {
     const orgId = req.user.organization?._id || req.user.organization;
-    const { name, eventType } = req.body;
+    const { name, eventType, sampleCaption, hashtags, cta } = req.body;
     if (!name || !eventType) {
       return res.status(400).json({ success: false, error: 'name and eventType are required' });
+    }
+
+    // hashtags may arrive as a JSON string (multipart form) or plain comma-separated string
+    let parsedHashtags = [];
+    if (hashtags) {
+      if (typeof hashtags === 'string') {
+        try { parsedHashtags = JSON.parse(hashtags); } catch {
+          parsedHashtags = hashtags.split(',').map(h => h.trim()).filter(Boolean);
+        }
+      } else if (Array.isArray(hashtags)) {
+        parsedHashtags = hashtags;
+      }
     }
 
     let referenceImageUrl = null;
@@ -56,7 +68,10 @@ exports.create = async (req, res) => {
       name,
       eventType,
       referenceImageUrl,
-      s3Key
+      s3Key,
+      sampleCaption: sampleCaption || '',
+      hashtags: parsedHashtags,
+      cta: cta || ''
     });
 
     if (referenceImageUrl) {
@@ -78,6 +93,15 @@ exports.update = async (req, res) => {
     if (req.body.name) update.name = req.body.name;
     if (req.body.eventType) update.eventType = req.body.eventType;
     if (req.body.isActive !== undefined) update.isActive = req.body.isActive;
+    if (req.body.sampleCaption !== undefined) update.sampleCaption = req.body.sampleCaption;
+    if (req.body.cta !== undefined) update.cta = req.body.cta;
+    if (req.body.hashtags !== undefined) {
+      let h = req.body.hashtags;
+      if (typeof h === 'string') {
+        try { h = JSON.parse(h); } catch { h = h.split(',').map(x => x.trim()).filter(Boolean); }
+      }
+      update.hashtags = Array.isArray(h) ? h : [];
+    }
 
     const doc = await EventTemplate.findOneAndUpdate(
       { _id: req.params.id, organization: orgId },

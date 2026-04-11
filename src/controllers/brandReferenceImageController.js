@@ -87,6 +87,9 @@ exports.upload = async (req, res) => {
       );
     }
 
+    // Invalidate style cache so next generation re-analyses with the new images
+    BrandConfig.updateOne({ organization: orgId }, { $unset: { styleCache: 1 } }).catch(() => {});
+
     res.status(201).json({ success: true, data: created });
   } catch (err) {
     logger.error('Reference image upload error', { error: err.message });
@@ -130,6 +133,8 @@ exports.remove = async (req, res) => {
     if (doc.s3Key) {
       storageService.deleteObjectByKey(doc.s3Key).catch(() => {});
     }
+    // Invalidate style cache so next generation re-analyses without this image
+    BrandConfig.updateOne({ organization: orgId }, { $unset: { styleCache: 1 } }).catch(() => {});
     res.json({ success: true, message: 'Deleted' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

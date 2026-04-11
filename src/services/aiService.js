@@ -156,8 +156,11 @@ class AIService {
     return response;
   }
 
-  _logImageUsage(model, size, quality) {
+  _logImageUsage(model, size, quality, prompt = '', apiUsage = null) {
     const ctx = this._mergeAiLogContext({});
+    // gpt-image-1 returns usage.input_tokens / usage.output_tokens / usage.total_tokens
+    const usage = apiUsage || {};
+    const inputTokensDetails = usage.input_tokens_details || {};
     aiApiUsageService.recordImageUsage({
       organizationId: ctx.organizationId,
       userId: ctx.userId,
@@ -165,7 +168,12 @@ class AIService {
       model,
       size,
       quality,
-      metadata: {}
+      promptTokens: Number(usage.input_tokens) || 0,
+      inputTextTokens: Number(inputTokensDetails.text_tokens) || 0,
+      inputImageTokens: Number(inputTokensDetails.image_tokens) || 0,
+      completionTokens: Number(usage.output_tokens) || 0,
+      totalTokens: Number(usage.total_tokens) || 0,
+      metadata: { prompt: prompt ? String(prompt).substring(0, 3000) : '' }
     });
   }
 
@@ -428,6 +436,176 @@ class AIService {
   }
 
   /**
+   * Use GPT-4o Vision to analyze up to 3 reference images and produce a detailed,
+   * structured style specification. Result is cached on BrandConfig for 24h and
+   * invalidated when reference images change — avoiding a Vision API call on every
+   * generation (Design Memory Phase 1).
+   * @param {string} organizationId
+   * @returns {Promise<{ stylePrompt: string|null, imageUrls: string[], styleSpec: object|null }>}
+   */
+  async _getReferenceOnlyContext(organizationId) {
+    if (!organizationId) return { stylePrompt: null, imageUrls: [], styleSpec: null };
+    try {
+      const refImages = await BrandReferenceImage.find({
+        organization: organizationId,
+        imageUrl: { $exists: true, $ne: '' }
+      }).sort({ createdAt: -1 }).limit(5).lean();
+
+      if (!refImages.length) return { stylePrompt: null, imageUrls: [], styleSpec: null };
+
+      // Collect raw URLs for passing to the /v1/images/edits endpoint
+      const imageUrls = refImages.slice(0, 2).map(ri => ri.imageUrl);
+
+      // ── Style Cache Check ──────────────────────────────────────────────────
+      // Hash the top-2 image URLs + a version tag — if they haven't changed and cache is < 24h, skip Vision call
+      // Bump STYLE_PROMPT_VERSION whenever the prompt template changes to force cache invalidation
+      const STYLE_PROMPT_VERSION = 'v2-no-text';
+      const crypto = require('crypto');
+      const imageUrlsHash = crypto.createHash('md5').update(imageUrls.join('|') + STYLE_PROMPT_VERSION).digest('hex');
+      const brandConfig = await BrandConfig.findOne({ organization: organizationId }).lean();
+      const cache = brandConfig?.styleCache;
+      const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+      const cacheValid = cache?.spec &&
+        cache.imageUrlsHash === imageUrlsHash &&
+        cache.analyzedAt &&
+        (Date.now() - new Date(cache.analyzedAt).getTime()) < CACHE_TTL_MS;
+
+      if (cacheValid) {
+        logger.info('Style cache HIT — skipping Vision API call', { organizationId });
+        return { stylePrompt: cache.spec, imageUrls, styleSpec: null };
+      }
+      logger.info('Style cache MISS — running Vision analysis', { organizationId });
+
+      // Download images and convert to base64 data URLs for vision analysis
+      const imageContents = [];
+      for (const ri of refImages.slice(0, 3)) {
+        try {
+          const resp = await axios.get(ri.imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+          const mime = resp.headers['content-type'] || 'image/jpeg';
+          const b64 = Buffer.from(resp.data).toString('base64');
+          imageContents.push({
+            type: 'image_url',
+            image_url: { url: `data:${mime};base64,${b64}`, detail: 'low' }
+          });
+        } catch (dlErr) {
+          logger.warn('Reference image download for vision analysis failed', {
+            url: ri.imageUrl?.substring(0, 100), err: dlErr.message
+          });
+        }
+      }
+
+      if (!imageContents.length) return { stylePrompt: null, imageUrls };
+
+      const visionPrompt = `You are a design system analyst. Analyze these ${imageContents.length} brand reference image(s) and produce a PRECISE style specification that another AI image generator must follow to create NEW images in the EXACT same visual style.
+
+Respond with ONLY this JSON (no markdown, no explanation):
+{
+  "medium": "graphic design" or "photography" or "illustration" or "3d render" or "mixed media",
+  "style": "describe the overall design style in 5-10 words, e.g. premium modern corporate, playful cartoon infographic, bold flat vector",
+  "colorPalette": ["exact color 1", "exact color 2", ...up to 6],
+  "gradients": "describe any gradient usage or 'none'",
+  "background": "describe background treatment precisely, e.g. solid purple, gradient orange-to-yellow, textured dark, soft blur photo",
+  "layout": "describe the spatial arrangement: centered, split panel, grid, asymmetric, etc.",
+  "typography": "describe text style: bold sans-serif headings, thin elegant, bubble letters, hand-drawn, etc.",
+  "textPlacement": "where text appears: top, center overlay, bottom banner, scattered, etc.",
+  "illustrationStyle": "if illustrations exist: flat vector, cartoon characters, isometric, line art, realistic, 3d icons, etc. or 'none'",
+  "iconography": "describe any icons/emojis/badges used, or 'none'",
+  "decorativeElements": "describe borders, shapes, patterns, stickers, ribbons, sparkles, etc. or 'none'",
+  "peopleUsage": "how people appear: cartoon characters, photo cutouts, illustrated, silhouettes, or 'none'",
+  "mood": "emotional tone: professional, playful, energetic, minimal, luxurious, fun, educational, etc.",
+  "spacing": "dense and packed, moderate, clean with whitespace, etc.",
+  "brandElements": "any visible logos, watermarks, brand marks, or 'none'",
+  "overallImpression": "1-2 sentence summary of how the final output should look — be very specific"
+}`;
+
+      const response = await this._postChatCompletions(
+        {
+          model: this.visionModel,
+          messages: [
+            { role: 'system', content: visionPrompt },
+            { role: 'user', content: [
+              { type: 'text', text: `Analyze these ${imageContents.length} brand reference image(s) and extract the precise visual style specification.` },
+              ...imageContents
+            ]}
+          ],
+          max_tokens: 800
+        },
+        { feature: 'content_studio.reference_style_analysis' },
+        { timeout: 45000 }
+      );
+
+      const text = response.data?.choices?.[0]?.message?.content;
+      if (!text) return { stylePrompt: null, imageUrls, styleSpec: null };
+
+      let styleSpec;
+      try {
+        let cleaned = text.trim();
+        const m = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (m) cleaned = m[1].trim();
+        styleSpec = JSON.parse(cleaned);
+      } catch {
+        logger.warn('Vision style spec parse failed, using raw text', { text: text.substring(0, 200) });
+        return {
+          stylePrompt: `STYLE SPECIFICATION from reference images (follow exactly):\n${text.substring(0, 1200)}`,
+          imageUrls,
+          styleSpec: null
+        };
+      }
+
+      const lines = [
+        `CRITICAL — You MUST replicate this EXACT visual style. Reference images are attached — match them precisely.`,
+        '',
+        `Medium: ${styleSpec.medium || 'graphic design'} — if "graphic design" or "illustration", do NOT generate photography.`,
+        `Style: ${styleSpec.style || 'professional marketing creative'}`,
+        `Color palette: ${Array.isArray(styleSpec.colorPalette) ? styleSpec.colorPalette.join(', ') : styleSpec.colorPalette || 'brand colors'}`,
+      ];
+      if (styleSpec.gradients && styleSpec.gradients !== 'none') lines.push(`Gradients: ${styleSpec.gradients}`);
+      lines.push(`Background: ${styleSpec.background || 'match reference'}`);
+      lines.push(`Layout: ${styleSpec.layout || 'centered'}`);
+      lines.push(`Typography: ${styleSpec.typography || 'bold modern'}`);
+      if (styleSpec.textPlacement) lines.push(`Text placement: ${styleSpec.textPlacement}`);
+      if (styleSpec.illustrationStyle && styleSpec.illustrationStyle !== 'none') {
+        lines.push(`Illustration style: ${styleSpec.illustrationStyle}`);
+      }
+      if (styleSpec.iconography && styleSpec.iconography !== 'none') lines.push(`Icons: ${styleSpec.iconography}`);
+      if (styleSpec.decorativeElements && styleSpec.decorativeElements !== 'none') {
+        lines.push(`Decorative elements: ${styleSpec.decorativeElements}`);
+      }
+      if (styleSpec.peopleUsage && styleSpec.peopleUsage !== 'none') {
+        lines.push(`People style: ${styleSpec.peopleUsage}`);
+      }
+      lines.push(`Mood: ${styleSpec.mood || 'professional'}`);
+      lines.push(`Spacing: ${styleSpec.spacing || 'balanced'}`);
+      if (styleSpec.brandElements && styleSpec.brandElements !== 'none') {
+        lines.push(`Brand elements: ${styleSpec.brandElements}`);
+      }
+      lines.push('');
+      lines.push(`OVERALL: ${styleSpec.overallImpression || 'Match the exact look and feel of the brand reference images.'}`);
+      lines.push('');
+      lines.push('STRICT INSTRUCTIONS:');
+      lines.push('- The generated design MUST closely match the attached reference images');
+      lines.push('- Maintain visual consistency: same color scheme, same layout patterns, same illustration style');
+      lines.push('- Do NOT introduce new visual styles or deviate from the references');
+      lines.push('- Keep layout, spacing, and typography similar to the references');
+      lines.push('- CRITICAL TEXT RULE: Any text visible in the image (on signs, doors, laptop screens, product packaging, posters, props, or any surface) MUST be real, meaningful English words relevant to the post topic. No gibberish, no nonsense words, no random characters, no placeholder text under any circumstance. If a brand logo appears on any surface, render the exact logo provided in the reference images — never invent a fictional logo or brand name.');
+
+      const stylePrompt = lines.join('\n');
+
+      // ── Save to Style Cache ─────────────────────────────────────────────────
+      BrandConfig.updateOne(
+        { organization: organizationId },
+        { $set: { styleCache: { spec: stylePrompt, analyzedAt: new Date(), imageUrlsHash } } },
+        { upsert: false }
+      ).catch(err => logger.warn('Style cache save failed (non-blocking)', { organizationId, err: err.message }));
+
+      return { stylePrompt, imageUrls, styleSpec };
+    } catch (err) {
+      logger.warn('Reference-only context (vision) failed', { organizationId, err: err.message });
+      return { stylePrompt: null, imageUrls: [], styleSpec: null };
+    }
+  }
+
+  /**
    * Generate a single post optimized for specific platform(s)
    * @private
    */
@@ -471,14 +649,21 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     const intent = options.intent || '';
     const mood = options.mood || '';
     const includeTrend = options.includeTrend;
+    // 'instant' mode skips brand context so generation is generic and fast.
+    // 'brand-voice' applies full brand writing guidelines.
+    // 'reference' uses standard text generation (visual style applied at image stage).
+    const generationMode = options.generationMode || 'instant';
     let userPrompt = prompt;
     if (audience) userPrompt += ` Target audience: ${audience}.`;
     if (intent) userPrompt += ` Content intent: ${intent}.`;
     if (mood) userPrompt += ` Writing tone/mood: ${mood}.`;
     if (includeTrend) userPrompt += ' Weave in a relevant current trend or seasonal angle.';
 
-    const brandContext = organizationId ? await this._getBrandContext(organizationId) : null;
-    const systemPrompt = this._buildPostVariantSystemPrompt(platforms, postType, brandContext);
+    const brandContext = (organizationId && generationMode === 'brand-voice')
+      ? await this._getBrandContext(organizationId)
+      : null;
+    const occasionContext = options.occasionContext || null;
+    const systemPrompt = this._buildPostVariantSystemPrompt(platforms, postType, brandContext, occasionContext);
     console.log('[Content Studio] AI system prompt for post variants:\n', systemPrompt);
     console.log('[Content Studio] AI user prompt for post variants:\n', userPrompt);
 
@@ -501,12 +686,18 @@ Generate ONLY the post content. No explanations or meta-commentary.`;
     return { variants: results.filter(v => v.content) };
   }
 
-  _buildPostVariantSystemPrompt(platforms, postType, brandContext) {
+  _buildPostVariantSystemPrompt(platforms, postType, brandContext, occasionContext = null) {
     const platformNames = platforms.join(', ');
     const platformGuidelines = this._getPlatformGuidelines(platforms, postType);
     const brandSection = brandContext ? `\nBrand guidelines (follow strictly):\n${brandContext}\n` : '';
+    let occasionSection = '';
+    if (occasionContext) {
+      const hashtagStr = (occasionContext.hashtags || []).join(' ');
+      occasionSection = `\nOccasion context (follow strictly):
+Occasion: ${occasionContext.name} (${occasionContext.eventType}).${occasionContext.sampleCaption ? `\nSample tone/caption: "${occasionContext.sampleCaption}".` : ''}${hashtagStr ? `\nInclude these hashtags: ${hashtagStr}.` : ''}${occasionContext.cta ? `\nCTA style: ${occasionContext.cta}.` : ''}\n`;
+    }
     return `You are a professional social media content creator. Generate a SINGLE engaging ${postType} that works across ${platformNames}.
-${platformGuidelines ? `\n${platformGuidelines}` : ''}${brandSection}
+${platformGuidelines ? `\n${platformGuidelines}` : ''}${brandSection}${occasionSection}
 CRITICAL RULES: Output ONE post only — no platform labels. Emojis sparingly; 3-5 hashtags at end.
 Generate ONLY the post text. No explanations, headers, or meta-commentary.`;
   }
@@ -667,13 +858,16 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
   }
 
   /**
-   * Generate an image via OpenAI Image API using gpt-image-1.5.
-   * Retries transient failures (aborted connections, timeouts, 429/502/503).
+   * Generate an image via OpenAI Image API.
+   * When reference images exist (referenceOnly mode), uses /v1/images/edits with
+   * the `images` parameter so the model can directly see the brand references.
+   * Otherwise falls back to /v1/images/generations.
    * @param {string} prompt - Description of the image to generate
    * @param {string} [organizationId] - If provided, visual style context is injected
+   * @param {object} [options] - { referenceOnly: boolean }
    * @returns {Promise<Buffer|null>} Image buffer or null on error
    */
-  async generateImage(prompt, organizationId = null) {
+  async generateImage(prompt, organizationId = null, options = {}) {
     if (!this.openaiApiKey || this.openaiApiKey.trim() === '') {
       return null;
     }
@@ -682,44 +876,141 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
       ? prompt
       : 'Professional social media post image, modern, high quality';
 
+    let referenceImageUrls = [];
+
+    let capturedStyleSpec = null;
+
+    // Fetch org logo — added as the last reference image so the model sees it directly.
+    // No text-based name instruction: the logo image IS the brand identity.
+    let orgLogoUrl = null;
     if (organizationId) {
-      const visualCtx = await this._getVisualStyleContext(organizationId);
-      if (visualCtx) {
-        basePrompt = `${visualCtx}\n\n${basePrompt}`;
+      try {
+        const Organization = require('../models/Organization');
+        const org = await Organization.findById(organizationId).select('logo').lean();
+        if (org?.logo) {
+          orgLogoUrl = org.logo;
+          basePrompt += `\n\nBRAND LOGO: The last reference image is the organisation's official logo. If any branded surface appears in the scene (signs, screens, packaging, walls), reproduce this exact logo visually — copy its colours, shape, and lettering precisely from the reference. Do not invent or alter the logo.`;
+        }
+      } catch (e) { /* non-blocking */ }
+    }
+
+    if (organizationId) {
+      if (options.referenceOnly) {
+        const refCtx = await this._getReferenceOnlyContext(organizationId);
+        if (refCtx.stylePrompt) basePrompt = `${refCtx.stylePrompt}\n\n${basePrompt}`;
+        if (refCtx.imageUrls?.length) referenceImageUrls = refCtx.imageUrls;
+        if (refCtx.styleSpec) capturedStyleSpec = refCtx.styleSpec;
+
+        // Design Memory Phase 3 — inject top-performing past styles to guide generation
+        try {
+          const designMemoryService = require('./designMemoryService');
+          const topStyles = await designMemoryService.getTopStyleSpecs(organizationId, 3);
+          if (topStyles.length) {
+            const topStyleLines = topStyles
+              .filter(s => s.layoutType || (s.colors && s.colors.length))
+              .map((s, i) => {
+                const parts = [];
+                if (s.layoutType) parts.push(`layout: ${s.layoutType}`);
+                if (s.colors && s.colors.length) parts.push(`colors: ${s.colors.join(', ')}`);
+                if (s.style) parts.push(`style: ${s.style}`);
+                if (s.medium) parts.push(`medium: ${s.medium}`);
+                return `  ${i + 1}. ${parts.join(', ')} (engagement score: ${s.designScore || 0})`;
+              });
+            if (topStyleLines.length) {
+              basePrompt = `${basePrompt}\n\nHigh-performing design patterns for this brand (use as additional inspiration, do not override the main style spec):\n${topStyleLines.join('\n')}`;
+            }
+          }
+        } catch (memErr) {
+          logger.warn('Design memory blend failed (non-blocking)', { organizationId, err: memErr.message });
+        }
+      } else {
+        const visualCtx = await this._getVisualStyleContext(organizationId);
+        if (visualCtx) basePrompt = `${visualCtx}\n\n${basePrompt}`;
       }
     }
-    const imagePrompt = basePrompt.substring(0, 1500);
 
-    const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5';
+    // Occasion visual style takes priority — appended after brand context
+    if (options.occasionVisualStyle) {
+      const ov = options.occasionVisualStyle;
+      const parts = [];
+      if (ov.dominantColors?.length) parts.push(`Dominant colors: ${ov.dominantColors.join(', ')}.`);
+      if (ov.mood) parts.push(`Visual mood: ${ov.mood}.`);
+      if (ov.layoutPattern) parts.push(`Layout: ${ov.layoutPattern}.`);
+      if (ov.typography) parts.push(`Typography: ${ov.typography}.`);
+      if (ov.decorativeElements?.length) parts.push(`Decorative elements: ${ov.decorativeElements.join(', ')}.`);
+      if (parts.length) {
+        basePrompt = `${basePrompt}\n\nOccasion visual style (highest priority): ${parts.join(' ')}`;
+      }
+    }
+    // Hard-enforcement suffix appended to every prompt regardless of path
+    const textEnforcementSuffix = '\n\nABSOLUTE RULE — TEXT QUALITY: Any text visible anywhere in the image (on signs, doors, screens, packaging, labels, posters, props, or any surface) MUST be real, meaningful, correctly spelled English words relevant to the post topic. No gibberish. No nonsense words. No random characters. No placeholder text. If the prompt specifies an exact headline, render it exactly. If a brand logo is shown in a reference image, reproduce that exact logo on branded surfaces — never invent a fictional logo. Violation of this rule makes the image completely unusable for professional use.';
+    const imagePrompt = (basePrompt + textEnforcementSuffix).substring(0, 4000);
+
+    const model = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
+    const size = '1024x1024';
+    const quality = 'medium';
     const maxAttempts = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_MAX_RETRIES, 10) || 3, 1), 5);
     const imageTimeout = Math.min(Math.max(parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS, 10) || 120000, 60000), 300000);
 
+    // Add org logo as the last reference image so the model can reproduce it on branded surfaces
+    if (orgLogoUrl && !referenceImageUrls.includes(orgLogoUrl)) {
+      referenceImageUrls = [...referenceImageUrls, orgLogoUrl];
+    }
+
+    // Choose endpoint: /images/edits (with reference images) or /images/generations
+    const useEditsEndpoint = referenceImageUrls.length > 0;
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const response = await axios.post(
-          'https://api.openai.com/v1/images/generations',
-          {
+        let response;
+
+        if (useEditsEndpoint) {
+          // /v1/images/edits — pass reference images so the model sees them directly
+          const requestBody = {
             model,
             prompt: imagePrompt,
+            images: referenceImageUrls.map(url => ({ image_url: url })),
             n: 1,
-            size: '1024x1024',
-            quality: 'medium'
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${this.openaiApiKey}`,
-              'Content-Type': 'application/json'
-            },
-            timeout: imageTimeout,
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity
-          }
-        );
+            size,
+            quality
+          };
+          console.log('[AI Image] Using /images/edits with %d reference image(s)', referenceImageUrls.length);
+          response = await axios.post(
+            'https://api.openai.com/v1/images/edits',
+            requestBody,
+            {
+              headers: {
+                Authorization: `Bearer ${this.openaiApiKey}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: imageTimeout,
+              maxContentLength: Infinity,
+              maxBodyLength: Infinity
+            }
+          );
+        } else {
+          // /v1/images/generations — standard text-only generation
+          response = await axios.post(
+            'https://api.openai.com/v1/images/generations',
+            { model, prompt: imagePrompt, n: 1, size, quality },
+            {
+              headers: {
+                Authorization: `Bearer ${this.openaiApiKey}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: imageTimeout,
+              maxContentLength: Infinity,
+              maxBodyLength: Infinity
+            }
+          );
+        }
+
+        const apiUsage = response.data?.usage || null;
 
         const b64 = response.data?.data?.[0]?.b64_json;
         if (b64) {
-          this._logImageUsage(model, '1024x1024', 'medium');
-          return Buffer.from(b64, 'base64');
+          this._logImageUsage(model, size, quality, imagePrompt, apiUsage);
+          return { buffer: Buffer.from(b64, 'base64'), styleSpec: capturedStyleSpec, imagePrompt };
         }
 
         const imageUrl = response.data?.data?.[0]?.url;
@@ -730,8 +1021,8 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
           timeout: 60000,
           maxContentLength: Infinity
         });
-        this._logImageUsage(model, '1024x1024', 'medium');
-        return Buffer.from(imgResponse.data);
+        this._logImageUsage(model, size, quality, imagePrompt, apiUsage);
+        return { buffer: Buffer.from(imgResponse.data), styleSpec: capturedStyleSpec, imagePrompt };
       } catch (error) {
         const status = error.response?.status;
         const data = error.response?.data;
@@ -741,6 +1032,7 @@ Return ONLY the post text (caption + hashtags). Keep the brand voice while incor
         logger.warn('AI image generation failed', {
           attempt,
           maxAttempts,
+          endpoint: useEditsEndpoint ? '/images/edits' : '/images/generations',
           error: error.message,
           code: error.code,
           status,

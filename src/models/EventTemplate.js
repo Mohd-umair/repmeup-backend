@@ -29,6 +29,9 @@ const eventTemplateSchema = new mongoose.Schema({
   referenceImageUrl: { type: String, default: null },
   s3Key: { type: String, default: null },
   eventStyle: { type: eventStyleSchema, default: null },
+  sampleCaption: { type: String, trim: true, default: '' },
+  hashtags: [{ type: String, trim: true }],
+  cta: { type: String, trim: true, default: '' },
   isActive: { type: Boolean, default: true }
 }, {
   timestamps: true
