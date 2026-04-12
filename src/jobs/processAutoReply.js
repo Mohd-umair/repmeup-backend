@@ -7,6 +7,38 @@ const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 const { emitToOrg } = require('../utils/socketEmitter');
+const { classifyMessage, countPreviousFallbacks } = require('../utils/messageIntentClassifier');
+
+// ─── Fallback tone rotation pool ─────────────────────────────────────────────
+// Primary message comes from fallbackSettings.message (user-configured).
+// These are used as natural-sounding alternatives / repeat-fallback messages.
+const FALLBACK_VARIANTS = [
+  "Thanks for your message! Our team will take it from here 😊",
+  "Got it 👍 I've passed this along to our team — someone will be in touch shortly.",
+  "We've received your request — our team will reach out to you soon.",
+  "Our team is on it! You'll hear back from us shortly 🙌",
+];
+const REPEAT_FALLBACK_MSG = "Our team is already looking into this — you'll hear from us soon 😊";
+
+/**
+ * Pick the appropriate fallback message based on how many times a fallback
+ * has already been sent in this conversation.
+ *
+ * @param {string} primaryMsg - user-configured fallback message
+ * @param {Array}  replies    - interaction.replies array
+ * @returns {{ message: string, shouldSend: boolean }}
+ */
+function selectFallbackMessage(primaryMsg, replies = []) {
+  const previousCount = countPreviousFallbacks(replies, primaryMsg);
+  if (previousCount === 0) {
+    return { message: primaryMsg || FALLBACK_VARIANTS[0], shouldSend: true };
+  }
+  if (previousCount === 1) {
+    return { message: REPEAT_FALLBACK_MSG, shouldSend: true };
+  }
+  // Already sent twice — don't spam the customer
+  return { message: null, shouldSend: false };
+}
 
 /**
  * Process auto-reply job
@@ -265,6 +297,64 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       return { skipped: true, reason: 'Human agent is handling this interaction' };
     }
 
+    // ─── LAYER 0: Pre-AI message classification ────────────────────────────────
+    // Classify the message BEFORE spending AI credits. This handles:
+    //   - Closing / satisfied messages → mark resolved, no reply
+    //   - Small talk (hi, hello) → always handle with AI, skip no-KB fallback
+    //   - Gibberish → send fallback immediately, no AI call
+    const msgType = classifyMessage(interactionForReply.content);
+    const isSmallTalk = msgType === 'small_talk';
+
+    if (msgType === 'closing') {
+      logger.info('[Auto-reply] Layer 0: closing message detected — resolving conversation silently', {
+        interactionId: interactionForReply._id?.toString(),
+        content: interactionForReply.content?.slice(0, 50)
+      });
+      await Interaction.updateOne(
+        { _id: interactionForReply._id },
+        { $set: { status: 'resolved', resolvedAt: new Date(), chatOpen: false } }
+      );
+      try {
+        const fresh = await Interaction.findById(interactionForReply._id).lean();
+        if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+      } catch (_e) {}
+      return { skipped: true, reason: 'conversation_closing_resolved' };
+    }
+
+    if (msgType === 'gibberish') {
+      logger.info('[Auto-reply] Layer 0: gibberish message — immediate fallback without AI call', {
+        interactionId: interactionForReply._id?.toString()
+      });
+      const fallback = organization.autoReplySettings?.fallbackSettings;
+      if (fallback?.enabled) {
+        const { message: fbMsg, shouldSend } = selectFallbackMessage(
+          fallback.message, interactionForReply.replies
+        );
+        if (shouldSend && fbMsg) {
+          if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+            await sendReplyToPlatform(interactionForReply, fbMsg, organization);
+          }
+          try {
+            await interactionForReply.escalateToHuman(['Gibberish / unreadable message'], 'ai_fallback', {});
+          } catch (_e) {}
+          if (fallback.assignToAgent) {
+            try {
+              const agent = await escalationService.assignToAgent(interactionForReply, organization, { forceFallback: true });
+              if (agent && fallback.notifyByEmail) {
+                await escalationService.notifyAgent(agent, interactionForReply, organization);
+              }
+            } catch (_e) {}
+          }
+        }
+        try {
+          const fresh = await Interaction.findById(interactionForReply._id).lean();
+          if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+        } catch (_e) {}
+        return { sent: shouldSend, escalated: true, reason: 'gibberish_fallback' };
+      }
+      return { skipped: true, reason: 'gibberish_no_fallback_configured' };
+    }
+
     // ─── LAYER 3: Conversation loop detection ──────────────────────────────────
     // For thread-style DMs where the AI has already replied at least once:
     // increment sameTopicReplies so the escalation scorer can detect unresolved loops.
@@ -348,13 +438,17 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       });
 
       const fallback = organization.autoReplySettings?.fallbackSettings;
-      const handoffMsg = (fallback?.enabled && fallback.message?.trim())
+      const primaryMsg = (fallback?.enabled && fallback.message?.trim())
         ? fallback.message.trim()
         : (organization.escalationSettings?.handoffMessageTemplate ||
            "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this.");
 
+      const { message: handoffMsg, shouldSend: shouldSendHandoff } = selectFallbackMessage(
+        primaryMsg, interactionForReply.replies
+      );
+
       let handoffSent = false;
-      if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+      if (shouldSendHandoff && handoffMsg && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
         handoffSent = await sendReplyToPlatform(interactionForReply, handoffMsg, organization);
       }
 
@@ -418,16 +512,24 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       const fallback = organization.autoReplySettings?.fallbackSettings;
       if (fallback?.enabled) {
         try {
-          const fallbackMsg = (fallback.message && fallback.message.trim())
+          const primaryFbMsg = (fallback.message && fallback.message.trim())
             ? fallback.message.trim()
             : 'Our Agent will contact you within 24 hours.';
 
-          // Send the fallback message to the customer on the platform
-          if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+          const { message: fallbackMsg, shouldSend } = selectFallbackMessage(
+            primaryFbMsg, interactionForReply.replies
+          );
+
+          // Send fallback message to the customer on the platform (with response memory)
+          if (shouldSend && fallbackMsg && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
             await sendReplyToPlatform(interactionForReply, fallbackMsg, organization);
             logger.info('[Auto-reply] Fallback message sent to platform', {
               interactionId: interactionForReply._id?.toString(),
               message: fallbackMsg
+            });
+          } else if (!shouldSend) {
+            logger.info('[Auto-reply] Fallback suppressed — already sent twice in this conversation', {
+              interactionId: interactionForReply._id?.toString()
             });
           }
 
@@ -457,7 +559,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
             if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
           } catch (_e) {}
 
-          return { sent: true, escalated: true, reason: 'ai_fallback' };
+          return { sent: !!shouldSend, escalated: true, reason: 'ai_fallback' };
         } catch (fallbackErr) {
           logger.warn('[Auto-reply] Fallback handler error (non-fatal)', {
             interactionId: interactionForReply._id?.toString(),
@@ -482,18 +584,40 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       usedKnowledgeBase: !!autoReply.response.usedKnowledgeBase,
       knowledgeBaseCount: autoReply.response.knowledgeBaseCount || 0,
       knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback,
-      confidence: autoReply.response.confidence
+      confidence: autoReply.response.confidence,
+      messageType: autoReply.response.messageType,
+      noReply: !!autoReply.response.noReply
     });
+
+    // ─── LAYER 2.25: AI-detected closing / no-reply signal ─────────────────────
+    // When the AI itself classifies the message as a closing/satisfied signal
+    // (e.g. "okay thankyou", "got it", "shukriya") AND requests noReply,
+    // resolve the conversation silently without sending any message.
+    // Layer 0 catches most of these, but the AI catches edge cases Layer 0 misses.
+    if (autoReply.response.noReply === true || autoReply.response.messageType === 'closing') {
+      logger.info('[Auto-reply] Layer 2.25: AI detected closing/no-reply — resolving conversation silently', {
+        interactionId: interactionForReply._id?.toString(),
+        messageType: autoReply.response.messageType
+      });
+      await Interaction.updateOne(
+        { _id: interactionForReply._id },
+        { $set: { status: 'resolved', resolvedAt: new Date(), chatOpen: false } }
+      );
+      try {
+        const fresh = await Interaction.findById(interactionForReply._id).lean();
+        if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+      } catch (_e) {}
+      return { skipped: true, reason: 'ai_detected_closing' };
+    }
 
     // ─── LAYER 2.5: No relevant KB info — fallback instead of generic AI answer ──
     // Trigger when fallback is enabled AND either:
     //   a) no KB was used at all, OR
     //   b) only generic fallback KB entries were injected (no direct text/keyword matches)
-    // This prevents the AI from sending generic, unhelpful responses when it has
-    // no specific knowledge to draw from for the customer's actual query.
+    // EXCEPTION: Small talk (hi, hello) must always get an AI reply — never fallback.
     const fallbackCfg = organization.autoReplySettings?.fallbackSettings;
     const hasNoRelevantKB = !autoReply.response.usedKnowledgeBase || autoReply.response.knowledgeBaseFallback;
-    if (fallbackCfg?.enabled && hasNoRelevantKB) {
+    if (fallbackCfg?.enabled && hasNoRelevantKB && !isSmallTalk) {
       logger.info('[Auto-reply] Layer 2.5: AI has no relevant KB info — sending fallback instead of generic reply', {
         interactionId: interactionForReply._id?.toString(),
         usedKnowledgeBase: !!autoReply.response.usedKnowledgeBase,
@@ -501,12 +625,16 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback
       });
 
-      const fallbackMsg = (fallbackCfg.message && fallbackCfg.message.trim())
+      const primary25Msg = (fallbackCfg.message && fallbackCfg.message.trim())
         ? fallbackCfg.message.trim()
         : 'Our Agent will contact you within 24 hours.';
 
+      const { message: fallbackMsg, shouldSend } = selectFallbackMessage(
+        primary25Msg, interactionForReply.replies
+      );
+
       let fallbackSent = false;
-      if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+      if (shouldSend && fallbackMsg && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
         fallbackSent = await sendReplyToPlatform(interactionForReply, fallbackMsg, organization);
       }
 
@@ -566,7 +694,10 @@ async function processSingleInteraction(interactionId, organization, jobData = {
     // even when the conversation is being escalated to a human agent.
     let replySent = false;
     if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
-      const sent = await sendReplyToPlatform(interactionForReply, autoReply.response.content, organization);
+      const sent = await sendReplyToPlatform(
+        interactionForReply, autoReply.response.content, organization,
+        autoReply.response.confidence, autoReply.response.messageType
+      );
       if (sent) {
         logEvents.autoReply.sent({
           interactionId: interactionForReply._id,
@@ -780,7 +911,10 @@ async function processBatchInteractions(organizationId, organization) {
 
       // Send if autoSend is enabled
       if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
-        const sent = await sendReplyToPlatform(interactionFresh, autoReply.response.content, organization);
+        const sent = await sendReplyToPlatform(
+          interactionFresh, autoReply.response.content, organization,
+          autoReply.response.confidence, autoReply.response.messageType
+        );
         if (sent) {
           logEvents.autoReply.sent({
             interactionId: interactionFresh._id,
@@ -859,7 +993,7 @@ async function getConnectionForReply(interaction) {
  */
 const ALLOWED_CONNECTION_STATUS = ['connected', 'available'];
 
-async function sendReplyToPlatform(interaction, content, organization) {
+async function sendReplyToPlatform(interaction, content, organization, confidence = null, messageType = null) {
   try {
     const connection = await getConnectionForReply(interaction);
     if (!connection || !ALLOWED_CONNECTION_STATUS.includes(connection.status) || !connection.isActive) {
@@ -978,7 +1112,7 @@ async function sendReplyToPlatform(interaction, content, organization) {
         role: { $in: ['admin', 'manager', 'agent', 'super_admin'] }
       }).select('_id').lean();
 
-      await interaction.addReply(content, user?._id ?? null, platformResponseId, true);
+      await interaction.addReply(content, user?._id ?? null, platformResponseId, true, null, null, confidence, messageType);
       interaction.autoReplied = true;
       interaction.respondedAt = new Date();
       await interaction.save();
