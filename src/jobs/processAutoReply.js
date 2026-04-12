@@ -468,13 +468,17 @@ async function processSingleInteraction(interactionId, organization, jobData = {
     });
 
     // ─── LAYER 2.5: No relevant KB info — fallback instead of generic AI answer ──
-    // When fallback is enabled and the AI had no knowledge base context to draw from,
-    // send the fallback message and assign to a human rather than replying with
-    // a generic response that adds no value to the customer.
+    // Trigger when fallback is enabled AND either:
+    //   a) no KB was used at all, OR
+    //   b) only generic fallback KB entries were injected (no direct text/keyword matches)
+    // This prevents the AI from sending generic, unhelpful responses when it has
+    // no specific knowledge to draw from for the customer's actual query.
     const fallbackCfg = organization.autoReplySettings?.fallbackSettings;
-    if (fallbackCfg?.enabled && !autoReply.response.usedKnowledgeBase) {
-      logger.info('[Auto-reply] Layer 2.5: AI has no KB info — sending fallback instead of generic reply', {
+    const hasNoRelevantKB = !autoReply.response.usedKnowledgeBase || autoReply.response.knowledgeBaseFallback;
+    if (fallbackCfg?.enabled && hasNoRelevantKB) {
+      logger.info('[Auto-reply] Layer 2.5: AI has no relevant KB info — sending fallback instead of generic reply', {
         interactionId: interactionForReply._id?.toString(),
+        usedKnowledgeBase: !!autoReply.response.usedKnowledgeBase,
         knowledgeBaseCount: autoReply.response.knowledgeBaseCount || 0,
         knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback
       });

@@ -11,6 +11,7 @@ const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const axios = require('axios');
 const logger = require('../config/logger');
+const { generateChatRef } = require('../utils/chatRefHelper');
 
 /**
  * Inbox visibility: same org + platform still has a connected account, and either
@@ -297,6 +298,28 @@ exports.getInteractions = async (req, res, next) => {
 
     const hasMore = interactions.length > safeLimit;
     if (hasMore) interactions.pop();  // remove the extra document
+
+    // Lazy backfill: assign chatRef to any interaction that doesn't have one yet
+    const missingChatRef = interactions.filter(i => !i.chatRef && i.organization);
+    if (missingChatRef.length > 0) {
+      try {
+        await Promise.all(
+          missingChatRef.map(async (i) => {
+            try {
+              const refData = await generateChatRef(i.organization);
+              if (refData?.chatRef) {
+                await Interaction.updateOne(
+                  { _id: i._id, chatRef: null },
+                  { $set: { chatNumber: refData.chatNumber, chatRef: refData.chatRef } }
+                );
+                i.chatNumber = refData.chatNumber;
+                i.chatRef = refData.chatRef;
+              }
+            } catch (_err) { /* skip individual failures */ }
+          })
+        );
+      } catch (_err) { /* non-fatal */ }
+    }
 
     const total = await Interaction.countDocuments(query);
 
