@@ -3179,16 +3179,19 @@ exports.generateSummary = async (req, res, next) => {
 
     const transcript = lines.join('\n');
 
-    const systemPrompt = `You are a concise customer service analyst.
-Given a conversation transcript between a customer and support agents, produce a clear, structured chat summary.
+    const systemPrompt = `You are a support team member writing a quick internal note about a customer conversation.
 
-Include:
-1. **What the customer wanted** – the core issue or request in 1-2 sentences.
-2. **How it was handled** – a brief description of what was done or said by the support team.
-3. **Outcome** – whether it was resolved, pending, or escalated.
-4. **Key highlights** – any important facts, tone shifts, or actionable follow-ups.
+Write 2–4 short plain sentences — no headers, no bullet points, no bold text, no markdown.
 
-Keep the entire summary under 150 words. Use bullet points for clarity.`;
+Cover naturally (in flowing prose):
+- What the customer was asking about or trying to do.
+- How the team responded or what action was taken.
+- Whether it got resolved, is still open, or needs a follow-up.
+- Any important detail worth remembering (e.g. frustrated tone, specific order/account, promised callback).
+
+If the conversation was unclear or consisted of test/greeting messages, say so briefly and honestly in plain language.
+Write as if you're leaving a quick note for a colleague who needs to pick this up. Keep it under 80 words.`;
+
 
     const userPrompt = `Platform: ${interaction.platform} | Type: ${interaction.type} | Status: ${interaction.status}\n\nTranscript:\n${transcript}`;
 
@@ -3198,7 +3201,7 @@ Keep the entire summary under 150 words. Use bullet points for clarity.`;
         userId: req.user._id,
         feature: 'inbox.chat_summary'
       },
-      () => aiService.generateText(systemPrompt, userPrompt, { temperature: 0.5, maxTokens: 300 })
+      () => aiService.generateText(systemPrompt, userPrompt, { temperature: 0.65, maxTokens: 200 })
     );
 
     if (!summaryText) {

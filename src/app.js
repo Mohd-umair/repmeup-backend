@@ -144,6 +144,7 @@ app.use('/api/social-accounts', require('./routes/socialAccounts'));
 app.use('/api/plans', require('./routes/plans'));
 app.use('/api/super-admin', require('./routes/super-admin'));
 app.use('/api/brand-config', require('./routes/brandConfig'));
+app.use('/api/inspirations', require('./routes/inspirations'));
 app.use('/api/event-templates', require('./routes/eventTemplates'));
 app.use('/api/post-templates', require('./routes/postTemplates'));
 app.use('/api/intent-buckets', require('./routes/intentBuckets'));

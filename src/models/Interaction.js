@@ -58,6 +58,18 @@ const interactionSchema = new mongoose.Schema({
     isVerified: Boolean
   },
   
+  // Support desk ticket reference
+  chatNumber: {
+    type: Number,
+    default: null,
+    index: true
+  },
+  chatRef: {
+    type: String,
+    default: null,
+    index: true
+  },
+
   // Threading support
   parentId: String,
   threadId: String,

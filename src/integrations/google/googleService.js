@@ -1,6 +1,7 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
 const PlatformConnection = require('../../models/PlatformConnection');
+const { generateChatRef } = require('../../utils/chatRefHelper');
 
 class GoogleService {
   constructor() {
@@ -254,14 +255,26 @@ class GoogleService {
 
       // Bulk upsert interactions (insert new, update existing)
       if (interactions.length > 0) {
+        const ggOrgId = platformConnection.organization;
+        const ggExistingIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const ggChatRefMap = {};
+        for (const interaction of interactions) {
+          if (!ggExistingIds.has(interaction.platformId)) {
+            ggChatRefMap[interaction.platformId] = await generateChatRef(ggOrgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = ggChatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }

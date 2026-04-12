@@ -6,6 +6,7 @@ const instagramService = require('../integrations/meta/instagramService');
 const { emitToOrg } = require('../utils/socketEmitter');
 const cacheService = require('../services/cacheService');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const { generateChatRef } = require('../utils/chatRefHelper');
 
 /**
  * Process webhook events from social media platforms
@@ -382,9 +383,10 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       // Step 1: Upsert the thread (create or update non-message fields)
       // Do not put status/isRead in $setOnInsert — they are already in $set (MongoDB conflicts same path in both operators)
+      const _igDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
       await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
-        { $set: updateFields },
+        { $set: updateFields, $setOnInsert: { chatNumber: _igDmChatRef.chatNumber, chatRef: _igDmChatRef.chatRef } },
         { upsert: true }
       );
 
@@ -472,11 +474,12 @@ async function handleInstagramWebhook(payload, organizationId) {
           updatePayload.parentId = parentCommentId; // So this reply shows in the parent thread, not as new conversation
         }
 
+        const _igCommentChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.id },
           {
             $set: updatePayload,
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _igCommentChatRef.chatNumber, chatRef: _igCommentChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -534,6 +537,7 @@ async function handleInstagramWebhook(payload, organizationId) {
           if (Number.isFinite(ms)) mentionCreatedAt = new Date(ms);
         }
 
+        const _igMentionChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: String(mentionId) },
           {
@@ -556,7 +560,7 @@ async function handleInstagramWebhook(payload, organizationId) {
                 rawMention: mention
               }
             },
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _igMentionChatRef.chatNumber, chatRef: _igMentionChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -589,6 +593,7 @@ async function handleInstagramWebhook(payload, organizationId) {
           if (Number.isFinite(ms)) msgPlatformCreatedAt = new Date(ms);
         }
 
+        const _igLegacyDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
@@ -602,7 +607,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               threadId: message.conversation_id,
               platformCreatedAt: msgPlatformCreatedAt
             },
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _igLegacyDmChatRef.chatNumber, chatRef: _igLegacyDmChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -775,11 +780,12 @@ async function handleFacebookWebhook(payload, organizationId) {
         };
         if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
+        const _fbCommentChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.comment_id },
           {
             $set: updateFields,
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _fbCommentChatRef.chatNumber, chatRef: _fbCommentChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -805,6 +811,7 @@ async function handleFacebookWebhook(payload, organizationId) {
         };
         if (senderProfile.avatarUrl) author.avatarUrl = senderProfile.avatarUrl;
 
+        const _fbDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
@@ -818,7 +825,7 @@ async function handleFacebookWebhook(payload, organizationId) {
               threadId: message.thread_id,
               platformCreatedAt: parseMetaTimestamp(message.created_time)
             },
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -899,6 +906,7 @@ async function handleWhatsAppWebhook(payload, organizationId) {
       if (change.value.messages) {
         const message = change.value.messages[0];
 
+        const _waChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
@@ -914,7 +922,7 @@ async function handleWhatsAppWebhook(payload, organizationId) {
               },
               platformCreatedAt: new Date(parseInt(message.timestamp) * 1000)
             },
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _waChatRef.chatNumber, chatRef: _waChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -1070,6 +1078,7 @@ async function handleLinkedInComment(data, organizationId) {
     }
 
     // Create or update the interaction
+    const _liChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
     const interaction = await Interaction.findOneAndUpdate(
       { platformId: commentId },
       {
@@ -1096,7 +1105,7 @@ async function handleLinkedInComment(data, organizationId) {
           threadId: parentCommentUrn || shareUrn,
           platformCreatedAt: createdAt ? new Date(createdAt) : new Date()
         },
-        $setOnInsert: { status: 'unread', isRead: false }
+        $setOnInsert: { status: 'unread', isRead: false, chatNumber: _liChatRef.chatNumber, chatRef: _liChatRef.chatRef }
       },
       { upsert: true, new: true }
     );

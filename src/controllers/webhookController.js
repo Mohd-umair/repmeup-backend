@@ -5,6 +5,7 @@ const youtubeService = require('../integrations/google/youtubeService');
 const { processWebhook } = require('../jobs/processWebhook');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
+const { generateChatRef } = require('../utils/chatRefHelper');
 
 /**
  * @desc    Handle Google Business Profile webhook
@@ -766,6 +767,15 @@ exports.handleWhatsAppWebhook = async (req, res) => {
               connection,
               connection.organization
             );
+
+            // Assign chat ticket ref before saving
+            try {
+              const chatData = await generateChatRef(connection.organization);
+              interaction.chatNumber = chatData.chatNumber;
+              interaction.chatRef = chatData.chatRef;
+            } catch (_chatRefErr) {
+              console.warn('[WhatsApp] Could not generate chatRef:', _chatRefErr.message);
+            }
 
             // Save interaction
             const savedInteraction = await Interaction.create(interaction);

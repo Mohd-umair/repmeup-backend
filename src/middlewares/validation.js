@@ -205,7 +205,14 @@ exports.validateKnowledgeBaseManual = (req, res, next) => {
     content: Joi.string().required().max(100000),
     tags: Joi.array().items(Joi.string().max(100)).max(50).optional(),
     priority: Joi.number().min(1).max(10).optional(),
-    metadata: Joi.object().optional()
+    metadata: Joi.object().optional(),
+    trainingContext: Joi.string().max(2000).allow('').optional(),
+    trainingWeight: Joi.number().min(1).max(10).optional(),
+    isTrainingData: Joi.boolean().optional(),
+    isActive: Joi.boolean().optional(),
+    templateFields: Joi.array().items(
+      Joi.object({ key: Joi.string().allow('').max(500), value: Joi.string().allow('').max(50000) })
+    ).max(100).optional()
   }).options({ stripUnknown: true });
 
   const { error } = schema.validate(req.body);
@@ -222,11 +229,18 @@ exports.validateKnowledgeBaseUpdate = (req, res, next) => {
   const schema = Joi.object({
     title: Joi.string().max(500).optional(),
     content: Joi.string().max(100000).optional(),
+    type: Joi.string().valid('faq', 'product_info', 'policy', 'brand_voice', 'procedure', 'general').optional(),
     category: Joi.string().max(200).optional(),
     tags: Joi.array().items(Joi.string().max(100)).max(50).optional(),
     priority: Joi.number().min(1).max(10).optional(),
     metadata: Joi.object().optional(),
-    isActive: Joi.boolean().optional()
+    isActive: Joi.boolean().optional(),
+    trainingContext: Joi.string().max(2000).allow('').optional(),
+    trainingWeight: Joi.number().min(1).max(10).optional(),
+    isTrainingData: Joi.boolean().optional(),
+    templateFields: Joi.array().items(
+      Joi.object({ key: Joi.string().allow('').max(500), value: Joi.string().allow('').max(50000) })
+    ).max(100).optional()
   }).options({ stripUnknown: true }).min(1);
 
   const { error } = schema.validate(req.body);

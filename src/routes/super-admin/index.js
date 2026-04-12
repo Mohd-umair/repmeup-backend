@@ -12,6 +12,8 @@ const contactInquiryController = require('../../controllers/contactInquiryContro
 const gpController = require('../../controllers/groupPermissionController');
 const ticketController = require('../../controllers/ticketController');
 const superAdminFaqController = require('../../controllers/superAdminFaqController');
+const inspirationAdminController = require('../../controllers/inspirationAdminController');
+const multer = require('multer');
 
 router.use(protect);
 router.use(requireSuperAdminAccess);
@@ -65,5 +67,15 @@ router.get('/users/:id/activity', superAdminController.getUserActivity);
 router.get('/users/:id', superAdminController.getUser);
 router.patch('/users/:id/status', superAdminController.setUserActive);
 router.delete('/users/:id', superAdminController.softDeleteUser);
+
+// Inspiration Library management
+const inspirationUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 25 }
+});
+router.get('/inspirations', inspirationAdminController.list);
+router.post('/inspirations', inspirationUpload.array('images', 25), inspirationAdminController.create);
+router.patch('/inspirations/:id', inspirationAdminController.update);
+router.delete('/inspirations/:id', inspirationAdminController.remove);
 
 module.exports = router;

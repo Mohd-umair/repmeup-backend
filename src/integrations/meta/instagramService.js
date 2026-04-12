@@ -1,5 +1,6 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
+const { generateChatRef } = require('../../utils/chatRefHelper');
 
 class InstagramService {
   constructor() {
@@ -300,14 +301,26 @@ class InstagramService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
+        const orgId = platformConnection.organization;
+        const existingIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const chatRefMap = {};
+        for (const interaction of interactions) {
+          if (!existingIds.has(interaction.platformId)) {
+            chatRefMap[interaction.platformId] = await generateChatRef(orgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = chatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }
@@ -397,8 +410,27 @@ class InstagramService {
             console.error('  Trace ID:', apiError.fbtrace_id);
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
-            // Check for specific permission errors
-            if (apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
+            // Subcode 2534041 = account owner has turned off DM access from their Instagram settings.
+            // This is an account-side toggle, NOT a developer/app permission issue.
+            if (apiError.code === 200 && apiError.error_subcode === 2534041) {
+              console.warn('⚠️  [Instagram DM] Account-level DM access is disabled for this user.');
+              console.warn('   The Instagram account owner needs to enable messaging access:');
+              console.warn('   Instagram → Settings → Privacy → Messages → Allow message requests');
+              console.warn('   OR: Settings → Business tools and controls → Connected tools (for Business/Creator accounts)');
+              console.warn('   Comments will continue to work normally.');
+
+              // Persist the flag so the UI can show a clear warning to the account owner
+              if (platformConnection._id) {
+                const PlatformConnection = require('../../models/PlatformConnection');
+                PlatformConnection.findByIdAndUpdate(platformConnection._id, {
+                  $set: {
+                    'metadata.instagramDmEnabled': false,
+                    'metadata.instagramDmDisabledReason': 'Account owner has disabled Instagram DM access. Go to Instagram → Settings → Privacy → Messages and enable message requests, then resync.'
+                  }
+                }).catch(() => {});
+              }
+            } else if (apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
+              // Generic permission error — likely a developer/app setup issue
               console.warn('');
               console.warn('⚠️  [Instagram DM] PERMISSION ERROR DETECTED');
               console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -437,6 +469,13 @@ class InstagramService {
 
       if (allConversations.length > 0) {
         console.log(`✅ [Instagram] Found ${allConversations.length} conversations - DMs are working!`);
+        // DMs working — ensure flag is cleared
+        if (platformConnection._id) {
+          const PlatformConnection = require('../../models/PlatformConnection');
+          PlatformConnection.findByIdAndUpdate(platformConnection._id, {
+            $set: { 'metadata.instagramDmEnabled': true, 'metadata.instagramDmDisabledReason': null }
+          }).catch(() => {});
+        }
       } else if (pageCount === 0) {
         console.warn(`⚠️  [Instagram] No conversations found - DMs likely not enabled (see error above)`);
       } else {
@@ -565,14 +604,26 @@ class InstagramService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
+        const orgId = platformConnection.organization;
+        const existingDmIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const dmChatRefMap = {};
+        for (const interaction of interactions) {
+          if (!existingDmIds.has(interaction.platformId)) {
+            dmChatRefMap[interaction.platformId] = await generateChatRef(orgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = dmChatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }
