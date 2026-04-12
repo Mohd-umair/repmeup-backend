@@ -375,13 +375,61 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         hint: 'Check: sentimentFilter, enabledPlatforms, enabledTypes in Auto-Reply settings'
       });
       console.warn(`⚠️  [Auto-reply] Not eligible for interaction ${interactionForReply._id}: ${autoReply.reason}`);
-      // Escalate to human if rules triggered
+
+      // Escalate to human if escalation rules triggered
       if (escalationCheck.shouldEscalate) {
         await escalationService.escalateInteraction(
           interactionForReply, organization,
           escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
         );
       }
+
+      // ─── FALLBACK: Send message + assign agent + notify when AI cannot respond ──
+      const fallback = organization.autoReplySettings?.fallbackSettings;
+      if (fallback?.enabled) {
+        try {
+          const fallbackMsg = (fallback.message && fallback.message.trim())
+            ? fallback.message.trim()
+            : 'Our Agent will contact you within 24 hours.';
+
+          // Send the fallback message to the customer on the platform
+          if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+            await sendReplyToPlatform(interactionForReply, fallbackMsg, organization);
+            logger.info('[Auto-reply] Fallback message sent to platform', {
+              interactionId: interactionForReply._id?.toString(),
+              message: fallbackMsg
+            });
+          }
+
+          // Mark interaction as requiring human response
+          await interactionForReply.escalateToHuman(
+            [`AI not eligible: ${autoReply.reason}`], 'ai_fallback', { reason: autoReply.reason }
+          );
+
+          // Assign to an available agent and email them (independent of escalationSettings)
+          if (fallback.assignToAgent) {
+            const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization);
+            if (assignedAgent) {
+              console.log(`👤 [Auto-reply Fallback] Assigned to agent: ${assignedAgent.firstName} ${assignedAgent.lastName}`);
+              if (fallback.notifyByEmail) {
+                await escalationService.notifyAgent(assignedAgent, interactionForReply, organization);
+                logger.info('[Auto-reply] Fallback: agent notified by email', {
+                  interactionId: interactionForReply._id?.toString(),
+                  agent: assignedAgent._id?.toString()
+                });
+              }
+            }
+          }
+
+          return { sent: true, escalated: true, reason: 'ai_fallback' };
+        } catch (fallbackErr) {
+          logger.warn('[Auto-reply] Fallback handler error (non-fatal)', {
+            interactionId: interactionForReply._id?.toString(),
+            error: fallbackErr.message
+          });
+        }
+      }
+
       return { skipped: true, reason: autoReply.reason };
     }
 
