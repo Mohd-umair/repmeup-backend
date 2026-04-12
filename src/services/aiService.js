@@ -1443,12 +1443,31 @@ ${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be gen
 
 ${baseGuidelines}
 
+IMPORTANT — Message classification rules:
+1. If the message is a greeting or small talk (hi, hello, hey, salam, how are you, kya haal):
+   - Set "messageType": "small_talk"
+   - Always set "resolvable": true and "confidence": 1.0
+   - Respond warmly and naturally
+2. If the message is a closing or satisfied signal (thanks, okay, got it, perfect, shukriya, theek hai, 👍, 🙏):
+   - Set "messageType": "closing"
+   - Set "noReply": true
+   - The "reply" field can be empty — it will not be sent
+3. If the message is completely unclear or gibberish (random characters, no real words):
+   - Set "messageType": "unclear"
+   - Set "resolvable": false
+4. All other messages are "messageType": "business"
+
+Type A (low confidence but understandable query): still attempt a helpful clarifying question.
+Type B (completely random / gibberish): set resolvable false, noReply false.
+
 Respond ONLY with this exact JSON (no other text, no markdown fences):
 {
   "resolvable": true or false,
   "reason": "if false: one-sentence explanation of why you cannot resolve it without private data",
   "confidence": 0.0 to 1.0,
-  "reply": "your complete customer-facing response"
+  "reply": "your complete customer-facing response",
+  "messageType": "small_talk or closing or business or unclear",
+  "noReply": false
 }`;
 
         const selfAssessResponse = await this._postChatCompletions(
@@ -1462,7 +1481,7 @@ Respond ONLY with this exact JSON (no other text, no markdown fences):
               }
             ],
             ...openAIChatCompletionTemperatureField(this.openaiModel, 0.7),
-            ...openAIChatCompletionMaxTokensField(this.openaiModel, 400)
+            ...openAIChatCompletionMaxTokensField(this.openaiModel, 450)
           },
           {},
           { timeout: 120000 }
@@ -1480,8 +1499,10 @@ Respond ONLY with this exact JSON (no other text, no markdown fences):
           });
         }
 
-        if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim()) {
-          const resolvable = parsed.resolvable !== false; // default to true if field missing
+        if (parsed && typeof parsed.reply === 'string') {
+          const resolvable = parsed.resolvable !== false;
+          const messageType = parsed.messageType || 'business';
+          const noReply = parsed.noReply === true;
           const confidence = typeof parsed.confidence === 'number'
             ? Math.max(0, Math.min(1, parsed.confidence))
             : (relevantKB && relevantKB.length > 0 ? Math.min(0.95, 0.78 + relevantKB.length * 0.04) : 0.78);
@@ -1490,6 +1511,8 @@ Respond ONLY with this exact JSON (no other text, no markdown fences):
             content: parsed.reply.trim(),
             confidence,
             resolvable,
+            noReply,
+            messageType,
             resolvableReason: resolvable ? null : (parsed.reason || 'Requires access to private account or system data'),
             generatedAt: new Date(),
             usedKnowledgeBase: relevantKB && relevantKB.length > 0,
@@ -1506,6 +1529,8 @@ Respond ONLY with this exact JSON (no other text, no markdown fences):
           content: rawSelfAssess,
           confidence: fallbackConfidence,
           resolvable: true,
+          noReply: false,
+          messageType: 'business',
           resolvableReason: null,
           generatedAt: new Date(),
           usedKnowledgeBase: relevantKB && relevantKB.length > 0,
