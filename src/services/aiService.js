@@ -211,7 +211,7 @@ class AIService {
 
       const topPriorityFallback = async () => {
         return KnowledgeBase.find(base)
-          .select('title content category priority keywords trainingWeight')
+          .select('title content category priority keywords trainingWeight usageCount lastUsedAt')
           .sort({ priority: -1, trainingWeight: -1, usageCount: -1 })
           .limit(limit);
       };
@@ -228,7 +228,7 @@ class AIService {
           ...base,
           $text: { $search: trimmed }
         })
-          .select('title content category priority keywords trainingWeight')
+          .select('title content category priority keywords trainingWeight usageCount lastUsedAt')
           .sort({ score: { $meta: 'textScore' }, priority: -1 })
           .limit(limit);
       } catch (textErr) {
@@ -256,7 +256,7 @@ class AIService {
             { title: { $regex: escapedForRegex.join('|'), $options: 'i' } }
           ]
         })
-          .select('title content category priority keywords trainingWeight')
+          .select('title content category priority keywords trainingWeight usageCount lastUsedAt')
           .sort({ priority: -1, usageCount: -1 })
           .limit(limit);
 
@@ -354,10 +354,11 @@ class AIService {
         if (pd && pd.length) parts.push(`Brand character: ${pd.join(', ')}.`);
         const hs = ov.hashtagStrategy || bp.hashtagStrategy;
         if (hs && hs.avgCount) {
-          let hsText = `Hashtag strategy: ~${hs.avgCount} per post`;
-          if (hs.branded?.length) hsText += `, branded: ${hs.branded.join(' ')}`;
-          if (hs.generic?.length) hsText += `, mix generic: ${hs.generic.slice(0, 5).join(' ')}`;
-          parts.push(hsText + '.');
+          // Only inject the COUNT as a style guideline.
+          // Never push specific branded/generic hashtags from analysis — they become stale
+          // (e.g. campaign hashtags from old posts that no longer apply).
+          // The user controls which hashtags to use via the manual "Approved Hashtags" field above.
+          parts.push(`Hashtag count: use approximately ${hs.avgCount} hashtags per post.`);
         }
         const cta = ov.ctaStyle || bp.ctaStyle;
         if (cta && cta.length) parts.push(`CTA style: ${cta.join(', ')}.`);

@@ -83,7 +83,13 @@ const platformConnectionSchema = new mongoose.Schema({
     },
     profilePicture: String,
     followerCount: Number,
-    isVerified: Boolean
+    isVerified: Boolean,
+    // Instagram-specific: whether the account allows DM access via API
+    instagramDmEnabled: {
+      type: Boolean,
+      default: null  // null = not yet determined
+    },
+    instagramDmDisabledReason: String
   },
   
   // Connection status

@@ -122,7 +122,8 @@ exports.updateOrganization = async (req, res, next) => {
       'industry',
       'size',
       'logo',
-      'whiteLabel'
+      'whiteLabel',
+      'orgCode'
     ];
 
     allowedFields.forEach(field => {
@@ -130,6 +131,11 @@ exports.updateOrganization = async (req, res, next) => {
         organization[field] = req.body[field];
       }
     });
+
+    // Sanitize orgCode: strip non-alphanumeric, uppercase, max 6 chars
+    if (organization.orgCode) {
+      organization.orgCode = organization.orgCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6);
+    }
 
     // Handle autoReplySettings separately (merge nested object)
     if (req.body.autoReplySettings !== undefined) {

@@ -6,6 +6,7 @@ const escalationService = require('../services/escalationService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const { emitToOrg } = require('../utils/socketEmitter');
 
 /**
  * Process auto-reply job
@@ -820,21 +821,30 @@ async function sendReplyToPlatform(interaction, content, organization) {
     // Add other platforms here
 
     if (replyStatus === 'sent') {
-      // Add reply to database
-      // Find a user to attribute the reply to (preferably the organization owner)
+      // Find a user to attribute the auto-reply to.
+      // Broaden the search to any org member so a missing admin/manager never
+      // blocks the status update. Fall back to null — sentBy is not required.
       const User = require('../models/User');
-      const user = await User.findOne({ organization: organization._id, role: { $in: ['admin', 'manager'] } });
-      
-      if (!user) {
-        return false;
-      }
-      
-      await interaction.addReply(content, user._id, platformResponseId, true);
+      const user = await User.findOne({
+        organization: organization._id,
+        role: { $in: ['admin', 'manager', 'agent', 'super_admin'] }
+      }).select('_id').lean();
+
+      await interaction.addReply(content, user?._id ?? null, platformResponseId, true);
+      interaction.autoReplied = true;
       interaction.respondedAt = new Date();
       await interaction.save();
 
-      // IMPORTANT: Remove any pending AI processing jobs for this interaction
-      // since it's already been replied to
+      // Emit real-time update so the inbox list reflects 'replied' status immediately
+      try {
+        emitToOrg(interaction.organization.toString(), 'interaction_updated', {
+          interaction: interaction.toObject ? interaction.toObject() : interaction
+        });
+      } catch (_emitErr) {
+        // Non-fatal — don't block the reply
+      }
+
+      // Remove any pending AI processing jobs for this interaction
       try {
         const { aiQueue } = require('../config/queue');
         const jobs = await aiQueue.getJobs(['waiting', 'active', 'delayed']);

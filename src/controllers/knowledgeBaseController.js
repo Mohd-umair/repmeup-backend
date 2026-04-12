@@ -502,7 +502,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
 exports.updateKnowledgeBase = async (req, res) => {
   try {
     const {
-      title, content, category, tags, priority, metadata, isActive,
+      title, content, type, category, tags, priority, metadata, isActive,
       trainingContext, trainingWeight, isTrainingData, templateFields
     } = req.body;
 
@@ -520,6 +520,7 @@ exports.updateKnowledgeBase = async (req, res) => {
 
     if (title !== undefined)           knowledgeBase.title = title;
     if (content !== undefined)         knowledgeBase.content = content;
+    if (type !== undefined)            knowledgeBase.type = type;
     if (category !== undefined)        knowledgeBase.category = category;
     if (tags !== undefined)            knowledgeBase.tags = tags;
     if (priority !== undefined)        knowledgeBase.priority = priority;

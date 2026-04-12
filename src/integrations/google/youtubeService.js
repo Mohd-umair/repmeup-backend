@@ -1,6 +1,7 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
 const PlatformConnection = require('../../models/PlatformConnection');
+const { generateChatRef } = require('../../utils/chatRefHelper');
 
 class YouTubeService {
   constructor() {
@@ -331,14 +332,26 @@ class YouTubeService {
 
       // Bulk upsert interactions (insert new, update existing)
       if (interactions.length > 0) {
+        const ytOrgId = platformConnection.organization;
+        const ytExistingIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const ytChatRefMap = {};
+        for (const interaction of interactions) {
+          if (!ytExistingIds.has(interaction.platformId)) {
+            ytChatRefMap[interaction.platformId] = await generateChatRef(ytOrgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = ytChatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }
