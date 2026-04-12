@@ -347,7 +347,7 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       // One thread per conversation (IG account + customer), not per message
       const threadPlatformId = `dm_${String(igAccountId)}_${String(partnerId)}`;
-      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author').lean();
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author chatRef').lean();
       if (existing && existing.metadata?.lastMid === mid) {
         // Meta webhook retry — do not re-queue AI / auto-reply
         logger.debug('[processWebhook] Instagram DM duplicate mid (webhook retry)', { threadPlatformId, mid });
@@ -365,6 +365,12 @@ async function handleInstagramWebhook(payload, organizationId) {
       if (profile.avatarUrl) mergedAuthor.avatarUrl = profile.avatarUrl;
       else if (existingAuthor.avatarUrl) mergedAuthor.avatarUrl = existingAuthor.avatarUrl;
 
+      // Generate chatRef for new interactions or backfill existing ones that don't have it
+      let _igDmChatRef = null;
+      if (!existing || !existing.chatRef) {
+        _igDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+      }
+
       const updateFields = {
         organization: organizationId,
         platform: 'instagram',
@@ -381,12 +387,21 @@ async function handleInstagramWebhook(payload, organizationId) {
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
+      // Backfill chatRef into $set for existing interactions that don't have it
+      if (existing && !existing.chatRef && _igDmChatRef?.chatRef) {
+        updateFields.chatNumber = _igDmChatRef.chatNumber;
+        updateFields.chatRef = _igDmChatRef.chatRef;
+      }
+
       // Step 1: Upsert the thread (create or update non-message fields)
-      // Do not put status/isRead in $setOnInsert — they are already in $set (MongoDB conflicts same path in both operators)
-      const _igDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+      // For NEW interactions: chatRef goes into $setOnInsert (avoids $set/$setOnInsert field conflict)
+      // For EXISTING without chatRef: already added to updateFields ($set) above
+      const setOnInsertFields = (!existing && _igDmChatRef?.chatRef)
+        ? { chatNumber: _igDmChatRef.chatNumber, chatRef: _igDmChatRef.chatRef }
+        : {};
       await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
-        { $set: updateFields, $setOnInsert: { chatNumber: _igDmChatRef.chatNumber, chatRef: _igDmChatRef.chatRef } },
+        { $set: updateFields, ...(Object.keys(setOnInsertFields).length > 0 ? { $setOnInsert: setOnInsertFields } : {}) },
         { upsert: true }
       );
 
@@ -698,7 +713,7 @@ async function handleFacebookWebhook(payload, organizationId) {
       if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
       const threadPlatformId = `dm_${String(pageId)}_${String(senderId)}`;
-      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid chatRef').lean();
       if (existing && existing.metadata?.lastMid === mid) {
         logger.debug('[processWebhook] Facebook DM duplicate mid (webhook retry)', { threadPlatformId, mid });
         return null;
@@ -707,6 +722,12 @@ async function handleFacebookWebhook(payload, organizationId) {
       const incomingMsg = { mid, text, timestamp: event.timestamp };
       if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
       if (attachmentType) incomingMsg.attachmentType = attachmentType;
+
+      // Generate chatRef for new interactions or backfill existing ones that don't have it
+      let _fbDmChatRef = null;
+      if (!existing || !existing.chatRef) {
+        _fbDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+      }
 
       const updateFields = {
         organization: organizationId,
@@ -724,17 +745,29 @@ async function handleFacebookWebhook(payload, organizationId) {
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
+      // Backfill chatRef into $set for existing interactions that don't have it
+      if (existing && !existing.chatRef && _fbDmChatRef?.chatRef) {
+        updateFields.chatNumber = _fbDmChatRef.chatNumber;
+        updateFields.chatRef = _fbDmChatRef.chatRef;
+      }
+
+      const updateOps = {
+        $set: updateFields,
+        $push: {
+          'metadata.incomingMessages': {
+            $each: [incomingMsg],
+            $slice: -100
+          }
+        }
+      };
+      // For NEW interactions: chatRef via $setOnInsert
+      if (!existing && _fbDmChatRef?.chatRef) {
+        updateOps.$setOnInsert = { chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef };
+      }
+
       const interaction = await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
-        {
-          $set: updateFields,
-          $push: {
-            'metadata.incomingMessages': {
-              $each: [incomingMsg],
-              $slice: -100
-            }
-          }
-        },
+        updateOps,
         { upsert: true, new: true }
       );
       return interaction;
