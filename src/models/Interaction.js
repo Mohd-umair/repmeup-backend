@@ -475,7 +475,11 @@ interactionSchema.methods.assignTo = function(userId, assignedBy, reason = 'manu
   this.assignedBy = assignedBy;
   this.assignedAt = new Date();
   this.assignmentReason = reason;
-  this.status = 'assigned';
+  // Preserve 'replied'/'resolved' status — a replied chat assigned for follow-up should
+  // not lose its 'replied' status. Agents can still see assignedTo and act accordingly.
+  if (this.status !== 'replied' && this.status !== 'resolved') {
+    this.status = 'assigned';
+  }
   
   // Add to assignment history
   if (!this.assignmentHistory) {
@@ -512,8 +516,10 @@ interactionSchema.methods.escalateToHuman = function(reasons = [], escalationTyp
     ...this.escalationMetadata,
     ...metadata
   };
-  // Update status if not already assigned
-  if (this.status !== 'assigned') {
+  // Only change status when the conversation has NOT already been answered.
+  // A conversation where AI/human already sent a reply (status = 'replied' or 'resolved')
+  // should NOT be demoted back to 'assigned' — it was answered, just flagged for follow-up.
+  if (this.status !== 'replied' && this.status !== 'resolved' && this.status !== 'assigned') {
     this.status = 'assigned';
   }
   return this.save();

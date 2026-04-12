@@ -317,6 +317,12 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           [intentRouting.reason], 'intent_routing', { intentBucket: interactionForReply.intentBucket?.toString() }
         );
 
+        // Emit final state so the frontend list reflects the definitive status after all DB writes
+        try {
+          const fresh = await Interaction.findById(interactionForReply._id).lean();
+          if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+        } catch (_e) {}
+
         logger.info('[Auto-reply] Layer 1: escalated after intent routing', {
           interactionId: interactionForReply._id?.toString(),
           handoffSent
@@ -362,7 +368,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       // Auto-assign agent and email notification (from fallbackSettings)
       if (fallback?.enabled && fallback.assignToAgent) {
         try {
-          const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization);
+          const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization, { forceFallback: true });
           if (assignedAgent) {
             console.log(`👤 [Auto-reply L2] Assigned to agent: ${assignedAgent.firstName} ${assignedAgent.lastName}`);
             if (fallback.notifyByEmail) {
@@ -373,6 +379,12 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           logger.warn('[Auto-reply] Layer 2: agent assignment error (non-fatal)', { error: assignErr.message });
         }
       }
+
+      // Emit final state so the frontend list reflects the definitive status after all DB writes
+      try {
+        const fresh = await Interaction.findById(interactionForReply._id).lean();
+        if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+      } catch (_e) {}
 
       logger.info('[Auto-reply] Layer 2: escalated after AI unresolvable assessment', {
         interactionId: interactionForReply._id?.toString(),
@@ -426,7 +438,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
 
           // Assign to an available agent and email them (independent of escalationSettings)
           if (fallback.assignToAgent) {
-            const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization);
+            const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization, { forceFallback: true });
             if (assignedAgent) {
               console.log(`👤 [Auto-reply Fallback] Assigned to agent: ${assignedAgent.firstName} ${assignedAgent.lastName}`);
               if (fallback.notifyByEmail) {
@@ -438,6 +450,12 @@ async function processSingleInteraction(interactionId, organization, jobData = {
               }
             }
           }
+
+          // Emit final state so the frontend list reflects the definitive status after all DB writes
+          try {
+            const fresh = await Interaction.findById(interactionForReply._id).lean();
+            if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+          } catch (_e) {}
 
           return { sent: true, escalated: true, reason: 'ai_fallback' };
         } catch (fallbackErr) {
@@ -503,7 +521,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
 
       if (fallbackCfg.assignToAgent) {
         try {
-          const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization);
+          const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization, { forceFallback: true });
           if (assignedAgent) {
             console.log(`👤 [Auto-reply L2.5] Assigned to agent: ${assignedAgent.firstName} ${assignedAgent.lastName}`);
             if (fallbackCfg.notifyByEmail) {
@@ -514,6 +532,12 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           logger.warn('[Auto-reply] Layer 2.5: agent assignment error (non-fatal)', { error: assignErr.message });
         }
       }
+
+      // Emit final state so the frontend list reflects the definitive status after all DB writes
+      try {
+        const fresh = await Interaction.findById(interactionForReply._id).lean();
+        if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+      } catch (_e) {}
 
       return { sent: fallbackSent, escalated: true, reason: 'ai_no_kb_fallback' };
     }
@@ -561,6 +585,13 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         escalationType,
         escalationMetadata
       );
+
+      // Emit final state so the frontend list reflects the definitive status after all DB writes
+      try {
+        const fresh = await Interaction.findById(interactionForReply._id).lean();
+        if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+      } catch (_e) {}
+
       logger.info('[Auto-reply] Escalated after reply', {
         interactionId: interactionForReply._id?.toString(),
         replySent,
