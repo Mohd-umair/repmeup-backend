@@ -334,16 +334,19 @@ async function processSingleInteraction(interactionId, organization, jobData = {
 
     // ─── LAYER 2: AI self-assessment — unresolvable signal ────────────────────
     // The LLM assessed that it cannot resolve this without private account/system data.
-    // Send a handoff acknowledgment and route directly to a human agent.
+    // Prefer fallbackSettings (newer, configurable), fall back to handoffMessageTemplate.
     if (autoReply.eligible && autoReply.resolvable === false) {
-      logger.info('[Auto-reply] Layer 2: AI unresolvable — routing to human with handoff message', {
+      logger.info('[Auto-reply] Layer 2: AI unresolvable — routing to human', {
         interactionId: interactionForReply._id?.toString(),
         reason: autoReply.resolvableReason
       });
 
-      const handoffMsg =
-        organization.escalationSettings?.handoffMessageTemplate ||
-        "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this.";
+      const fallback = organization.autoReplySettings?.fallbackSettings;
+      const handoffMsg = (fallback?.enabled && fallback.message?.trim())
+        ? fallback.message.trim()
+        : (organization.escalationSettings?.handoffMessageTemplate ||
+           "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this.");
+
       let handoffSent = false;
       if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
         handoffSent = await sendReplyToPlatform(interactionForReply, handoffMsg, organization);
@@ -355,6 +358,21 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         'ai_unresolvable',
         { resolvableReason: autoReply.resolvableReason }
       );
+
+      // Auto-assign agent and email notification (from fallbackSettings)
+      if (fallback?.enabled && fallback.assignToAgent) {
+        try {
+          const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization);
+          if (assignedAgent) {
+            console.log(`👤 [Auto-reply L2] Assigned to agent: ${assignedAgent.firstName} ${assignedAgent.lastName}`);
+            if (fallback.notifyByEmail) {
+              await escalationService.notifyAgent(assignedAgent, interactionForReply, organization);
+            }
+          }
+        } catch (assignErr) {
+          logger.warn('[Auto-reply] Layer 2: agent assignment error (non-fatal)', { error: assignErr.message });
+        }
+      }
 
       logger.info('[Auto-reply] Layer 2: escalated after AI unresolvable assessment', {
         interactionId: interactionForReply._id?.toString(),
@@ -448,6 +466,53 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback,
       confidence: autoReply.response.confidence
     });
+
+    // ─── LAYER 2.5: No relevant KB info — fallback instead of generic AI answer ──
+    // When fallback is enabled and the AI had no knowledge base context to draw from,
+    // send the fallback message and assign to a human rather than replying with
+    // a generic response that adds no value to the customer.
+    const fallbackCfg = organization.autoReplySettings?.fallbackSettings;
+    if (fallbackCfg?.enabled && !autoReply.response.usedKnowledgeBase) {
+      logger.info('[Auto-reply] Layer 2.5: AI has no KB info — sending fallback instead of generic reply', {
+        interactionId: interactionForReply._id?.toString(),
+        knowledgeBaseCount: autoReply.response.knowledgeBaseCount || 0,
+        knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback
+      });
+
+      const fallbackMsg = (fallbackCfg.message && fallbackCfg.message.trim())
+        ? fallbackCfg.message.trim()
+        : 'Our Agent will contact you within 24 hours.';
+
+      let fallbackSent = false;
+      if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+        fallbackSent = await sendReplyToPlatform(interactionForReply, fallbackMsg, organization);
+      }
+
+      try {
+        await interactionForReply.escalateToHuman(
+          ['AI reply had no knowledge base context — fallback triggered'], 'ai_no_kb_fallback',
+          { confidence: autoReply.response.confidence }
+        );
+      } catch (_escErr) {
+        logger.warn('[Auto-reply] Layer 2.5: escalateToHuman error (non-fatal)', { error: _escErr.message });
+      }
+
+      if (fallbackCfg.assignToAgent) {
+        try {
+          const assignedAgent = await escalationService.assignToAgent(interactionForReply, organization);
+          if (assignedAgent) {
+            console.log(`👤 [Auto-reply L2.5] Assigned to agent: ${assignedAgent.firstName} ${assignedAgent.lastName}`);
+            if (fallbackCfg.notifyByEmail) {
+              await escalationService.notifyAgent(assignedAgent, interactionForReply, organization);
+            }
+          }
+        } catch (assignErr) {
+          logger.warn('[Auto-reply] Layer 2.5: agent assignment error (non-fatal)', { error: assignErr.message });
+        }
+      }
+
+      return { sent: fallbackSent, escalated: true, reason: 'ai_no_kb_fallback' };
+    }
 
     // Merge confidence-based escalation check with the earlier one
     const postReplyEscalationCheck = await escalationService.shouldEscalate(
@@ -882,6 +947,13 @@ async function sendReplyToPlatform(interaction, content, organization) {
       interaction.autoReplied = true;
       interaction.respondedAt = new Date();
       await interaction.save();
+
+      // Clear the interaction cache NOW so the next poll returns fresh DB data
+      // (avoids the stale-cache race where the 30s frontend poll overwrites
+      //  the socket-updated 'replied' status with cached 'unread' data)
+      try {
+        await cacheService.delPattern(`interactions:${interaction.organization.toString()}*`);
+      } catch (_cacheErr) { /* non-fatal */ }
 
       // Emit real-time update so the inbox list reflects 'replied' status immediately
       try {
