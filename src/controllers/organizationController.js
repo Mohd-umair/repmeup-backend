@@ -145,7 +145,24 @@ exports.updateOrganization = async (req, res, next) => {
       }
       Object.keys(req.body.autoReplySettings).forEach(key => {
         if (req.body.autoReplySettings[key] !== undefined) {
-          organization.autoReplySettings[key] = req.body.autoReplySettings[key];
+          // Deep-merge nested sub-objects (e.g. fallbackSettings) so partial updates
+          // don't wipe sibling fields that were not included in the request
+          if (
+            key === 'fallbackSettings' &&
+            typeof req.body.autoReplySettings[key] === 'object' &&
+            req.body.autoReplySettings[key] !== null &&
+            !Array.isArray(req.body.autoReplySettings[key])
+          ) {
+            organization.autoReplySettings[key] = {
+              ...(organization.autoReplySettings[key]?.toObject
+                ? organization.autoReplySettings[key].toObject()
+                : organization.autoReplySettings[key] || {}),
+              ...req.body.autoReplySettings[key]
+            };
+            organization.markModified('autoReplySettings.fallbackSettings');
+          } else {
+            organization.autoReplySettings[key] = req.body.autoReplySettings[key];
+          }
         }
       });
     }

@@ -463,6 +463,9 @@ interactionSchema.methods.addReply = function(content, userId, platformResponseI
   }
   
   this.status = 'replied';
+  if (!this.respondedAt) {
+    this.respondedAt = new Date();
+  }
   return this.save();
 };
 

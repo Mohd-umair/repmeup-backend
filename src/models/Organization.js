@@ -184,7 +184,27 @@ const organizationSchema = new mongoose.Schema({
       type: Boolean,
       default: true // Enable scheduled processing
     },
-    lastScheduledRun: Date // Track last scheduled run time
+    lastScheduledRun: Date, // Track last scheduled run time
+
+    // Fallback settings — triggered when AI cannot respond for any reason
+    fallbackSettings: {
+      enabled: {
+        type: Boolean,
+        default: false
+      },
+      message: {
+        type: String,
+        default: 'Our Agent will contact you within 24 hours.'
+      },
+      assignToAgent: {
+        type: Boolean,
+        default: true
+      },
+      notifyByEmail: {
+        type: Boolean,
+        default: true
+      }
+    }
   },
   
   // Inbox UI settings
