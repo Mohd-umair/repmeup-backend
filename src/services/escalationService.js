@@ -334,8 +334,17 @@ class EscalationService {
   /**
    * Assign interaction to agent using configured method
    */
-  async assignToAgent(interaction, organization) {
-    const settings = organization.escalationSettings;
+  /**
+   * Assign interaction to agent.
+   * @param {Object} interaction
+   * @param {Object} organization
+   * @param {Object} [opts]
+   * @param {boolean} [opts.forceFallback=false] - When true, bypasses the 'manual' assignment
+   *   restriction and always picks an available agent. Use for AI fallback paths where the
+   *   fallbackSettings.assignToAgent flag is explicitly set to true.
+   */
+  async assignToAgent(interaction, organization, { forceFallback = false } = {}) {
+    const settings = organization.escalationSettings || {};
     const method = settings.assignmentMethod || 'round_robin';
 
     try {
@@ -347,25 +356,22 @@ class EscalationService {
         return null;
       }
 
+      // 'manual' means no automatic assignment — UNLESS the caller explicitly forces it
+      // (e.g. fallback path where the admin has turned on assignToAgent).
+      if (method === 'manual' && !forceFallback) {
+        return null;
+      }
+
       let agent = null;
 
       switch (method) {
-        case 'round_robin':
-          agent = await this.assignRoundRobin(organization);
-          break;
-        
         case 'least_busy':
           agent = await this.assignLeastBusy(organization);
           break;
-        
         case 'skill_based':
           agent = await this.assignSkillBased(interaction, organization);
           break;
-        
-        case 'manual':
-          // Don't auto-assign, wait for manual assignment
-          return null;
-        
+        case 'round_robin':
         default:
           agent = await this.assignRoundRobin(organization);
       }
@@ -390,6 +396,9 @@ class EscalationService {
 
     if (pool.length === 0) return null;
 
+    if (!organization.escalationSettings) {
+      organization.escalationSettings = {};
+    }
     const lastIndex = organization.escalationSettings.lastAssignedAgentIndex ?? -1;
     const nextIndex = (lastIndex + 1) % pool.length;
     organization.escalationSettings.lastAssignedAgentIndex = nextIndex;
