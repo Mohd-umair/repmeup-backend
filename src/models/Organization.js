@@ -145,11 +145,11 @@ const organizationSchema = new mongoose.Schema({
     },
     autoSend: {
       type: Boolean,
-      default: false // If true, automatically send; if false, save as draft
+      default: true
     },
     requireApproval: {
       type: Boolean,
-      default: true // Require human approval before sending
+      default: false
     },
     maxRepliesPerDay: {
       type: Number,

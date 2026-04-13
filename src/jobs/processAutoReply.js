@@ -332,7 +332,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           fallback.message, interactionForReply.replies
         );
         if (shouldSend && fbMsg) {
-          if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+          if (organization.autoReplySettings.enabled) {
             await sendReplyToPlatform(interactionForReply, fbMsg, organization);
           }
           try {
@@ -398,7 +398,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           organization.escalationSettings?.handoffMessageTemplate ||
           "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this.";
         let handoffSent = false;
-        if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+        if (organization.autoReplySettings.enabled) {
           handoffSent = await sendReplyToPlatform(interactionForReply, handoffMsg, organization);
         }
 
@@ -449,7 +449,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       );
 
       let handoffSent = false;
-      if (shouldSendHandoff && handoffMsg && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+          if (shouldSendHandoff && handoffMsg && organization.autoReplySettings.enabled) {
         handoffSent = await sendReplyToPlatform(interactionForReply, handoffMsg, organization);
       }
 
@@ -522,7 +522,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           );
 
           // Send fallback message to the customer on the platform (with response memory)
-          if (shouldSend && fallbackMsg && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+          if (shouldSend && fallbackMsg && organization.autoReplySettings.enabled) {
             await sendReplyToPlatform(interactionForReply, fallbackMsg, organization);
             logger.info('[Auto-reply] Fallback message sent to platform', {
               interactionId: interactionForReply._id?.toString(),
@@ -635,7 +635,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       );
 
       let fallbackSent = false;
-      if (shouldSend && fallbackMsg && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+      if (shouldSend && fallbackMsg && organization.autoReplySettings.enabled) {
         fallbackSent = await sendReplyToPlatform(interactionForReply, fallbackMsg, organization);
       }
 
@@ -694,7 +694,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
     // Send the reply FIRST so the customer always gets an acknowledgment,
     // even when the conversation is being escalated to a human agent.
     let replySent = false;
-    if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+    if (organization.autoReplySettings.enabled) {
       const sent = await sendReplyToPlatform(
         interactionForReply, autoReply.response.content, organization,
         autoReply.response.confidence, autoReply.response.messageType
@@ -919,8 +919,8 @@ async function processBatchInteractions(organizationId, organization) {
       });
       results.processed++;
 
-      // Send if autoSend is enabled
-      if (organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
+      // Send if auto-reply is enabled
+      if (organization.autoReplySettings.enabled) {
         const sent = await sendReplyToPlatform(
           interactionFresh, autoReply.response.content, organization,
           autoReply.response.confidence, autoReply.response.messageType
