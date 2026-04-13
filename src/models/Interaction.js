@@ -58,6 +58,14 @@ const interactionSchema = new mongoose.Schema({
     isVerified: Boolean
   },
   
+  // Linked unified contact (resolved from author identity)
+  contact: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Contact',
+    default: null,
+    index: true
+  },
+
   // Support desk ticket reference
   chatNumber: {
     type: Number,
@@ -356,6 +364,11 @@ const interactionSchema = new mongoose.Schema({
   
   // Chat summary (manual or AI-generated)
   summary: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  summarySuggestedAction: {
     type: String,
     trim: true,
     default: null

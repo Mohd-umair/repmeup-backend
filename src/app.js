@@ -152,6 +152,7 @@ app.use('/api/products', require('./routes/products'));
 app.use('/api/trends', require('./routes/trends'));
 app.use('/api/audit-logs', require('./routes/auditLog'));
 app.use('/api/tickets', require('./routes/tickets'));
+app.use('/api/contacts', require('./routes/contacts'));
 // app.use('/api/labels', require('./routes/labels'));
 // app.use('/api/templates', require('./routes/templates'));
 

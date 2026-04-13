@@ -1382,15 +1382,25 @@ Scoring: very positive 0.7-1.0, neutral -0.3 to 0.3, very negative -1.0 to -0.7`
         }
       }
 
-      // Build context from knowledge base — cap each entry to avoid bloating the prompt
-      const MAX_KB_ENTRY_CHARS = 600;
-      const kbContext = relevantKB && relevantKB.length > 0
-        ? relevantKB.map(kb => {
-            const body = (kb.content || '').substring(0, MAX_KB_ENTRY_CHARS);
-            const truncated = (kb.content || '').length > MAX_KB_ENTRY_CHARS ? '…' : '';
-            return `${kb.title}: ${body}${truncated}`;
-          }).join('\n\n')
-        : '';
+      // Build context from knowledge base — strictly cap each entry and total to
+      // avoid bloating the prompt and driving up token costs.
+      // Long documents (PDFs, playbooks) are trimmed to extract the most useful leading text.
+      const MAX_KB_ENTRY_CHARS = 400;  // per-entry cap
+      const MAX_KB_TOTAL_CHARS = 1200; // hard total cap across all entries
+      let kbContext = '';
+      if (relevantKB && relevantKB.length > 0) {
+        let totalChars = 0;
+        const parts = [];
+        for (const kb of relevantKB) {
+          if (totalChars >= MAX_KB_TOTAL_CHARS) break;
+          const body = (kb.content || '').substring(0, MAX_KB_ENTRY_CHARS);
+          const truncated = (kb.content || '').length > MAX_KB_ENTRY_CHARS ? '…' : '';
+          const entry = `${kb.title}: ${body}${truncated}`;
+          totalChars += entry.length;
+          parts.push(entry);
+        }
+        kbContext = parts.join('\n\n');
+      }
 
       // Load per-bucket reply config if interaction is classified
       const IntentBucket = require('../models/IntentBucket');
@@ -1436,39 +1446,17 @@ ${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be gen
 
       // Layer 2: self-assessment mode — LLM reports whether it can resolve the query
       if (withSelfAssessment) {
-        const selfAssessSystemPrompt = `You are a professional customer service AI. Before composing a reply, assess whether you can fully resolve this query WITHOUT needing access to:
-- Private account data (order history, transaction records, account details)
-- Real-time system data (live inventory, delivery tracking, live status)
-- Internal tools, back-office systems, or human judgment
+        // NOTE: Layer 0 (messageIntentClassifier) already filters out 'closing' and 'gibberish'
+        // messages before this AI call is made. Only 'small_talk' and 'business' messages reach here.
+        // Keep classification instructions minimal to reduce token cost.
+        const selfAssessSystemPrompt = `You are a professional customer service AI. Assess if you can fully resolve this query WITHOUT: private account data, real-time system data, or internal tools.
 
 ${baseGuidelines}
 
-IMPORTANT — Message classification rules:
-1. If the message is a greeting or small talk (hi, hello, hey, salam, how are you, kya haal):
-   - Set "messageType": "small_talk"
-   - Always set "resolvable": true and "confidence": 1.0
-   - Respond warmly and naturally
-2. If the message is a closing or satisfied signal (thanks, okay, got it, perfect, shukriya, theek hai, 👍, 🙏):
-   - Set "messageType": "closing"
-   - Set "noReply": true
-   - The "reply" field can be empty — it will not be sent
-3. If the message is completely unclear or gibberish (random characters, no real words):
-   - Set "messageType": "unclear"
-   - Set "resolvable": false
-4. All other messages are "messageType": "business"
+Reply with JSON only (no markdown):
+{"resolvable":true/false,"reason":"why not resolvable (if false)","confidence":0.0-1.0,"reply":"customer-facing reply","messageType":"small_talk|business|unclear","noReply":false}
 
-Type A (low confidence but understandable query): still attempt a helpful clarifying question.
-Type B (completely random / gibberish): set resolvable false, noReply false.
-
-Respond ONLY with this exact JSON (no other text, no markdown fences):
-{
-  "resolvable": true or false,
-  "reason": "if false: one-sentence explanation of why you cannot resolve it without private data",
-  "confidence": 0.0 to 1.0,
-  "reply": "your complete customer-facing response",
-  "messageType": "small_talk or closing or business or unclear",
-  "noReply": false
-}`;
+Rules: greeting/small talk → messageType small_talk, resolvable true, confidence 1.0. Unclear query → attempt a clarifying question (low confidence). Cannot resolve → resolvable false.`;
 
         const selfAssessResponse = await this._postChatCompletions(
           {
@@ -1477,11 +1465,11 @@ Respond ONLY with this exact JSON (no other text, no markdown fences):
               { role: 'system', content: selfAssessSystemPrompt },
               {
                 role: 'user',
-                content: `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
+                content: `Message: "${interaction.content}"\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`
               }
             ],
             ...openAIChatCompletionTemperatureField(this.openaiModel, 0.7),
-            ...openAIChatCompletionMaxTokensField(this.openaiModel, 450)
+            ...openAIChatCompletionMaxTokensField(this.openaiModel, 400)
           },
           {},
           { timeout: 120000 }
