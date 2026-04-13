@@ -146,27 +146,38 @@ exports.deleteContact = async (req, res, next) => {
 };
 
 // ─── Merge contacts ─────────────────────────────────────────────────────────
-// POST /api/contacts/:id/merge  body: { targetContactId }
-// Merges targetContact INTO :id (primary). Target becomes deleted.
+// POST /api/contacts/:id/merge  body: { phone } or { email }
+// Merges target contact (found by phone or email) INTO :id (primary). Target becomes deleted.
 exports.mergeContact = async (req, res, next) => {
   try {
     const orgId = req.user.organization._id;
-    const { targetContactId } = req.body;
+    const { phone, email } = req.body;
 
-    if (!targetContactId) {
-      return res.status(400).json({ success: false, error: 'targetContactId is required' });
+    if (!phone && !email) {
+      return res.status(400).json({ success: false, error: 'A phone number or email is required to find the contact to merge.' });
     }
-    if (targetContactId === req.params.id) {
-      return res.status(400).json({ success: false, error: 'Cannot merge a contact with itself' });
+
+    // Build lookup query — phone takes priority
+    const targetQuery = { organization: orgId, isDeleted: false };
+    if (phone) {
+      targetQuery.primaryPhone = phone.trim();
+    } else {
+      targetQuery.primaryEmail = email.trim().toLowerCase();
     }
 
     const [primary, target] = await Promise.all([
       Contact.findOne({ _id: req.params.id, organization: orgId, isDeleted: false }),
-      Contact.findOne({ _id: targetContactId, organization: orgId, isDeleted: false })
+      Contact.findOne(targetQuery)
     ]);
 
     if (!primary) return res.status(404).json({ success: false, error: 'Primary contact not found' });
-    if (!target) return res.status(404).json({ success: false, error: 'Target contact not found' });
+    if (!target) {
+      const field = phone ? 'phone number' : 'email';
+      return res.status(404).json({ success: false, error: `No contact found with that ${field}.` });
+    }
+    if (String(target._id) === String(primary._id)) {
+      return res.status(400).json({ success: false, error: 'That contact is the same as the current one.' });
+    }
 
     // Merge channels — add unique channels from target into primary
     for (const ch of target.channels) {
