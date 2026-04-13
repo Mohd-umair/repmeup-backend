@@ -8,6 +8,7 @@ const logEvents = require('../utils/logEvents');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 const { emitToOrg } = require('../utils/socketEmitter');
 const { classifyMessage, countPreviousFallbacks } = require('../utils/messageIntentClassifier');
+const { updateAIInsights } = require('../services/contactService');
 
 // ─── Fallback tone rotation pool ─────────────────────────────────────────────
 // Primary message comes from fallbackSettings.message (user-configured).
@@ -704,6 +705,15 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           platform: interactionForReply.platform
         });
         replySent = true;
+
+        // Update contact AI insights (fire-and-forget — never blocks the reply path)
+        if (interactionForReply.contact) {
+          updateAIInsights(interactionForReply.contact, {
+            intent: interactionForReply.intentBucket?.toString() || interactionForReply.intent || null,
+            sentiment: interactionForReply.sentiment || null,
+            priority: interactionForReply.urgency || null
+          }).catch(() => {});
+        }
       }
     }
 

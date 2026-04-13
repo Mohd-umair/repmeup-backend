@@ -3204,31 +3204,41 @@ exports.generateSummary = async (req, res, next) => {
 
     const systemPrompt = `You are a support team member writing a quick internal note about a customer conversation.
 
-Write 2–4 short plain sentences — no headers, no bullet points, no bold text, no markdown.
+Respond ONLY with this exact JSON (no markdown, no extra text):
+{
+  "summary": "2-4 plain sentences covering: what the customer wanted, how the team responded, whether it's resolved or still open, any key detail (frustrated tone, specific issue, promised callback). Keep under 80 words. No headers, no bullets, no bold.",
+  "suggestedAction": "One short sentence: the single most useful next action for the agent, e.g. 'Follow up if customer does not respond within 24 hours.' or 'No action needed — conversation resolved.' or 'Escalate to billing team — payment issue unresolved.'"
+}
 
-Cover naturally (in flowing prose):
-- What the customer was asking about or trying to do.
-- How the team responded or what action was taken.
-- Whether it got resolved, is still open, or needs a follow-up.
-- Any important detail worth remembering (e.g. frustrated tone, specific order/account, promised callback).
+If the conversation was unclear or test messages, say so honestly in the summary. Keep both fields concise and human.`;
 
-If the conversation was unclear or consisted of test/greeting messages, say so briefly and honestly in plain language.
-Write as if you're leaving a quick note for a colleague who needs to pick this up. Keep it under 80 words.`;
+    const userPrompt = `Platform: ${interaction.platform} | Status: ${interaction.status}\n\nTranscript:\n${transcript}`;
 
-
-    const userPrompt = `Platform: ${interaction.platform} | Type: ${interaction.type} | Status: ${interaction.status}\n\nTranscript:\n${transcript}`;
-
-    const { result: summaryText, aiApiUsageId } = await runWithAiContextAndUsageId(
+    const { result: rawResult, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId: req.user.organization._id,
         userId: req.user._id,
         feature: 'inbox.chat_summary'
       },
-      () => aiService.generateText(systemPrompt, userPrompt, { temperature: 0.65, maxTokens: 200 })
+      () => aiService.generateText(systemPrompt, userPrompt, { temperature: 0.65, maxTokens: 220 })
     );
 
-    if (!summaryText) {
+    if (!rawResult) {
       return res.status(500).json({ success: false, error: 'AI returned an empty summary. Please try again.' });
+    }
+
+    // Parse JSON response — fall back to treating the entire result as summary if parse fails
+    let summaryText = rawResult.trim();
+    let suggestedAction = null;
+    try {
+      const jsonMatch = rawResult.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawResult);
+      if (parsed?.summary) {
+        summaryText = parsed.summary.trim();
+        suggestedAction = parsed.suggestedAction?.trim() || null;
+      }
+    } catch (_) {
+      // JSON parse failed — use raw text as summary, no suggested action
     }
 
     // Deduct credit
@@ -3245,9 +3255,10 @@ Write as if you're leaving a quick note for a colleague who needs to pick this u
     );
     creditsDeducted = 1;
 
-    // Persist summary
+    // Persist summary + suggested action
     await Interaction.findByIdAndUpdate(req.params.id, {
       summary: summaryText,
+      summarySuggestedAction: suggestedAction,
       summaryGeneratedAt: new Date(),
       summaryGeneratedBy: 'ai'
     });
@@ -3256,7 +3267,12 @@ Write as if you're leaving a quick note for a colleague who needs to pick this u
 
     return res.status(200).json({
       success: true,
-      data: { summary: summaryText, generatedBy: 'ai', generatedAt: new Date() },
+      data: {
+        summary: summaryText,
+        suggestedAction,
+        generatedBy: 'ai',
+        generatedAt: new Date()
+      },
       credits: updatedCredits
     });
   } catch (error) {

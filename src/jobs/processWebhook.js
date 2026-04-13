@@ -7,6 +7,7 @@ const { emitToOrg } = require('../utils/socketEmitter');
 const cacheService = require('../services/cacheService');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 const { generateChatRef } = require('../utils/chatRefHelper');
+const { resolveContact, normalizeAuthorForPlatform } = require('../services/contactService');
 
 /**
  * Process webhook events from social media platforms
@@ -62,6 +63,29 @@ module.exports = async function processWebhook(job) {
         type: interaction.type,
         contentPreview: interaction.content?.substring(0, 100)
       });
+
+      // ─── Contact Identity Resolution (fire-and-forget) ──────────────────
+      // Resolve (or create) the unified Contact for this customer.
+      // Runs in background — never blocks message delivery or AI queuing.
+      if (interaction.author?.platformId) {
+        (async () => {
+          try {
+            const contactPayload = normalizeAuthorForPlatform(
+              interaction.platform,
+              interaction.author,
+              {} // rawData kept minimal to avoid storing large webhook payloads
+            );
+            const contact = await resolveContact(contactPayload, organizationId);
+            if (contact) {
+              await Interaction.findByIdAndUpdate(interaction._id, { contact: contact._id });
+              // Keep in-memory reference so downstream in this job can access it
+              interaction.contact = contact._id;
+            }
+          } catch (contactErr) {
+            jobLogger.warn('Contact resolution failed (non-fatal)', { error: contactErr.message });
+          }
+        })();
+      }
 
       // Invalidate inbox list cache so next GET /api/inbox returns this interaction (fixes DMs not showing until refresh/sync)
       if (organizationId) {
