@@ -740,6 +740,7 @@ exports.replyToInteraction = async (req, res, next) => {
             resolvedFromToken: resolvedFromToken || null,
             pageId
           });
+          const connType = connection.metadata?.connectionType || null;
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
             errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
@@ -753,7 +754,8 @@ exports.replyToInteraction = async (req, res, next) => {
               connection.accessToken,
               pageId,
               true,
-              attachmentLocalPath
+              attachmentLocalPath,
+              connType
             );
           } else {
             result = await instagramService.sendMessage(
@@ -761,14 +763,16 @@ exports.replyToInteraction = async (req, res, next) => {
               replyContent,
               connection.accessToken,
               pageId,
-              true
+              true,
+              connType
             );
           }
         } else {
           result = await instagramService.replyToComment(
             interaction.platformId,
             replyContent,
-            connection.accessToken
+            connection.accessToken,
+            connection.metadata?.connectionType || null
           );
         }
         if (result && result.success && result.platformResponseId) {

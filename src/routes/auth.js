@@ -319,6 +319,236 @@ router.get('/instagram/callback', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Instagram Direct Connect — auto-saves all IG accounts without Page Manager
+// ---------------------------------------------------------------------------
+
+// GET /api/auth/instagram-direct  — generate OAuth URL
+router.get('/instagram-direct', protect, checkConnectionLimit, async (req, res, next) => {
+  try {
+    const appId = process.env.META_APP_ID || process.env.INSTAGRAM_APP_ID || process.env.FACEBOOK_APP_ID;
+    if (!appId) {
+      return res.status(500).json({ success: false, error: 'Meta App ID not configured.' });
+    }
+
+    const state = metaAuth.generateState(
+      req.user.id,
+      req.user.organization._id || req.user.organization,
+      'instagram-direct'
+    );
+
+    const redirectUri = metaAuth.getInstagramDirectRedirectURI();
+
+    const params = new URLSearchParams({
+      client_id: appId,
+      redirect_uri: redirectUri,
+      state,
+      scope: [
+        'public_profile',
+        'instagram_basic',
+        'instagram_manage_comments',
+        'instagram_manage_messages',
+        'instagram_manage_insights',
+        'instagram_content_publish',
+        'pages_show_list',
+        'pages_read_engagement',
+        'pages_manage_posts',
+        'pages_manage_engagement',
+        'pages_manage_metadata',
+        'pages_read_user_content',
+        'business_management'
+      ].join(','),
+      response_type: 'code',
+      auth_type: 'rerequest',
+      display: 'page'
+    });
+
+    const authUrl = `https://www.facebook.com/v18.0/dialog/oauth?${params.toString()}`;
+    res.json({ success: true, authUrl });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/auth/instagram-direct/callback  — exchange code, auto-save IG accounts, redirect
+router.get('/instagram-direct/callback', async (req, res) => {
+  const frontendBase = process.env.FRONTEND_URL;
+
+  try {
+    const { code, state, error: oauthError, error_description } = req.query;
+
+    // Meta GET probe to validate the callback URL (no code/state)
+    if (!code && !state && !oauthError) {
+      return res.status(200).send('OK');
+    }
+
+    if (oauthError) {
+      console.error('[InstagramDirect] OAuth error:', oauthError, error_description);
+      return res.redirect(
+        `${frontendBase}/app/settings?connection=instagram-direct&status=error&message=${encodeURIComponent(error_description || oauthError)}`
+      );
+    }
+
+    if (!code || !state) {
+      return res.redirect(
+        `${frontendBase}/app/settings?connection=instagram-direct&status=error&message=${encodeURIComponent('Missing authorization code or state.')}`
+      );
+    }
+
+    // Decode URL-encoded state if needed
+    let decodedState = state;
+    try {
+      if (state.includes('%')) decodedState = decodeURIComponent(state);
+    } catch (_) {}
+
+    const stateData = metaAuth.verifyState(decodedState);
+    const { userId, organizationId } = stateData;
+
+    const redirectUri = metaAuth.getInstagramDirectRedirectURI();
+    const shortToken = await metaAuth.exchangeCodeForToken(code, redirectUri);
+    const tokenData = await metaAuth.getLongLivedToken(shortToken);
+
+    // Get user info (best-effort — continue even if rate limited)
+    let userInfo;
+    try {
+      userInfo = await metaAuth.getUserInfo(tokenData.accessToken);
+    } catch (err) {
+      if (err.isRateLimit) {
+        userInfo = await metaAuth.getMinimalUserFromToken(tokenData.accessToken);
+      } else {
+        throw err;
+      }
+    }
+
+    // Save user-level Facebook connection so Page Manager stays functional
+    if (userInfo && userInfo.id) {
+      try {
+        await metaAuth.saveFacebookUserConnection(userId, organizationId, tokenData.accessToken, userInfo);
+      } catch (err) {
+        console.warn('[InstagramDirect] Could not save user-level FB connection:', err.message);
+      }
+    }
+
+    // Auto-discover and save all Instagram accounts linked to the user's Facebook pages
+    const { savedCount, igAccounts, errors } = await metaAuth.autoSaveInstagramConnections(
+      userId,
+      organizationId,
+      tokenData.accessToken,
+      userInfo || {}
+    );
+
+    if (savedCount === 0) {
+      const noAccountMsg = errors.length
+        ? errors.join(' | ')
+        : 'No Instagram Professional accounts were found. Make sure your Instagram account is a Business or Creator account and is linked to a Facebook Page.';
+
+      return res.redirect(
+        `${frontendBase}/app/settings?connection=instagram-direct&status=error&message=${encodeURIComponent(noAccountMsg)}`
+      );
+    }
+
+    const successMsg = igAccounts.map(a => `@${a.username}`).join(', ');
+    res.redirect(
+      `${frontendBase}/app/settings?connection=instagram-direct&status=success&accounts=${savedCount}&names=${encodeURIComponent(successMsg)}`
+    );
+  } catch (error) {
+    console.error('[InstagramDirect] Callback error:', error);
+    res.redirect(
+      `${frontendBase}/app/settings?connection=instagram-direct&status=error&message=${encodeURIComponent(error.message || 'Instagram connection failed.')}`
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Instagram Login — Instagram API with Instagram Login (no Facebook required)
+// https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login
+// ---------------------------------------------------------------------------
+
+const instagramLoginAuth = require('../integrations/meta/instagramLoginAuth');
+
+// GET /api/auth/instagram-login  — generate OAuth URL
+router.get('/instagram-login', protect, checkConnectionLimit, async (req, res, next) => {
+  try {
+    const authUrl = instagramLoginAuth.getAuthURL(
+      req.user.id,
+      req.user.organization._id || req.user.organization
+    );
+    res.json({ success: true, authUrl });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/auth/instagram-login/callback  — exchange code, save connection, redirect
+router.get('/instagram-login/callback', async (req, res) => {
+  const frontendBase = process.env.FRONTEND_URL;
+
+  try {
+    const { code, state, error: oauthError, error_description } = req.query;
+
+    // Meta GET probe to validate the callback URL
+    if (!code && !state && !oauthError) {
+      return res.status(200).send('OK');
+    }
+
+    if (oauthError) {
+      console.error('[InstagramLogin] OAuth error:', oauthError, error_description);
+      return res.redirect(
+        `${frontendBase}/app/settings?connection=instagram-login&status=error&message=${encodeURIComponent(error_description || oauthError)}`
+      );
+    }
+
+    if (!code || !state) {
+      return res.redirect(
+        `${frontendBase}/app/settings?connection=instagram-login&status=error&message=${encodeURIComponent('Missing authorization code or state.')}`
+      );
+    }
+
+    // Decode URL-encoded state if needed
+    let decodedState = state;
+    try {
+      if (state.includes('%')) decodedState = decodeURIComponent(state);
+    } catch (_) {}
+
+    const stateData = instagramLoginAuth.verifyState(decodedState);
+    const { userId, organizationId } = stateData;
+
+    const redirectUri = instagramLoginAuth.getRedirectURI();
+
+    // Exchange code for short-lived token
+    const shortToken = await instagramLoginAuth.exchangeCode(code, redirectUri);
+
+    // Get long-lived token (60 days)
+    const { accessToken, expiresIn } = await instagramLoginAuth.getLongLivedToken(shortToken);
+
+    // Get Instagram user info
+    const userInfo = await instagramLoginAuth.getUserInfo(accessToken);
+
+    // Save the connection (creates or updates PlatformConnection)
+    const connection = await instagramLoginAuth.saveConnection(
+      userId,
+      organizationId,
+      accessToken,
+      expiresIn,
+      userInfo
+    );
+
+    console.log(`[InstagramLogin] Connected @${userInfo.username} for org ${organizationId}`);
+
+    res.redirect(
+      `${frontendBase}/app/settings?connection=instagram-login&status=success&accounts=1&names=${encodeURIComponent('@' + userInfo.username)}`
+    );
+  } catch (error) {
+    console.error('[InstagramLogin] Callback error:', error);
+    const msg = error.code === 'CROSS_ORG_CONFLICT'
+      ? error.message
+      : (error.message || 'Instagram connection failed.');
+    res.redirect(
+      `${frontendBase}/app/settings?connection=instagram-login&status=error&message=${encodeURIComponent(msg)}`
+    );
+  }
+});
+
 // LinkedIn OAuth
 router.get('/linkedin', protect, async (req, res, next) => {
   try {

@@ -1064,6 +1064,7 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
     } else if (interaction.platform === 'instagram') {
       const instagramService = require('../integrations/meta/instagramService');
       let result;
+      const connType = connection.metadata?.connectionType || null;
       if (interaction.type === 'dm') {
         const pageId =
           connection.platformPageId ||
@@ -1083,7 +1084,8 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
               content,
               connection.accessToken,
               pageId,
-              true
+              true,
+              connType
             );
           } catch (sendErr) {
             logger.error('[Auto-reply] Instagram DM sendMessage failed', {
@@ -1099,7 +1101,8 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
         result = await instagramService.replyToComment(
           interaction.platformId,
           content,
-          connection.accessToken
+          connection.accessToken,
+          connType
         );
       }
       if (result && result.success && result.platformResponseId) {
