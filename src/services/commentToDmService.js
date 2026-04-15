@@ -228,6 +228,7 @@ async function processCommentForProduct(interaction, organizationId) {
 
     const accessToken = connection.accessToken;
     const pageId = connection.platformData?.pageId || connection.platformPageId || connection.platformUserId;
+    const connType = connection.metadata?.connectionType || null;
 
     // ── 7. Post safe public-comment stub ──────────────────────────────
     const commenterUsername = interaction.author?.username || '';
@@ -242,7 +243,7 @@ async function processCommentForProduct(interaction, organizationId) {
     });
 
     try {
-      await instagramService.replyToComment(interaction.platformId, publicStub, accessToken);
+      await instagramService.replyToComment(interaction.platformId, publicStub, accessToken, connType);
       svcLogger.info('[commentToDm] Posted public comment stub', { commentId: interaction.platformId, stub: publicStub });
     } catch (stubErr) {
       // Non-fatal — still send DM even if public reply fails (e.g. comment deleted, permissions)
@@ -285,7 +286,7 @@ async function processCommentForProduct(interaction, organizationId) {
     // is older than 7 days, or the private reply was already sent for this comment).
     let dmSendMethod = 'private_reply';
     try {
-      await instagramService.sendPrivateReply(interaction.platformId, dmText, accessToken, pageId);
+      await instagramService.sendPrivateReply(interaction.platformId, dmText, accessToken, pageId, connType);
     } catch (privateReplyErr) {
       svcLogger.warn('[commentToDm] sendPrivateReply failed — falling back to sendMessage', {
         commentId: interaction.platformId,
@@ -293,7 +294,7 @@ async function processCommentForProduct(interaction, organizationId) {
         error: privateReplyErr.message
       });
       dmSendMethod = 'send_message_fallback';
-      await instagramService.sendMessage(String(commenterId), dmText, accessToken, pageId, false);
+      await instagramService.sendMessage(String(commenterId), dmText, accessToken, pageId, false, connType);
     }
     svcLogger.info('[commentToDm] Product DM sent successfully', { commenterId, productId: product._id, dmSendMethod });
 

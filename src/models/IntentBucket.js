@@ -57,6 +57,11 @@ const intentBucketSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  /** Designated fallback bucket: interactions escalated by AI (no KB / unresolvable) land here */
+  isFallback: {
+    type: Boolean,
+    default: false
+  },
   isActive: {
     type: Boolean,
     default: true
@@ -72,5 +77,6 @@ const intentBucketSchema = new mongoose.Schema({
 intentBucketSchema.index({ organization: 1, order: 1 });
 intentBucketSchema.index({ organization: 1, name: 1 }, { unique: true });
 intentBucketSchema.index({ organization: 1, isDefault: 1 });
+intentBucketSchema.index({ organization: 1, isFallback: 1 });
 
 module.exports = mongoose.model('IntentBucket', intentBucketSchema);

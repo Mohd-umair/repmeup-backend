@@ -815,6 +815,74 @@ class MetaAuthService {
   }
 
   /**
+   * Get redirect URI for the Instagram Direct connect flow.
+   * Reads INSTAGRAM_DIRECT_CALLBACK_URL, falls back to INSTAGRAM_CALLBACK_URL.
+   */
+  getInstagramDirectRedirectURI() {
+    const redirectUri =
+      process.env.INSTAGRAM_DIRECT_CALLBACK_URL ||
+      process.env.INSTAGRAM_CALLBACK_URL ||
+      process.env.META_CALLBACK_URL;
+
+    if (!redirectUri) {
+      throw new Error(
+        'Instagram direct callback URL not configured. Please set INSTAGRAM_DIRECT_CALLBACK_URL in your environment variables.'
+      );
+    }
+    return redirectUri;
+  }
+
+  /**
+   * Auto-discover and save all Instagram Professional accounts accessible via a Facebook user token.
+   * Iterates /me/accounts, finds pages with an instagram_business_account, and saves each as a
+   * PlatformConnection with platform = 'instagram'.  Also saves the linked Facebook Page connection.
+   *
+   * @param {string} userId - ORM user id
+   * @param {string} organizationId - ORM organisation id
+   * @param {string} accessToken - Long-lived Facebook user access token
+   * @param {object} userInfo - { id, name, email } from /me
+   * @returns {{ savedCount: number, igAccounts: Array<{ username, pageId }>, errors: string[] }}
+   */
+  async autoSaveInstagramConnections(userId, organizationId, accessToken, userInfo) {
+    const pages = await this.getUserPages(accessToken);
+    const pagesWithIg = pages.filter(p => p.instagram_business_account);
+
+    const igAccounts = [];
+    const errors = [];
+
+    for (const page of pagesWithIg) {
+      const pageAccessToken = page.access_token;
+      try {
+        // Save the Facebook Page connection so inbox / publish work correctly
+        await this.saveFacebookConnection(userId, organizationId, page, pageAccessToken);
+      } catch (err) {
+        if (err.code !== 'CROSS_ORG_CONFLICT') {
+          console.warn(`[InstagramDirect] Could not save Facebook page ${page.name}: ${err.message}`);
+        }
+      }
+
+      try {
+        await this.saveInstagramConnection(userId, organizationId, page, pageAccessToken);
+        igAccounts.push({
+          username: page.instagram_business_account.username,
+          pageId: page.id,
+          pageName: page.name
+        });
+      } catch (err) {
+        if (err.code === 'CROSS_ORG_CONFLICT') {
+          errors.push(`Instagram account @${page.instagram_business_account.username} is already connected to another workspace.`);
+        } else {
+          console.error(`[InstagramDirect] Failed to save IG account for page ${page.name}:`, err.message);
+          errors.push(`Could not connect @${page.instagram_business_account.username || page.name}: ${err.message}`);
+        }
+      }
+    }
+
+    console.log(`[InstagramDirect] Saved ${igAccounts.length}/${pagesWithIg.length} Instagram account(s) for org ${organizationId}`);
+    return { savedCount: igAccounts.length, igAccounts, errors };
+  }
+
+  /**
    * Refresh access token (if needed before expiry)
    */
   async refreshAccessToken(platformConnection) {
