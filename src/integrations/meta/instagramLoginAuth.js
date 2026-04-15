@@ -350,7 +350,6 @@ class InstagramLoginAuthService {
       existing.status = 'connected';
       existing.isActive = true;
       existing.lastSyncAt = new Date();
-      // Ensure the real ID is stored so webhook routing works
       existing.platformUserId = igUserId;
       existing.platformPageId = igUserId;
       if (userInfo.profile_picture_url) {
