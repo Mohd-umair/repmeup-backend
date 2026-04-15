@@ -84,6 +84,7 @@ class InstagramLoginAuthService {
    */
   getAuthURL(userId, organizationId) {
     const appId =
+      process.env.INSTAGRAM_LOGIN_APP_ID ||
       process.env.META_APP_ID ||
       process.env.INSTAGRAM_APP_ID ||
       process.env.FACEBOOK_APP_ID;
@@ -121,10 +122,12 @@ class InstagramLoginAuthService {
    */
   async exchangeCode(code, redirectUri) {
     const appId =
+      process.env.INSTAGRAM_LOGIN_APP_ID ||
       process.env.META_APP_ID ||
       process.env.INSTAGRAM_APP_ID ||
       process.env.FACEBOOK_APP_ID;
     const appSecret =
+      process.env.INSTAGRAM_LOGIN_APP_SECRET ||
       process.env.META_APP_SECRET ||
       process.env.INSTAGRAM_APP_SECRET ||
       process.env.FACEBOOK_APP_SECRET;
@@ -161,6 +164,7 @@ class InstagramLoginAuthService {
    */
   async getLongLivedToken(shortToken) {
     const appSecret =
+      process.env.INSTAGRAM_LOGIN_APP_SECRET ||
       process.env.META_APP_SECRET ||
       process.env.INSTAGRAM_APP_SECRET ||
       process.env.FACEBOOK_APP_SECRET;
