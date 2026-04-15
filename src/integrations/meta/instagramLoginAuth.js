@@ -348,11 +348,11 @@ class InstagramLoginAuthService {
       isActive: true,
       platformData: {
         businessAccountId: igUserId,
-        accountType: userInfo.account_type
+        accountType: (userInfo.account_type || 'BUSINESS').toUpperCase()
       },
       metadata: {
         connectionType: 'instagram_login',
-        accountType: userInfo.account_type,
+        accountType: (userInfo.account_type || 'business').toLowerCase(),
         profilePicture: userInfo.profile_picture_url
       }
     });
