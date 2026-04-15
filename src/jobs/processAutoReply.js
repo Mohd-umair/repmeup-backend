@@ -1,5 +1,6 @@
 const Interaction = require('../models/Interaction');
 const Organization = require('../models/Organization');
+const IntentBucket = require('../models/IntentBucket');
 const aiService = require('../services/aiService');
 const cacheService = require('../services/cacheService');
 const escalationService = require('../services/escalationService');
@@ -20,6 +21,27 @@ const FALLBACK_VARIANTS = [
   "Our team is on it! You'll hear back from us shortly 🙌",
 ];
 const REPEAT_FALLBACK_MSG = "Our team is already looking into this — you'll hear from us soon 😊";
+
+/**
+ * Route an interaction to the org's designated fallback bucket (isFallback=true).
+ * No-op if no such bucket exists — never throws.
+ */
+async function routeToFallbackBucket(interaction, organizationId) {
+  try {
+    const bucket = await IntentBucket.findOne({
+      organization: organizationId,
+      isFallback: true,
+      isActive: true
+    }).select('_id').lean();
+    if (bucket) {
+      interaction.intentBucket = bucket._id;
+      interaction.bucketAssignedBy = 'ai';
+      await interaction.save();
+    }
+  } catch (err) {
+    logger.warn('[Auto-reply] routeToFallbackBucket error (non-fatal)', { error: err.message });
+  }
+}
 
 /**
  * Pick the appropriate fallback message based on how many times a fallback
@@ -481,6 +503,8 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
       } catch (_e) {}
 
+      await routeToFallbackBucket(interactionForReply, organization._id);
+
       logger.info('[Auto-reply] Layer 2: escalated after AI unresolvable assessment', {
         interactionId: interactionForReply._id?.toString(),
         handoffSent
@@ -538,6 +562,8 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           await interactionForReply.escalateToHuman(
             [`AI not eligible: ${autoReply.reason}`], 'ai_fallback', { reason: autoReply.reason }
           );
+
+          await routeToFallbackBucket(interactionForReply, organization._id);
 
           // Assign to an available agent and email them (independent of escalationSettings)
           if (fallback.assignToAgent) {
@@ -647,6 +673,8 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       } catch (_escErr) {
         logger.warn('[Auto-reply] Layer 2.5: escalateToHuman error (non-fatal)', { error: _escErr.message });
       }
+
+      await routeToFallbackBucket(interactionForReply, organization._id);
 
       if (fallbackCfg.assignToAgent) {
         try {
