@@ -83,6 +83,7 @@ let limiter = rateLimit({
     if (rateLimitDisabled) return true;
     if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
     if (req.path.startsWith('/api/webhooks/')) return true;
+    if (req.path.startsWith('/api/webhook/')) return true;
     // Inbox avatar/attachment proxies (many small requests when loading inbox; all authenticated)
     if (req.path.includes('inbox/avatar/') || req.path.includes('inbox/attachment')) return true;
     return false;
@@ -128,6 +129,8 @@ app.use('/api/inbox', require('./routes/inbox'));
 app.use('/api/knowledge-base', require('./routes/knowledgeBase'));
 app.use('/api/platforms', require('./routes/platforms'));
 app.use('/api/webhooks', require('./routes/webhooks'));
+// Alias: Repmeup-IG app has webhook URL configured without the 's' — keep both working
+app.use('/api/webhook', require('./routes/webhooks'));
 app.use('/api/organizations', require('./routes/organizations'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/diagnostics', require('./routes/diagnostics'));
@@ -182,6 +185,7 @@ const upgradeRateLimiting = () => {
         if (rateLimitDisabled) return true;
         if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
         if (req.path.startsWith('/api/webhooks/')) return true;
+        if (req.path.startsWith('/api/webhook/')) return true;
         return false;
       },
       store: new RedisStore({
