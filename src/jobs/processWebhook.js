@@ -269,6 +269,8 @@ async function handleInstagramWebhook(payload, organizationId) {
 
     // Resolve Instagram connection so we can set platformConnection on new DMs (needed for reply)
     const igAccountId = entry.id;
+    console.log(`[IG-DEBUG] handleInstagramWebhook: entry.id=${igAccountId}, org=${organizationId}, messaging=${entry.messaging?.length||0}, standby=${entry.standby?.length||0}, changes=${entry.changes?.length||0}`);
+
     let platformConnectionId = null;
     let dmReceiverConnection = null;
     if (igAccountId) {
@@ -278,12 +280,17 @@ async function handleInstagramWebhook(payload, organizationId) {
         platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) },
         status: { $in: ['connected', 'available'] },
         isActive: true
-      }).select('_id accessToken').lean();
+      }).select('_id accessToken platformUserId').lean();
       if (conn) {
         platformConnectionId = conn._id;
         dmReceiverConnection = conn;
+        console.log(`[IG-DEBUG] Connection found: _id=${conn._id}, platformUserId=${conn.platformUserId}`);
       } else {
-        logger.warn('[processWebhook] Instagram: no connection found', { igAccountId, organizationId });
+        // Log ALL instagram connections for this org to help diagnose mismatch
+        const allIgConns = await PlatformConnection.find({ organization: organizationId, platform: 'instagram' })
+          .select('_id platformUserId platformPageId status isActive').lean();
+        logger.warn('[processWebhook] Instagram: no connection found', { igAccountId, organizationId, allIgConns });
+        console.log(`[IG-DEBUG] No connection found. All IG connections for org:`, JSON.stringify(allIgConns));
       }
     }
 
@@ -420,6 +427,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       // Step 1: Upsert the thread (create or update non-message fields)
       // For NEW interactions: chatRef goes into $setOnInsert (avoids $set/$setOnInsert field conflict)
       // For EXISTING without chatRef: already added to updateFields ($set) above
+      console.log(`[IG-DEBUG] Upserting DM interaction: platformId=${threadPlatformId}, org=${organizationId}, platformConnectionId=${platformConnectionId}`);
       const setOnInsertFields = (!existing && _igDmChatRef?.chatRef)
         ? { chatNumber: _igDmChatRef.chatNumber, chatRef: _igDmChatRef.chatRef }
         : {};
