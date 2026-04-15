@@ -267,91 +267,96 @@ class InstagramLoginAuthService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Resolve the "real" Instagram Business Account ID that the webhook system uses.
+   * Resolve the "real" Instagram Business Account ID that webhooks use.
    *
-   * Instagram Login API returns an app-scoped ID (ASID) which is different from the
-   * Instagram Business Account ID used in webhook entry.id events. We use the
-   * Instagram Business Discovery API (via any connected account's token) to look up
-   * the real ID by username.
+   * Instagram Login API returns an app-scoped ID (ASID) which differs from the
+   * real Instagram Business Account ID used in webhook entry.id events.
    *
-   * Falls back to the app-scoped ID if lookup fails.
+   * Strategy (no external API needed):
+   *   1. Look for any existing connection in our DB with the same username but
+   *      a different platformUserId — that ID is the real Business Account ID.
+   *   2. Fall back to the app-scoped ID if nothing is found.
    */
   async resolveRealInstagramId(username, appScopedId) {
     try {
-      const PlatformConnection = require('../../models/PlatformConnection');
-      // Find any active Instagram connection that can serve as the lookup account
-      const helperConn = await PlatformConnection.findOne({
+      // Search DB for any Instagram connection (any org/status) with same username
+      // that was connected via a different method and may have the real ID.
+      const existing = await PlatformConnection.findOne({
         platform: 'instagram',
-        isActive: true,
-        status: 'connected',
-        // Prefer Facebook Login connections since they have full Graph API access
-        'metadata.connectionType': { $ne: 'instagram_login' }
-      }).select('accessToken platformData').lean();
+        platformUsername: username,
+        platformUserId: { $ne: appScopedId, $exists: true, $nin: ['', null] }
+      }).select('platformUserId').lean();
 
-      if (!helperConn?.accessToken) {
-        console.log(`[InstagramLogin] No helper connection available for ID lookup, using app-scoped ID`);
-        return appScopedId;
-      }
-
-      const helperAccountId = helperConn.platformData?.businessAccountId;
-      if (!helperAccountId) return appScopedId;
-
-      // Use Instagram Business Discovery API to find the real account ID by username
-      const resp = await axios.get(`https://graph.facebook.com/v18.0/${helperAccountId}`, {
-        params: {
-          fields: `business_discovery.fields(id,username)`,
-          username,
-          access_token: helperConn.accessToken
-        },
-        timeout: 8000
-      });
-
-      const realId = resp.data?.business_discovery?.id;
-      if (realId) {
-        console.log(`[InstagramLogin] Resolved real Instagram ID for @${username}: ${appScopedId} → ${realId}`);
-        return realId;
+      if (existing?.platformUserId) {
+        console.log(`[InstagramLogin] Resolved real Instagram ID for @${username} from DB: ${appScopedId} → ${existing.platformUserId}`);
+        return existing.platformUserId;
       }
     } catch (err) {
-      console.warn(`[InstagramLogin] Business Discovery lookup failed for @${username}:`, err.response?.data?.error?.message || err.message);
+      console.warn(`[InstagramLogin] DB ID lookup failed for @${username}:`, err.message);
     }
+    console.log(`[InstagramLogin] Using app-scoped ID for @${username}: ${appScopedId}`);
     return appScopedId;
   }
 
   /**
    * Persist an Instagram Login connection to the database.
    *
-   * Important: platformPageId is set equal to platformUserId (the IG account ID)
-   * so that the existing processWebhook.js DM routing (which queries by platformPageId)
-   * works without any changes.
+   * platformPageId mirrors platformUserId (the real IG Business Account ID) so that
+   * the existing webhook DM routing which queries by platformPageId continues to work.
    */
   async saveConnection(userId, organizationId, accessToken, expiresIn, userInfo) {
     const igAppScopedId = userInfo.id;
     const igUsername = userInfo.username;
 
-    // Resolve the real Instagram Business Account ID (matches webhook entry.id)
-    const igUserId = await this.resolveRealInstagramId(igUsername, igAppScopedId);
+    // Attempt to resolve the real Instagram Business Account ID (matches webhook entry.id).
+    // Falls back to the app-scoped ID when no better source is available.
+    const resolvedId = await this.resolveRealInstagramId(igUsername, igAppScopedId);
 
-    // Check for existing connection by username, real ID, or app-scoped ID
-    const existing = await PlatformConnection.findOne({
+    // Find any existing connection for this org that matches by username, resolved ID, or scoped ID.
+    // Use findOneAndDelete duplicates approach: get ALL matching, keep newest, remove rest.
+    const allMatches = await PlatformConnection.find({
       organization: organizationId,
       platform: 'instagram',
       $or: [
         { platformUsername: igUsername },
-        { platformUserId: igUserId },
+        { platformUserId: resolvedId },
         { platformUserId: igAppScopedId },
         { 'metadata.igLoginScopedId': igAppScopedId }
       ]
-    });
+    }).sort({ createdAt: 1 }); // oldest first
+
+    // If there are duplicates, remove the older ones and keep only the most recent
+    let existing = null;
+    if (allMatches.length > 1) {
+      console.warn(`[InstagramLogin] Found ${allMatches.length} duplicate connections for @${igUsername} — cleaning up`);
+      const toDelete = allMatches.slice(0, -1); // remove all but the last (newest)
+      existing = allMatches[allMatches.length - 1];
+      await PlatformConnection.deleteMany({ _id: { $in: toDelete.map(c => c._id) } });
+      console.log(`[InstagramLogin] Removed ${toDelete.length} duplicate connection(s) for @${igUsername}`);
+    } else if (allMatches.length === 1) {
+      existing = allMatches[0];
+    }
+
+    // Determine the best ID to use as platformUserId:
+    //   - If we resolved a real ID (different from app-scoped): use resolved ID
+    //   - If existing connection already has a real ID (different from app-scoped): keep it
+    //   - Otherwise: use app-scoped ID
+    let finalId = resolvedId;
+    if (finalId === igAppScopedId && existing?.platformUserId && existing.platformUserId !== igAppScopedId) {
+      // Existing connection already has the real ID — preserve it
+      finalId = existing.platformUserId;
+      console.log(`[InstagramLogin] Preserving existing real ID for @${igUsername}: ${finalId}`);
+    }
 
     if (existing) {
-      console.log(`[InstagramLogin] Updating existing connection for @${igUsername} (real ID: ${igUserId}, scoped: ${igAppScopedId})`);
+      console.log(`[InstagramLogin] Updating connection for @${igUsername} (platformUserId: ${finalId}, scopedId: ${igAppScopedId})`);
       existing.accessToken = accessToken;
       existing.tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
       existing.status = 'connected';
       existing.isActive = true;
       existing.lastSyncAt = new Date();
-      existing.platformUserId = igUserId;
-      existing.platformPageId = igUserId;
+      existing.platformUserId = finalId;
+      existing.platformPageId = finalId;
       if (userInfo.profile_picture_url) {
         existing.platformProfilePicture = userInfo.profile_picture_url;
       }
@@ -359,7 +364,7 @@ class InstagramLoginAuthService {
       existing.metadata.connectionType = 'instagram_login';
       existing.metadata.igLoginScopedId = igAppScopedId;
       if (!existing.platformData) existing.platformData = {};
-      existing.platformData.businessAccountId = igUserId;
+      existing.platformData.businessAccountId = finalId;
       existing.scopes = [
         'instagram_business_basic',
         'instagram_business_content_publish',
@@ -368,13 +373,13 @@ class InstagramLoginAuthService {
       ];
       await existing.save();
       console.log(`[InstagramLogin] Updated connection for @${igUsername}`);
-      await this.subscribeToWebhook(igUserId, accessToken);
+      await this.subscribeToWebhook(finalId, accessToken);
       return existing;
     }
 
-    // Cross-org conflict check
+    // Cross-org conflict check (only when creating a brand-new connection)
     const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
-      'instagram', igUserId, organizationId
+      'instagram', finalId, organizationId
     );
     if (crossOrgConflict) {
       const err = new Error('This Instagram account is already connected to another workspace.');
@@ -383,18 +388,17 @@ class InstagramLoginAuthService {
     }
 
     // Create new connection
-    console.log(`[InstagramLogin] Creating new connection for @${igUsername} (${userInfo.account_type})`);
+    console.log(`[InstagramLogin] Creating new connection for @${igUsername} (${userInfo.account_type}), platformUserId: ${finalId}`);
     const connection = await PlatformConnection.create({
       user: userId,
       organization: organizationId,
       createdBy: userId,
       platform: 'instagram',
-      platformUserId: igUserId,
+      platformUserId: finalId,
       platformUsername: igUsername,
       platformDisplayName: userInfo.name || igUsername,
       platformEmail: null,
-      // Set platformPageId = platformUserId so webhook DM routing works without changes
-      platformPageId: igUserId,
+      platformPageId: finalId,
       platformProfilePicture: userInfo.profile_picture_url || null,
       accessToken,
       refreshToken: null,
@@ -408,24 +412,22 @@ class InstagramLoginAuthService {
       status: 'connected',
       isActive: true,
       platformData: {
-        businessAccountId: igUserId,
+        businessAccountId: finalId,
         accountType: (userInfo.account_type || 'BUSINESS').toUpperCase()
       },
       metadata: {
         connectionType: 'instagram_login',
         accountType: (userInfo.account_type || 'business').toLowerCase(),
         profilePicture: userInfo.profile_picture_url,
-        // Store app-scoped ID so webhook routing can match by either ID
         igLoginScopedId: igAppScopedId
       }
     });
 
-    // Increment usage counter
     const platformConnectionService = require('../../services/platformConnectionService');
     await platformConnectionService.incrementConnectionCount(organizationId);
 
     console.log(`[InstagramLogin] Connection saved for @${igUsername}`);
-    await this.subscribeToWebhook(igUserId, accessToken);
+    await this.subscribeToWebhook(finalId, accessToken);
     return connection;
   }
 }
