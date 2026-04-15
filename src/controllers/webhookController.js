@@ -384,9 +384,15 @@ exports.handleInstagramWebhook = async (req, res) => {
     const instagramId = entry.id;
     const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
+
+    // Search by platformUserId OR platformPageId to cover both Facebook Login and Instagram Login connections
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
-      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
+      $or: [
+        { platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
+        { platformPageId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
+        { 'platformData.businessAccountId': String(instagramId) }
+      ],
       isActive: true
     });
 
@@ -394,7 +400,16 @@ exports.handleInstagramWebhook = async (req, res) => {
       if (isMetaTestEvent && hasMentionChange) {
         console.log('[Instagram Webhook] Received Meta test mention event (entry.id=0). This confirms callback URL works.');
       } else {
-        console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. Connect this Instagram in Settings → Page Manager to receive DMs/comments/mentions here.`);
+        // Log all IG connections to diagnose ID mismatch
+        const allIgConns = await PlatformConnection.find({ platform: 'instagram', isActive: true })
+          .select('platformUserId platformPageId platformData.businessAccountId platformUsername status').lean();
+        console.log(`[Instagram Webhook] No active connection for entry.id=${instagramId}. All active IG connections:`, JSON.stringify(allIgConns.map(c => ({
+          platformUserId: c.platformUserId,
+          platformPageId: c.platformPageId,
+          businessAccountId: c.platformData?.businessAccountId,
+          username: c.platformUsername,
+          status: c.status
+        }))));
       }
       return;
     }
