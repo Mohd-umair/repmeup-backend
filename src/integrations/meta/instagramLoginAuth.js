@@ -297,6 +297,7 @@ class InstagramLoginAuthService {
       }
       if (!existing.metadata) existing.metadata = {};
       existing.metadata.connectionType = 'instagram_login';
+      existing.metadata.igLoginScopedId = igUserId;
       if (!existing.platformData) existing.platformData = {};
       existing.platformData.businessAccountId = igUserId;
       existing.scopes = [
@@ -353,7 +354,9 @@ class InstagramLoginAuthService {
       metadata: {
         connectionType: 'instagram_login',
         accountType: (userInfo.account_type || 'business').toLowerCase(),
-        profilePicture: userInfo.profile_picture_url
+        profilePicture: userInfo.profile_picture_url,
+        // Store app-scoped ID separately so webhook routing can match either ID
+        igLoginScopedId: igUserId
       }
     });
 

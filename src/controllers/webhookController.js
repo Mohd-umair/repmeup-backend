@@ -385,13 +385,16 @@ exports.handleInstagramWebhook = async (req, res) => {
     const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
 
-    // Search by platformUserId OR platformPageId to cover both Facebook Login and Instagram Login connections
+    // Search by all known ID fields to cover Facebook Login, Instagram Login (app-scoped ID),
+    // and the case where the webhook uses the Facebook-based Instagram Business Account ID
+    // while the Instagram Login connection stores a different app-scoped ID.
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
       $or: [
         { platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
         { platformPageId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
-        { 'platformData.businessAccountId': String(instagramId) }
+        { 'platformData.businessAccountId': String(instagramId) },
+        { 'metadata.igLoginScopedId': String(instagramId) }
       ],
       isActive: true
     });

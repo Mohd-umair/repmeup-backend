@@ -280,7 +280,8 @@ async function handleInstagramWebhook(payload, organizationId) {
         $or: [
           { platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) } },
           { platformPageId: { $in: [String(igAccountId), igAccountId].filter(Boolean) } },
-          { 'platformData.businessAccountId': String(igAccountId) }
+          { 'platformData.businessAccountId': String(igAccountId) },
+          { 'metadata.igLoginScopedId': String(igAccountId) }
         ],
         status: { $in: ['connected', 'available'] },
         isActive: true
