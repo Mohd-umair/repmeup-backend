@@ -384,18 +384,9 @@ exports.handleInstagramWebhook = async (req, res) => {
     const instagramId = entry.id;
     const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
-
-    // Search by all known ID fields to cover Facebook Login, Instagram Login (app-scoped ID),
-    // and the case where the webhook uses the Facebook-based Instagram Business Account ID
-    // while the Instagram Login connection stores a different app-scoped ID.
     const connection = await PlatformConnection.findOne({
       platform: 'instagram',
-      $or: [
-        { platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
-        { platformPageId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
-        { 'platformData.businessAccountId': String(instagramId) },
-        { 'metadata.igLoginScopedId': String(instagramId) }
-      ],
+      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
       isActive: true
     });
 
@@ -403,16 +394,7 @@ exports.handleInstagramWebhook = async (req, res) => {
       if (isMetaTestEvent && hasMentionChange) {
         console.log('[Instagram Webhook] Received Meta test mention event (entry.id=0). This confirms callback URL works.');
       } else {
-        // Log all IG connections to diagnose ID mismatch
-        const allIgConns = await PlatformConnection.find({ platform: 'instagram', isActive: true })
-          .select('platformUserId platformPageId platformData.businessAccountId platformUsername status').lean();
-        console.log(`[Instagram Webhook] No active connection for entry.id=${instagramId}. All active IG connections:`, JSON.stringify(allIgConns.map(c => ({
-          platformUserId: c.platformUserId,
-          platformPageId: c.platformPageId,
-          businessAccountId: c.platformData?.businessAccountId,
-          username: c.platformUsername,
-          status: c.status
-        }))));
+        console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. Connect this Instagram in Settings → Page Manager to receive DMs/comments/mentions here.`);
       }
       return;
     }

@@ -801,18 +801,36 @@ class InstagramService {
     const apiBase = this._getApiBase(connectionType);
     const isIgLogin = connectionType === 'instagram_login';
     let tokenPageId = null;
+
     try {
-      // take_thread_control is a Messenger Platform feature, not needed for Instagram Login.
-      if (!isIgLogin) {
-        try {
-          await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
-            params: { recipient_id: recipientId, access_token: accessToken }
-          });
-          console.log('[Instagram] Thread control taken for recipient:', recipientId);
-        } catch (ttcErr) {
-          // Non-fatal: if we're already the thread owner this may fail or be a no-op
-          console.warn('[Instagram] take_thread_control failed (may already be owner):', ttcErr.response?.data?.error?.message || ttcErr.message);
-        }
+      // ── Instagram Login path (graph.instagram.com) ──
+      // Token is a User access token; no thread control, no messaging_type/tag.
+      // Endpoint: POST /{ig-user-id}/messages
+      if (isIgLogin) {
+        const body = {
+          recipient: { id: recipientId },
+          message: { text: message }
+        };
+        console.log(`[Instagram] sendMessage (IG Login): POST ${apiBase}/${pageId}/messages to ${recipientId}`);
+        const response = await axios.post(
+          `${apiBase}/${pageId}/messages`,
+          body,
+          { params: { access_token: accessToken } }
+        );
+        return {
+          success: true,
+          platformResponseId: response.data.message_id
+        };
+      }
+
+      // ── Facebook Login path (graph.facebook.com) ──
+      try {
+        await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
+          params: { recipient_id: recipientId, access_token: accessToken }
+        });
+        console.log('[Instagram] Thread control taken for recipient:', recipientId);
+      } catch (ttcErr) {
+        console.warn('[Instagram] take_thread_control failed (may already be owner):', ttcErr.response?.data?.error?.message || ttcErr.message);
       }
 
       try {
@@ -830,7 +848,6 @@ class InstagramService {
         console.warn('[Instagram] sendMessage: /me check failed (code', code, '). Cannot confirm token matches pageId.', msg?.substring(0, 80));
       }
 
-      // Try sending; if HUMAN_AGENT tag is not approved (error 10), fall back to RESPONSE.
       const attemptSend = async (useTag) => {
         const body = {
           recipient: { id: recipientId },
@@ -910,14 +927,18 @@ class InstagramService {
    */
   async sendPrivateReply(commentId, message, accessToken, pageId, connectionType = null) {
     const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
     try {
+      const body = {
+        recipient: { comment_id: String(commentId) },
+        message: { text: message }
+      };
+      if (!isIgLogin) {
+        body.messaging_type = 'RESPONSE';
+      }
       const response = await axios.post(
         `${apiBase}/${pageId}/messages`,
-        {
-          recipient: { comment_id: String(commentId) },
-          message: { text: message },
-          messaging_type: 'RESPONSE'
-        },
+        body,
         { params: { access_token: accessToken } }
       );
 
@@ -955,14 +976,48 @@ class InstagramService {
     const useDirectUpload = localFilePath && fs.existsSync(localFilePath);
 
     try {
-      if (!isIgLogin) {
-        await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
-          params: { recipient_id: recipientId, access_token: accessToken }
-        }).catch(() => {});
-      }
-
       const apiUrl = `${apiBase}/${pageId}/messages`;
       const platformType = attachmentType;
+
+      // ── Instagram Login path: simple body, no messaging_type/tag ──
+      if (isIgLogin) {
+        const sendIgLogin = async () => {
+          if (useDirectUpload) {
+            const form = new FormData();
+            form.append('recipient', JSON.stringify({ id: recipientId }));
+            form.append('message', JSON.stringify({
+              attachment: { type: platformType, payload: { is_reusable: false } }
+            }));
+            form.append('filedata', fs.createReadStream(localFilePath));
+            return axios.post(apiUrl, form, {
+              params: { access_token: accessToken },
+              headers: form.getHeaders(),
+              timeout: 30000,
+              maxContentLength: 100 * 1024 * 1024
+            });
+          }
+          return axios.post(apiUrl, {
+            recipient: { id: recipientId },
+            message: {
+              attachment: {
+                type: platformType,
+                payload: { url: attachmentUrl, is_reusable: false }
+              }
+            }
+          }, { params: { access_token: accessToken } });
+        };
+
+        const response = await sendIgLogin();
+        if (caption && caption.trim()) {
+          await this.sendMessage(recipientId, caption.trim(), accessToken, pageId, false, connectionType);
+        }
+        return { success: true, platformResponseId: response.data?.message_id };
+      }
+
+      // ── Facebook Login path: thread control + messaging_type/tag ──
+      await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
+        params: { recipient_id: recipientId, access_token: accessToken }
+      }).catch(() => {});
 
       const sendRequest = async (useTag) => {
         if (useDirectUpload) {

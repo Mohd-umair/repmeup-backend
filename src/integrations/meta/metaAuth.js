@@ -452,6 +452,7 @@ class MetaAuthService {
     if (!accessToken) return null;
     const appCreds = [
       [process.env.META_APP_ID, process.env.META_APP_SECRET],
+      [process.env.INSTAGRAM_LOGIN_APP_ID, process.env.INSTAGRAM_LOGIN_APP_SECRET],
       [process.env.INSTAGRAM_APP_ID, process.env.INSTAGRAM_APP_SECRET],
       [process.env.FACEBOOK_APP_ID, process.env.FACEBOOK_APP_SECRET]
     ].filter(([id, secret]) => id && secret);
