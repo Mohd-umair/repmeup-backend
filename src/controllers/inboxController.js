@@ -727,7 +727,8 @@ exports.replyToInteraction = async (req, res, next) => {
         const instagramService = require('../integrations/meta/instagramService');
         let result;
         if (interaction.type === 'dm') {
-          const connType = connection.metadata?.connectionType || null;
+          const connType = connection.metadata?.connectionType
+            || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
           let pageId = connection.platformPageId || connection.platformData?.pageId;
           // For Facebook Login connections, resolve the Page ID from the token
           // to avoid "not the thread owner" (#100). Instagram Login tokens are
@@ -775,7 +776,7 @@ exports.replyToInteraction = async (req, res, next) => {
             interaction.platformId,
             replyContent,
             connection.accessToken,
-            connection.metadata?.connectionType || null
+            connType
           );
         }
         if (result && result.success && result.platformResponseId) {
