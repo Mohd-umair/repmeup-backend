@@ -384,11 +384,40 @@ exports.handleInstagramWebhook = async (req, res) => {
     const instagramId = entry.id;
     const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
-    const connection = await PlatformConnection.findOne({
+
+    // Primary lookup: by platformUserId
+    let connection = await PlatformConnection.findOne({
       platform: 'instagram',
       platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
       isActive: true
     });
+
+    // Fallback: webhook entry.id might be the real IG Business Account ID while
+    // the connection stores the app-scoped ID (Instagram Login flow). Search by
+    // platformPageId, businessAccountId, or igLoginScopedId.
+    if (!connection) {
+      connection = await PlatformConnection.findOne({
+        platform: 'instagram',
+        $or: [
+          { platformPageId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
+          { 'platformData.businessAccountId': String(instagramId) },
+          { 'metadata.igLoginScopedId': String(instagramId) }
+        ],
+        isActive: true
+      });
+
+      // Self-heal: update platformUserId/platformPageId so future webhooks match instantly
+      if (connection && String(connection.platformUserId) !== String(instagramId)) {
+        console.log(`[Instagram Webhook] Auto-healing IDs for @${connection.platformUsername}: platformUserId ${connection.platformUserId} → ${instagramId}`);
+        connection.platformUserId = String(instagramId);
+        connection.platformPageId = String(instagramId);
+        if (!connection.platformData) connection.platformData = {};
+        connection.platformData.businessAccountId = String(instagramId);
+        if (!connection.metadata) connection.metadata = {};
+        connection.metadata.igLoginScopedId = connection.metadata.igLoginScopedId || connection.platformUserId;
+        await connection.save();
+      }
+    }
 
     if (!connection) {
       if (isMetaTestEvent && hasMentionChange) {
