@@ -272,13 +272,50 @@ async function handleInstagramWebhook(payload, organizationId) {
     let platformConnectionId = null;
     let dmReceiverConnection = null;
     if (igAccountId) {
-      const conn = await PlatformConnection.findOne({
+      // Primary: match by platformUserId
+      let conn = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'instagram',
         platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) },
         status: { $in: ['connected', 'available'] },
         isActive: true
-      }).select('_id accessToken').lean();
+      }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
+
+      // Fallback: webhook entry.id is the real IG Business Account ID but the
+      // connection may store the app-scoped ID (Instagram Login flow).
+      if (!conn) {
+        conn = await PlatformConnection.findOne({
+          organization: organizationId,
+          platform: 'instagram',
+          $or: [
+            { platformPageId: { $in: [String(igAccountId), igAccountId].filter(Boolean) } },
+            { 'platformData.businessAccountId': String(igAccountId) },
+            { 'metadata.igLoginScopedId': String(igAccountId) }
+          ],
+          status: { $in: ['connected', 'available'] },
+          isActive: true
+        }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
+
+        // Self-heal: persist the real IG ID so future webhooks match instantly
+        if (conn && String(conn.platformUserId) !== String(igAccountId)) {
+          logger.info('[processWebhook] Auto-healing IG connection IDs', {
+            username: conn.platformUsername,
+            oldId: conn.platformUserId,
+            realId: igAccountId
+          });
+          await PlatformConnection.updateOne(
+            { _id: conn._id },
+            {
+              $set: {
+                platformUserId: String(igAccountId),
+                platformPageId: String(igAccountId),
+                'platformData.businessAccountId': String(igAccountId)
+              }
+            }
+          );
+        }
+      }
+
       if (conn) {
         platformConnectionId = conn._id;
         dmReceiverConnection = conn;
