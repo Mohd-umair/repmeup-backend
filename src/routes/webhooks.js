@@ -17,9 +17,13 @@ router.post('/youtube', webhookController.handleYouTubeWebhook);
 router.get('/facebook', webhookController.verifyFacebookWebhook);
 router.post('/facebook', webhookController.handleFacebookWebhook);
 
-// Instagram webhooks
+// Instagram webhooks (Facebook Login — main Repmeup app)
 router.get('/instagram', webhookController.verifyInstagramWebhook);
 router.post('/instagram', webhookController.handleInstagramWebhook);
+
+// Instagram Login webhooks (Repmeup-IG app — separate Meta app)
+router.get('/instagram-login', webhookController.verifyInstagramLoginWebhook);
+router.post('/instagram-login', webhookController.handleInstagramLoginWebhook);
 
 // LinkedIn webhooks
 router.get('/linkedin', webhookController.verifyLinkedInWebhook);
