@@ -228,7 +228,8 @@ async function processCommentForProduct(interaction, organizationId) {
 
     const accessToken = connection.accessToken;
     const pageId = connection.platformData?.pageId || connection.platformPageId || connection.platformUserId;
-    const connType = connection.metadata?.connectionType || null;
+    const connType = connection.metadata?.connectionType
+      || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
 
     // ── 7. Post safe public-comment stub ──────────────────────────────
     const commenterUsername = interaction.author?.username || '';

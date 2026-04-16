@@ -1064,7 +1064,8 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
     } else if (interaction.platform === 'instagram') {
       const instagramService = require('../integrations/meta/instagramService');
       let result;
-      const connType = connection.metadata?.connectionType || null;
+      const connType = connection.metadata?.connectionType
+        || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
       if (interaction.type === 'dm') {
         const pageId =
           connection.platformPageId ||

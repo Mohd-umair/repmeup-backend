@@ -88,9 +88,19 @@ class InstagramService {
   /**
    * Extract connection type string from a platformConnection document or metadata object.
    * Returns 'instagram_login' or null (null = default Facebook Login behaviour).
+   *
+   * Fallback: Instagram Login tokens always start with 'IGAA', Facebook Page
+   * tokens start with 'EAA'. Use the prefix when metadata is missing.
    */
   _connectionType(platformConnection) {
-    return platformConnection?.metadata?.connectionType || null;
+    const explicit = platformConnection?.metadata?.connectionType;
+    if (explicit) return explicit;
+
+    const token = platformConnection?.accessToken || platformConnection?.access_token || '';
+    if (typeof token === 'string' && token.startsWith('IGAA')) {
+      return 'instagram_login';
+    }
+    return null;
   }
 
   /**
