@@ -94,6 +94,16 @@ class InstagramService {
   }
 
   /**
+   * For Instagram Login, the Graph API requires /me/{edge} instead of /{id}/{edge}.
+   * Returns 'me' for instagram_login, otherwise the businessAccountId.
+   */
+  _accountPath(platformConnection) {
+    const connType = this._connectionType(platformConnection);
+    if (connType === 'instagram_login') return 'me';
+    return this._getBusinessAccountId(platformConnection);
+  }
+
+  /**
    * Fetch Instagram media (posts, reels) only. Used for Content / platform posts listing.
    * @param {Object} platformConnection - Must have accessToken and business account ID
    * @returns {Promise<Array>} Array of { id, caption, media_type, timestamp, permalink, media_url }
@@ -101,12 +111,16 @@ class InstagramService {
   async getMedia(platformConnection) {
     const accessToken = platformConnection.accessToken || platformConnection.access_token;
     const businessAccountId = this._getBusinessAccountId(platformConnection);
-    const apiBase = this._getApiBase(this._connectionType(platformConnection));
+    const connType = this._connectionType(platformConnection);
+    const apiBase = this._getApiBase(connType);
+    const isIgLogin = connType === 'instagram_login';
     if (!businessAccountId) {
       throw new Error('Instagram Business Account ID not found in connection');
     }
     let allMedia = [];
-    let nextPage = `${apiBase}/${businessAccountId}/media`;
+    let nextPage = isIgLogin
+      ? `${apiBase}/me/media`
+      : `${apiBase}/${businessAccountId}/media`;
     let pageCount = 0;
     const maxPages = 10;
     while (nextPage && pageCount < maxPages) {
@@ -162,17 +176,22 @@ class InstagramService {
     try {
       const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
-      const apiBase = this._getApiBase(this._connectionType(platformConnection));
+      const connType = this._connectionType(platformConnection);
+      const apiBase = this._getApiBase(connType);
+      const isIgLogin = connType === 'instagram_login';
 
       if (!businessAccountId) {
         throw new Error('Instagram Business Account ID not found in connection');
       }
 
-      console.log(`📸 [Instagram] Fetching comments for account: ${businessAccountId}`);
+      console.log(`📸 [Instagram] Fetching comments for account: ${businessAccountId} [${connType || 'facebook_login'}]`);
 
-      // Get recent media (posts, reels, stories)
+      // Facebook Login: /{businessAccountId}/media
+      // Instagram Login: /me/media (User token)
       let allMedia = [];
-      let nextPage = `${apiBase}/${businessAccountId}/media`;
+      let nextPage = isIgLogin
+        ? `${apiBase}/me/media`
+        : `${apiBase}/${businessAccountId}/media`;
       let pageCount = 0;
       const maxPages = 10; // Limit to prevent excessive API calls
 
@@ -401,11 +420,13 @@ class InstagramService {
       console.log(`💬 [Instagram] Fetching DMs via Page ID: ${pageId} (IG account: ${businessAccountId}) [${connType || 'facebook_login'}]`);
       console.log(`💬 [Instagram] Using token: ${tokenPreview}`);
 
-      // Get conversations using Page ID
-      // Facebook Login: graph.facebook.com/{page-id}/conversations?platform=instagram
-      // Instagram Login: graph.instagram.com/{ig-user-id}/conversations?platform=instagram
+      // Facebook Login:  graph.facebook.com/{page-id}/conversations?platform=instagram
+      // Instagram Login: graph.instagram.com/me/conversations?platform=instagram
+      const isIgLogin = connType === 'instagram_login';
       let allConversations = [];
-      let nextPage = `${apiBase}/${pageId}/conversations`;
+      let nextPage = isIgLogin
+        ? `${apiBase}/me/conversations`
+        : `${apiBase}/${pageId}/conversations`;
       let pageCount = 0;
       const maxPages = 10;
 
@@ -1082,21 +1103,20 @@ class InstagramService {
   async createMediaContainer(platformConnection, { caption, mediaUrl, mediaType }) {
     try {
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
       const apiBase = this._getApiBase(this._connectionType(platformConnection));
 
-      if (!businessAccountId) {
+      if (!accountPath || accountPath === 'undefined') {
         throw new Error('Instagram Business Account ID not found');
       }
 
-      console.log(`📸 [Instagram] Creating media container for account: ${businessAccountId}`);
+      console.log(`📸 [Instagram] Creating media container for account: ${accountPath}`);
 
       const params = {
         access_token: accessToken,
         caption: caption || ''
       };
 
-      // Add media based on type
       if (mediaType === 'image') {
         params.image_url = mediaUrl;
       } else if (mediaType === 'video') {
@@ -1107,7 +1127,7 @@ class InstagramService {
       }
 
       const response = await axios.post(
-        `${apiBase}/${businessAccountId}/media`,
+        `${apiBase}/${accountPath}/media`,
         null,
         { params }
       );
@@ -1240,13 +1260,13 @@ class InstagramService {
   async publishMediaContainer(platformConnection, containerId) {
     try {
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
       const apiBase = this._getApiBase(this._connectionType(platformConnection));
 
       console.log(`📤 [Instagram] Publishing container: ${containerId}`);
 
       const response = await axios.post(
-        `${apiBase}/${businessAccountId}/media_publish`,
+        `${apiBase}/${accountPath}/media_publish`,
         null,
         {
           params: {
@@ -1357,11 +1377,11 @@ class InstagramService {
       }
 
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
       const connType = this._connectionType(platformConnection);
       const apiBase = this._getApiBase(connType);
 
-      console.log(`📖 [Instagram] Starting story creation for account: ${businessAccountId}`);
+      console.log(`📖 [Instagram] Starting story creation for account: ${accountPath}`);
 
       // Pre-check: Verify URL is publicly accessible
       await this.verifyMediaUrlAccessible(mediaUrl);
@@ -1382,7 +1402,7 @@ class InstagramService {
 
       console.log(`📸 [Instagram] Creating story container`);
       const containerResponse = await axios.post(
-        `${apiBase}/${businessAccountId}/media`,
+        `${apiBase}/${accountPath}/media`,
         null,
         { params }
       );
@@ -1390,15 +1410,13 @@ class InstagramService {
       const containerId = containerResponse.data.id;
       console.log(`✅ [Instagram] Story container created: ${containerId}`);
 
-      // Step 2: For videos, wait for processing
       if (mediaType === 'video') {
         await this.checkContainerStatus(accessToken, containerId, 30, connType);
       }
 
-      // Step 3: Publish the story
       console.log(`📤 [Instagram] Publishing story container: ${containerId}`);
       const publishResponse = await axios.post(
-        `${apiBase}/${businessAccountId}/media_publish`,
+        `${apiBase}/${accountPath}/media_publish`,
         null,
         {
           params: {
@@ -1485,23 +1503,21 @@ class InstagramService {
       }
 
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
       const connType = this._connectionType(platformConnection);
       const apiBase = this._getApiBase(connType);
 
-      console.log(`🎬 [Instagram] Starting reel creation for account: ${businessAccountId}`);
+      console.log(`🎬 [Instagram] Starting reel creation for account: ${accountPath}`);
       console.log(`📹 [Instagram] Video URL: ${mediaUrl}`);
 
-      // Pre-check: Verify URL is publicly accessible before sending to Instagram
       await this.verifyMediaUrlAccessible(mediaUrl);
 
-      // Step 1: Create reel container
       const params = {
         access_token: accessToken,
-        media_type: 'REELS', // This tells Instagram it's a reel
+        media_type: 'REELS',
         video_url: mediaUrl,
         caption: caption || '',
-        share_to_feed: true // Also share to main feed
+        share_to_feed: true
       };
 
       console.log(`📹 [Instagram] Creating reel container with params:`, {
@@ -1510,7 +1526,7 @@ class InstagramService {
         share_to_feed: params.share_to_feed
       });
       const containerResponse = await axios.post(
-        `${apiBase}/${businessAccountId}/media`,
+        `${apiBase}/${accountPath}/media`,
         null,
         { params }
       );
@@ -1518,13 +1534,11 @@ class InstagramService {
       const containerId = containerResponse.data.id;
       console.log(`✅ [Instagram] Reel container created: ${containerId}`);
 
-      // Step 2: Wait for video processing
       await this.checkContainerStatus(accessToken, containerId, 30, connType);
 
-      // Step 3: Publish the reel
       console.log(`📤 [Instagram] Publishing reel container: ${containerId}`);
       const publishResponse = await axios.post(
-        `${apiBase}/${businessAccountId}/media_publish`,
+        `${apiBase}/${accountPath}/media_publish`,
         null,
         {
           params: {
@@ -1588,7 +1602,7 @@ class InstagramService {
   async createCarouselPost(platformConnection, { caption, mediaUrls }) {
     try {
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
       const apiBase = this._getApiBase(this._connectionType(platformConnection));
 
       if (!mediaUrls || mediaUrls.length === 0) {
@@ -1624,7 +1638,7 @@ class InstagramService {
         }
 
         const response = await axios.post(
-          `${apiBase}/${businessAccountId}/media`,
+          `${apiBase}/${accountPath}/media`,
           null,
           { params }
         );
@@ -1635,7 +1649,7 @@ class InstagramService {
 
       // Step 2: Create carousel container
       const carouselResponse = await axios.post(
-        `${apiBase}/${businessAccountId}/media`,
+        `${apiBase}/${accountPath}/media`,
         null,
         {
           params: {
