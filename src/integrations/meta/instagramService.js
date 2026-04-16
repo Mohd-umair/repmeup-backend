@@ -18,8 +18,25 @@ class InstagramService {
     const token = typeof accessToken === 'string' ? accessToken.trim() : null;
     if (!token) return null;
 
-    // For Instagram DM senders (IGSID), name+profile_pic works without Advanced Access.
-    // username requires instagram_manage_messages Advanced Access — try it, but fall back gracefully.
+    const isIgLoginToken = token.startsWith('IGAA');
+
+    // Instagram Login (IGAA) user tokens can only query /me — they cannot look
+    // up arbitrary IGSIDs. Skip the attempt to avoid noisy 190 errors.
+    if (isIgLoginToken) {
+      try {
+        const response = await axios.get(`${this.instagramGraphUrl}/${userId}`, {
+          params: { fields: 'name,username', access_token: token },
+          timeout: 5000
+        });
+        const data = response.data || null;
+        if (data && (data.name || data.username)) return data;
+      } catch (_) {
+        // Instagram Login tokens can't look up other users — this is expected
+      }
+      return null;
+    }
+
+    // Facebook Login path: try graph.facebook.com first, then graph.instagram.com
     const attemptsPerUrl = [
       { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fieldSets: ['name,profile_pic,username', 'name,profile_pic'] },
       { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fieldSets: ['name,username,profile_pic', 'name,profile_pic'] }
@@ -34,7 +51,6 @@ class InstagramService {
           });
           const data = response.data || null;
           if (data && (data.name || data.username || data.profile_pic)) {
-            // Normalize: always expose profile_pic as the avatar field
             if (!data.profile_pic && data.profile_picture_url) {
               data.profile_pic = data.profile_picture_url;
             }
@@ -44,7 +60,6 @@ class InstagramService {
           const msg = err.response?.data?.error?.message || err.message;
           const code = err.response?.data?.error?.code;
           if (code === 200 || code === 190 || code === 100) {
-            // Permissions or token issue — try the reduced field set next
             if (!this._profileFailLogged) this._profileFailLogged = new Set();
             const logKey = `${userId}_${fields}`;
             if (!this._profileFailLogged.has(logKey)) {
@@ -54,7 +69,6 @@ class InstagramService {
           } else {
             console.warn(`[Instagram] User profile ${urlName} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
           }
-          // Try next field set or next URL
         }
       }
     }

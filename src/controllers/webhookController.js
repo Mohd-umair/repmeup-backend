@@ -392,31 +392,16 @@ exports.handleInstagramWebhook = async (req, res) => {
       isActive: true
     });
 
-    // Fallback: webhook entry.id might be the real IG Business Account ID while
-    // the connection stores the app-scoped ID (Instagram Login flow). Search by
-    // platformPageId, businessAccountId, or igLoginScopedId.
+    // Fallback: search by platformPageId or businessAccountId (Facebook Login connections)
     if (!connection) {
       connection = await PlatformConnection.findOne({
         platform: 'instagram',
         $or: [
           { platformPageId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
-          { 'platformData.businessAccountId': String(instagramId) },
-          { 'metadata.igLoginScopedId': String(instagramId) }
+          { 'platformData.businessAccountId': String(instagramId) }
         ],
         isActive: true
       });
-
-      // Self-heal: update platformUserId/platformPageId so future webhooks match instantly
-      if (connection && String(connection.platformUserId) !== String(instagramId)) {
-        console.log(`[Instagram Webhook] Auto-healing IDs for @${connection.platformUsername}: platformUserId ${connection.platformUserId} → ${instagramId}`);
-        connection.platformUserId = String(instagramId);
-        connection.platformPageId = String(instagramId);
-        if (!connection.platformData) connection.platformData = {};
-        connection.platformData.businessAccountId = String(instagramId);
-        if (!connection.metadata) connection.metadata = {};
-        connection.metadata.igLoginScopedId = connection.metadata.igLoginScopedId || connection.platformUserId;
-        await connection.save();
-      }
     }
 
     if (!connection) {
@@ -468,6 +453,111 @@ exports.handleInstagramWebhook = async (req, res) => {
   } catch (error) {
     console.error('Instagram webhook handler error:', error);
     // Don't send error response as we already sent 200
+  }
+};
+
+// =============================================================================
+// Instagram Login (Repmeup-IG app) — separate webhook endpoint
+// =============================================================================
+
+/**
+ * Verify Instagram Login webhook (Repmeup-IG app)
+ * GET /api/webhooks/instagram-login
+ */
+exports.verifyInstagramLoginWebhook = (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log('[IG-Login Webhook] Verification request:', { mode, token });
+
+  const verifyToken = process.env.INSTAGRAM_LOGIN_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
+  if (mode === 'subscribe' && token === verifyToken) {
+    console.log('[IG-Login Webhook] Verified successfully');
+    res.status(200).send(challenge);
+  } else {
+    console.error('[IG-Login Webhook] Verification failed');
+    res.sendStatus(403);
+  }
+};
+
+/**
+ * Handle Instagram Login webhook events (Repmeup-IG app)
+ * POST /api/webhooks/instagram-login
+ *
+ * Only looks up connections created via Instagram Login (IGAA token prefix).
+ * Self-heals the app-scoped → real IG Business Account ID on first webhook.
+ */
+exports.handleInstagramLoginWebhook = async (req, res) => {
+  try {
+    res.sendStatus(200);
+
+    console.log('📩 [IG-Login Webhook] Received POST:', JSON.stringify(req.body, null, 2));
+
+    const entry = req.body.entry?.[0];
+    if (!entry) return;
+
+    const hasMessaging = entry.messaging && entry.messaging.length > 0;
+    const hasStandby = entry.standby && entry.standby.length > 0;
+    const hasChanges = entry.changes && entry.changes.length > 0;
+    const hasCommentChange = hasChanges && entry.changes.some(c => c.field === 'comments');
+    const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
+    if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) return;
+
+    const instagramId = entry.id;
+    const PlatformConnection = require('../models/PlatformConnection');
+
+    // Primary lookup: the real IG Business Account ID (works after self-heal)
+    let connection = await PlatformConnection.findOne({
+      platform: 'instagram',
+      platformUserId: String(instagramId),
+      isActive: true
+    });
+
+    // Fallback: first-time webhook — connection still stores the app-scoped ID.
+    // Find the Instagram Login connection by IGAA token prefix.
+    if (!connection) {
+      connection = await PlatformConnection.findOne({
+        platform: 'instagram',
+        accessToken: { $regex: /^IGAA/ },
+        isActive: true
+      });
+    }
+
+    // Self-heal: persist the real IG Business Account ID
+    if (connection && String(connection.platformUserId) !== String(instagramId)) {
+      const oldId = connection.platformUserId;
+      console.log(`[IG-Login Webhook] Auto-healing IDs for @${connection.platformUsername}: ${oldId} → ${instagramId}`);
+      if (!connection.metadata) connection.metadata = {};
+      connection.metadata.igLoginScopedId = connection.metadata.igLoginScopedId || oldId;
+      connection.platformUserId = String(instagramId);
+      connection.platformPageId = String(instagramId);
+      if (!connection.platformData) connection.platformData = {};
+      connection.platformData.businessAccountId = String(instagramId);
+      await connection.save();
+    }
+
+    if (!connection) {
+      console.log(`[IG-Login Webhook] No active Instagram Login connection for account ${instagramId}.`);
+      return;
+    }
+
+    const organizationId = connection.organization.toString();
+
+    const processWebhook = require('../jobs/processWebhook');
+    try {
+      const result = await processWebhook({
+        data: { platform: 'instagram', payload: req.body, organizationId },
+        id: 'instagram-login-' + Date.now()
+      });
+      if (result && result.interactionId) {
+        console.log('[IG-Login Webhook] Processed and saved to database');
+      }
+    } catch (processErr) {
+      console.error('[IG-Login Webhook] Processing error:', processErr.message);
+    }
+  } catch (error) {
+    console.error('[IG-Login Webhook] Handler error:', error);
   }
 };
 
