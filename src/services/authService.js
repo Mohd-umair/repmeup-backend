@@ -8,6 +8,42 @@ const emailService = require('./emailService');
 
 class AuthService {
   /**
+   * Normalize Google profile names and derive a default org name (always creates a sensible org on signup).
+   * @param {object} googleProfile - from googleAuthService.getUserProfile / verifyIdToken
+   * @returns {{ email: string, providerId: string, firstName: string, lastName: string, picture?: string, organizationName: string }}
+   */
+  _normalizeGoogleSignupProfile(googleProfile) {
+    const email = (googleProfile.email || '').toLowerCase().trim();
+    const providerId = googleProfile.id;
+    const picture = googleProfile.picture;
+    const fullName = (googleProfile.fullName || '').trim();
+
+    let firstName = (googleProfile.firstName || '').trim();
+    let lastName = (googleProfile.lastName || '').trim();
+
+    if (!firstName && fullName) {
+      const parts = fullName.split(/\s+/).filter(Boolean);
+      firstName = parts[0] || '';
+      lastName = lastName || parts.slice(1).join(' ');
+    }
+
+    const localPart = email.split('@')[0] || 'user';
+    if (!firstName) {
+      firstName = localPart.replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) || 'User';
+    }
+    if (!lastName) {
+      lastName = 'Team';
+    }
+
+    const display = [firstName, lastName].filter((s) => s && String(s).trim()).join(' ').trim();
+    const organizationName = display
+      ? `${display}'s Organization`
+      : `${localPart}'s Organization`;
+
+    return { email, providerId, firstName, lastName, picture, organizationName };
+  }
+
+  /**
    * Register new user with organization
    */
   async register(userData) {
@@ -238,7 +274,14 @@ class AuthService {
    */
   async googleAuth(googleProfile) {
     try {
-      const { email, id: providerId, firstName, lastName, picture } = googleProfile;
+      const { email, providerId, firstName, lastName, picture, organizationName } =
+        this._normalizeGoogleSignupProfile(googleProfile);
+
+      if (!email || !providerId) {
+        throw new Error('Google did not return a valid email or account id.');
+      }
+
+      let isNewUser = false;
 
       // Check if user exists
       let user = await User.findOne({ email }).populate('organization');
@@ -258,6 +301,23 @@ class AuthService {
           );
         }
 
+        // Orphaned user (no org doc) — create org and attach (e.g. legacy / partial signup)
+        if (!user.organization || !user.organization._id) {
+          const organization = await Organization.create({
+            name: organizationName,
+            owner: null,
+            subscription: {
+              plan: 'free',
+              status: 'trial',
+              startDate: new Date()
+            }
+          });
+          user.organization = organization._id;
+          organization.owner = user._id;
+          organization.usage.currentUsers = 1;
+          await organization.save();
+        }
+
         // User exists - update OAuth info and login
         user.oauth = {
           provider: 'google',
@@ -265,16 +325,23 @@ class AuthService {
           profile: googleProfile
         };
         user.lastLogin = new Date();
-        
+
+        if ((!user.firstName || !String(user.firstName).trim()) && firstName) {
+          user.firstName = firstName;
+        }
+        if ((!user.lastName || !String(user.lastName).trim()) && lastName) {
+          user.lastName = lastName;
+        }
+
         if (!user.avatar && picture) {
           user.avatar = picture;
         }
-        
+
         await user.save();
+        user = await User.findById(user._id).populate('organization');
       } else {
-        // Create new user and organization
-        const organizationName = `${firstName}'s Organization`;
-        
+        isNewUser = true;
+        // Create new user and organization (same pattern as email register)
         const organization = await Organization.create({
           name: organizationName,
           owner: null,
@@ -293,6 +360,7 @@ class AuthService {
           organization: organization._id,
           avatar: picture,
           isEmailVerified: true, // Google emails are verified
+          lastLogin: new Date(),
           oauth: {
             provider: 'google',
             providerId,
@@ -326,7 +394,7 @@ class AuthService {
         user: user.toJSON(),
         token,
         refreshToken,
-        isNewUser: !user.lastLogin || user.createdAt.getTime() === user.updatedAt.getTime()
+        isNewUser
       };
     } catch (error) {
       console.error('Google auth error:', error);
