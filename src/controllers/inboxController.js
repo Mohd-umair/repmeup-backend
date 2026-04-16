@@ -727,20 +727,23 @@ exports.replyToInteraction = async (req, res, next) => {
         const instagramService = require('../integrations/meta/instagramService');
         let result;
         if (interaction.type === 'dm') {
-          // Send API requires the Facebook Page ID that owns the Instagram thread (thread owner).
-          // Resolve from token so we always use the token's Page and avoid "not the thread owner" (#100).
+          const connType = connection.metadata?.connectionType || null;
           let pageId = connection.platformPageId || connection.platformData?.pageId;
-          const resolvedFromToken = await instagramService.getPageIdFromToken(connection.accessToken);
-          if (resolvedFromToken) pageId = resolvedFromToken;
+          // For Facebook Login connections, resolve the Page ID from the token
+          // to avoid "not the thread owner" (#100). Instagram Login tokens are
+          // different (User tokens on graph.instagram.com), so skip this step.
+          if (connType !== 'instagram_login') {
+            const resolvedFromToken = await instagramService.getPageIdFromToken(connection.accessToken);
+            if (resolvedFromToken) pageId = resolvedFromToken;
+          }
           const recipientId = interaction.author?.platformId;
           logger.info('[Inbox Reply] Instagram DM send', {
             igAccountId,
             platformUserId: connection.platformUserId,
             storedPageId: connection.platformPageId || connection.platformData?.pageId,
-            resolvedFromToken: resolvedFromToken || null,
-            pageId
+            pageId,
+            connType
           });
-          const connType = connection.metadata?.connectionType || null;
           if (!pageId || !recipientId) {
             replyStatus = 'failed';
             errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
