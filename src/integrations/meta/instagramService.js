@@ -4,9 +4,15 @@ const { generateChatRef } = require('../../utils/chatRefHelper');
 
 class InstagramService {
   constructor() {
+    // graph.facebook.com: stable on v18.0 for Facebook-Login Instagram flow.
     this.apiVersion = 'v18.0';
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
-    this.instagramGraphUrl = `https://graph.instagram.com/${this.apiVersion}`;
+
+    // graph.instagram.com: Instagram API with Instagram Login requires v20.0+
+    // for messaging endpoints. Using v18.0 causes a misleading 2534037
+    // "not the thread owner" error even when token and payload are correct.
+    this.instagramApiVersion = 'v23.0';
+    this.instagramGraphUrl = `https://graph.instagram.com/${this.instagramApiVersion}`;
   }
 
   /**
@@ -88,13 +94,13 @@ class InstagramService {
    * Returns the correct Graph API base URL depending on how Instagram was connected.
    *
    * - Facebook Login (default):  https://graph.facebook.com/v18.0
-   * - Instagram Login (new):     https://graph.instagram.com/v18.0
+   * - Instagram Login (new):     https://graph.instagram.com/v23.0
    *
    * @param {string|null} connectionType - platformConnection.metadata.connectionType
    */
   _getApiBase(connectionType) {
     if (connectionType === 'instagram_login') {
-      return this.instagramGraphUrl; // https://graph.instagram.com/v18.0
+      return this.instagramGraphUrl; // https://graph.instagram.com/v23.0
     }
     return this.baseUrl; // https://graph.facebook.com/v18.0
   }
