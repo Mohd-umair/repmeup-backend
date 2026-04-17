@@ -508,79 +508,21 @@ exports.handleInstagramLoginWebhook = async (req, res) => {
     const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
     if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) return;
 
-    // True if every messaging event in this payload is an outgoing echo or a
-    // message edit. Echo/edit events come from OTHER IG accounts subscribed to
-    // the same Repmeup-IG app and must NOT trigger self-healing on our account.
-    const allEchoOrEdit = hasMessaging && entry.messaging.every(
-      m => m.message?.is_echo === true || !!m.message_edit
-    );
-
-    const instagramId = entry.id;
+    // entry.id is the global Instagram Business Account ID. Since saveConnection
+    // now stores user_id (the same global ID) as platformUserId, the lookup is
+    // deterministic — no fallbacks, no self-healing, no cross-account leakage.
+    const instagramId = String(entry.id);
     const PlatformConnection = require('../models/PlatformConnection');
 
-    // Primary lookup: after first self-heal platformUserId = global IG ID.
-    // This matches every webhook after the initial heal.
-    let connection = await PlatformConnection.findOne({
+    const connection = await PlatformConnection.findOne({
       platform: 'instagram',
-      platformUserId: String(instagramId),
+      platformUserId: instagramId,
       accessToken: { $regex: /^IGAA/ },
       isActive: true
     });
 
-    // Self-healing fallbacks — only for genuine incoming events (not echoes/edits
-    // from other IG accounts that share the same Repmeup-IG app subscription).
-    if (!connection && !allEchoOrEdit) {
-      // Fallback A: connection stores ISUID in both platformUserId and igLoginScopedId
-      // (the state right after reconnecting with the new saveConnection code).
-      connection = await PlatformConnection.findOne({
-        platform: 'instagram',
-        accessToken: { $regex: /^IGAA/ },
-        isActive: true,
-        $expr: { $eq: ['$platformUserId', '$metadata.igLoginScopedId'] }
-      }).sort({ createdAt: -1 });
-
-      // Fallback B: connection has igLoginScopedId set but platformUserId is stale
-      // (e.g. the wrong ID from a previous bad self-heal that hasn't been reconnected).
-      // This handles the case where the user hasn't reconnected yet.
-      if (!connection) {
-        connection = await PlatformConnection.findOne({
-          platform: 'instagram',
-          accessToken: { $regex: /^IGAA/ },
-          isActive: true,
-          'metadata.igLoginScopedId': { $exists: true, $nin: [null, ''] }
-        }).sort({ createdAt: -1 });
-      }
-    }
-
-    // Self-heal: update platformUserId from the stale/ISUID value to the real
-    // global IG Business Account ID delivered by the webhook. Delete any
-    // conflicting connection first to prevent E11000 duplicate key error.
-    if (connection && String(connection.platformUserId) !== String(instagramId)) {
-      const oldId = connection.platformUserId;
-      console.log(`[IG-Login Webhook] Self-healing IDs for @${connection.platformUsername}: ${oldId} → ${instagramId}`);
-
-      const stale = await PlatformConnection.findOne({
-        organization: connection.organization,
-        platform: 'instagram',
-        platformUserId: String(instagramId),
-        _id: { $ne: connection._id }
-      });
-      if (stale) {
-        console.log(`[IG-Login Webhook] Removing stale connection ${stale._id} to allow self-heal`);
-        await PlatformConnection.deleteOne({ _id: stale._id });
-      }
-
-      if (!connection.metadata) connection.metadata = {};
-      connection.metadata.igLoginScopedId = connection.metadata.igLoginScopedId || oldId;
-      connection.platformUserId = String(instagramId);
-      connection.platformPageId = String(instagramId);
-      if (!connection.platformData) connection.platformData = {};
-      connection.platformData.businessAccountId = String(instagramId);
-      await connection.save();
-    }
-
     if (!connection) {
-      console.log(`[IG-Login Webhook] No active Instagram Login connection for account ${instagramId}.`);
+      console.log(`[IG-Login Webhook] No active Instagram Login connection for account ${instagramId}. Connect this account via Settings → Connect Instagram (Instagram Login).`);
       return;
     }
 
