@@ -444,7 +444,10 @@ class MetaAuthService {
     return null;
   }
 
-
+  /**
+   * Verify access token. Tries each configured Meta app (META, INSTAGRAM, FACEBOOK) so that
+   * tokens issued by any of them can be verified (fixes "App_id in the input_token did not match the Viewing App").
+   */
   async verifyAccessToken(accessToken) {
     if (!accessToken) return null;
     const appCreds = [
