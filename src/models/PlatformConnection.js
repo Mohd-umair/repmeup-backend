@@ -89,7 +89,21 @@ const platformConnectionSchema = new mongoose.Schema({
       type: Boolean,
       default: null  // null = not yet determined
     },
-    instagramDmDisabledReason: String
+    instagramDmDisabledReason: String,
+    // Instagram Login flow: identifies the connection type
+    connectionType: {
+      type: String,
+      enum: ['instagram_login', 'facebook_login', null],
+      default: null
+    },
+    // Instagram Login flow: the app-scoped Instagram User ID (ISUID) returned by
+    // graph.instagram.com/me. Webhooks use the global IG Business Account ID as
+    // entry.id — storing the ISUID here lets the webhook handler self-heal the
+    // platformUserId on the first delivery.
+    igLoginScopedId: {
+      type: String,
+      default: null
+    }
   },
   
   // Connection status
