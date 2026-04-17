@@ -231,6 +231,32 @@ class InstagramLoginAuthService {
    * Subscribes using the app-scoped ISUID (what the token is valid for);
    * the resolvedId (global IG Business Account ID) is stored separately.
    */
+  /**
+   * Unsubscribe an Instagram account from app webhooks.
+   * Must be called when the user disconnects the account so Meta stops
+   * delivering events for it. Silently ignores errors (expired token, etc.)
+   * since the DB record will be deactivated regardless.
+   */
+  async unsubscribeFromWebhook(igUserId, accessToken) {
+    try {
+      const response = await axios.delete(
+        `${this.graphURL}/${igUserId}/subscribed_apps`,
+        {
+          params: { access_token: accessToken },
+          timeout: 8000
+        }
+      );
+      if (response.data?.success) {
+        console.log(`[InstagramLogin] IG account ${igUserId} unsubscribed from webhooks`);
+      } else {
+        console.warn(`[InstagramLogin] Unexpected unsubscribe response for ${igUserId}:`, response.data);
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.warn(`[InstagramLogin] Could not unsubscribe IG ${igUserId} from webhooks (token may have expired): ${msg}`);
+    }
+  }
+
   async subscribeToWebhook(igUserId, accessToken) {
     const fields = [
       'messages',
