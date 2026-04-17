@@ -222,42 +222,6 @@ class InstagramLoginAuthService {
   }
 
   // ---------------------------------------------------------------------------
-  // ID resolution
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Resolve the global Instagram Business Account ID from the DB.
-   *
-   * Meta's Instagram Login flow (graph.instagram.com/me) returns an
-   * app-scoped Instagram User ID (ISUID), e.g. 26849283451375167.
-   * Meta webhooks always deliver entry.id = the global IG Business Account ID,
-   * e.g. 17841480114255930. These two IDs are different for the same account.
-   *
-   * Strategy: look for any existing connection (created via any flow) that has
-   * the same @username but a DIFFERENT platformUserId. That other connection
-   * used the Facebook Login flow and will have stored the real global ID.
-   *
-   * Returns the global IG Business Account ID if found, otherwise appScopedId.
-   */
-  async resolveRealInstagramId(username, appScopedId) {
-    try {
-      const existing = await PlatformConnection.findOne({
-        platform: 'instagram',
-        platformUsername: username,
-        platformUserId: { $ne: appScopedId, $exists: true, $not: /^$/ }
-      }).select('platformUserId').lean();
-
-      if (existing?.platformUserId) {
-        console.log(`[InstagramLogin] Resolved real IG ID for @${username}: ${appScopedId} → ${existing.platformUserId}`);
-        return String(existing.platformUserId);
-      }
-    } catch (err) {
-      console.warn(`[InstagramLogin] DB ID lookup failed for @${username}:`, err.message);
-    }
-    return String(appScopedId);
-  }
-
-  // ---------------------------------------------------------------------------
   // Webhook subscription
   // ---------------------------------------------------------------------------
 
@@ -307,13 +271,15 @@ class InstagramLoginAuthService {
    * Persist an Instagram Login connection to the database.
    *
    * Key design:
-   *  - graph.instagram.com/me returns the app-scoped ISUID (igAppScopedId).
-   *  - Meta webhooks always deliver entry.id = the global IG Business Account ID.
-   *  - We resolve the global ID at connection time (via resolveRealInstagramId)
-   *    so the first webhook matches by primary key, with no self-healing needed.
-   *  - Any stale connection (old Facebook Login) that holds the resolved global ID
-   *    is deleted before saving to prevent E11000 duplicate key errors.
-   *  - igAppScopedId is preserved in metadata.igLoginScopedId for reference.
+   *  - graph.instagram.com/me returns the app-scoped Instagram User ID (ISUID).
+   *    There is no API available with an IGAA token that resolves ISUID → global
+   *    IG Business Account ID. DB lookups are unreliable (prior corrupted state).
+   *  - We store the ISUID as platformUserId AND as metadata.igLoginScopedId.
+   *    Both fields start with the same value.
+   *  - On the FIRST webhook, handleInstagramLoginWebhook self-heals the connection:
+   *    it updates platformUserId to the real global ID while igLoginScopedId keeps
+   *    the ISUID. After healing, platformUserId ≠ igLoginScopedId, so the $expr
+   *    discriminator in the webhook handler won't re-match this connection again.
    */
   async saveConnection(userId, organizationId, accessToken, expiresIn, userInfo) {
     const igAppScopedId = String(userInfo.id);
@@ -326,82 +292,46 @@ class InstagramLoginAuthService {
       'instagram_business_manage_comments'
     ];
 
-    // Step 1: Resolve the global IG Business Account ID.
-    // If the user previously connected via Facebook Login, that connection stores
-    // the real global ID. We reuse it so webhooks match on the first delivery.
-    const resolvedId = await this.resolveRealInstagramId(igUsername, igAppScopedId);
-
-    // Step 2: Remove any stale connection (typically an old Facebook Login one)
-    // that already occupies the resolvedId for this org. Keeping it would cause
-    // an E11000 duplicate key error when we try to update our connection.
-    if (resolvedId !== igAppScopedId) {
-      const stale = await PlatformConnection.findOne({
-        organization: organizationId,
-        platform: 'instagram',
-        platformUserId: resolvedId
-      });
-      if (stale) {
-        console.log(`[InstagramLogin] Removing stale connection for @${igUsername} (id: ${stale._id}, userId: ${resolvedId})`);
-        await PlatformConnection.deleteOne({ _id: stale._id });
-      }
-    }
-
-    // Step 3: Find any existing Instagram Login connection for this account
-    // (could be stored under the app-scoped ID or the resolved ID).
+    // Find any existing Instagram Login connection for this account.
+    // Match by ISUID in platformUserId OR igLoginScopedId (handles re-connect
+    // after a previous self-heal where platformUserId was already updated to
+    // the global ID).
     const existing = await PlatformConnection.findOne({
       organization: organizationId,
       platform: 'instagram',
       $or: [
         { platformUserId: igAppScopedId },
-        { platformUserId: resolvedId },
         { 'metadata.igLoginScopedId': igAppScopedId }
       ]
     });
 
-    const tokenFields = {
-      accessToken,
-      tokenExpiresAt: new Date(Date.now() + expiresIn * 1000),
-      status: 'connected',
-      isActive: true,
-      lastSyncAt: new Date(),
-      platformUserId: resolvedId,
-      platformPageId: resolvedId,
-      platformProfilePicture: userInfo.profile_picture_url || undefined,
-      scopes,
-      'platformData.businessAccountId': resolvedId,
-      'metadata.connectionType': 'instagram_login',
-      'metadata.accountType': accountType,
-      'metadata.igLoginScopedId': igAppScopedId
-    };
-
     if (existing) {
-      console.log(`[InstagramLogin] Updating connection for @${igUsername} (resolvedId: ${resolvedId}, scopedId: ${igAppScopedId})`);
-      Object.assign(existing, {
-        accessToken,
-        tokenExpiresAt: new Date(Date.now() + expiresIn * 1000),
-        status: 'connected',
-        isActive: true,
-        lastSyncAt: new Date(),
-        platformUserId: resolvedId,
-        platformPageId: resolvedId,
-        scopes
-      });
+      console.log(`[InstagramLogin] Updating connection for @${igUsername} (ISUID: ${igAppScopedId})`);
+      existing.accessToken = accessToken;
+      existing.tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+      existing.status = 'connected';
+      existing.isActive = true;
+      existing.lastSyncAt = new Date();
+      // Reset to ISUID so self-healing can run again on next webhook
+      existing.platformUserId = igAppScopedId;
+      existing.platformPageId = igAppScopedId;
+      existing.scopes = scopes;
       if (userInfo.profile_picture_url) existing.platformProfilePicture = userInfo.profile_picture_url;
       if (!existing.metadata) existing.metadata = {};
       existing.metadata.connectionType = 'instagram_login';
       existing.metadata.accountType = accountType;
       existing.metadata.igLoginScopedId = igAppScopedId;
       if (!existing.platformData) existing.platformData = {};
-      existing.platformData.businessAccountId = resolvedId;
+      existing.platformData.businessAccountId = igAppScopedId;
       await existing.save();
       console.log(`[InstagramLogin] Updated connection for @${igUsername}`);
       await this.subscribeToWebhook(igAppScopedId, accessToken);
       return existing;
     }
 
-    // Cross-org conflict check (use the resolvedId so we don't miss conflicts)
+    // Cross-org conflict check
     const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
-      'instagram', resolvedId, organizationId
+      'instagram', igAppScopedId, organizationId
     );
     if (crossOrgConflict) {
       const err = new Error('This Instagram account is already connected to another workspace.');
@@ -409,15 +339,14 @@ class InstagramLoginAuthService {
       throw err;
     }
 
-    // Step 4: Create new connection with the global IG Business Account ID.
-    console.log(`[InstagramLogin] Creating new connection for @${igUsername} (resolvedId: ${resolvedId}, scopedId: ${igAppScopedId})`);
+    console.log(`[InstagramLogin] Creating new connection for @${igUsername} (ISUID: ${igAppScopedId})`);
     const connection = await PlatformConnection.create({
       user: userId,
       organization: organizationId,
       createdBy: userId,
       platform: 'instagram',
-      platformUserId: resolvedId,
-      platformPageId: resolvedId,
+      platformUserId: igAppScopedId,
+      platformPageId: igAppScopedId,
       platformUsername: igUsername,
       platformDisplayName: userInfo.name || igUsername,
       platformEmail: null,
@@ -429,7 +358,7 @@ class InstagramLoginAuthService {
       status: 'connected',
       isActive: true,
       platformData: {
-        businessAccountId: resolvedId,
+        businessAccountId: igAppScopedId,
         accountType: (userInfo.account_type || 'BUSINESS').toUpperCase()
       },
       metadata: {
