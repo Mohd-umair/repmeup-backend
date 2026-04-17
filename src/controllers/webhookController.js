@@ -520,23 +520,19 @@ exports.handleInstagramLoginWebhook = async (req, res) => {
       isActive: true
     });
 
-    // Safety net for the transition period: if an old IGAA connection still stores
-    // the app-scoped ID (pre-fix), try to match via igLoginScopedId or by the
-    // recipient.id inside the messaging payload (which IS the app-scoped ISUID).
+    // Fallback: find an un-healed IGAA connection — one where platformUserId
+    // still equals metadata.igLoginScopedId (both are the ISUID). After
+    // self-healing, platformUserId diverges to the global ID so the $expr
+    // will no longer match that connection.
+    // Take the most recently created one (avoids picking up a different org's
+    // connection in the unlikely case of a race).
     if (!connection) {
-      const recipientId = entry.messaging?.[0]?.recipient?.id ||
-                          entry.standby?.[0]?.recipient?.id;
-      if (recipientId) {
-        connection = await PlatformConnection.findOne({
-          platform: 'instagram',
-          $or: [
-            { platformUserId: String(recipientId) },
-            { 'metadata.igLoginScopedId': String(recipientId) }
-          ],
-          accessToken: { $regex: /^IGAA/ },
-          isActive: true
-        });
-      }
+      connection = await PlatformConnection.findOne({
+        platform: 'instagram',
+        accessToken: { $regex: /^IGAA/ },
+        isActive: true,
+        $expr: { $eq: ['$platformUserId', '$metadata.igLoginScopedId'] }
+      }).sort({ createdAt: -1 });
     }
 
     // Self-heal: if the connection still stores the old app-scoped ID, update it
