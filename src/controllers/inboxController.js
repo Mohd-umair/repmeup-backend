@@ -729,11 +729,18 @@ exports.replyToInteraction = async (req, res, next) => {
         if (interaction.type === 'dm') {
           const connType = connection.metadata?.connectionType
             || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
-          let pageId = connection.platformPageId || connection.platformData?.pageId;
-          // For Facebook Login connections, resolve the Page ID from the token
-          // to avoid "not the thread owner" (#100). Instagram Login tokens are
-          // different (User tokens on graph.instagram.com), so skip this step.
-          if (connType !== 'instagram_login') {
+          let pageId;
+          if (connType === 'instagram_login') {
+            // IGAA tokens are scoped to the app-scoped Instagram User ID (ISUID), not the
+            // global IG Business Account ID that ends up in platformUserId after self-healing.
+            // graph.instagram.com/{ISUID}/messages is the correct endpoint; using the global
+            // ID causes error 2534037 "not the thread owner". Fall back to platformUserId if
+            // igLoginScopedId was not yet stored (old connections before schema fix).
+            pageId = connection.metadata?.igLoginScopedId || connection.platformUserId;
+          } else {
+            pageId = connection.platformPageId || connection.platformData?.pageId;
+            // For Facebook Login connections, resolve the Page ID from the token
+            // to avoid "not the thread owner" (#100).
             const resolvedFromToken = await instagramService.getPageIdFromToken(connection.accessToken);
             if (resolvedFromToken) pageId = resolvedFromToken;
           }

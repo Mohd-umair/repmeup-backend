@@ -1090,7 +1090,7 @@ exports.handleProductPaymentWebhook = async (req, res) => {
       organization: organizationId,
       platform: 'instagram',
       isActive: true
-    }).select('accessToken platformData platformPageId platformUserId').lean();
+    }).select('accessToken platformData platformPageId platformUserId metadata').lean();
 
     if (!conn) {
       console.warn('[ProductPayment] No Instagram connection for org', organizationId);
@@ -1098,7 +1098,11 @@ exports.handleProductPaymentWebhook = async (req, res) => {
     }
 
     const accessToken = conn.accessToken;
-    const pageId = conn.platformData?.pageId || conn.platformPageId || conn.platformUserId;
+    const connType = conn.metadata?.connectionType
+      || (typeof conn.accessToken === 'string' && conn.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
+    const pageId = connType === 'instagram_login'
+      ? (conn.metadata?.igLoginScopedId || conn.platformUserId)
+      : (conn.platformData?.pageId || conn.platformPageId || conn.platformUserId);
 
     try {
       await require('../integrations/meta/instagramService').sendMessage(
@@ -1106,7 +1110,8 @@ exports.handleProductPaymentWebhook = async (req, res) => {
         dmText,
         accessToken,
         pageId,
-        false
+        false,
+        connType
       );
       console.log('[ProductPayment] Confirmation DM sent to', order.instagramUserId);
     } catch (dmErr) {

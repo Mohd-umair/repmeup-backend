@@ -1067,10 +1067,12 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
       const connType = connection.metadata?.connectionType
         || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
       if (interaction.type === 'dm') {
-        const pageId =
-          connection.platformPageId ||
-          connection.platformData?.pageId ||
-          connection.metadata?.facebookPageId;
+        // For Instagram Login (IGAA tokens), the endpoint must be /{ISUID}/messages where ISUID
+        // is the app-scoped ID the token was issued for — stored in metadata.igLoginScopedId.
+        // Using the self-healed global ID (platformPageId) causes error 2534037.
+        const pageId = connType === 'instagram_login'
+          ? (connection.metadata?.igLoginScopedId || connection.platformUserId)
+          : (connection.platformPageId || connection.platformData?.pageId || connection.metadata?.facebookPageId);
         const recipientId = interaction.author?.platformId;
         if (!pageId || !recipientId) {
           logger.warn('[Auto-reply] Instagram DM missing pageId or recipientId', {
