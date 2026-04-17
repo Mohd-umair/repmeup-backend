@@ -385,22 +385,26 @@ exports.handleInstagramWebhook = async (req, res) => {
     const isMetaTestEvent = String(instagramId) === '0';
     const PlatformConnection = require('../models/PlatformConnection');
 
-    // Primary lookup: by platformUserId
-    let connection = await PlatformConnection.findOne({
+    // Lookup Facebook Login connections only (exclude IGAA tokens — those are
+    // handled by the dedicated /api/webhooks/instagram-login endpoint).
+    const fbLoginFilter = {
       platform: 'instagram',
-      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
+      accessToken: { $not: /^IGAA/ },
       isActive: true
+    };
+
+    let connection = await PlatformConnection.findOne({
+      ...fbLoginFilter,
+      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) }
     });
 
-    // Fallback: search by platformPageId or businessAccountId (Facebook Login connections)
     if (!connection) {
       connection = await PlatformConnection.findOne({
-        platform: 'instagram',
+        ...fbLoginFilter,
         $or: [
           { platformPageId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
           { 'platformData.businessAccountId': String(instagramId) }
-        ],
-        isActive: true
+        ]
       });
     }
 
@@ -507,27 +511,52 @@ exports.handleInstagramLoginWebhook = async (req, res) => {
     const instagramId = entry.id;
     const PlatformConnection = require('../models/PlatformConnection');
 
-    // Primary lookup: the real IG Business Account ID (works after self-heal)
+    // Primary lookup: after saveConnection() resolves the global IG Business Account
+    // ID at connection time, this will match immediately on every webhook.
     let connection = await PlatformConnection.findOne({
       platform: 'instagram',
       platformUserId: String(instagramId),
+      accessToken: { $regex: /^IGAA/ },
       isActive: true
     });
 
-    // Fallback: first-time webhook — connection still stores the app-scoped ID.
-    // Find the Instagram Login connection by IGAA token prefix.
+    // Safety net for the transition period: if an old IGAA connection still stores
+    // the app-scoped ID (pre-fix), try to match via igLoginScopedId or by the
+    // recipient.id inside the messaging payload (which IS the app-scoped ISUID).
     if (!connection) {
-      connection = await PlatformConnection.findOne({
-        platform: 'instagram',
-        accessToken: { $regex: /^IGAA/ },
-        isActive: true
-      });
+      const recipientId = entry.messaging?.[0]?.recipient?.id ||
+                          entry.standby?.[0]?.recipient?.id;
+      if (recipientId) {
+        connection = await PlatformConnection.findOne({
+          platform: 'instagram',
+          $or: [
+            { platformUserId: String(recipientId) },
+            { 'metadata.igLoginScopedId': String(recipientId) }
+          ],
+          accessToken: { $regex: /^IGAA/ },
+          isActive: true
+        });
+      }
     }
 
-    // Self-heal: persist the real IG Business Account ID
+    // Self-heal: if the connection still stores the old app-scoped ID, update it
+    // to the real global IG Business Account ID (entry.id). Delete any conflicting
+    // stale connection first to prevent E11000.
     if (connection && String(connection.platformUserId) !== String(instagramId)) {
       const oldId = connection.platformUserId;
-      console.log(`[IG-Login Webhook] Auto-healing IDs for @${connection.platformUsername}: ${oldId} → ${instagramId}`);
+      console.log(`[IG-Login Webhook] Self-healing IDs for @${connection.platformUsername}: ${oldId} → ${instagramId}`);
+
+      const stale = await PlatformConnection.findOne({
+        organization: connection.organization,
+        platform: 'instagram',
+        platformUserId: String(instagramId),
+        _id: { $ne: connection._id }
+      });
+      if (stale) {
+        console.log(`[IG-Login Webhook] Removing stale connection ${stale._id} to allow self-heal`);
+        await PlatformConnection.deleteOne({ _id: stale._id });
+      }
+
       if (!connection.metadata) connection.metadata = {};
       connection.metadata.igLoginScopedId = connection.metadata.igLoginScopedId || oldId;
       connection.platformUserId = String(instagramId);
