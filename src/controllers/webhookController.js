@@ -508,11 +508,18 @@ exports.handleInstagramLoginWebhook = async (req, res) => {
     const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
     if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) return;
 
+    // True if every messaging event in this payload is an outgoing echo or a
+    // message edit. Echo/edit events come from OTHER IG accounts subscribed to
+    // the same Repmeup-IG app and must NOT trigger self-healing on our account.
+    const allEchoOrEdit = hasMessaging && entry.messaging.every(
+      m => m.message?.is_echo === true || !!m.message_edit
+    );
+
     const instagramId = entry.id;
     const PlatformConnection = require('../models/PlatformConnection');
 
-    // Primary lookup: after saveConnection() resolves the global IG Business Account
-    // ID at connection time, this will match immediately on every webhook.
+    // Primary lookup: after first self-heal platformUserId = global IG ID.
+    // This matches every webhook after the initial heal.
     let connection = await PlatformConnection.findOne({
       platform: 'instagram',
       platformUserId: String(instagramId),
@@ -520,24 +527,34 @@ exports.handleInstagramLoginWebhook = async (req, res) => {
       isActive: true
     });
 
-    // Fallback: find an un-healed IGAA connection — one where platformUserId
-    // still equals metadata.igLoginScopedId (both are the ISUID). After
-    // self-healing, platformUserId diverges to the global ID so the $expr
-    // will no longer match that connection.
-    // Take the most recently created one (avoids picking up a different org's
-    // connection in the unlikely case of a race).
-    if (!connection) {
+    // Self-healing fallbacks — only for genuine incoming events (not echoes/edits
+    // from other IG accounts that share the same Repmeup-IG app subscription).
+    if (!connection && !allEchoOrEdit) {
+      // Fallback A: connection stores ISUID in both platformUserId and igLoginScopedId
+      // (the state right after reconnecting with the new saveConnection code).
       connection = await PlatformConnection.findOne({
         platform: 'instagram',
         accessToken: { $regex: /^IGAA/ },
         isActive: true,
         $expr: { $eq: ['$platformUserId', '$metadata.igLoginScopedId'] }
       }).sort({ createdAt: -1 });
+
+      // Fallback B: connection has igLoginScopedId set but platformUserId is stale
+      // (e.g. the wrong ID from a previous bad self-heal that hasn't been reconnected).
+      // This handles the case where the user hasn't reconnected yet.
+      if (!connection) {
+        connection = await PlatformConnection.findOne({
+          platform: 'instagram',
+          accessToken: { $regex: /^IGAA/ },
+          isActive: true,
+          'metadata.igLoginScopedId': { $exists: true, $nin: [null, ''] }
+        }).sort({ createdAt: -1 });
+      }
     }
 
-    // Self-heal: if the connection still stores the old app-scoped ID, update it
-    // to the real global IG Business Account ID (entry.id). Delete any conflicting
-    // stale connection first to prevent E11000.
+    // Self-heal: update platformUserId from the stale/ISUID value to the real
+    // global IG Business Account ID delivered by the webhook. Delete any
+    // conflicting connection first to prevent E11000 duplicate key error.
     if (connection && String(connection.platformUserId) !== String(instagramId)) {
       const oldId = connection.platformUserId;
       console.log(`[IG-Login Webhook] Self-healing IDs for @${connection.platformUsername}: ${oldId} → ${instagramId}`);
