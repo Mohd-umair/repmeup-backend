@@ -410,6 +410,19 @@ exports.disconnectPlatform = async (req, res, next) => {
     connection.status = 'disconnected';
     await connection.save();
 
+    // For Instagram Login connections, revoke the Meta webhook subscription so
+    // Meta stops delivering events for this account. Fire-and-forget — DB is
+    // already updated so a failure here doesn't block the disconnect response.
+    if (
+      connection.platform === 'instagram' &&
+      (connection.metadata?.connectionType === 'instagram_login' ||
+        (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA')))
+    ) {
+      const igLoginAuth = require('../integrations/meta/instagramLoginAuth');
+      const isuid = connection.metadata?.igLoginScopedId || connection.platformUserId;
+      igLoginAuth.unsubscribeFromWebhook(isuid, connection.accessToken).catch(() => {});
+    }
+
     // Decrement usage counter if this connection was counted (Dependency Inversion)
     if (wasCounted) {
       await platformConnectionService.decrementConnectionCount(req.user.organization._id);
