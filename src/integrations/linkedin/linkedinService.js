@@ -279,7 +279,7 @@ class LinkedInService {
             },
             {
               $set: platformFields,
-              $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null, chatNumber: liRef.chatNumber, chatRef: liRef.chatRef }
+              $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: liRef.chatNumber, chatRef: liRef.chatRef }
             },
             {
               upsert: true,

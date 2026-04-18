@@ -165,7 +165,7 @@ module.exports = async function processAutoReply(job) {
 };
 
 /**
- * Process a single interaction (webhook-triggered)
+ * Process a single interaction (webhook-triggered or recent sync)
  */
 async function processSingleInteraction(interactionId, organization, jobData = {}) {
   try {
@@ -174,6 +174,22 @@ async function processSingleInteraction(interactionId, organization, jobData = {
 
     if (!interaction) {
       return { skipped: true, reason: 'Interaction not found' };
+    }
+
+    // Safety-net guard: never auto-reply to historical or old synced interactions.
+    // This is a second line of defence — the primary guard is in platformController.syncPlatform.
+    // It catches any edge case where a sync job slips past the controller-level check
+    // (e.g. initial OAuth sync, stale connectedAt, or future sync code paths).
+    if (interaction.source === 'sync') {
+      const SYNC_AUTO_REPLY_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+      const msgDate = interaction.platformCreatedAt || interaction.createdAt;
+      const connectedAt = interaction.platformConnection?.connectedAt;
+      const isHistorical = connectedAt && msgDate < connectedAt;
+      const isTooOld = (Date.now() - new Date(msgDate).getTime()) > SYNC_AUTO_REPLY_AGE_MS;
+
+      if (isHistorical || isTooOld) {
+        return { skipped: true, reason: `Synced historical/old interaction (msgDate=${msgDate}, connectedAt=${connectedAt})` };
+      }
     }
 
     const threadDm = isThreadStyleDm(interaction);
