@@ -437,11 +437,11 @@ async function handleInstagramWebhook(payload, organizationId) {
       // For NEW interactions: chatRef goes into $setOnInsert (avoids $set/$setOnInsert field conflict)
       // For EXISTING without chatRef: already added to updateFields ($set) above
       const setOnInsertFields = (!existing && _igDmChatRef?.chatRef)
-        ? { chatNumber: _igDmChatRef.chatNumber, chatRef: _igDmChatRef.chatRef }
-        : {};
+        ? { chatNumber: _igDmChatRef.chatNumber, chatRef: _igDmChatRef.chatRef, source: 'webhook' }
+        : { source: 'webhook' };
       await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
-        { $set: updateFields, ...(Object.keys(setOnInsertFields).length > 0 ? { $setOnInsert: setOnInsertFields } : {}) },
+        { $set: updateFields, $setOnInsert: setOnInsertFields },
         { upsert: true }
       );
 
@@ -534,7 +534,7 @@ async function handleInstagramWebhook(payload, organizationId) {
           { platformId: comment.id },
           {
             $set: updatePayload,
-            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _igCommentChatRef.chatNumber, chatRef: _igCommentChatRef.chatRef }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _igCommentChatRef.chatNumber, chatRef: _igCommentChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -615,7 +615,7 @@ async function handleInstagramWebhook(payload, organizationId) {
                 rawMention: mention
               }
             },
-            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _igMentionChatRef.chatNumber, chatRef: _igMentionChatRef.chatRef }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _igMentionChatRef.chatNumber, chatRef: _igMentionChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -662,7 +662,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               threadId: message.conversation_id,
               platformCreatedAt: msgPlatformCreatedAt
             },
-            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _igLegacyDmChatRef.chatNumber, chatRef: _igLegacyDmChatRef.chatRef }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _igLegacyDmChatRef.chatNumber, chatRef: _igLegacyDmChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -800,9 +800,12 @@ async function handleFacebookWebhook(payload, organizationId) {
           }
         }
       };
-      // For NEW interactions: chatRef via $setOnInsert
-      if (!existing && _fbDmChatRef?.chatRef) {
-        updateOps.$setOnInsert = { chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef };
+      // For NEW interactions: chatRef + source via $setOnInsert
+      if (!existing) {
+        updateOps.$setOnInsert = {
+          source: 'webhook',
+          ...(_fbDmChatRef?.chatRef ? { chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef } : {})
+        };
       }
 
       const interaction = await Interaction.findOneAndUpdate(
@@ -858,7 +861,7 @@ async function handleFacebookWebhook(payload, organizationId) {
           { platformId: comment.comment_id },
           {
             $set: updateFields,
-            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _fbCommentChatRef.chatNumber, chatRef: _fbCommentChatRef.chatRef }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _fbCommentChatRef.chatNumber, chatRef: _fbCommentChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -898,7 +901,7 @@ async function handleFacebookWebhook(payload, organizationId) {
               threadId: message.thread_id,
               platformCreatedAt: parseMetaTimestamp(message.created_time)
             },
-            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -995,7 +998,7 @@ async function handleWhatsAppWebhook(payload, organizationId) {
               },
               platformCreatedAt: new Date(parseInt(message.timestamp) * 1000)
             },
-            $setOnInsert: { status: 'unread', isRead: false, chatNumber: _waChatRef.chatNumber, chatRef: _waChatRef.chatRef }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _waChatRef.chatNumber, chatRef: _waChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -1178,7 +1181,7 @@ async function handleLinkedInComment(data, organizationId) {
           threadId: parentCommentUrn || shareUrn,
           platformCreatedAt: createdAt ? new Date(createdAt) : new Date()
         },
-        $setOnInsert: { status: 'unread', isRead: false, chatNumber: _liChatRef.chatNumber, chatRef: _liChatRef.chatRef }
+        $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _liChatRef.chatNumber, chatRef: _liChatRef.chatRef }
       },
       { upsert: true, new: true }
     );

@@ -881,6 +881,7 @@ exports.handleWhatsAppWebhook = async (req, res) => {
             }
 
             // Save interaction
+            interaction.source = 'webhook';
             const savedInteraction = await Interaction.create(interaction);
             console.log(`✅ [WhatsApp] Interaction saved: ${savedInteraction._id}`);
 

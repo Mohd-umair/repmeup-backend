@@ -594,6 +594,10 @@ exports.syncPlatform = async (req, res, next) => {
         }
       }
       
+      // Messages older than this threshold are treated as historical and never
+      // auto-replied to, even if they arrived during a sync of a newly connected account.
+      const SYNC_AUTO_REPLY_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
       for (const interaction of newInteractions) {
         try {
           // Double-check: Skip if already has replies (safety check)
@@ -602,7 +606,7 @@ exports.syncPlatform = async (req, res, next) => {
             continue;
           }
 
-          // Queue AI processing for new interactions only
+          // Queue AI processing for every new interaction so buckets/sentiment are set.
           await aiQueue.add({
             interactionId: interaction._id
           }, {
@@ -611,7 +615,19 @@ exports.syncPlatform = async (req, res, next) => {
             jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
           });
 
-          // Queue auto-reply
+          // Guard: skip auto-reply for historical/old messages fetched during sync.
+          // A message is historical if it predates when the account was first connected,
+          // or if it is older than 24 hours (catches accounts whose connectedAt wasn't set).
+          const msgDate = interaction.platformCreatedAt || interaction.createdAt;
+          const isHistorical = connection.connectedAt && msgDate < connection.connectedAt;
+          const isTooOld = (Date.now() - new Date(msgDate).getTime()) > SYNC_AUTO_REPLY_AGE_MS;
+
+          if (isHistorical || isTooOld) {
+            console.log(`⏭️  [Sync] Skipping auto-reply for historical/old interaction ${interaction._id} (msgDate=${msgDate}, connectedAt=${connection.connectedAt})`);
+            continue;
+          }
+
+          // Queue auto-reply only for genuinely new messages
           const queued = await autoReplyScheduler.queueImmediateAutoReply(
             interaction._id.toString(),
             organizationId

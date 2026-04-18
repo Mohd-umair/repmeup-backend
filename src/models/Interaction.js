@@ -424,7 +424,16 @@ const interactionSchema = new mongoose.Schema({
   // Timestamps
   platformCreatedAt: Date,
   respondedAt: Date,
-  resolvedAt: Date
+  resolvedAt: Date,
+
+  // How this interaction was created: 'webhook' = real-time event, 'sync' = pulled
+  // during a manual or initial account sync. Used to suppress auto-reply on
+  // historical/old messages that should never receive automated responses.
+  source: {
+    type: String,
+    enum: ['webhook', 'sync'],
+    default: 'webhook'
+  }
 }, {
   timestamps: true
 });
