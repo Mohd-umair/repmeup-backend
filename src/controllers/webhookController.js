@@ -747,11 +747,13 @@ exports.verifyWhatsAppWebhook = (req, res) => {
     });
 
     // Verify the token and mode
-    if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    // Accept either the WhatsApp-specific token or the generic Meta verify token
+    const expectedToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
+    if (mode === 'subscribe' && token === expectedToken) {
       console.log('✅ [WhatsApp Webhook] Verification successful');
       res.status(200).send(challenge);
     } else {
-      console.error('❌ [WhatsApp Webhook] Verification failed');
+      console.error('❌ [WhatsApp Webhook] Verification failed — token mismatch');
       res.sendStatus(403);
     }
   } catch (error) {
@@ -900,9 +902,9 @@ exports.handleWhatsAppWebhook = async (req, res) => {
               }
             }
 
-            // Mark message as read (optional)
+            // Mark message as read using per-connection token
             try {
-              await whatsappService.markAsRead(message.id);
+              await whatsappService.markAsRead(connection, message.id);
             } catch (readError) {
               console.error('❌ [WhatsApp] Failed to mark as read:', readError.message);
             }

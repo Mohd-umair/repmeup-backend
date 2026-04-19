@@ -855,6 +855,7 @@ exports.replyToInteraction = async (req, res, next) => {
       } else if (interaction.platform === 'whatsapp') {
         const whatsappService = require('../integrations/whatsapp/whatsappService');
         const result = await whatsappService.sendTextMessage(
+          connection,
           interaction.author.platformId,
           replyContent
         );

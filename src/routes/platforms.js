@@ -7,6 +7,9 @@ const { checkConnectionLimit, attachConnectionLimits } = require('../middleware/
 // Google OAuth callback (public - called by Google)
 router.get('/google/callback', platformController.handleGoogleCallback);
 
+// WhatsApp Embedded Signup callback (public — Meta redirects here after OAuth)
+router.get('/whatsapp/callback', platformController.handleWhatsAppCallback);
+
 // Meta webhook verification (public - called by Meta for callback URL validation)
 // Must be before router.use(protect)
 router.get('/meta/callback', (req, res) => {
@@ -51,8 +54,10 @@ router.use(protect);
 // Google OAuth flow - check limit before starting OAuth
 router.get('/google/connect', checkConnectionLimit, platformController.initiateGoogleConnection);
 
-// WhatsApp Business API
-router.post('/whatsapp/connect', platformController.connectWhatsApp);
+// WhatsApp Business API — Embedded Signup OAuth (multi-tenant)
+router.get('/whatsapp/connect', checkConnectionLimit, platformController.initiateWhatsAppConnection);
+// Dev/fallback: direct env-based connection (single-tenant)
+router.post('/whatsapp/connect-direct', checkConnectionLimit, platformController.connectWhatsApp);
 router.delete('/whatsapp/disconnect', platformController.disconnectWhatsApp);
 router.get('/whatsapp/status', platformController.getWhatsAppStatus);
 
@@ -64,8 +69,6 @@ router.get('/:id', platformController.getPlatformConnection);
 router.delete('/:id', platformController.disconnectPlatform);
 router.post('/:id/sync', platformController.syncPlatform);
 router.post('/:id/refresh-locations', platformController.refreshGoogleLocations);
-
-router.post('/whatsapp/connect', checkConnectionLimit, platformController.connectWhatsApp);
 
 module.exports = router;
 
