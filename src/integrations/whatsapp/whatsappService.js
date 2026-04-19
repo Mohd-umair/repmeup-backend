@@ -1,39 +1,73 @@
 const axios = require('axios');
-const Interaction = require('../../models/Interaction');
 
 /**
  * WhatsApp Business Cloud API Service
- * Handles WhatsApp message sending, receiving, and media
- * 
+ * Multi-tenant: all send/query methods accept a `connection` object (PlatformConnection)
+ * instead of reading from process.env. This allows each customer to use their own
+ * WhatsApp Business Account credentials stored in the database.
+ *
  * Documentation: https://developers.facebook.com/docs/whatsapp/cloud-api
  */
-
 class WhatsAppService {
   constructor() {
-    this.apiURL = 'https://graph.facebook.com/v18.0';
-    this.phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    this.accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-    this.businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+    this.apiVersion = 'v23.0';
+    this.apiURL = `https://graph.facebook.com/${this.apiVersion}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Extract phone number ID from a PlatformConnection.
+   * Supports both new (platformData.phoneNumberId) and legacy (platformUserId) storage.
+   */
+  _phoneNumberId(connection) {
+    return connection.platformData?.phoneNumberId
+      || connection.platformData?.phoneNumberId
+      || connection.platformUserId
+      || process.env.WHATSAPP_PHONE_NUMBER_ID;
   }
 
   /**
-   * Verify WhatsApp connection
+   * Extract access token from a PlatformConnection, falling back to env.
    */
-  async verifyConnection() {
-    try {
-      if (!this.phoneNumberId || !this.accessToken) {
-        throw new Error('WhatsApp credentials not configured');
-      }
+  _accessToken(connection) {
+    return connection?.accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
+  }
 
-      // Get phone number details
-      const response = await axios.get(
-        `${this.apiURL}/${this.phoneNumberId}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`
-          }
-        }
-      );
+  _authHeader(connection) {
+    return { Authorization: `Bearer ${this._accessToken(connection)}` };
+  }
+
+  _jsonHeaders(connection) {
+    return {
+      Authorization: `Bearer ${this._accessToken(connection)}`,
+      'Content-Type': 'application/json'
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Connection verification
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Verify a WhatsApp connection by querying the phone number details.
+   * @param {Object} connection  PlatformConnection document (or null for env fallback)
+   */
+  async verifyConnection(connection = null) {
+    const phoneNumberId = this._phoneNumberId(connection || {});
+    const token = this._accessToken(connection || {});
+
+    if (!phoneNumberId || !token) {
+      throw new Error('WhatsApp credentials not configured');
+    }
+
+    try {
+      const response = await axios.get(`${this.apiURL}/${phoneNumberId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 10000
+      });
 
       return {
         success: true,
@@ -43,168 +77,145 @@ class WhatsAppService {
         qualityRating: response.data.quality_rating
       };
     } catch (error) {
-      console.error('❌ [WhatsApp] Connection verification failed:', error.response?.data || error.message);
+      console.error('[WhatsApp] Connection verification failed:', error.response?.data || error.message);
       throw new Error(error.response?.data?.error?.message || 'Failed to verify WhatsApp connection');
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Messaging
+  // ---------------------------------------------------------------------------
+
   /**
-   * Send text message
+   * Send a plain text message.
+   * @param {Object} connection  PlatformConnection
+   * @param {string} to          Recipient phone number (E.164 format)
+   * @param {string} message     Message body
    */
-  async sendTextMessage(to, message) {
+  async sendTextMessage(connection, to, message) {
+    const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.post(
-        `${this.apiURL}/${this.phoneNumberId}/messages`,
+        `${this.apiURL}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
-          to: to,
+          to,
           type: 'text',
-          text: {
-            preview_url: true,
-            body: message
-          }
+          text: { preview_url: true, body: message }
         },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
       );
 
-      console.log('✅ [WhatsApp] Message sent:', response.data);
-
-      return {
-        success: true,
-        messageId: response.data.messages[0].id,
-        status: 'sent'
-      };
+      console.log('[WhatsApp] Message sent:', response.data.messages?.[0]?.id);
+      return { success: true, messageId: response.data.messages[0].id, status: 'sent' };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to send message:', error.response?.data || error.message);
+      console.error('[WhatsApp] Failed to send message:', error.response?.data || error.message);
       throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp message');
     }
   }
 
   /**
-   * Send template message
+   * Send a template message.
+   * @param {Object} connection
+   * @param {string} to
+   * @param {string} templateName
+   * @param {string} languageCode
+   * @param {Array}  components
    */
-  async sendTemplateMessage(to, templateName, languageCode = 'en', components = []) {
+  async sendTemplateMessage(connection, to, templateName, languageCode = 'en', components = []) {
+    const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.post(
-        `${this.apiURL}/${this.phoneNumberId}/messages`,
+        `${this.apiURL}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
-          to: to,
+          to,
           type: 'template',
-          template: {
-            name: templateName,
-            language: {
-              code: languageCode
-            },
-            components: components
-          }
+          template: { name: templateName, language: { code: languageCode }, components }
         },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
       );
 
-      return {
-        success: true,
-        messageId: response.data.messages[0].id
-      };
+      return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to send template:', error.response?.data || error.message);
+      console.error('[WhatsApp] Failed to send template:', error.response?.data || error.message);
       throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp template');
     }
   }
 
   /**
-   * Send media message (image, video, document, audio)
+   * Send a media message (image, video, document, audio).
+   * @param {Object} connection
+   * @param {string} to
+   * @param {string} mediaType  'image' | 'video' | 'document' | 'audio'
+   * @param {string} mediaId    Media ID (upload via /media endpoint first)
+   * @param {string} caption    Optional caption
    */
-  async sendMediaMessage(to, mediaType, mediaId, caption = '') {
+  async sendMediaMessage(connection, to, mediaType, mediaId, caption = '') {
+    const phoneNumberId = this._phoneNumberId(connection);
     try {
       const messageData = {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: to,
-        type: mediaType
+        to,
+        type: mediaType,
+        [mediaType]: { id: mediaId }
       };
 
-      messageData[mediaType] = {
-        id: mediaId
-      };
-
-      if (caption && (mediaType === 'image' || mediaType === 'video' || mediaType === 'document')) {
+      if (caption && ['image', 'video', 'document'].includes(mediaType)) {
         messageData[mediaType].caption = caption;
       }
 
       const response = await axios.post(
-        `${this.apiURL}/${this.phoneNumberId}/messages`,
+        `${this.apiURL}/${phoneNumberId}/messages`,
         messageData,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
       );
 
-      return {
-        success: true,
-        messageId: response.data.messages[0].id
-      };
+      return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to send media:', error.response?.data || error.message);
+      console.error('[WhatsApp] Failed to send media:', error.response?.data || error.message);
       throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp media');
     }
   }
 
   /**
-   * Mark message as read
+   * Mark a message as read.
+   * @param {Object} connection
+   * @param {string} messageId
    */
-  async markAsRead(messageId) {
+  async markAsRead(connection, messageId) {
+    const phoneNumberId = this._phoneNumberId(connection);
     try {
       await axios.post(
-        `${this.apiURL}/${this.phoneNumberId}/messages`,
-        {
-          messaging_product: 'whatsapp',
-          status: 'read',
-          message_id: messageId
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        { messaging_product: 'whatsapp', status: 'read', message_id: messageId },
+        { headers: this._jsonHeaders(connection), timeout: 10000 }
       );
-
       return { success: true };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to mark as read:', error.response?.data || error.message);
+      // Non-fatal — log and continue
+      console.warn('[WhatsApp] Failed to mark as read:', error.response?.data?.error?.message || error.message);
       return { success: false };
     }
   }
 
-  /**
-   * Get media URL
-   */
-  async getMediaUrl(mediaId) {
-    try {
-      const response = await axios.get(
-        `${this.apiURL}/${mediaId}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`
-          }
-        }
-      );
+  // ---------------------------------------------------------------------------
+  // Media
+  // ---------------------------------------------------------------------------
 
+  /**
+   * Get media metadata (URL, mime type, size, sha256).
+   * @param {Object} connection
+   * @param {string} mediaId
+   */
+  async getMediaUrl(connection, mediaId) {
+    try {
+      const response = await axios.get(`${this.apiURL}/${mediaId}`, {
+        headers: this._authHeader(connection),
+        timeout: 10000
+      });
       return {
         success: true,
         url: response.data.url,
@@ -213,254 +224,225 @@ class WhatsAppService {
         fileSize: response.data.file_size
       };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to get media URL:', error.response?.data || error.message);
+      console.error('[WhatsApp] Failed to get media URL:', error.response?.data || error.message);
       throw new Error('Failed to get media URL');
     }
   }
 
   /**
-   * Download media
+   * Download media binary.
+   * @param {Object} connection
+   * @param {string} mediaUrl
    */
-  async downloadMedia(mediaUrl) {
+  async downloadMedia(connection, mediaUrl) {
     try {
       const response = await axios.get(mediaUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`
-        },
-        responseType: 'arraybuffer'
+        headers: this._authHeader(connection),
+        responseType: 'arraybuffer',
+        timeout: 30000
       });
-
-      return {
-        success: true,
-        data: response.data,
-        contentType: response.headers['content-type']
-      };
+      return { success: true, data: response.data, contentType: response.headers['content-type'] };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to download media:', error.message);
+      console.error('[WhatsApp] Failed to download media:', error.message);
       throw new Error('Failed to download media');
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Webhook payload parsing (stateless — no connection needed)
+  // ---------------------------------------------------------------------------
+
   /**
-   * Process incoming webhook message
+   * Parse an incoming WhatsApp webhook payload and extract message data.
+   * Returns { success, skipped, messageData } — does not touch the database.
    */
-  async processWebhookMessage(webhookData) {
+  processWebhookMessage(webhookData) {
     try {
-      console.log('📱 [WhatsApp] Processing webhook message');
+      const entry = webhookData.entry?.[0];
+      const value = entry?.changes?.[0]?.value;
 
-      const entry = webhookData.entry[0];
-      const changes = entry.changes[0];
-      const value = changes.value;
-
-      // Check if it's a message event
-      if (!value.messages || value.messages.length === 0) {
-        console.log('⏭️  [WhatsApp] No messages in webhook');
+      if (!value?.messages?.length) {
         return { success: true, skipped: true };
       }
 
       const message = value.messages[0];
-      const contact = value.contacts[0];
+      const contact = value.contacts?.[0];
 
-      // Extract message details
       const messageData = {
         platformId: message.id,
         from: message.from,
-        timestamp: new Date(parseInt(message.timestamp) * 1000),
+        timestamp: new Date(parseInt(message.timestamp, 10) * 1000),
         type: message.type,
         contact: {
-          name: contact.profile.name,
-          wa_id: contact.wa_id
+          name: contact?.profile?.name || message.from,
+          wa_id: contact?.wa_id || message.from
         }
       };
 
-      // Extract message content based on type
       switch (message.type) {
         case 'text':
           messageData.content = message.text.body;
           break;
-        
         case 'image':
           messageData.content = message.image.caption || '[Image]';
           messageData.mediaId = message.image.id;
           messageData.mediaType = 'image';
           break;
-        
         case 'video':
           messageData.content = message.video.caption || '[Video]';
           messageData.mediaId = message.video.id;
           messageData.mediaType = 'video';
           break;
-        
         case 'audio':
           messageData.content = '[Audio Message]';
           messageData.mediaId = message.audio.id;
           messageData.mediaType = 'audio';
           break;
-        
         case 'document':
           messageData.content = message.document.caption || message.document.filename || '[Document]';
           messageData.mediaId = message.document.id;
           messageData.mediaType = 'document';
           break;
-        
         case 'location':
           messageData.content = `[Location: ${message.location.latitude}, ${message.location.longitude}]`;
           messageData.location = message.location;
           break;
-        
         case 'contacts':
-          messageData.content = `[Contact: ${message.contacts[0].name.formatted_name}]`;
+          messageData.content = `[Contact: ${message.contacts?.[0]?.name?.formatted_name || 'Unknown'}]`;
           messageData.contacts = message.contacts;
           break;
-        
+        case 'sticker':
+          messageData.content = '[Sticker]';
+          messageData.mediaId = message.sticker?.id;
+          messageData.mediaType = 'sticker';
+          break;
+        case 'reaction':
+          messageData.content = `[Reaction: ${message.reaction?.emoji || ''}]`;
+          messageData.reactionEmoji = message.reaction?.emoji;
+          messageData.reactedToMessageId = message.reaction?.message_id;
+          break;
+        case 'button':
+          messageData.content = message.button?.text || '[Button reply]';
+          messageData.buttonPayload = message.button?.payload;
+          break;
+        case 'interactive':
+          messageData.content = message.interactive?.button_reply?.title
+            || message.interactive?.list_reply?.title
+            || '[Interactive reply]';
+          break;
         default:
           messageData.content = `[Unsupported message type: ${message.type}]`;
       }
 
-      console.log('✅ [WhatsApp] Message processed:', messageData);
-
-      return {
-        success: true,
-        messageData: messageData
-      };
-
+      return { success: true, messageData };
     } catch (error) {
-      console.error('❌ [WhatsApp] Error processing webhook:', error);
+      console.error('[WhatsApp] Error processing webhook:', error);
       throw error;
     }
   }
 
   /**
-   * Transform WhatsApp message to Interaction model
+   * Build an Interaction document from parsed message data + connection context.
    */
-  async transformToInteraction(messageData, platformConnection, organization) {
-    try {
-      const interaction = {
-        organization: organization._id,
-        platform: 'whatsapp',
-        platformConnection: platformConnection._id,
-        type: 'dm',
-        platformId: messageData.platformId,
-        content: messageData.content,
-        contentType: messageData.mediaType || 'text',
-        author: {
-          platformId: messageData.from,
-          name: messageData.contact.name,
-          username: messageData.contact.wa_id
-        },
-        platformCreatedAt: messageData.timestamp,
-        status: 'unread',
-        isRead: false
+  transformToInteraction(messageData, platformConnection, organization) {
+    const interaction = {
+      organization: organization._id,
+      platform: 'whatsapp',
+      platformConnection: platformConnection._id,
+      type: 'dm',
+      platformId: messageData.platformId,
+      content: messageData.content,
+      contentType: messageData.mediaType || 'text',
+      author: {
+        platformId: messageData.from,
+        name: messageData.contact.name,
+        username: messageData.contact.wa_id
+      },
+      platformCreatedAt: messageData.timestamp,
+      status: 'unread',
+      isRead: false
+    };
+
+    if (messageData.mediaId) {
+      interaction.metadata = {
+        mediaId: messageData.mediaId,
+        mediaType: messageData.mediaType,
+        hasMedia: true
       };
-
-      // Add media metadata if present
-      if (messageData.mediaId) {
-        interaction.metadata = {
-          mediaId: messageData.mediaId,
-          mediaType: messageData.mediaType,
-          hasMedia: true
-        };
-      }
-
-      // Add location metadata if present
-      if (messageData.location) {
-        interaction.metadata = {
-          ...interaction.metadata,
-          location: messageData.location
-        };
-      }
-
-      return interaction;
-    } catch (error) {
-      console.error('❌ [WhatsApp] Error transforming to interaction:', error);
-      throw error;
     }
+
+    if (messageData.location) {
+      interaction.metadata = { ...interaction.metadata, location: messageData.location };
+    }
+
+    return interaction;
   }
 
+  // ---------------------------------------------------------------------------
+  // Business profile & templates
+  // ---------------------------------------------------------------------------
+
   /**
-   * Get business profile
+   * @param {Object} connection
    */
-  async getBusinessProfile() {
+  async getBusinessProfile(connection) {
+    const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.get(
-        `${this.apiURL}/${this.phoneNumberId}/whatsapp_business_profile`,
+        `${this.apiURL}/${phoneNumberId}/whatsapp_business_profile`,
         {
-          params: {
-            fields: 'about,address,description,email,profile_picture_url,websites,vertical'
-          },
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`
-          }
+          params: { fields: 'about,address,description,email,profile_picture_url,websites,vertical' },
+          headers: this._authHeader(connection),
+          timeout: 10000
         }
       );
-
-      return {
-        success: true,
-        profile: response.data.data[0]
-      };
+      return { success: true, profile: response.data.data?.[0] || {} };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to get business profile:', error.response?.data || error.message);
-      throw new Error('Failed to get business profile');
+      console.error('[WhatsApp] Failed to get business profile:', error.response?.data || error.message);
+      return { success: false, profile: {} };
     }
   }
 
   /**
-   * Update business profile
+   * @param {Object} connection
+   * @param {Object} profileData
    */
-  async updateBusinessProfile(profileData) {
+  async updateBusinessProfile(connection, profileData) {
+    const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.post(
-        `${this.apiURL}/${this.phoneNumberId}/whatsapp_business_profile`,
-        {
-          messaging_product: 'whatsapp',
-          ...profileData
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        }
+        `${this.apiURL}/${phoneNumberId}/whatsapp_business_profile`,
+        { messaging_product: 'whatsapp', ...profileData },
+        { headers: this._jsonHeaders(connection), timeout: 10000 }
       );
-
-      return {
-        success: true,
-        data: response.data
-      };
+      return { success: true, data: response.data };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to update business profile:', error.response?.data || error.message);
+      console.error('[WhatsApp] Failed to update business profile:', error.response?.data || error.message);
       throw new Error('Failed to update business profile');
     }
   }
 
   /**
-   * Get message templates
+   * @param {Object} connection
    */
-  async getMessageTemplates() {
+  async getMessageTemplates(connection) {
+    const wabaId = connection?.platformData?.wabaId
+      || connection?.platformData?.businessAccountId
+      || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+
+    if (!wabaId) throw new Error('WhatsApp Business Account ID not available on this connection');
+
     try {
-      if (!this.businessAccountId) {
-        throw new Error('WhatsApp Business Account ID not configured');
-      }
-
       const response = await axios.get(
-        `${this.apiURL}/${this.businessAccountId}/message_templates`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`
-          }
-        }
+        `${this.apiURL}/${wabaId}/message_templates`,
+        { headers: this._authHeader(connection), timeout: 10000 }
       );
-
-      return {
-        success: true,
-        templates: response.data.data
-      };
+      return { success: true, templates: response.data.data };
     } catch (error) {
-      console.error('❌ [WhatsApp] Failed to get templates:', error.response?.data || error.message);
+      console.error('[WhatsApp] Failed to get templates:', error.response?.data || error.message);
       throw new Error('Failed to get message templates');
     }
   }
 }
 
 module.exports = new WhatsAppService();
-

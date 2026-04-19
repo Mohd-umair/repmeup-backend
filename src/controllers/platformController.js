@@ -546,6 +546,25 @@ exports.syncPlatform = async (req, res, next) => {
           }
         });
       }
+    } else if (connection.platform === 'whatsapp') {
+      // WhatsApp Cloud API does not expose a "fetch history" endpoint for arbitrary conversations.
+      // We surface the last known messages already stored and update connection quality/profile.
+      try {
+        const verifyResult = await whatsappService.verifyConnection(connection);
+        if (verifyResult.success) {
+          connection.platformData = {
+            ...connection.platformData,
+            qualityRating: verifyResult.qualityRating,
+            codeVerificationStatus: verifyResult.codeVerificationStatus
+          };
+          connection.lastSyncAt = new Date();
+          await connection.save();
+          console.log('[Sync] WhatsApp connection health refreshed');
+        }
+      } catch (waErr) {
+        console.warn('[Sync] WhatsApp health check failed (non-fatal):', waErr.message);
+      }
+      result = { count: 0, interactions: [] };
     } else {
       return res.status(400).json({
         success: false,
@@ -779,12 +798,131 @@ exports.refreshGoogleLocations = async (req, res, next) => {
  * @route   POST /api/platforms/whatsapp/connect
  * @access  Private
  */
+/**
+ * @desc    Initiate WhatsApp Embedded Signup OAuth flow
+ * @route   GET /api/platforms/whatsapp/connect
+ * @access  Private
+ * Returns an authUrl for the frontend to open in a popup/redirect.
+ */
+exports.initiateWhatsAppConnection = async (req, res, next) => {
+  try {
+    const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+    const userId = req.user._id.toString();
+    const organizationId = req.user.organization._id.toString();
+
+    const authUrl = whatsappLoginAuth.getAuthURL(userId, organizationId);
+
+    res.status(200).json({
+      success: true,
+      data: { authUrl }
+    });
+  } catch (error) {
+    console.error('❌ [WhatsApp] Initiate connection error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Handle WhatsApp OAuth callback (Embedded Signup)
+ * @route   GET /api/platforms/whatsapp/callback  (public — called by Meta redirect)
+ * @access  Public
+ */
+exports.handleWhatsAppCallback = async (req, res, next) => {
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
+
+  try {
+    const { code, state, error: oauthError, error_description } = req.query;
+
+    if (oauthError) {
+      console.error('[WhatsApp] OAuth error:', oauthError, error_description);
+      return res.redirect(
+        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(error_description || oauthError)}`
+      );
+    }
+
+    if (!code || !state) {
+      return res.redirect(
+        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent('Missing code or state parameter')}`
+      );
+    }
+
+    const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+
+    // Verify state and extract userId / organizationId
+    let stateData;
+    try {
+      stateData = whatsappLoginAuth.verifyState(state);
+    } catch (stateErr) {
+      return res.redirect(
+        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(stateErr.message)}`
+      );
+    }
+
+    const { userId, organizationId } = stateData;
+
+    // Exchange code for short-lived token then long-lived token
+    const shortToken = await whatsappLoginAuth.exchangeCode(code);
+    const { accessToken, expiresIn } = await whatsappLoginAuth.getLongLivedToken(shortToken);
+
+    // Discover WABAs and phone numbers
+    const phoneNumbers = await whatsappLoginAuth.getWhatsAppAccounts(accessToken);
+
+    if (!phoneNumbers || phoneNumbers.length === 0) {
+      return res.redirect(
+        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(
+          'No WhatsApp Business phone numbers found. Ensure the account has admin access to a WABA.'
+        )}`
+      );
+    }
+
+    // Save all discovered phone numbers as separate connections (or just the first)
+    const savedConnections = [];
+    for (const phoneData of phoneNumbers) {
+      try {
+        const conn = await whatsappLoginAuth.saveConnection(
+          userId, organizationId, accessToken, expiresIn, phoneData
+        );
+        savedConnections.push(conn);
+      } catch (saveErr) {
+        if (saveErr.code === 'CROSS_ORG_CONFLICT') {
+          console.warn(`[WhatsApp] Cross-org conflict for ${phoneData.displayPhoneNumber}, skipping`);
+        } else {
+          console.error(`[WhatsApp] Failed to save connection for ${phoneData.displayPhoneNumber}:`, saveErr.message);
+        }
+      }
+    }
+
+    if (savedConnections.length === 0) {
+      return res.redirect(
+        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(
+          'Could not save WhatsApp connection. The number may already be connected in another workspace.'
+        )}`
+      );
+    }
+
+    console.log(`✅ [WhatsApp] ${savedConnections.length} connection(s) saved for org ${organizationId}`);
+    return res.redirect(
+      `${frontendUrl}/settings?tab=platforms&whatsapp_connected=true&count=${savedConnections.length}`
+    );
+
+  } catch (error) {
+    console.error('❌ [WhatsApp] Callback error:', error);
+    return res.redirect(
+      `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(error.message || 'WhatsApp connection failed')}`
+    );
+  }
+};
+
+/**
+ * @desc    Connect WhatsApp using env credentials (dev/fallback — single-tenant)
+ * @route   POST /api/platforms/whatsapp/connect-direct
+ * @access  Private
+ */
 exports.connectWhatsApp = async (req, res, next) => {
   try {
     const organizationId = req.user.organization._id;
 
-    // Verify WhatsApp connection
-    const verificationResult = await whatsappService.verifyConnection();
+    const verificationResult = await whatsappService.verifyConnection(null);
 
     if (!verificationResult.success) {
       return res.status(400).json({
@@ -794,7 +932,10 @@ exports.connectWhatsApp = async (req, res, next) => {
       });
     }
 
-    // Check if already connected
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+    const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+
     const existingConnection = await PlatformConnection.findOne({
       organization: organizationId,
       platform: 'whatsapp',
@@ -809,9 +950,8 @@ exports.connectWhatsApp = async (req, res, next) => {
       });
     }
 
-    // Cross-org conflict check: block if this phone number is active in another workspace
     const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
-      'whatsapp', whatsappService.phoneNumberId, organizationId
+      'whatsapp', phoneNumberId, organizationId
     );
     if (crossOrgConflict) {
       return res.status(409).json({
@@ -821,31 +961,31 @@ exports.connectWhatsApp = async (req, res, next) => {
       });
     }
 
-    // Get business profile
-    const profileResult = await whatsappService.getBusinessProfile();
+    const profileResult = await whatsappService.getBusinessProfile({ accessToken, platformData: { phoneNumberId }, platformUserId: phoneNumberId });
 
-    // Create platform connection
     const connection = await PlatformConnection.create({
       organization: organizationId,
       platform: 'whatsapp',
-      platformUserId: whatsappService.phoneNumberId,
+      platformUserId: phoneNumberId,
       platformDisplayName: verificationResult.verifiedName,
-      accessToken: whatsappService.accessToken, // Required field
-      createdBy: req.user._id, // Required field
+      accessToken,
+      createdBy: req.user._id,
       platformData: {
-        phoneNumberId: whatsappService.phoneNumberId,
-        businessAccountId: whatsappService.businessAccountId,
+        phoneNumberId,
+        businessAccountId,
+        wabaId: businessAccountId,
         displayPhoneNumber: verificationResult.phoneNumber,
         verifiedName: verificationResult.verifiedName,
         qualityRating: verificationResult.qualityRating,
         codeVerificationStatus: verificationResult.codeVerificationStatus,
         businessProfile: profileResult.profile
       },
+      metadata: { connectionType: 'whatsapp_direct_env' },
       status: 'connected',
       isActive: true
     });
 
-    console.log('✅ [WhatsApp] Connection created:', connection._id);
+    console.log('✅ [WhatsApp] Direct connection created:', connection._id);
 
     res.status(200).json({
       success: true,
@@ -867,12 +1007,12 @@ exports.connectWhatsApp = async (req, res, next) => {
 exports.disconnectWhatsApp = async (req, res, next) => {
   try {
     const organizationId = req.user.organization._id;
+    const connectionId = req.query.connectionId || req.body?.connectionId;
 
-    const connection = await PlatformConnection.findOne({
-      organization: organizationId,
-      platform: 'whatsapp',
-      isActive: true
-    });
+    const query = { organization: organizationId, platform: 'whatsapp', isActive: true };
+    if (connectionId) query._id = connectionId;
+
+    const connection = await PlatformConnection.findOne(query);
 
     if (!connection) {
       return res.status(404).json({
@@ -881,7 +1021,13 @@ exports.disconnectWhatsApp = async (req, res, next) => {
       });
     }
 
-    // Deactivate connection
+    // Unsubscribe WABA from webhooks before deactivating
+    const wabaId = connection.platformData?.wabaId;
+    if (wabaId && connection.accessToken) {
+      const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+      await whatsappLoginAuth.unsubscribeFromWebhook(wabaId, connection.accessToken);
+    }
+
     connection.isActive = false;
     connection.status = 'disconnected';
     await connection.save();
