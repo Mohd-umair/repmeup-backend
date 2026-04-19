@@ -119,10 +119,39 @@ module.exports = async function processAI(job) {
       jobLogger.warn('Credit deduction failed (non-fatal)', { error: creditErr.message });
     }
 
-    // Save interaction
-    await interaction.save();
+    // Persist only the AI-derived fields using a targeted $set update.
+    // Using interaction.save() causes a Mongoose VersionError when processWebhook
+    // concurrently writes metadata.incomingMessages between our findById and this
+    // save — the document version increments and save() finds a stale __v.
+    const aiUpdate = {
+      sentiment:             interaction.sentiment,
+      sentimentScore:        interaction.sentimentScore,
+      sentimentConfidence:   interaction.sentimentConfidence,
+      intent:                interaction.intent,
+      topics:                interaction.topics,
+      autoReplyEligible:     interaction.autoReplyEligible,
+    };
+    if (interaction.intentBucket)       aiUpdate.intentBucket       = interaction.intentBucket;
+    if (interaction.bucketAssignedBy)   aiUpdate.bucketAssignedBy   = interaction.bucketAssignedBy;
+    if (interaction.assignedTo)         aiUpdate.assignedTo         = interaction.assignedTo;
+    if (interaction.assignedBy)         aiUpdate.assignedBy         = interaction.assignedBy;
+    if (interaction.assignedAt)         aiUpdate.assignedAt         = interaction.assignedAt;
+    if (interaction.assignmentReason)   aiUpdate.assignmentReason   = interaction.assignmentReason;
+    if (interaction.assignmentHistory?.length) {
+      // Append any new assignment history entries added by assignToAgent()
+      await Interaction.findByIdAndUpdate(
+        interactionId,
+        {
+          $set: aiUpdate,
+          $push: { assignmentHistory: { $each: interaction.assignmentHistory } }
+        },
+        { new: false }
+      );
+    } else {
+      await Interaction.findByIdAndUpdate(interactionId, { $set: aiUpdate }, { new: false });
+    }
 
-    console.log(`AI processing completed for interaction: ${interactionId}`);
+    jobLogger.info('AI processing completed', { interactionId });
 
     return {
       success: true,

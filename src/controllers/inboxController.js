@@ -725,10 +725,11 @@ exports.replyToInteraction = async (req, res, next) => {
         }
       } else if (interaction.platform === 'instagram') {
         const instagramService = require('../integrations/meta/instagramService');
+        // Resolve connection type once — used for both DM and comment reply paths.
+        const connType = connection.metadata?.connectionType
+          || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
         let result;
         if (interaction.type === 'dm') {
-          const connType = connection.metadata?.connectionType
-            || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
           let pageId;
           if (connType === 'instagram_login') {
             // IGAA tokens are scoped to the app-scoped Instagram User ID (ISUID), not the
