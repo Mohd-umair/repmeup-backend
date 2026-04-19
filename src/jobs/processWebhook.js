@@ -310,9 +310,12 @@ async function handleInstagramWebhook(payload, organizationId) {
     const allMessageEvents = [...messaging, ...standby];
 
     if (allMessageEvents.length === 0) {
-      logger.info('[processWebhook] Instagram: no messaging or standby events', {
+      const hasComments = !!(entry.changes?.some(c => c.field === 'comments'));
+      const hasMentions = !!(entry.changes?.some(c => c.field === 'mentions'));
+      logger.info('[processWebhook] Instagram: no DM/standby events — checking changes', {
         entryId: entry.id,
-        hasChanges: !!(entry.changes && entry.changes.length)
+        hasComments,
+        hasMentions
       });
     }
 
@@ -480,8 +483,15 @@ async function handleInstagramWebhook(payload, organizationId) {
     for (const change of changes) {
       if (change.field === 'comments') {
         const comment = change.value;
-        // Skip our own replies: when the connected IG account replies, from.id equals the account id.
+        // Skip own comments: when the connected IG account owner posts a comment,
+        // from.id equals the account's global IG ID (= entry.id = igAccountId).
+        // Business owner comments must not appear as inbox interactions.
         if (comment.from && String(comment.from.id) === String(igAccountId)) {
+          logger.info('[processWebhook] Instagram: skipping own comment from connected account', {
+            commentId: comment.id,
+            fromId: comment.from.id,
+            igAccountId
+          });
           return null;
         }
 
@@ -525,6 +535,9 @@ async function handleInstagramWebhook(payload, organizationId) {
           },
           platformCreatedAt
         };
+        // Link to the platform connection so the inbox reply path can resolve
+        // the correct access token and account, same as DMs do at line 428.
+        if (platformConnectionId) updatePayload.platformConnection = platformConnectionId;
         if (isReply && parentCommentId) {
           updatePayload.parentId = parentCommentId; // So this reply shows in the parent thread, not as new conversation
         }
