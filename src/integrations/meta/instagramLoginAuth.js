@@ -14,7 +14,8 @@ const PlatformConnection = require('../../models/PlatformConnection');
  *  - Graph API:     https://graph.instagram.com
  *  - No Facebook Page required
  *  - Scopes:        instagram_business_basic, instagram_business_content_publish,
- *                   instagram_business_manage_messages, instagram_business_manage_comments
+ *                   instagram_business_manage_messages, instagram_business_manage_comments,
+ *                   instagram_business_manage_insights
  */
 class InstagramLoginAuthService {
   constructor() {
@@ -103,7 +104,8 @@ class InstagramLoginAuthService {
         'instagram_business_basic',
         'instagram_business_content_publish',
         'instagram_business_manage_messages',
-        'instagram_business_manage_comments'
+        'instagram_business_manage_comments',
+        'instagram_business_manage_insights'
       ].join(','),
       response_type: 'code',
       state
@@ -330,7 +332,8 @@ class InstagramLoginAuthService {
       'instagram_business_basic',
       'instagram_business_content_publish',
       'instagram_business_manage_messages',
-      'instagram_business_manage_comments'
+      'instagram_business_manage_comments',
+      'instagram_business_manage_insights'
     ];
 
     // Find any existing Instagram Login connection for this account, keyed by
