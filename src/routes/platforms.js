@@ -54,9 +54,12 @@ router.use(protect);
 // Google OAuth flow - check limit before starting OAuth
 router.get('/google/connect', checkConnectionLimit, platformController.initiateGoogleConnection);
 
-// WhatsApp Business API — Embedded Signup OAuth (multi-tenant)
+// WhatsApp Business API
+// GET  /whatsapp/connect        → returns Embedded Signup OAuth authUrl (production)
+// POST /whatsapp/connect        → direct env-credentials connect (dev / current setup)
+// POST /whatsapp/connect-direct → alias for the above
 router.get('/whatsapp/connect', checkConnectionLimit, platformController.initiateWhatsAppConnection);
-// Dev/fallback: direct env-based connection (single-tenant)
+router.post('/whatsapp/connect', checkConnectionLimit, platformController.connectWhatsApp);
 router.post('/whatsapp/connect-direct', checkConnectionLimit, platformController.connectWhatsApp);
 router.delete('/whatsapp/disconnect', platformController.disconnectWhatsApp);
 router.get('/whatsapp/status', platformController.getWhatsAppStatus);
