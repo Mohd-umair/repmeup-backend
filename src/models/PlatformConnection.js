@@ -90,10 +90,14 @@ const platformConnectionSchema = new mongoose.Schema({
       default: null  // null = not yet determined
     },
     instagramDmDisabledReason: String,
-    // Instagram Login flow: identifies the connection type
+    // Identifies the OAuth / connection flow used to create this record.
+    //  - instagram_login           : Instagram API with Instagram Login (IGAA tokens)
+    //  - facebook_login            : Instagram via Facebook Login / Page Manager (EAA tokens)
+    //  - whatsapp_embedded_signup  : WhatsApp via Meta Embedded Signup OAuth (per-tenant)
+    //  - whatsapp_direct_env       : WhatsApp using shared env-level credentials (dev/single-tenant)
     connectionType: {
       type: String,
-      enum: ['instagram_login', 'facebook_login', null],
+      enum: ['instagram_login', 'facebook_login', 'whatsapp_embedded_signup', 'whatsapp_direct_env', null],
       default: null
     },
     // Instagram Login flow: the app-scoped Instagram User ID (ISUID) returned by
