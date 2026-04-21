@@ -982,7 +982,13 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
 }
 
 /**
- * Handle WhatsApp webhook
+ * Handle WhatsApp webhook (legacy queued path).
+ *
+ * Threads all messages from the same (phoneNumberId, customer) pair into a single
+ * Interaction, matching the primary handler in controllers/webhookController.js
+ * and the Instagram/Facebook DM pattern above. Previously this path keyed each
+ * Interaction on `message.id` (the per-message wamid), which created a brand-new
+ * conversation for every inbound message.
  */
 async function handleWhatsAppWebhook(payload, organizationId) {
   try {
@@ -992,32 +998,86 @@ async function handleWhatsAppWebhook(payload, organizationId) {
     const changes = entry.changes || [];
 
     for (const change of changes) {
-      if (change.value.messages) {
-        const message = change.value.messages[0];
+      const value = change.value || {};
+      if (!value.messages || value.messages.length === 0) continue;
 
-        const _waChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
-        const interaction = await Interaction.findOneAndUpdate(
-          { platformId: message.id },
-          {
-            $set: {
-              organization: organizationId,
-              platform: 'whatsapp',
-              type: 'dm',
-              platformId: message.id,
-              content: message.text?.body || message.body,
-              author: {
-                platformId: message.from,
-                name: change.value.contacts?.[0]?.profile?.name || message.from
-              },
-              platformCreatedAt: new Date(parseInt(message.timestamp) * 1000)
-            },
-            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _waChatRef.chatNumber, chatRef: _waChatRef.chatRef }
-          },
-          { upsert: true, new: true }
-        );
+      const message = value.messages[0];
+      const phoneNumberId = value.metadata?.phone_number_id;
+      const senderId = String(message.from);
+      const mid = message.id;
 
-        return interaction;
+      // One Interaction per (connected phone number, customer)
+      const threadPlatformId = `dm_${String(phoneNumberId)}_${senderId}`;
+
+      const existing = await Interaction
+        .findOne({ platformId: threadPlatformId })
+        .select('_id metadata.lastMid author chatRef')
+        .lean();
+
+      // Idempotency: skip if we've already recorded this exact message id
+      if (existing && existing.metadata?.lastMid === mid) {
+        return null;
       }
+
+      const prevAuthor = existing?.author || {};
+      const mergedAuthor = {
+        platformId: senderId,
+        name: value.contacts?.[0]?.profile?.name || prevAuthor.name || senderId,
+        username: value.contacts?.[0]?.wa_id || prevAuthor.username || senderId
+      };
+
+      let chatRefData = null;
+      if (!existing || !existing.chatRef) {
+        chatRefData = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+      }
+
+      const textContent = message.text?.body || message.body || '';
+
+      const set = {
+        organization: organizationId,
+        platform: 'whatsapp',
+        type: 'dm',
+        platformId: threadPlatformId,
+        threadId: senderId,
+        content: textContent,
+        author: mergedAuthor,
+        platformCreatedAt: new Date(parseInt(message.timestamp) * 1000),
+        status: 'unread',
+        isRead: false,
+        'metadata.lastMid': mid,
+        'metadata.phoneNumberId': String(phoneNumberId)
+      };
+
+      const setOnInsert = { source: 'webhook' };
+      if (existing && !existing.chatRef && chatRefData?.chatRef) {
+        set.chatNumber = chatRefData.chatNumber;
+        set.chatRef = chatRefData.chatRef;
+      } else if (!existing && chatRefData?.chatRef) {
+        setOnInsert.chatNumber = chatRefData.chatNumber;
+        setOnInsert.chatRef = chatRefData.chatRef;
+      }
+
+      await Interaction.findOneAndUpdate(
+        { platformId: threadPlatformId },
+        { $set: set, $setOnInsert: setOnInsert },
+        { upsert: true }
+      );
+
+      // Append this message to the thread's message list; guard against duplicate mids
+      await Interaction.updateOne(
+        { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
+        {
+          $push: {
+            'metadata.incomingMessages': {
+              $each: [{ mid, text: textContent, timestamp: Date.now(), type: message.type }],
+              $slice: -100
+            }
+          }
+        }
+      );
+
+      const interaction = await Interaction.findOne({ platformId: threadPlatformId });
+      return interaction;
     }
 
     return null;
