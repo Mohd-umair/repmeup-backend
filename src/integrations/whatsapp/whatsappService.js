@@ -343,6 +343,13 @@ class WhatsAppService {
 
   /**
    * Build an Interaction document from parsed message data + connection context.
+   *
+   * @deprecated This produces a per-message Interaction (platformId = wamid), which
+   * creates a new conversation row for every inbound message. For webhook handling,
+   * thread messages by `dm_<phoneNumberId>_<senderNumber>` and push each message into
+   * `metadata.incomingMessages` (see controllers/webhookController.js::handleWhatsAppWebhook
+   * and jobs/processWebhook.js::handleWhatsAppWebhook). Kept only for backward
+   * compatibility with any non-webhook callers.
    */
   transformToInteraction(messageData, platformConnection, organization) {
     const interaction = {

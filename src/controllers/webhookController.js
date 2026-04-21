@@ -773,6 +773,7 @@ exports.handleWhatsAppWebhook = async (req, res) => {
     const whatsappService = require('../integrations/whatsapp/whatsappService');
     const PlatformConnection = require('../models/PlatformConnection');
     const Interaction = require('../models/Interaction');
+    const { emitToOrg } = require('../utils/socketEmitter');
 
     console.log('💬 [WhatsApp Webhook] Received event');
     console.log('📦 [WhatsApp Webhook] Request body:', JSON.stringify(req.body, null, 2));
@@ -866,36 +867,136 @@ exports.handleWhatsAppWebhook = async (req, res) => {
           const messageData = await whatsappService.processWebhookMessage(req.body);
 
           if (messageData.success && !messageData.skipped) {
-            // Transform to interaction
-            const interaction = await whatsappService.transformToInteraction(
-              messageData.messageData,
-              connection,
-              connection.organization
-            );
+            const md = messageData.messageData;
+            const senderId = String(md.from);
+            const mid = md.platformId;
 
-            // Assign chat ticket ref before saving
-            try {
-              const chatData = await generateChatRef(connection.organization);
-              interaction.chatNumber = chatData.chatNumber;
-              interaction.chatRef = chatData.chatRef;
-            } catch (_chatRefErr) {
-              console.warn('[WhatsApp] Could not generate chatRef:', _chatRefErr.message);
+            // Thread key: one Interaction per (connected phone number, customer).
+            // Matches the Instagram/Facebook DM pattern in processWebhook.js so all
+            // messages from the same WhatsApp number collapse into a single conversation.
+            const threadPlatformId = `dm_${String(phoneNumberId)}_${senderId}`;
+
+            // Look up existing thread for duplicate detection + author merging
+            const existing = await Interaction
+              .findOne({ platformId: threadPlatformId })
+              .select('_id metadata.lastMid author chatRef')
+              .lean();
+
+            // Meta can retry the same webhook event — skip if we already stored this mid
+            if (existing && existing.metadata?.lastMid === mid) {
+              console.log(`⏭️  [WhatsApp] Duplicate webhook (same mid) — skipping: ${mid}`);
+              continue;
             }
 
-            // Save interaction
-            interaction.source = 'webhook';
-            const savedInteraction = await Interaction.create(interaction);
-            console.log(`✅ [WhatsApp] Interaction saved: ${savedInteraction._id}`);
+            // Merge author info: prefer new values, fall back to previously stored ones
+            const prevAuthor = existing?.author || {};
+            const mergedAuthor = {
+              platformId: senderId,
+              name: md.contact?.name || prevAuthor.name || senderId,
+              username: md.contact?.wa_id || prevAuthor.username || senderId
+            };
 
-            // AUTOMATIC SENTIMENT ANALYSIS: Analyze immediately for real-time filtering
-            if (savedInteraction.content && !savedInteraction.sentiment) {
+            // Chat ref is only allocated on first insert
+            let chatRefData = null;
+            if (!existing || !existing.chatRef) {
+              try {
+                chatRefData = await generateChatRef(connection.organization);
+              } catch (_chatRefErr) {
+                console.warn('[WhatsApp] Could not generate chatRef:', _chatRefErr.message);
+              }
+            }
+
+            const set = {
+              organization: connection.organization._id,
+              platform: 'whatsapp',
+              platformConnection: connection._id,
+              type: 'dm',
+              platformId: threadPlatformId,
+              threadId: senderId,
+              content: md.content,
+              contentType: md.mediaType || 'text',
+              author: mergedAuthor,
+              platformCreatedAt: md.timestamp,
+              status: 'unread',
+              isRead: false,
+              'metadata.lastMid': mid,
+              'metadata.phoneNumberId': String(phoneNumberId)
+            };
+
+            if (md.mediaId) {
+              set['metadata.mediaId'] = md.mediaId;
+              set['metadata.mediaType'] = md.mediaType;
+              set['metadata.hasMedia'] = true;
+            }
+            if (md.location) {
+              set['metadata.location'] = md.location;
+            }
+
+            const setOnInsert = { source: 'webhook' };
+            // Backfill chatRef onto an existing thread that somehow lacks one
+            if (existing && !existing.chatRef && chatRefData?.chatRef) {
+              set.chatNumber = chatRefData.chatNumber;
+              set.chatRef = chatRefData.chatRef;
+            } else if (!existing && chatRefData?.chatRef) {
+              setOnInsert.chatNumber = chatRefData.chatNumber;
+              setOnInsert.chatRef = chatRefData.chatRef;
+            }
+
+            // Step 1: upsert the thread document (no message array push here to avoid
+            // $set/$push path conflicts on the same sub-path)
+            await Interaction.findOneAndUpdate(
+              { platformId: threadPlatformId },
+              { $set: set, $setOnInsert: setOnInsert },
+              { upsert: true }
+            );
+
+            // Step 2: append this message to the thread's message list, guarding
+            // against duplicate mids so webhook retries don't double-push.
+            const incomingMsg = {
+              mid,
+              text: md.content,
+              timestamp: md.timestamp,
+              type: md.type
+            };
+            if (md.mediaId) {
+              incomingMsg.mediaId = md.mediaId;
+              incomingMsg.attachmentType = md.mediaType;
+            }
+            await Interaction.updateOne(
+              { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
+              {
+                $push: {
+                  'metadata.incomingMessages': {
+                    $each: [incomingMsg],
+                    $slice: -100
+                  }
+                }
+              }
+            );
+
+            const savedInteraction = await Interaction.findOne({ platformId: threadPlatformId });
+            if (!savedInteraction) {
+              console.error('[WhatsApp] Thread upsert succeeded but document not found after fetch');
+              continue;
+            }
+            console.log(`✅ [WhatsApp] Thread updated: ${savedInteraction._id} (thread=${threadPlatformId})`);
+
+            // AUTOMATIC SENTIMENT ANALYSIS: Analyze immediately for real-time filtering.
+            // Use atomic $set to avoid VersionError when AI worker races on the same doc.
+            if (savedInteraction.content) {
               try {
                 const aiService = require('../services/aiService');
                 const sentimentResult = aiService.fallbackSentimentAnalysis(savedInteraction.content);
-                savedInteraction.sentiment = sentimentResult.sentiment;
-                savedInteraction.sentimentScore = sentimentResult.sentimentScore;
-                savedInteraction.sentimentConfidence = sentimentResult.sentimentConfidence;
-                await savedInteraction.save();
+                await Interaction.updateOne(
+                  { _id: savedInteraction._id },
+                  {
+                    $set: {
+                      sentiment: sentimentResult.sentiment,
+                      sentimentScore: sentimentResult.sentimentScore,
+                      sentimentConfidence: sentimentResult.sentimentConfidence
+                    }
+                  }
+                );
                 console.log(`🎭 [WhatsApp] Sentiment analyzed: ${sentimentResult.sentiment} for ${savedInteraction._id}`);
               } catch (sentError) {
                 console.error(`⚠️ [WhatsApp] Sentiment analysis failed:`, sentError.message);
@@ -904,9 +1005,18 @@ exports.handleWhatsAppWebhook = async (req, res) => {
 
             // Mark message as read using per-connection token
             try {
-              await whatsappService.markAsRead(connection, message.id);
+              await whatsappService.markAsRead(connection, mid);
             } catch (readError) {
               console.error('❌ [WhatsApp] Failed to mark as read:', readError.message);
+            }
+
+            // Emit socket event so the frontend inbox updates in real time
+            try {
+              emitToOrg(connection.organization._id.toString(), 'new_interaction', {
+                interaction: savedInteraction.toObject()
+              });
+            } catch (socketErr) {
+              console.error('[WhatsApp] Socket emit failed:', socketErr.message);
             }
 
             // Full AI pipeline + auto-reply queue (respects triggerMode, platforms, types, delay)
@@ -918,7 +1028,7 @@ exports.handleWhatsAppWebhook = async (req, res) => {
                 {
                   attempts: 3,
                   backoff: 2000,
-                  jobId: `ai-${savedInteraction._id}`
+                  jobId: `ai-${savedInteraction._id}-${mid}`
                 }
               );
               const queued = await autoReplyScheduler.queueImmediateAutoReply(
