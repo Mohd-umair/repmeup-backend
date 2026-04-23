@@ -5,6 +5,8 @@ const Interaction = require('../models/Interaction');
 const { escapeRegex } = require('../utils/sanitize');
 const userActivityLogService = require('../services/userActivityLogService');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
+const cacheService = require('../services/cacheService');
+const entitlementsService = require('../services/entitlementsService');
 
 // @desc    Get all users in organization
 // @route   GET /api/users
@@ -155,17 +157,15 @@ exports.createUser = async (req, res, next) => {
       });
     }
 
-    // Check user limits: prefer Subscription (plan from DB) when present, else Organization limits
-    const organization = await Organization.findById(organizationId);
-    const subscription = await Subscription.findOne({ organization: organizationId });
+    // Check user limits via entitlementsService (single source of truth).
     const currentUserCount = await User.countDocuments({ organization: organizationId, isActive: true });
+    const { allowed, limit: maxUsers } = await entitlementsService.canAddResource(
+      organizationId,
+      'users',
+      currentUserCount
+    );
 
-    const maxUsers = subscription
-      ? subscription.limits.maxUsers
-      : (organization.limits?.maxUsers ?? 3);
-    const isUnlimited = maxUsers === -1;
-
-    if (!isUnlimited && currentUserCount >= maxUsers) {
+    if (!allowed) {
       return res.status(400).json({
         success: false,
         error: `User limit reached. Your plan allows ${maxUsers} users. Upgrade to add more team members.`
@@ -187,15 +187,17 @@ exports.createUser = async (req, res, next) => {
 
     const user = await User.create(userData);
 
-    // Update organization and subscription user counts
-    await Organization.findByIdAndUpdate(organizationId, {
-      $inc: { 'usage.currentUsers': 1 }
-    });
-    if (subscription) {
-      await Subscription.findByIdAndUpdate(subscription._id, {
-        $inc: { 'usage.activeUsers': 1 }
-      });
-    }
+    // Update usage counters on both the (legacy) Organization doc and the Subscription doc.
+    // Both are kept in lockstep during the deprecation period; entitlementsService picks
+    // the correct one automatically at read time.
+    await Promise.all([
+      Organization.findByIdAndUpdate(organizationId, { $inc: { 'usage.currentUsers': 1 } }),
+      Subscription.updateOne(
+        { organization: organizationId },
+        { $inc: { 'usage.activeUsers': 1 } }
+      )
+    ]);
+    await entitlementsService.invalidateEntitlements(organizationId);
 
     // Return user without password
     const userResponse = await User.findById(user._id).select('-password');
@@ -285,6 +287,9 @@ exports.updateUser = async (req, res, next) => {
       { new: true, runValidators: true }
     ).select('-password');
 
+    // Invalidate cached user so protect middleware picks up the changes on next request
+    cacheService.del(cacheService.userKey(id)).catch(() => {});
+
     res.status(200).json({
       success: true,
       data: updatedUser,
@@ -345,24 +350,25 @@ exports.deleteUser = async (req, res, next) => {
     // Soft delete - just deactivate
     await User.findByIdAndUpdate(id, { isActive: false });
 
+    // Invalidate cached user so protect middleware immediately sees deactivation
+    cacheService.del(cacheService.userKey(id)).catch(() => {});
+
     // Unassign all interactions from this user
     await Interaction.updateMany(
       { assignedTo: id },
       { $unset: { assignedTo: '', assignedAt: '' } }
     );
 
-    // Update organization and subscription user counts
-    await Organization.findByIdAndUpdate(req.user.organization._id, {
-      $inc: { 'usage.currentUsers': -1 }
-    });
-    const subscription = await Subscription.findOne({
-      organization: req.user.organization._id
-    });
-    if (subscription) {
-      await Subscription.findByIdAndUpdate(subscription._id, {
-        $inc: { 'usage.activeUsers': -1 }
-      });
-    }
+    // Decrement usage counters on both the (legacy) Organization doc and the Subscription doc.
+    const orgId = req.user.organization._id;
+    await Promise.all([
+      Organization.findByIdAndUpdate(orgId, { $inc: { 'usage.currentUsers': -1 } }),
+      Subscription.updateOne(
+        { organization: orgId, 'usage.activeUsers': { $gt: 0 } },
+        { $inc: { 'usage.activeUsers': -1 } }
+      )
+    ]);
+    await entitlementsService.invalidateEntitlements(orgId);
 
     res.status(200).json({
       success: true,

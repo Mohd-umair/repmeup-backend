@@ -1,6 +1,7 @@
 const authService = require('../services/authService');
 const emailService = require('../services/emailService');
 const userActivityLogService = require('../services/userActivityLogService');
+const cacheService = require('../services/cacheService');
 
 // @desc    Register user & organization
 // @route   POST /api/auth/register
@@ -103,6 +104,9 @@ exports.updateProfile = async (req, res, next) => {
   try {
     const user = await authService.updateProfile(req.user._id, req.body);
 
+    // Invalidate cached user so subsequent requests see updated profile
+    cacheService.del(cacheService.userKey(req.user._id.toString())).catch(() => {});
+
     res.status(200).json({
       success: true,
       data: user
@@ -132,6 +136,9 @@ exports.changePassword = async (req, res, next) => {
       newPassword
     );
 
+    // Invalidate cached user — password change should force a fresh DB read
+    cacheService.del(cacheService.userKey(req.user._id.toString())).catch(() => {});
+
     res.status(200).json({
       success: true,
       data: result
@@ -149,8 +156,26 @@ exports.changePassword = async (req, res, next) => {
 // @access  Private
 exports.logout = async (req, res, next) => {
   try {
-    // In a real app, you might want to blacklist the token
-    // For now, just return success (client will delete token)
+    // Revoke the current token so it cannot be reused even before natural expiry.
+    // The blacklist entry lives in Redis until the token's own exp timestamp passes.
+    const rawToken = req.headers.authorization?.split(' ')[1];
+    if (rawToken) {
+      const jwt = require('jsonwebtoken');
+      try {
+        const decoded = jwt.decode(rawToken);
+        if (decoded?.exp) {
+          await cacheService.blacklistToken(rawToken, decoded.exp);
+        }
+      } catch (_) {
+        // Non-fatal: if token decode fails, we still ack the logout
+      }
+    }
+
+    // Also clear the user cache so any cached session data is gone immediately
+    if (req.user?._id) {
+      cacheService.del(cacheService.userKey(req.user._id.toString())).catch(() => {});
+    }
+
     res.status(200).json({
       success: true,
       data: { message: 'Logged out successfully' }

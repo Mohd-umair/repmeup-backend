@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const platformController = require('../controllers/platformController');
 const { protect, authorize } = require('../middlewares/auth');
-const { checkConnectionLimit, attachConnectionLimits } = require('../middleware/platformLimitMiddleware');
+const { checkConnectionLimit, attachConnectionLimits } = require('../middlewares/platformLimitMiddleware');
 
 // Google OAuth callback (public - called by Google)
 router.get('/google/callback', platformController.handleGoogleCallback);

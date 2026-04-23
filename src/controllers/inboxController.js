@@ -12,254 +12,49 @@ const googleService = require('../integrations/google/googleService');
 const axios = require('axios');
 const logger = require('../config/logger');
 const { generateChatRef } = require('../utils/chatRefHelper');
+const replyService = require('../services/replyService');
+const inboxBulkService = require('../services/inboxBulkService');
+const inboxQueryService = require('../services/inbox/inboxQueryService');
+const inboxAiAssistService = require('../services/inbox/inboxAiAssistService');
 
-/**
- * Inbox visibility: same org + platform still has a connected account, and either
- * platformConnection matches an active row, is missing/null (legacy), or is stale (reconnect).
- */
-function buildPlatformConnectionVisibilityFilter(activeConnections) {
-  const activeConnectionIds = activeConnections.map((c) => c._id);
-  const activePlatforms = [...new Set(activeConnections.map((c) => c.platform))];
-  if (!activeConnectionIds.length || !activePlatforms.length) {
-    return { _id: { $in: [] } };
-  }
-  return {
-    $and: [
-      { platform: { $in: activePlatforms } },
-      {
-        $or: [
-          { platformConnection: { $in: activeConnectionIds } },
-          { platformConnection: { $exists: false } },
-          { platformConnection: null },
-          {
-            platformConnection: {
-              $exists: true,
-              $ne: null,
-              $nin: activeConnectionIds
-            }
-          }
-        ]
-      }
-    ]
-  };
-}
+const {
+  InboxQueryError,
+  SLA_THRESHOLD_MS,
+  parseQueryCsv,
+  setQueryFieldInOrEquals,
+  buildVisibilityFilter: buildPlatformConnectionVisibilityFilter
+} = inboxQueryService;
 
-/** Comma-separated or repeated query values → trimmed non-empty strings */
-function parseQueryCsv(val) {
-  if (val == null || val === '') return [];
-  if (Array.isArray(val)) {
-    return val.flatMap((s) => String(s).split(',')).map((x) => x.trim()).filter(Boolean);
-  }
-  return String(val).split(',').map((s) => s.trim()).filter(Boolean);
-}
-
-function setQueryFieldInOrEquals(queryObj, field, rawVal) {
-  const parts = parseQueryCsv(rawVal);
-  if (parts.length === 0) return;
-  if (parts.length === 1) queryObj[field] = parts[0];
-  else queryObj[field] = { $in: parts };
-}
+const { InboxAiError, respondInboxAiError } = inboxAiAssistService;
 
 // @desc    Get all interactions (inbox)
 // @route   GET /api/inbox
 exports.getInteractions = async (req, res, next) => {
   try {
-    const {
-      platform,
-      type,
-      sentiment,
-      status,
-      search,
-      assignedTo,
-      label,
-      intentBucket,
-      viewMode,
-      postId,
-      dateFrom,
-      dateTo,
-      chatOpen,
-      page = 1,
-      limit = 20,
-      // Keep inbox ordered by newest platform comment/message first.
-      sortBy = 'platformCreatedAt',
-      sortOrder = 'desc'
-    } = req.query;
+    const orgId = req.user.organization._id;
 
-    // Enforce max page size: clients cannot request more than 100 at once
-    const safeLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
-    const safePage  = Math.max(parseInt(page) || 1, 1);
-
-    // Build query
-    const query = { organization: req.user.organization._id };
-
-    // Only show parent interactions (top-level comments/reviews), not replies
-    // Replies are shown in the detail view when clicking on a parent
-    // This filter will be added to $and array below
-
-    // Multiselect sends CSV or repeated params → OR via $in (single value stays equality)
-    setQueryFieldInOrEquals(query, 'platform', platform);
-    setQueryFieldInOrEquals(query, 'type', type);
-    if (postId) query['metadata.postId'] = postId;
-    setQueryFieldInOrEquals(query, 'sentiment', sentiment);
-    setQueryFieldInOrEquals(query, 'status', status);
-    if (assignedTo) query.assignedTo = assignedTo;
-
-    // Date range filter on platformCreatedAt
-    if (dateFrom || dateTo) {
-      query.platformCreatedAt = {};
-      if (dateFrom) query.platformCreatedAt.$gte = new Date(dateFrom);
-      if (dateTo) {
-        // Include the full end day (23:59:59.999)
-        const end = new Date(dateTo);
-        end.setHours(23, 59, 59, 999);
-        query.platformCreatedAt.$lte = end;
-      }
-    }
-
-    // Label filter — one id or $in (OR) on labels array
-    setQueryFieldInOrEquals(query, 'labels', label);
-
-    // Intent bucket filter
-    if (intentBucket) {
-      if (intentBucket === 'none') {
-        query.$and = [...(query.$and || []), { $or: [{ intentBucket: { $exists: false } }, { intentBucket: null }] }];
-      } else {
-        query.intentBucket = intentBucket;
-      }
-    }
-
-    // View mode overrides: assigned (to me), needs_response (unread, oldest first), overdue (past SLA), archived
-    const SLA_HOURS = 24;
-    const slaCutoff = new Date(Date.now() - SLA_HOURS * 60 * 60 * 1000);
-    let effectiveSortBy = sortBy;
-    let effectiveSortOrder = sortOrder;
-    if (viewMode === 'assigned') {
-      query.assignedTo = req.user._id;
-    } else if (viewMode === 'needs_response') {
-      query.status = 'unread';
-      effectiveSortBy = 'platformCreatedAt';
-      effectiveSortOrder = 'asc';
-    } else if (viewMode === 'overdue') {
-      query.status = { $nin: ['replied', 'resolved'] };
-      query.platformCreatedAt = { $lt: slaCutoff };
-      effectiveSortBy = 'platformCreatedAt';
-      effectiveSortOrder = 'asc';
-    } else if (viewMode === 'archived') {
-      // Show only archived conversations
-      query.status = 'archived';
-    }
-    
-    // For non-archived views, explicitly exclude archived conversations
-    // unless the user has specifically filtered by archived status
-    if (viewMode !== 'archived' && !status) {
-      if (query.status && typeof query.status === 'object' && query.status.$nin) {
-        // If status is already an object with $nin, add 'archived' to it
-        query.status.$nin.push('archived');
-      } else if (!query.status) {
-        // If no status filter exists, exclude archived
-        query.status = { $ne: 'archived' };
-      }
-    }
-    
-    // Build search condition - escape special regex characters
-    // Trim and validate search term
-    const searchTerm = search ? search.trim() : null;
-    const searchCondition = searchTerm && searchTerm.length > 0 ? (() => {
-      // Escape special regex characters but allow emojis and unicode
-      // Replace special regex characters with escaped versions: . * + ? ^ $ { } ( ) | [ ] \
-      // Note: We don't escape emojis or unicode characters - MongoDB handles them fine with UTF-8
-      const escapedSearch = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      
-      return {
-        $or: [
-          { content: { $regex: escapedSearch, $options: 'i' } },
-          { 'author.name': { $regex: escapedSearch, $options: 'i' } },
-          { 'author.username': { $regex: escapedSearch, $options: 'i' } }
-        ]
-      };
-    })() : null;
-
-    // Get active platform connections to filter interactions
-    const PlatformConnection = require('../models/PlatformConnection');
+    // Active platform connections scope what this org can see in the inbox.
     const activeConnections = await PlatformConnection.find({
-      organization: req.user.organization._id,
+      organization: orgId,
       isActive: true,
       status: 'connected'
-    }).select('_id platform');
+    }).select('_id platform').lean();
 
-    const activeConnectionIds = activeConnections.map((conn) => conn._id);
-    const platformConnectionFilter = buildPlatformConnectionVisibilityFilter(activeConnections);
-
-    // Build agent condition: agents see only chats assigned to them OR previously assigned to them
-    const agentCondition = req.user.role === 'agent' ? {
-      $or: [
-        { assignedTo: req.user._id },
-        { 'assignmentHistory.assignedTo': req.user._id }
-      ]
-    } : null;
-
-    // Combine all conditions using $and
-    // Note: We need to combine the parentId filter with other conditions
-    const conditionsToAnd = [
-      // Parent ID filter (only top-level interactions - no replies)
-      // Exclude any interaction that has a parentId set (replies have parentId)
-      {
-        $or: [
-          { parentId: { $exists: false } },
-          { parentId: null },
-          { parentId: '' }
-        ]
-      },
-      platformConnectionFilter
-    ];
-    
-    if (searchCondition) {
-      conditionsToAnd.push(searchCondition);
-    }
-    
-    if (agentCondition) {
-      conditionsToAnd.push(agentCondition);
-    }
-
-    // Chat session filter: open = true or legacy missing field; closed = explicit false
-    const chatOpenStr = chatOpen != null ? String(chatOpen).toLowerCase() : '';
-    if (chatOpenStr === 'true' || chatOpenStr === '1') {
-      conditionsToAnd.push({
-        $or: [{ chatOpen: true }, { chatOpen: { $exists: false } }]
-      });
-    } else if (chatOpenStr === 'false' || chatOpenStr === '0') {
-      conditionsToAnd.push({ chatOpen: false });
-    }
-
-    // Use $and to combine all conditions
-    query.$and = conditionsToAnd;
-
-    // Calculate pagination
-    const skip = (safePage - 1) * safeLimit;
-    const sort = { [effectiveSortBy]: effectiveSortOrder === 'desc' ? -1 : 1 };
-
-    // Try to get from cache (include search in cache key, normalized)
-    const cacheSearchKey = searchTerm ? searchTerm.toLowerCase().trim() : '';
-    const effectiveAssignedTo = viewMode === 'assigned' ? req.user._id.toString() : (assignedTo || '');
-    const cacheKey = cacheService.interactionsKey(req.user.organization._id, {
-      platform,
-      type,
-      sentiment,
-      status,
-      label,
-      postId: postId || '',
-      viewMode: viewMode || '',
-      search: cacheSearchKey,
-      page: safePage,
-      limit: safeLimit,
-      assignedTo: req.user.role === 'agent' ? req.user._id.toString() : effectiveAssignedTo,
-      activeConnections: activeConnectionIds.map(id => id.toString()).sort().join(','),
-      // Must be part of the key or date / bucket filters return wrong cached pages
-      dateFrom: dateFrom ? String(dateFrom) : '',
-      dateTo: dateTo ? String(dateTo) : '',
-      intentBucket: intentBucket ? String(intentBucket) : '',
-      chatOpen: chatOpen != null && chatOpen !== '' ? String(chatOpen) : ''
+    const {
+      mongoQuery,
+      effectiveSort,
+      safePage,
+      safeLimit,
+      skip,
+      searchTerm,
+      cacheFilters
+    } = inboxQueryService.buildListFilter({
+      user: req.user,
+      query: req.query,
+      activeConnections
     });
+
+    const cacheKey = cacheService.interactionsKey(orgId, cacheFilters);
 
     const cached = await cacheService.get(cacheKey);
     if (cached) {
@@ -270,20 +65,15 @@ exports.getInteractions = async (req, res, next) => {
           hasMore: Array.isArray(cached.interactions) ? cached.interactions.length >= safeLimit : false
         };
       }
-      // Backward compatibility: older cached entries may not include pagination.total.
-      if (cached?.pagination && typeof cached.pagination.total !== 'number') {
-        const totalFromDb = await Interaction.countDocuments(query);
-        cached.pagination.total = totalFromDb;
+      // Backward compat: older cached entries may lack pagination.total.
+      if (typeof cached.pagination.total !== 'number') {
+        cached.pagination.total = await Interaction.countDocuments(mongoQuery);
       }
-      return res.status(200).json({
-        success: true,
-        data: cached,
-        cached: true
-      });
+      return res.status(200).json({ success: true, data: cached, cached: true });
     }
 
-    // Execute query — fetch one extra to know if another page exists (avoids COUNT for perf)
-    const interactions = await Interaction.find(query)
+    // +1 so we can detect hasMore without an extra count round-trip.
+    const interactions = await Interaction.find(mongoQuery)
       .populate('assignedTo', 'firstName lastName email avatar')
       .populate('assignedBy', 'firstName lastName email')
       .populate('assignmentHistory.assignedTo', 'firstName lastName email')
@@ -291,57 +81,59 @@ exports.getInteractions = async (req, res, next) => {
       .populate('labels', 'name color icon')
       .populate('replies.sentBy', 'firstName lastName')
       .populate('platformConnection', 'platform isActive status')
-      .sort(sort)
-      .limit(safeLimit + 1)   // +1 to detect next page
+      .sort(effectiveSort)
+      .limit(safeLimit + 1)
       .skip(skip)
       .lean();
 
     const hasMore = interactions.length > safeLimit;
-    if (hasMore) interactions.pop();  // remove the extra document
+    if (hasMore) interactions.pop();
 
-    // Lazy backfill: assign chatRef to any interaction that doesn't have one yet
-    const missingChatRef = interactions.filter(i => !i.chatRef && i.organization);
+    // Lazy backfill: best-effort chatRef for legacy interactions (never fatal).
+    const missingChatRef = interactions.filter((i) => !i.chatRef && i.organization);
     if (missingChatRef.length > 0) {
-      try {
-        await Promise.all(
-          missingChatRef.map(async (i) => {
-            try {
-              const refData = await generateChatRef(i.organization);
-              if (refData?.chatRef) {
-                await Interaction.updateOne(
-                  { _id: i._id, chatRef: null },
-                  { $set: { chatNumber: refData.chatNumber, chatRef: refData.chatRef } }
-                );
-                i.chatNumber = refData.chatNumber;
-                i.chatRef = refData.chatRef;
-              }
-            } catch (_err) { /* skip individual failures */ }
-          })
-        );
-      } catch (_err) { /* non-fatal */ }
+      await Promise.all(
+        missingChatRef.map(async (i) => {
+          try {
+            const refData = await generateChatRef(i.organization);
+            if (refData?.chatRef) {
+              await Interaction.updateOne(
+                { _id: i._id, chatRef: null },
+                { $set: { chatNumber: refData.chatNumber, chatRef: refData.chatRef } }
+              );
+              i.chatNumber = refData.chatNumber;
+              i.chatRef = refData.chatRef;
+            }
+          } catch (err) {
+            logger.warn('[inboxController] chatRef backfill skipped', {
+              interactionId: i._id?.toString(),
+              error: err.message
+            });
+          }
+        })
+      );
     }
 
-    const total = await Interaction.countDocuments(query);
+    const total = await Interaction.countDocuments(mongoQuery);
 
     const result = {
       interactions,
-      pagination: {
-        page: safePage,
-        limit: safeLimit,
-        hasMore,
-        total
-      }
+      pagination: { page: safePage, limit: safeLimit, hasMore, total }
     };
 
-    // Cache result - shorter TTL for search queries (2 minutes) vs regular queries (5 minutes)
-    const cacheTTL = searchTerm ? 120 : 300; // 2 min for searches, 5 min for filters
+    // Shorter TTL for search queries — they have high cardinality.
+    const cacheTTL = searchTerm ? 120 : 300;
     await cacheService.set(cacheKey, result, cacheTTL);
 
-    res.status(200).json({
-      success: true,
-      data: result
-    });
+    res.status(200).json({ success: true, data: result });
   } catch (error) {
+    if (error instanceof InboxQueryError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        code: error.code
+      });
+    }
     next(error);
   }
 };
@@ -444,7 +236,7 @@ exports.getInteraction = async (req, res, next) => {
         // If this child interaction's platformId matches any of our app replies' platformResponseId,
         // it means this is our own reply that came back from the platform - skip it
         if (appReplyPlatformIds.has(child.platformId)) {
-          console.log(`⏭️  [Inbox] Filtering out duplicate reply: ${child.platformId} (already in app replies)`);
+          logger.debug('[Inbox] filtering out duplicate reply', { platformId: child.platformId });
           return false;
         }
         return true;
@@ -565,8 +357,7 @@ exports.replyToInteraction = async (req, res, next) => {
   try {
     const { content, useTemplate, templateId, templateVariables, attachmentUrl, attachmentType } = req.body;
 
-    // Resolve the local file on disk so we can upload directly to Meta (avoids
-    // Meta needing to download from our URL which fails behind ngrok/tunnels).
+    // Resolve local disk path so Meta can receive the file directly (avoids ngrok/tunnel issues)
     let attachmentLocalPath = null;
     if (attachmentUrl) {
       const urlFilename = attachmentUrl.split('/').pop();
@@ -576,48 +367,32 @@ exports.replyToInteraction = async (req, res, next) => {
       }
     }
 
-    // Convert webm audio to m4a (AAC) — webm is not accepted by Meta APIs.
+    // Convert webm audio → m4a (Meta APIs do not accept webm)
     if (attachmentType === 'audio' && attachmentLocalPath && /\.webm$/i.test(attachmentLocalPath)) {
       try {
         const { convertToM4a } = require('../utils/audioConverter');
         attachmentLocalPath = await convertToM4a(attachmentLocalPath);
       } catch (convErr) {
-        console.error('[Inbox Reply] Audio conversion failed, will try original file:', convErr.message);
+        logger.warn('[replyToInteraction] Audio conversion failed, trying original file', { error: convErr.message });
       }
     }
 
-    const interaction = await Interaction.findById(req.params.id)
-      .populate('platformConnection');
-
+    const interaction = await Interaction.findById(req.params.id).populate('platformConnection');
     if (!interaction) {
-      return res.status(404).json({
-        success: false,
-        error: 'Interaction not found'
-      });
+      return res.status(404).json({ success: false, error: 'Interaction not found' });
     }
-
-    // Check organization access
     if (interaction.organization.toString() !== req.user.organization._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        error: 'Access denied'
-      });
+      return res.status(403).json({ success: false, error: 'Access denied' });
     }
-
-    // Agents can only reply when currently assigned to this interaction
     if (req.user.role === 'agent') {
       const assignedToId = interaction.assignedTo?.toString?.() || interaction.assignedTo;
       if (assignedToId !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          error: 'You can only reply to conversations assigned to you'
-        });
+        return res.status(403).json({ success: false, error: 'You can only reply to conversations assigned to you' });
       }
     }
 
+    // Resolve template content if requested
     let replyContent = content;
-
-    // If using template
     if (useTemplate && templateId) {
       const template = await ResponseTemplate.findById(templateId);
       if (template) {
@@ -626,359 +401,63 @@ exports.replyToInteraction = async (req, res, next) => {
       }
     }
 
-    // Initialize reply status
-    let platformResponseId = null;
-    let replyStatus = 'sent';
-    let errorMessage = null;
+    // Resolve the correct platform connection and dispatch the send
+    const connection = await replyService.resolveConnection(interaction);
+    const { platformResponseId, status: replyStatus, errorMessage } = await replyService.sendReplyToPlatform({
+      interaction,
+      connection,
+      replyContent,
+      attachmentUrl,
+      attachmentType,
+      attachmentLocalPath
+    });
 
-    // Send actual reply to platform via integration service
-    try {
-      // Resolve platform connection (may be missing if interaction was created via webhook without it)
-      let connection = null;
-      const isInstagramDm = interaction.platform === 'instagram' && interaction.type === 'dm';
-      let igAccountId = interaction.metadata?.instagramAccountId;
-      if (isInstagramDm && !igAccountId && interaction.platformId && interaction.platformId.startsWith('dm_')) {
-        const parts = interaction.platformId.split('_');
-        if (parts.length >= 3) igAccountId = parts[1];
-      }
-
-      const isFacebookDm = interaction.platform === 'facebook' && interaction.type === 'dm';
-      let facebookPageId = interaction.metadata?.facebookPageId;
-      if (isFacebookDm && !facebookPageId && interaction.platformId && interaction.platformId.startsWith('dm_')) {
-        const parts = interaction.platformId.split('_');
-        if (parts.length >= 3) facebookPageId = parts[1];
-      }
-
-      if (isInstagramDm && igAccountId) {
-        const threadOwnerConn = await PlatformConnection.findOne({
-          organization: interaction.organization,
-          platform: 'instagram',
-          platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
-          status: 'connected',
-          isActive: true
-        }).lean();
-        if (threadOwnerConn) connection = threadOwnerConn;
-      }
-      if (!connection) connection = interaction.platformConnection;
-      if (!connection && interaction.platform && interaction.organization && !isInstagramDm) {
-        const conn = await PlatformConnection.findOne({
-          organization: interaction.organization,
-          platform: interaction.platform,
-          status: 'connected',
-          isActive: true
-        }).lean();
-        if (conn) connection = conn;
-      }
-      if (isFacebookDm && facebookPageId && (!connection || String(connection.platformPageId) !== String(facebookPageId))) {
-        const pageConn = await PlatformConnection.findOne({
-          organization: interaction.organization,
-          platform: 'facebook',
-          platformPageId: { $in: [String(facebookPageId), facebookPageId] },
-          status: 'connected',
-          isActive: true
-        }).lean();
-        if (pageConn) connection = pageConn;
-      }
-      if (connection && isInstagramDm && igAccountId) {
-        const connectionIgId = connection.platformUserId != null ? String(connection.platformUserId) : '';
-        if (connectionIgId !== String(igAccountId)) {
-          const threadOwnerConn = await PlatformConnection.findOne({
-            organization: interaction.organization,
-            platform: 'instagram',
-            platformUserId: { $in: [igAccountId, String(igAccountId)] },
-            status: 'connected',
-            isActive: true
-          }).lean();
-          connection = threadOwnerConn || null;
-        }
-      }
-      if (!connection) {
-        replyStatus = 'failed';
-        if (isInstagramDm) {
-          errorMessage = igAccountId
-            ? 'Could not find the Instagram account for this conversation. Please reconnect it in Settings.'
-            : 'This conversation is not linked to an Instagram account. Sync the Instagram that receives these DMs from Settings, then try again.';
-        } else if (isFacebookDm) {
-          errorMessage = facebookPageId
-            ? 'Could not find the Facebook Page for this conversation. Please reconnect it in Settings.'
-            : 'This conversation is not linked to a Facebook Page. Reconnect the Page that receives these messages in Settings.';
-        } else {
-          errorMessage = 'Platform connection not found. Please reconnect this account in Settings.';
-        }
-      } else if (connection.status !== 'connected' || !connection.isActive) {
-        replyStatus = 'failed';
-        errorMessage = 'Platform connection is not active. Please reconnect this account in Settings.';
-      } else if (interaction.platform === 'youtube') {
-        const youtubeService = require('../integrations/google/youtubeService');
-        const result = await youtubeService.replyToComment(
-          connection,
-          interaction.platformId,
-          replyContent
-        );
-        
-        if (result.success && result.commentId) {
-          platformResponseId = result.commentId;
-          replyStatus = 'sent';
-        } else {
-          replyStatus = 'failed';
-          errorMessage = 'Failed to post reply to YouTube';
-        }
-      } else if (interaction.platform === 'instagram') {
-        const instagramService = require('../integrations/meta/instagramService');
-        // Resolve connection type once — used for both DM and comment reply paths.
-        const connType = connection.metadata?.connectionType
-          || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
-        let result;
-        if (interaction.type === 'dm') {
-          let pageId;
-          if (connType === 'instagram_login') {
-            // IGAA tokens are scoped to the app-scoped Instagram User ID (ISUID), not the
-            // global IG Business Account ID that ends up in platformUserId after self-healing.
-            // graph.instagram.com/{ISUID}/messages is the correct endpoint; using the global
-            // ID causes error 2534037 "not the thread owner". Fall back to platformUserId if
-            // igLoginScopedId was not yet stored (old connections before schema fix).
-            pageId = connection.metadata?.igLoginScopedId || connection.platformUserId;
-          } else {
-            pageId = connection.platformPageId || connection.platformData?.pageId;
-            // For Facebook Login connections, resolve the Page ID from the token
-            // to avoid "not the thread owner" (#100).
-            const resolvedFromToken = await instagramService.getPageIdFromToken(connection.accessToken);
-            if (resolvedFromToken) pageId = resolvedFromToken;
-          }
-          const recipientId = interaction.author?.platformId;
-          logger.info('[Inbox Reply] Instagram DM send', {
-            igAccountId,
-            platformUserId: connection.platformUserId,
-            storedPageId: connection.platformPageId || connection.platformData?.pageId,
-            pageId,
-            connType
-          });
-          if (!pageId || !recipientId) {
-            replyStatus = 'failed';
-            errorMessage = 'Missing page or recipient for Instagram DM reply. Reconnect this Instagram account in Settings (Settings → Platforms) so we have the correct Page ID.';
-            console.error('[Inbox Reply] Instagram DM: missing pageId or recipientId', { hasPageId: !!pageId, hasRecipientId: !!recipientId, igAccountId });
-          } else if (attachmentUrl && attachmentType) {
-            result = await instagramService.sendMessageWithAttachment(
-              recipientId,
-              attachmentType,
-              attachmentUrl,
-              replyContent || undefined,
-              connection.accessToken,
-              pageId,
-              true,
-              attachmentLocalPath,
-              connType
-            );
-          } else {
-            result = await instagramService.sendMessage(
-              recipientId,
-              replyContent,
-              connection.accessToken,
-              pageId,
-              true,
-              connType
-            );
-          }
-        } else {
-          result = await instagramService.replyToComment(
-            interaction.platformId,
-            replyContent,
-            connection.accessToken,
-            connType
-          );
-        }
-        if (result && result.success && result.platformResponseId) {
-          platformResponseId = result.platformResponseId;
-          replyStatus = 'sent';
-        } else if (replyStatus !== 'failed') {
-          replyStatus = 'failed';
-          errorMessage = (result && result.error) || 'Failed to post reply to Instagram';
-        }
-      } else if (interaction.platform === 'facebook') {
-        const facebookService = require('../integrations/meta/facebookService');
-        let result;
-        if (interaction.type === 'dm') {
-          const pageId = connection.platformPageId || connection.platformData?.pageId;
-          const recipientId = interaction.author?.platformId;
-          if (!pageId || !recipientId) {
-            replyStatus = 'failed';
-            errorMessage = 'Missing Page or recipient for Facebook Messenger reply. Reconnect the Page in Settings.';
-          } else if (attachmentUrl && attachmentType) {
-            result = await facebookService.sendMessageWithAttachment(
-              recipientId,
-              attachmentType,
-              attachmentUrl,
-              replyContent || undefined,
-              connection.accessToken,
-              pageId,
-              true,
-              attachmentLocalPath
-            );
-          } else {
-            result = await facebookService.sendMessage(
-              recipientId,
-              replyContent,
-              connection.accessToken,
-              pageId,
-              true
-            );
-          }
-        } else {
-          result = await facebookService.replyToComment(
-            connection,
-            interaction.platformId,
-            replyContent
-          );
-        }
-        if (result && result.success && (result.platformResponseId || result.commentId)) {
-          platformResponseId = result.platformResponseId || result.commentId;
-          replyStatus = 'sent';
-        } else if (replyStatus !== 'failed') {
-          replyStatus = 'failed';
-          errorMessage = (result && result.error) || 'Failed to post reply to Facebook';
-        }
-      } else if (interaction.platform === 'linkedin') {
-        const linkedinService = require('../integrations/linkedin/linkedinService');
-        const result = await linkedinService.replyToComment(
-          connection,
-          interaction._id,
-          replyContent
-        );
-        
-        if (result.status === 'sent' && result.platformResponseId) {
-          platformResponseId = result.platformResponseId;
-          replyStatus = 'sent';
-        } else {
-          replyStatus = 'failed';
-          errorMessage = result.error || 'Failed to post reply to LinkedIn';
-        }
-      } else if (interaction.platform === 'whatsapp') {
-        const whatsappService = require('../integrations/whatsapp/whatsappService');
-        const result = await whatsappService.sendTextMessage(
-          connection,
-          interaction.author.platformId,
-          replyContent
-        );
-        
-        if (result.success && result.messageId) {
-          platformResponseId = result.messageId;
-          replyStatus = 'sent';
-        } else {
-          replyStatus = 'failed';
-          errorMessage = 'Failed to send WhatsApp message';
-        }
-      } else if (interaction.platform === 'google' && interaction.type === 'review') {
-        const locationId = interaction.metadata?.locationId;
-        const reviewId = interaction.metadata?.reviewId || interaction.platformId;
-        if (!locationId || !reviewId) {
-          replyStatus = 'failed';
-          errorMessage = 'Missing location or review ID for Google review reply.';
-        } else {
-          try {
-            await googleService.ensureValidToken(connection);
-            await googleService.replyToReview(
-              connection,
-              locationId,
-              reviewId,
-              replyContent
-            );
-            platformResponseId = `google-review-${reviewId}`;
-            replyStatus = 'sent';
-          } catch (err) {
-            replyStatus = 'failed';
-            errorMessage = err.message || 'Failed to post reply to Google review';
-          }
-        }
-      } else {
-        replyStatus = 'failed';
-        errorMessage = `Replies for ${interaction.platform} are not yet implemented`;
-      }
-    } catch (platformError) {
-      const metaError = platformError.response?.data?.error || platformError.platformError;
-      const metaUserMsg = metaError?.error_user_msg || metaError?.message;
-      console.error('Error posting reply to platform:', metaUserMsg || platformError.message);
-      if (platformError.response?.data) {
-        console.error('Platform API response:', JSON.stringify(platformError.response.data));
-      }
-      replyStatus = 'failed';
-      // Friendly message for Instagram "not the thread owner" (code 100, subcode 2534037)
-      if (metaError?.code === 100 && metaError?.error_subcode === 2534037) {
-        errorMessage = 'This conversation belongs to a different Instagram account. Reconnect the Instagram account that receives these DMs in Settings → Platforms, then try again.';
-      } else {
-        errorMessage = metaUserMsg || platformError.message || 'Failed to post reply to platform';
-      }
-    }
-
-    // Add reply to database with platform response ID
-    // Note: addReply sets status to 'replied', so we'll update it if failed
+    // Persist reply in DB
     const previousStatus = interaction.status;
     await interaction.addReply(replyContent, req.user._id, platformResponseId, false, attachmentUrl || undefined, attachmentType || undefined);
-    
-    // Reload interaction to get the updated reply
     await interaction.populate('replies.sentBy', 'firstName lastName');
-    
-    // Update the last reply status and interaction status if it failed
+
     if (replyStatus === 'failed') {
-      if (interaction.replies && interaction.replies.length > 0) {
-        const lastReply = interaction.replies[interaction.replies.length - 1];
-        lastReply.status = 'failed';
+      if (interaction.replies?.length > 0) {
+        interaction.replies[interaction.replies.length - 1].status = 'failed';
       }
-      // Revert status if reply failed
       interaction.status = previousStatus;
       await interaction.save();
     } else {
-      // Update respondedAt timestamp if successful
       interaction.respondedAt = new Date();
       interaction.chatOpen = true;
       await interaction.save();
 
-      // IMPORTANT: Remove any pending AI and auto-reply jobs for this interaction
-      // since it's already been replied to
+      // Cancel any pending AI / auto-reply jobs — this conversation is already answered
       try {
         const { aiQueue, autoReplyQueue } = require('../config/queue');
-        const jobs = await aiQueue.getJobs(['waiting', 'active', 'delayed']);
-
-        for (const job of jobs) {
-          if (job.data.interactionId && job.data.interactionId.toString() === interaction._id.toString()) {
+        const allPending = [
+          ...(await aiQueue.getJobs(['waiting', 'active', 'delayed'])),
+          ...(await autoReplyQueue.getJobs(['waiting', 'active', 'delayed']))
+        ];
+        for (const job of allPending) {
+          if (job.data.interactionId?.toString() === interaction._id.toString()) {
             await job.remove();
-            console.log(`🗑️  [Reply] Removed pending AI job ${job.id} for interaction ${interaction._id} (already replied)`);
-          }
-        }
-
-        const autoReplyJobs = await autoReplyQueue.getJobs(['waiting', 'active', 'delayed']);
-        for (const job of autoReplyJobs) {
-          if (job.data.interactionId && job.data.interactionId.toString() === interaction._id.toString()) {
-            await job.remove();
-            console.log(`🗑️  [Reply] Removed pending auto-reply job ${job.id} for interaction ${interaction._id} (already replied)`);
           }
         }
       } catch (queueError) {
-        console.warn('Could not remove pending AI/auto-reply jobs:', queueError.message);
-        // Don't fail the reply if queue cleanup fails
+        logger.warn('[replyToInteraction] Could not cancel pending AI/auto-reply jobs', { error: queueError.message });
       }
     }
 
-    // Clear cache
     await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
 
-    // Return appropriate response
     if (replyStatus === 'sent') {
-      res.status(200).json({
-        success: true,
-        data: interaction,
-        message: 'Reply sent successfully to YouTube'
-      });
-    } else {
-      console.error('[Inbox Reply] Failed to send to platform:', errorMessage || 'Unknown error');
-      res.status(500).json({
-        success: false,
-        error: errorMessage || 'Failed to send reply to platform',
-        data: interaction,
-        message: 'Reply saved locally but failed to post to platform'
-      });
+      return res.status(200).json({ success: true, data: interaction, message: 'Reply sent successfully' });
     }
+    logger.error('[replyToInteraction] Platform send failed', { error: errorMessage });
+    return res.status(500).json({
+      success: false,
+      error: errorMessage || 'Failed to send reply to platform',
+      data: interaction,
+      message: 'Reply saved locally but failed to post to platform'
+    });
   } catch (error) {
-    console.error('Error in replyToInteraction:', error);
     next(error);
   }
 };
@@ -1054,7 +533,7 @@ exports.deleteInteraction = async (req, res, next) => {
         : 'Interaction removed from inbox.'
     });
   } catch (error) {
-    console.error('Error in deleteInteraction:', error);
+    logger.error('[inboxController] deleteInteraction error', { error: error.message });
     next(error);
   }
 };
@@ -1136,18 +615,18 @@ exports.assignInteraction = async (req, res, next) => {
         actionUrl: `/app/inbox/${interaction._id}`,
         deliveryMethod: ['in_app', 'email']
       });
-      console.log(`🔔 [Assignment] In-app notification created for ${agent.email}`);
+      logger.info('[Assignment] in-app notification created', { email: agent.email });
     } catch (notifError) {
-      console.error('Failed to create notification:', notifError);
+      logger.error('[Assignment] failed to create notification', { error: notifError.message });
     }
 
     // Send email notification
     const emailService = require('../services/emailService');
     try {
       await emailService.sendAssignmentNotification(agent, interaction);
-      console.log(`📧 [Assignment] Email sent to ${agent.email}`);
+      logger.info('[Assignment] email sent', { email: agent.email });
     } catch (emailError) {
-      console.error('Failed to send assignment email:', emailError);
+      logger.error('[Assignment] failed to send assignment email', { error: emailError.message });
       // Don't fail the assignment if email fails
     }
 
@@ -1336,151 +815,37 @@ exports.getStats = async (req, res, next) => {
     const orgId = req.user.organization._id;
     const { platform } = req.query;
 
-    // Only count interactions for connected accounts; when none connected, stats are zero
-    const activeConnectionsForStats = await PlatformConnection.find({
+    // Active platform connections scope what counts toward inbox stats.
+    const activeConnections = await PlatformConnection.find({
       organization: orgId,
       isActive: true,
       status: 'connected'
-    }).select('_id platform');
-    const connectionFilter = buildPlatformConnectionVisibilityFilter(activeConnectionsForStats);
+    }).select('_id platform').lean();
 
-    // Match parent interactions only (exclude replies), same as inbox list
-    const matchStage = {
-      organization: orgId,
-      $and: [
-        { $or: [{ parentId: { $exists: false } }, { parentId: null }, { parentId: '' }] },
-        connectionFilter
-      ]
-    };
-    setQueryFieldInOrEquals(matchStage, 'platform', platform);
+    const matchStage = inboxQueryService.buildStatsMatchStage({
+      orgId,
+      platform,
+      activeConnections
+    });
+    const slaCutoff = new Date(Date.now() - SLA_THRESHOLD_MS);
+    const pipeline = inboxQueryService.buildStatsAggregationPipeline({ matchStage, slaCutoff });
 
-    const SLA_HOURS = 24;
-    const slaThresholdMs = SLA_HOURS * 60 * 60 * 1000;
-    const now = new Date();
-    const slaCutoff = new Date(now.getTime() - slaThresholdMs);
-
-    const stats = await Interaction.aggregate([
-      { $match: matchStage },
-      {
-        $facet: {
-          counts: [
-            {
-              $group: {
-                _id: null,
-                total: { $sum: 1 },
-                unread: {
-                  $sum: { $cond: [{ $eq: ['$status', 'unread'] }, 1, 0] }
-                },
-                assigned: {
-                  $sum: { $cond: [{ $eq: ['$status', 'assigned'] }, 1, 0] }
-                },
-                replied: {
-                  $sum: { $cond: [{ $eq: ['$status', 'replied'] }, 1, 0] }
-                },
-                resolved: {
-                  $sum: { $cond: [{ $eq: ['$status', 'resolved'] }, 1, 0] }
-                },
-                positive: {
-                  $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] }
-                },
-                negative: {
-                  $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] }
-                },
-                neutral: {
-                  $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] }
-                }
-              }
-            },
-            {
-              $addFields: {
-                responseRate: {
-                  $cond: [
-                    { $gt: ['$total', 0] },
-                    { $round: [{ $multiply: [{ $divide: [{ $add: ['$replied', '$resolved'] }, '$total'] }, 100] }, 0] },
-                    0
-                  ]
-                }
-              }
-            }
-          ],
-          avgResponse: [
-            {
-              $match: {
-                respondedAt: { $exists: true, $ne: null },
-                platformCreatedAt: { $exists: true, $ne: null }
-              }
-            },
-            {
-              $group: {
-                _id: null,
-                avgMs: { $avg: { $subtract: ['$respondedAt', '$platformCreatedAt'] } }
-              }
-            }
-          ],
-          overdue: [
-            {
-              $match: {
-                status: { $nin: ['replied', 'resolved'] },
-                platformCreatedAt: { $lt: slaCutoff }
-              }
-            },
-            { $count: 'count' }
-          ]
-        }
-      },
-      {
-        $addFields: {
-          _counts: { $arrayElemAt: ['$counts', 0] },
-          _avgResp: { $arrayElemAt: ['$avgResponse', 0] },
-          _overdue: { $arrayElemAt: ['$overdue', 0] }
-        }
-      },
-      {
-        $replaceRoot: {
-          newRoot: {
-            $mergeObjects: [
-              { $ifNull: ['$_counts', {}] },
-              {
-                avgResponseTimeMinutes: {
-                  $cond: [
-                    { $and: [{ $ne: ['$_avgResp.avgMs', null] }, { $gt: ['$_avgResp.avgMs', 0] }] },
-                    { $round: [{ $divide: ['$_avgResp.avgMs', 60000] }, 0] },
-                    null
-                  ]
-                },
-                overdueCount: { $ifNull: ['$_overdue.count', 0] }
-              }
-            ]
-          }
-        }
-      },
-      {
-        $addFields: {
-          total: { $ifNull: ['$total', 0] },
-          unread: { $ifNull: ['$unread', 0] },
-          assigned: { $ifNull: ['$assigned', 0] },
-          replied: { $ifNull: ['$replied', 0] },
-          resolved: { $ifNull: ['$resolved', 0] },
-          responseRate: { $ifNull: ['$responseRate', 0] },
-          positive: { $ifNull: ['$positive', 0] },
-          negative: { $ifNull: ['$negative', 0] },
-          neutral: { $ifNull: ['$neutral', 0] },
-          overdueCount: { $ifNull: ['$overdueCount', 0] }
-        }
-      }
-    ]);
+    const stats = await Interaction.aggregate(pipeline);
 
     const data = stats[0] || {};
-    // Ensure responseRate is included when no stats
     if (!data.responseRate && data.total === undefined) {
       data.responseRate = 0;
     }
 
-    res.status(200).json({
-      success: true,
-      data
-    });
+    res.status(200).json({ success: true, data });
   } catch (error) {
+    if (error instanceof InboxQueryError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        code: error.code
+      });
+    }
     next(error);
   }
 };
@@ -1524,93 +889,20 @@ exports.getLabels = async (req, res, next) => {
 // @access  Private
 exports.suggestReply = async (req, res, next) => {
   try {
-    const interaction = await Interaction.findById(req.params.id);
-
-    if (!interaction) {
-      return res.status(404).json({
-        success: false,
-        error: 'Interaction not found'
-      });
-    }
-
-    // Check organization access
-    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        error: 'Access denied'
-      });
-    }
-
-    const organizationId = req.user.organization._id.toString();
-
-    // Check AI credits before generating
-    const aiCreditService = require('../services/aiCreditService');
-    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
-
-    if (!creditCheck.allowed) {
-      return res.status(403).json({
-        success: false,
-        error: creditCheck.error || 'Insufficient AI credits',
-        code: creditCheck.code || 'INSUFFICIENT_CREDITS',
-        credits: {
-          current: creditCheck.current,
-          limit: creditCheck.limit,
-          remaining: creditCheck.remaining
-        }
-      });
-    }
-
-    // Get organization for settings
-    const organization = await Organization.findById(req.user.organization._id);
-
-    let suggestCreditsDeducted = 0;
-    try {
-      const { result: aiResponse, aiApiUsageId } = await runWithAiContextAndUsageId(
-        {
-          organizationId: req.user.organization._id,
-          userId: req.user._id,
-          feature: 'inbox.suggest_reply'
-        },
-        () => aiService.generateResponse(interaction, req.user.organization._id)
-      );
-
-      if (!aiResponse) {
-        return res.status(500).json({ success: false, error: 'Failed to generate AI response' });
-      }
-
-      await aiCreditService.deductCredits(
-        organizationId,
-        1,
-        {
-          operation: 'ai_response',
-          userId: req.user._id,
-          interactionId: interaction._id.toString(),
-          platform: interaction.platform,
-          messagePreview: interaction.lastMessage?.content?.substring(0, 100) || ''
-        },
-        { aiApiUsageId }
-      );
-      suggestCreditsDeducted = 1;
-
-      const updatedCredits = await aiCreditService.getUsage(organizationId);
-
-      res.status(200).json({
-        success: true,
-        data: { suggestedReply: aiResponse.content, confidence: aiResponse.confidence, usedKnowledgeBase: aiResponse.usedKnowledgeBase, knowledgeBaseCount: aiResponse.knowledgeBaseCount },
-        credits: updatedCredits, message: 'AI reply generated successfully'
-      });
-    } catch (aiError) {
-      console.error('AI service error in suggestReply:', aiError.message);
-      if (suggestCreditsDeducted > 0) {
-        await aiCreditService.rollbackCredits(organizationId, suggestCreditsDeducted, { operation: 'ai_response', userId: req.user?._id, reason: aiError.message });
-      }
-      return res.status(500).json({
-        success: false, error: aiError.message || 'Failed to generate AI response. Please check your OpenAI API configuration.'
-      });
-    }
-  } catch (error) {
-    console.error('Suggest reply error:', error);
-    next(error);
+    const { data, credits } = await inboxAiAssistService.suggestReplyFor({
+      interactionId: req.params.id,
+      user: req.user
+    });
+    return res.status(200).json({
+      success: true,
+      data,
+      credits,
+      message: 'AI reply generated successfully'
+    });
+  } catch (err) {
+    if (err instanceof InboxAiError) return respondInboxAiError(res, err);
+    logger.error('[inboxController] suggestReply error', { error: err.message });
+    next(err);
   }
 };
 
@@ -1618,171 +910,21 @@ exports.suggestReply = async (req, res, next) => {
 // @route   POST /api/inbox/:id/ai-assist
 // @access  Private
 exports.aiAssist = async (req, res, next) => {
-  let assistCreditsDeducted = 0;
-  const organizationId = req.user.organization._id.toString();
-  const aiCreditService = require('../services/aiCreditService');
   try {
-    const interaction = await Interaction.findById(req.params.id);
-    if (!interaction) {
-      return res.status(404).json({ success: false, error: 'Interaction not found' });
-    }
-    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
-      return res.status(403).json({ success: false, error: 'Access denied' });
-    }
-    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
-    if (!creditCheck.allowed) {
-      return res.status(403).json({
-        success: false,
-        error: creditCheck.error || 'Insufficient AI credits',
-        code: creditCheck.code || 'INSUFFICIENT_CREDITS',
-        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining }
-      });
-    }
-
-    // Gather conversation context: latest messages from thread
-    const childInteractions = await Interaction.find({
-      $or: [
-        { parentId: interaction._id.toString() },
-        { parentId: interaction.platformId }
-      ],
-      organization: req.user.organization._id
-    }).sort({ platformCreatedAt: -1 }).limit(10).lean();
-
-    const recentReplies = (interaction.replies || [])
-      .filter(r => r.status !== 'deleted')
-      .slice(-10);
-
-    const conversationContext = [];
-    conversationContext.push(`Customer (${interaction.author?.name || 'Unknown'}): "${interaction.content}"`);
-    for (const child of childInteractions.reverse()) {
-      conversationContext.push(`Customer: "${child.content}"`);
-    }
-    for (const reply of recentReplies) {
-      const label = reply.isPlatformReply ? 'Customer' : 'Agent';
-      conversationContext.push(`${label}: "${reply.content}"`);
-    }
-    const chatContext = conversationContext.join('\n');
-
-    // Load knowledge base entries for context
-    const KnowledgeBase = require('../models/KnowledgeBase');
-    const { entries: kbEntries, fromFallback: kbFallback } = await aiService.searchKnowledgeBase(
-      organizationId,
-      interaction.content,
-      5
-    );
-    // Track real (non-fallback) matches so usage stats stay accurate
-    if (!kbFallback && kbEntries && kbEntries.length > 0) {
-      for (const kb of kbEntries) {
-        try {
-          await kb.incrementUsage();
-        } catch (usageErr) {
-          console.error('Error incrementing KB usage (aiAssist):', usageErr);
-        }
-      }
-    }
-    // Cap each KB entry to avoid bloating the AI Assist prompt
-    const MAX_KB_ENTRY_CHARS = 600;
-    const kbContext = kbEntries && kbEntries.length > 0
-      ? kbEntries.map(kb => {
-          const body = (kb.content || '').substring(0, MAX_KB_ENTRY_CHARS);
-          const truncated = (kb.content || '').length > MAX_KB_ENTRY_CHARS ? '…' : '';
-          return `${kb.title}: ${body}${truncated}`;
-        }).join('\n\n')
-      : '';
-
-    const baseSystemPrompt = `You are a professional customer service AI assistant.
-You help agents draft replies to customer messages.
-
-CONVERSATION CONTEXT:
-${chatContext}
-
-${kbContext ? `KNOWLEDGE BASE (use this information to ground your answers):\n${kbContext}` : 'No knowledge base content available. Provide helpful general responses.'}
-
-IMPORTANT RULES:
-- Address the customer's concern directly
-- Be polite, empathetic, and professional
-- If knowledge base content is provided, prioritize those facts
-- Never say placeholders like "[Your Name]" or "[Company]"
-- Match the tone to the platform: ${interaction.platform} (${interaction.type})
-- Do NOT include a greeting like "Dear customer" unless the message is formal`;
-
-    const replyTypes = {
-      short: {
-        instruction: 'Generate a SHORT, concise reply (1-2 sentences max). Get straight to the point.',
-        maxTokens: 100,
-        temperature: 0.6
-      },
-      detailed: {
-        instruction: 'Generate a DETAILED, comprehensive reply (3-5 sentences). Cover all relevant points thoroughly while remaining friendly.',
-        maxTokens: 300,
-        temperature: 0.7
-      },
-      sales: {
-        instruction: 'Generate a SALES-oriented reply (2-4 sentences). Address the query, then naturally suggest relevant products/services or upsell opportunities. Be helpful, not pushy.',
-        maxTokens: 250,
-        temperature: 0.75
-      }
-    };
-
-    const generateOne = async (type) => {
-      const config = replyTypes[type];
-      return runWithAiContextAndUsageId(
-        {
-          organizationId: req.user.organization._id,
-          userId: req.user._id,
-          feature: `inbox.ai_assist.${type}`
-        },
-        async () => {
-          const result = await aiService.generateText(
-            `${baseSystemPrompt}\n\n${config.instruction}`,
-            `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
-            { temperature: config.temperature, maxTokens: config.maxTokens }
-          );
-          return { type, content: result };
-        }
-      );
-    };
-
-    const [wShort, wDetailed, wSales] = await Promise.all([
-      generateOne('short'),
-      generateOne('detailed'),
-      generateOne('sales')
-    ]);
-    const shortReply = wShort.result;
-    const detailedReply = wDetailed.result;
-    const salesReply = wSales.result;
-    const assistLinkId = wSales.aiApiUsageId || wDetailed.aiApiUsageId || wShort.aiApiUsageId;
-
-    await aiCreditService.deductCredits(
-      organizationId,
-      1,
-      {
-        operation: 'ai_assist',
-        userId: req.user._id,
-        interactionId: interaction._id.toString(),
-        platform: interaction.platform,
-        messagePreview: interaction.content?.substring(0, 100) || ''
-      },
-      { aiApiUsageId: assistLinkId }
-    );
-    assistCreditsDeducted = 1;
-
-    const updatedCredits = await aiCreditService.getUsage(organizationId);
-
-    res.status(200).json({
-      success: true,
-      data: { short: shortReply.content, detailed: detailedReply.content, sales: salesReply.content, usedKnowledgeBase: kbEntries && kbEntries.length > 0, knowledgeBaseCount: kbEntries ? kbEntries.length : 0 },
-      credits: updatedCredits, message: 'AI assistance generated successfully'
+    const { data, credits } = await inboxAiAssistService.generateAssistTriple({
+      interactionId: req.params.id,
+      user: req.user
     });
-  } catch (error) {
-    console.error('AI Assist error:', error);
-    if (assistCreditsDeducted > 0 && organizationId) {
-      await aiCreditService.rollbackCredits(organizationId, assistCreditsDeducted, { operation: 'ai_assist', userId: req.user?._id, reason: error.message });
-    }
-    if (error.response?.status === 401) {
-      return res.status(500).json({ success: false, error: 'OpenAI API key is invalid or expired.' });
-    }
-    return res.status(500).json({ success: false, error: error.message || 'Failed to generate AI assistance. Please try again.' });
+    return res.status(200).json({
+      success: true,
+      data,
+      credits,
+      message: 'AI assistance generated successfully'
+    });
+  } catch (err) {
+    if (err instanceof InboxAiError) return respondInboxAiError(res, err);
+    logger.error('[inboxController] aiAssist error', { error: err.message });
+    next(err);
   }
 };
 
@@ -1790,138 +932,23 @@ IMPORTANT RULES:
 // @route   POST /api/inbox/:id/ai-assist/regenerate
 // @access  Private
 exports.aiAssistRegenerate = async (req, res, next) => {
-  let regenCreditsDeducted = 0;
-  const organizationId = req.user.organization._id.toString();
-  const aiCreditService = require('../services/aiCreditService');
   try {
     const { type } = req.body;
-    if (!['short', 'detailed', 'sales'].includes(type)) {
-      return res.status(400).json({ success: false, error: 'Invalid type. Must be short, detailed, or sales.' });
-    }
-
-    const interaction = await Interaction.findById(req.params.id);
-    if (!interaction) {
-      return res.status(404).json({ success: false, error: 'Interaction not found' });
-    }
-    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
-      return res.status(403).json({ success: false, error: 'Access denied' });
-    }
-    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
-    if (!creditCheck.allowed) {
-      return res.status(403).json({
-        success: false,
-        error: creditCheck.error || 'Insufficient AI credits',
-        code: creditCheck.code || 'INSUFFICIENT_CREDITS',
-        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining }
-      });
-    }
-
-    const childInteractions = await Interaction.find({
-      $or: [
-        { parentId: interaction._id.toString() },
-        { parentId: interaction.platformId }
-      ],
-      organization: req.user.organization._id
-    }).sort({ platformCreatedAt: -1 }).limit(10).lean();
-
-    const recentReplies = (interaction.replies || [])
-      .filter(r => r.status !== 'deleted')
-      .slice(-10);
-
-    const conversationContext = [];
-    conversationContext.push(`Customer (${interaction.author?.name || 'Unknown'}): "${interaction.content}"`);
-    for (const child of childInteractions.reverse()) {
-      conversationContext.push(`Customer: "${child.content}"`);
-    }
-    for (const reply of recentReplies) {
-      const label = reply.isPlatformReply ? 'Customer' : 'Agent';
-      conversationContext.push(`${label}: "${reply.content}"`);
-    }
-    const chatContext = conversationContext.join('\n');
-
-    const KnowledgeBase = require('../models/KnowledgeBase');
-    const { entries: kbEntries, fromFallback: kbFallback } = await aiService.searchKnowledgeBase(
-      organizationId,
-      interaction.content,
-      5
-    );
-    // Track real (non-fallback) matches so usage stats stay accurate
-    if (!kbFallback && kbEntries && kbEntries.length > 0) {
-      for (const kb of kbEntries) {
-        try {
-          await kb.incrementUsage();
-        } catch (usageErr) {
-          console.error('Error incrementing KB usage (aiAssistRegenerate):', usageErr);
-        }
-      }
-    }
-    // Cap each KB entry to avoid bloating the regenerate prompt
-    const MAX_KB_REGEN_ENTRY_CHARS = 600;
-    const kbContext = kbEntries && kbEntries.length > 0
-      ? kbEntries.map(kb => {
-          const body = (kb.content || '').substring(0, MAX_KB_REGEN_ENTRY_CHARS);
-          const truncated = (kb.content || '').length > MAX_KB_REGEN_ENTRY_CHARS ? '…' : '';
-          return `${kb.title}: ${body}${truncated}`;
-        }).join('\n\n')
-      : '';
-
-    const replyConfigs = {
-      short: { instruction: 'Generate a SHORT, concise reply (1-2 sentences max). Get straight to the point.', maxTokens: 100, temperature: 0.8 },
-      detailed: { instruction: 'Generate a DETAILED, comprehensive reply (3-5 sentences). Cover all relevant points thoroughly while remaining friendly.', maxTokens: 300, temperature: 0.8 },
-      sales: { instruction: 'Generate a SALES-oriented reply (2-4 sentences). Address the query, then naturally suggest relevant products/services. Be helpful, not pushy.', maxTokens: 250, temperature: 0.85 }
-    };
-
-    const config = replyConfigs[type];
-    const systemPrompt = `You are a professional customer service AI assistant.
-You help agents draft replies to customer messages. Generate a DIFFERENT response than the previous one.
-
-CONVERSATION CONTEXT:
-${chatContext}
-
-${kbContext ? `KNOWLEDGE BASE:\n${kbContext}` : ''}
-
-${config.instruction}`;
-
-    const { result: content, aiApiUsageId } = await runWithAiContextAndUsageId(
-      {
-        organizationId: req.user.organization._id,
-        userId: req.user._id,
-        feature: `inbox.ai_assist_regenerate.${type}`
-      },
-      () =>
-        aiService.generateText(
-          systemPrompt,
-          `Customer message: "${interaction.content}"\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`,
-          { temperature: config.temperature, maxTokens: config.maxTokens }
-        )
-    );
-
-    await aiCreditService.deductCredits(
-      organizationId,
-      1,
-      {
-        operation: 'ai_assist_regenerate',
-        userId: req.user._id,
-        interactionId: interaction._id.toString(),
-        platform: interaction.platform,
-        messagePreview: interaction.content?.substring(0, 100) || ''
-      },
-      { aiApiUsageId }
-    );
-    regenCreditsDeducted = 1;
-
-    const updatedCredits = await aiCreditService.getUsage(organizationId);
-
-    res.status(200).json({
-      success: true, data: { type, content },
-      credits: updatedCredits, message: `${type} reply regenerated successfully`
+    const { data, credits } = await inboxAiAssistService.regenerateAssistOne({
+      interactionId: req.params.id,
+      user: req.user,
+      type
     });
-  } catch (error) {
-    console.error('AI Assist regenerate error:', error);
-    if (regenCreditsDeducted > 0) {
-      await aiCreditService.rollbackCredits(organizationId, regenCreditsDeducted, { operation: 'ai_assist_regenerate', userId: req.user?._id, reason: error.message });
-    }
-    return res.status(500).json({ success: false, error: error.message || 'Failed to regenerate AI reply.' });
+    return res.status(200).json({
+      success: true,
+      data,
+      credits,
+      message: `${type} reply regenerated successfully`
+    });
+  } catch (err) {
+    if (err instanceof InboxAiError) return respondInboxAiError(res, err);
+    logger.error('[inboxController] aiAssistRegenerate error', { error: err.message });
+    next(err);
   }
 };
 
@@ -1929,201 +956,23 @@ ${config.instruction}`;
 // @route   POST /api/inbox/auto-reply/generate
 // @access  Private (Admin/Manager)
 exports.generateAutoReplies = async (req, res, next) => {
-  const organizationId = req.user.organization._id.toString();
-  const aiCreditService = require('../services/aiCreditService');
   try {
-    const { interactionIds, autoSend = false } = req.body;
-
-    // Get organization settings
-    const organization = await Organization.findById(req.user.organization._id);
-
-    if (!organization.autoReplySettings.enabled) {
-      return res.status(400).json({
-        success: false,
-        error: 'Auto-reply is not enabled for your organization'
-      });
-    }
-
-    // Check daily limit
-    const today = new Date().toDateString();
-    const lastReset = organization.autoReplySettings.lastReplyResetDate 
-      ? new Date(organization.autoReplySettings.lastReplyResetDate).toDateString()
-      : null;
-
-    if (lastReset !== today) {
-      organization.autoReplySettings.repliesCountToday = 0;
-      organization.autoReplySettings.lastReplyResetDate = new Date();
-      await organization.save();
-    }
-
-    if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
-      return res.status(429).json({
-        success: false,
-        error: 'Daily auto-reply limit reached'
-      });
-    }
-
-    // Get interactions
-    const query = interactionIds && interactionIds.length > 0
-      ? { _id: { $in: interactionIds }, organization: req.user.organization._id }
-      : { 
-          organization: req.user.organization._id,
-          status: 'unread',
-          $or: [
-            { replies: { $size: 0 } },
-            { replies: { $exists: false } }
-          ]
-        };
-
-    const interactions = await Interaction.find(query)
-      .populate('platformConnection')
-      .limit(20); // Process max 20 at a time
-
-    const results = {
-      total: interactions.length,
-      generated: 0,
-      sent: 0,
-      failed: 0,
-      skipped: 0,
-      details: []
-    };
-
-    for (const interaction of interactions) {
-      try {
-        // Check daily limit
-        if (organization.autoReplySettings.repliesCountToday >= organization.autoReplySettings.maxRepliesPerDay) {
-          results.skipped++;
-          results.details.push({
-            interactionId: interaction._id,
-            status: 'skipped',
-            reason: 'Daily limit reached'
-          });
-          continue;
-        }
-
-        // Check AI credits before generating
-        const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
-        if (!creditCheck.allowed) {
-          results.skipped++;
-          results.details.push({
-            interactionId: interaction._id,
-            status: 'skipped',
-            reason: 'Insufficient AI credits'
-          });
-          continue;
-        }
-
-        // Generate auto-reply
-        const autoReply = await aiService.generateAutoReply(
-          interaction,
-          req.user.organization._id,
-          organization
-        );
-
-        if (!autoReply.eligible) {
-          results.skipped++;
-          results.details.push({
-            interactionId: interaction._id,
-            status: 'skipped',
-            reason: autoReply.reason
-          });
-          continue;
-        }
-
-        results.generated++;
-        // Credits: generateAutoReply already deducts 1 credit (operation: auto_reply)
-
-        // If autoSend is true and organization allows it, send the reply
-        if (autoSend && organization.autoReplySettings.autoSend && !organization.autoReplySettings.requireApproval) {
-          try {
-            // Send reply to platform
-            let platformResponseId = null;
-            let replyStatus = 'sent';
-
-            if (interaction.platformConnection && interaction.platformConnection.status === 'connected') {
-              if (interaction.platform === 'youtube') {
-                const youtubeService = require('../integrations/google/youtubeService');
-                const result = await youtubeService.replyToComment(
-                  interaction.platformConnection,
-                  interaction.platformId,
-                  autoReply.response.content
-                );
-                
-                if (result.success && result.commentId) {
-                  platformResponseId = result.commentId;
-                  replyStatus = 'sent';
-                } else {
-                  replyStatus = 'failed';
-                }
-              }
-              // Add other platforms here
-            }
-
-            if (replyStatus === 'sent') {
-              // Add reply to database
-              await interaction.addReply(autoReply.response.content, req.user._id, platformResponseId, true);
-              interaction.respondedAt = new Date();
-              await interaction.save();
-
-              results.sent++;
-              organization.autoReplySettings.repliesCountToday++;
-
-              results.details.push({
-                interactionId: interaction._id,
-                status: 'sent',
-                reply: autoReply.response.content,
-                confidence: autoReply.response.confidence
-              });
-            } else {
-              results.failed++;
-              results.details.push({
-                interactionId: interaction._id,
-                status: 'failed',
-                reason: 'Failed to send to platform'
-              });
-            }
-          } catch (sendError) {
-            results.failed++;
-            results.details.push({
-              interactionId: interaction._id,
-              status: 'failed',
-              reason: sendError.message
-            });
-          }
-        } else {
-          // Save as suggested reply (not sent)
-          results.details.push({
-            interactionId: interaction._id,
-            status: 'generated',
-            suggestedReply: autoReply.response.content,
-            confidence: autoReply.response.confidence,
-            usedKnowledgeBase: autoReply.response.usedKnowledgeBase
-          });
-        }
-      } catch (error) {
-        results.failed++;
-        results.details.push({
-          interactionId: interaction._id,
-          status: 'error',
-          reason: error.message
-        });
-      }
-    }
-
-    // Save updated organization
-    await organization.save();
-
-    // Clear cache
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
-
-    res.status(200).json({
+    const { interactionIds, autoSend = false } = req.body || {};
+    const results = await inboxAiAssistService.processAutoReplyBatch({
+      user: req.user,
+      interactionIds,
+      autoSend,
+      mode: 'full'
+    });
+    return res.status(200).json({
       success: true,
       data: results,
       message: `Generated ${results.generated} replies, sent ${results.sent}, skipped ${results.skipped}, failed ${results.failed}`
     });
-  } catch (error) {
-    console.error('Auto-reply generation error:', error);
-    next(error);
+  } catch (err) {
+    if (err instanceof InboxAiError) return respondInboxAiError(res, err);
+    logger.error('[inboxController] generateAutoReplies error', { error: err.message });
+    next(err);
   }
 };
 
@@ -2131,106 +980,29 @@ exports.generateAutoReplies = async (req, res, next) => {
 // @route   POST /api/inbox/auto-reply/test-trigger
 // @access  Private (Admin/Manager)
 exports.testAutoReplyTrigger = async (req, res, next) => {
-  const organizationId = req.user.organization._id;
-  const aiCreditService = require('../services/aiCreditService');
   try {
-    const organization = await Organization.findById(organizationId);
-
-    if (!organization) {
-      return res.status(404).json({
-        success: false,
-        message: 'Organization not found'
-      });
-    }
-
-    // Find unread interactions without replies
-    const query = {
-      organization: organizationId,
-      status: 'unread',
-      $or: [
-        { replies: { $size: 0 } },
-        { replies: { $exists: false } }
-      ]
-    };
-
-    const interactions = await Interaction.find(query)
-      .populate('platformConnection')
-      .limit(20);
-
-    if (interactions.length === 0) {
+    const results = await inboxAiAssistService.processAutoReplyBatch({
+      user: req.user,
+      interactionIds: [],
+      autoSend: false,
+      mode: 'test'
+    });
+    if (results.found === 0) {
       return res.status(200).json({
         success: true,
         message: 'No eligible interactions found',
-        data: {
-          found: 0,
-          query: query,
-          settings: organization.autoReplySettings
-        }
+        data: { found: 0 }
       });
     }
-
-    const results = {
-      processed: 0,
-      sent: 0,
-      skipped: 0,
-      details: []
-    };
-
-    for (const interaction of interactions) {
-      const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
-      if (!creditCheck.allowed) {
-        results.skipped++;
-        results.details.push({
-          id: interaction._id,
-          platform: interaction.platform,
-          type: interaction.type,
-          status: 'skipped',
-          reason: 'Insufficient AI credits'
-        });
-        continue;
-      }
-
-      // Check eligibility
-      const autoReply = await aiService.generateAutoReply(
-        interaction,
-        organizationId,
-        organization
-      );
-
-      if (!autoReply.eligible) {
-        results.skipped++;
-        results.details.push({
-          id: interaction._id,
-          platform: interaction.platform,
-          type: interaction.type,
-          status: 'skipped',
-          reason: autoReply.reason
-        });
-        continue;
-      }
-
-      results.processed++;
-      // Credits: generateAutoReply already deducts 1 credit
-
-      results.details.push({
-        id: interaction._id,
-        platform: interaction.platform,
-        type: interaction.type,
-        status: 'generated',
-        confidence: autoReply.response.confidence,
-        reply: autoReply.response.content
-      });
-    }
-
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Auto-reply test completed',
       data: results
     });
-
-  } catch (error) {
-    console.error('Auto-reply test error:', error);
-    next(error);
+  } catch (err) {
+    if (err instanceof InboxAiError) return respondInboxAiError(res, err);
+    logger.error('[inboxController] testAutoReplyTrigger error', { error: err.message });
+    next(err);
   }
 };
 
@@ -2277,7 +1049,7 @@ exports.getEscalatedInteractions = async (req, res, next) => {
       }
     });
   } catch (error) {
-    console.error('Get escalated interactions error:', error);
+    logger.error('[inboxController] getEscalatedInteractions error', { error: error.message });
     next(error);
   }
 };
@@ -2318,7 +1090,7 @@ exports.getAvailableAgents = async (req, res, next) => {
       data: agentsWithWorkload
     });
   } catch (error) {
-    console.error('Get available agents error:', error);
+    logger.error('[inboxController] getAvailableAgents error', { error: error.message });
     next(error);
   }
 };
@@ -2329,70 +1101,27 @@ exports.getAvailableAgents = async (req, res, next) => {
 exports.bulkAssignInteractions = async (req, res, next) => {
   try {
     const { interactionIds, userId } = req.body;
-
-    if (!interactionIds || !Array.isArray(interactionIds) || interactionIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'interactionIds array is required'
-      });
+    if (!Array.isArray(interactionIds) || interactionIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'interactionIds array is required' });
     }
-
     if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: 'userId is required'
-      });
+      return res.status(400).json({ success: false, error: 'userId is required' });
     }
 
-    // Verify agent exists
-    const agent = await User.findById(userId);
-    if (!agent) {
-      return res.status(404).json({
-        success: false,
-        error: 'Agent not found'
-      });
-    }
-
-    const assignedAt = new Date();
-
-    // Update all interactions — also push to assignmentHistory so the
-    // "Assigned to X by Y" timeline banner appears in the detail view.
-    const result = await Interaction.updateMany(
-      {
-        _id: { $in: interactionIds },
-        organization: req.user.organization._id
-      },
-      {
-        $set: {
-          assignedTo: userId,
-          assignedBy: req.user._id,
-          assignedAt,
-          assignmentReason: 'manual',
-          status: 'assigned'
-        },
-        $push: {
-          assignmentHistory: {
-            assignedTo: userId,
-            assignedBy: req.user._id,
-            assignedAt,
-            reason: 'manual'
-          }
-        }
-      }
-    );
-
-    // Clear cache
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    const { updated, agentName } = await inboxBulkService.bulkAssign({
+      interactionIds,
+      userId,
+      assignedBy: req.user._id,
+      organizationId: req.user.organization._id
+    });
 
     res.status(200).json({
       success: true,
-      data: {
-        updated: result.modifiedCount
-      },
-      message: `Successfully assigned ${result.modifiedCount} interaction(s) to ${agent.firstName} ${agent.lastName}`
+      data: { updated },
+      message: `Successfully assigned ${updated} interaction(s) to ${agentName}`
     });
   } catch (error) {
-    console.error('Bulk assign error:', error);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
     next(error);
   }
 };
@@ -2403,43 +1132,26 @@ exports.bulkAssignInteractions = async (req, res, next) => {
 exports.bulkUpdateStatus = async (req, res, next) => {
   try {
     const { interactionIds, status } = req.body;
-
-    if (!interactionIds || !Array.isArray(interactionIds) || interactionIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'interactionIds array is required'
-      });
+    if (!Array.isArray(interactionIds) || interactionIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'interactionIds array is required' });
+    }
+    if (!status) {
+      return res.status(400).json({ success: false, error: 'status is required' });
     }
 
-    if (!status || !['unread', 'read', 'replied', 'resolved', 'archived', 'spam'].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        error: 'status must be one of: unread, read, replied, resolved, archived, spam'
-      });
-    }
-
-    const update = { status };
-    if (status === 'resolved') {
-      update.resolvedAt = new Date();
-    }
-
-    const result = await Interaction.updateMany(
-      {
-        _id: { $in: interactionIds },
-        organization: req.user.organization._id
-      },
-      { $set: update }
-    );
-
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    const { updated } = await inboxBulkService.bulkUpdateStatus({
+      interactionIds,
+      status,
+      organizationId: req.user.organization._id
+    });
 
     res.status(200).json({
       success: true,
-      data: { updated: result.modifiedCount },
-      message: `Successfully updated ${result.modifiedCount} interaction(s) to ${status}`
+      data: { updated },
+      message: `Successfully updated ${updated} interaction(s) to ${status}`
     });
   } catch (error) {
-    console.error('Bulk status update error:', error);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
     next(error);
   }
 };
@@ -2450,45 +1162,18 @@ exports.bulkUpdateStatus = async (req, res, next) => {
 exports.bulkAddLabel = async (req, res, next) => {
   try {
     const { interactionIds, labelId } = req.body;
-
-    if (!interactionIds || !Array.isArray(interactionIds) || interactionIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'interactionIds array is required'
-      });
+    if (!Array.isArray(interactionIds) || interactionIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'interactionIds array is required' });
     }
-
     if (!labelId) {
-      return res.status(400).json({
-        success: false,
-        error: 'labelId is required'
-      });
+      return res.status(400).json({ success: false, error: 'labelId is required' });
     }
 
-    const label = await Label.findById(labelId);
-    if (!label) {
-      return res.status(404).json({
-        success: false,
-        error: 'Label not found'
-      });
-    }
-
-    const interactions = await Interaction.find({
-      _id: { $in: interactionIds },
-      organization: req.user.organization._id
+    const { updated } = await inboxBulkService.bulkAddLabel({
+      interactionIds,
+      labelId,
+      organizationId: req.user.organization._id
     });
-
-    let updated = 0;
-    for (const interaction of interactions) {
-      if (!interaction.labels.includes(labelId)) {
-        interaction.labels.push(labelId);
-        await interaction.save();
-        await label.incrementUsage();
-        updated++;
-      }
-    }
-
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
 
     res.status(200).json({
       success: true,
@@ -2496,7 +1181,7 @@ exports.bulkAddLabel = async (req, res, next) => {
       message: `Successfully added label to ${updated} interaction(s)`
     });
   } catch (error) {
-    console.error('Bulk add label error:', error);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
     next(error);
   }
 };
@@ -2518,7 +1203,7 @@ exports.getEscalationStats = async (req, res, next) => {
       data: stats
     });
   } catch (error) {
-    console.error('Get escalation stats error:', error);
+    logger.error('[inboxController] getEscalationStats error', { error: error.message });
     next(error);
   }
 };
@@ -2566,7 +1251,7 @@ exports.escalateInteractionManually = async (req, res, next) => {
       message: 'Interaction escalated to human agent successfully'
     });
   } catch (error) {
-    console.error('Manual escalation error:', error);
+    logger.error('[inboxController] manualEscalation error', { error: error.message });
     next(error);
   }
 };
@@ -2626,7 +1311,7 @@ exports.getAttachment = async (req, res, next) => {
     if (error.response?.status === 404 || error.response?.status === 403) {
       return res.status(404).json({ success: false, error: 'Attachment not available' });
     }
-    console.error('getAttachment error:', error.message);
+    logger.error('[inboxController] getAttachment error', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to load attachment' });
   }
 };
@@ -2738,7 +1423,7 @@ exports.getAuthorAvatar = async (req, res, next) => {
     // Only log truly unexpected errors.
     const status = error.response?.status;
     if (error.code !== 'ECONNABORTED' && status !== 400 && status !== 403 && status !== 404) {
-      console.error('getAuthorAvatar error:', error.message);
+      logger.error('[inboxController] getAuthorAvatar error', { error: error.message });
     }
     
     res.status(404).json({ 
@@ -2835,7 +1520,7 @@ exports.backfillFacebookAvatars = async (req, res) => {
         : 'Backfill complete.'
     });
   } catch (error) {
-    console.error('backfillFacebookAvatars error:', error.message);
+    logger.error('[inboxController] backfillFacebookAvatars error', { error: error.message });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2991,7 +1676,7 @@ exports.getBucketView = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('getBucketView error:', error.message);
+    logger.error('[inboxController] getBucketView error', { error: error.message });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -3144,7 +1829,7 @@ exports.getTopicInsights = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('getTopicInsights error:', error.message);
+    logger.error('[inboxController] getTopicInsights error', { error: error.message });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -3303,7 +1988,7 @@ If the conversation was unclear or test messages, say so honestly in the summary
         );
       } catch (_) { /* ignore rollback error */ }
     }
-    console.error('generateSummary error:', error.message);
+    logger.error('[inboxController] generateSummary error', { error: error.message });
     next(error);
   }
 };
@@ -3337,7 +2022,7 @@ exports.saveSummary = async (req, res, next) => {
       data: { summary: summary.trim(), generatedBy: 'manual', generatedAt: new Date() }
     });
   } catch (error) {
-    console.error('saveSummary error:', error.message);
+    logger.error('[inboxController] saveSummary error', { error: error.message });
     next(error);
   }
 };

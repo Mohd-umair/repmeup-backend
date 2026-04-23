@@ -32,7 +32,7 @@ router.post(
 
 // Meta (Facebook/Instagram) OAuth routes
 const metaAuth = require('../integrations/meta/metaAuth');
-const { checkConnectionLimit } = require('../middleware/platformLimitMiddleware');
+const { checkConnectionLimit } = require('../middlewares/platformLimitMiddleware');
 
 // LinkedIn OAuth routes
 const linkedinAuth = require('../integrations/linkedin/linkedinAuth');

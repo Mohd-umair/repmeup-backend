@@ -1,5 +1,9 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const cacheService = require('../services/cacheService');
+
+// User cache TTL: 5 minutes. Short enough that deactivation takes effect quickly.
+const USER_CACHE_TTL = 300;
 
 // Protect routes - verify JWT token
 exports.protect = async (req, res, next) => {
@@ -20,11 +24,32 @@ exports.protect = async (req, res, next) => {
     }
 
     try {
-      // Verify token
+      // Verify token signature and expiry
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      // Get user from database
-      const user = await User.findById(decoded.id).populate('organization');
+      // Reject tokens that have been explicitly revoked (logout / forced sign-out)
+      if (await cacheService.isTokenBlacklisted(token)) {
+        return res.status(401).json({
+          success: false,
+          error: 'Token has been revoked. Please log in again.'
+        });
+      }
+
+      // Try cache first — avoids a DB round-trip on every authenticated request.
+      // On cache miss, falls through to MongoDB and repopulates the cache.
+      const cacheKey = cacheService.userKey(decoded.id);
+      let user = await cacheService.get(cacheKey);
+
+      if (!user) {
+        user = await User.findById(decoded.id)
+          .select('-password')
+          .lean()
+          .populate('organization');
+
+        if (user) {
+          await cacheService.set(cacheKey, user, USER_CACHE_TTL);
+        }
+      }
 
       if (!user) {
         return res.status(401).json({

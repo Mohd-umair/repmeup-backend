@@ -1,4 +1,5 @@
 const platformConnectionService = require('../services/platformConnectionService');
+const entitlementsService = require('../services/entitlementsService');
 
 /**
  * Middleware to check platform connection limits before allowing new connections
@@ -52,32 +53,31 @@ exports.checkConnectionLimit = async (req, res, next) => {
 };
 
 /**
- * Attach connection limit info to request without blocking
- * Use this for read endpoints that need to show limit info
+ * Attach connection limit info to request without blocking.
+ * Used by read endpoints that need to show limit info in the UI.
+ *
+ * Source of truth: entitlementsService — not Organization.limits (legacy).
  */
 exports.attachConnectionLimits = async (req, res, next) => {
   try {
     const organizationId = req.user?.organization?._id || req.user?.organization;
-    
+
     if (!organizationId) {
       return next();
     }
 
-    const remaining = await platformConnectionService.getRemainingSlots(organizationId);
-    const organization = await require('../models/Organization').findById(organizationId)
-      .select('limits.maxPlatformConnections usage.currentPlatformConnections');
+    const [entitlements, remaining] = await Promise.all([
+      entitlementsService.getEntitlements(organizationId),
+      platformConnectionService.getRemainingSlots(organizationId)
+    ]);
 
-    if (organization) {
-      req.connectionLimits = {
-        max: organization.limits.maxPlatformConnections,
-        current: organization.usage.currentPlatformConnections,
-        remaining
-      };
-    }
+    const max = entitlements.limits.maxAccounts;
+    const current = entitlements.usage.connectedAccounts ?? 0;
+    req.connectionLimits = { max, current, remaining };
 
     next();
   } catch (error) {
-    // Don't block request if this fails
+    // Don't block the request if this fails — it's informational, not authoritative.
     console.warn('Could not attach connection limits:', error);
     next();
   }

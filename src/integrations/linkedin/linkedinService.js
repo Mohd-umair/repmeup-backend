@@ -270,7 +270,10 @@ class LinkedInService {
       for (const interactionData of allInteractions) {
         try {
           const { status, isRead, sentiment, ...platformFields } = interactionData;
-          const existing = await Interaction.findOne({ platformId: interactionData.platformId }).select('_id').lean();
+          const existing = await Interaction.findOne({
+            platformId: interactionData.platformId,
+            organization: connection.organization
+          }).select('_id').lean();
           const liRef = existing ? { chatNumber: null, chatRef: null } : await generateChatRef(connection.organization).catch(() => ({ chatNumber: null, chatRef: null }));
           await Interaction.findOneAndUpdate(
             {

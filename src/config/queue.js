@@ -1,4 +1,5 @@
 const Queue = require('bull');
+const logger = require('./logger');
 
 // Memory-efficient queue settings
 const queueOptions = {
@@ -15,14 +16,22 @@ const queueOptions = {
   }
 };
 
-// Create queues with optimized settings
+// ============================================================================
+// Active queues (have at least one producer AND one consumer in worker.js)
+// ============================================================================
 const webhookQueue = new Queue('webhook-processing', queueOptions);
-const syncQueue = new Queue('platform-sync', queueOptions);
 const aiQueue = new Queue('ai-processing', queueOptions);
-const notificationQueue = new Queue('notifications', queueOptions);
 const autoReplyQueue = new Queue('auto-reply', queueOptions);
 const scheduledPublishQueue = new Queue('scheduled-publish', queueOptions);
 const brandAnalysisQueue = new Queue('brand-analysis', queueOptions);
+
+// ============================================================================
+// Reserved / dormant queues (declared but currently unused).
+// Kept in place so existing Bull Board dashboards and imports keep working.
+// TODO: either wire producers/consumers or remove. See docs/queues.md.
+// ============================================================================
+const syncQueue = new Queue('platform-sync', queueOptions);
+const notificationQueue = new Queue('notifications', queueOptions);
 
 // Configure job settings (memory-efficient)
 const queueConfig = {
@@ -35,20 +44,42 @@ const queueConfig = {
   removeOnFail: 100 // Keep only last 100 failed jobs (reduced from 500)
 };
 
-// Error handling for all queues
-const queues = [webhookQueue, syncQueue, aiQueue, notificationQueue, autoReplyQueue, scheduledPublishQueue, brandAnalysisQueue];
+// Error handling for all queues — every event below MUST be cheap.
+// Per-job logs go to debug to avoid log explosion under load.
+const queues = [
+  webhookQueue,
+  syncQueue,
+  aiQueue,
+  notificationQueue,
+  autoReplyQueue,
+  scheduledPublishQueue,
+  brandAnalysisQueue
+];
 
 queues.forEach(queue => {
   queue.on('error', (error) => {
-    console.error(`Queue ${queue.name} error:`, error);
+    logger.error(`[Queue:${queue.name}] error`, {
+      queue: queue.name,
+      error: error.message,
+      stack: error.stack
+    });
   });
 
   queue.on('failed', (job, err) => {
-    console.error(`Job ${job.id} in queue ${queue.name} failed:`, err.message);
+    logger.error(`[Queue:${queue.name}] job failed`, {
+      queue: queue.name,
+      jobId: job?.id,
+      attemptsMade: job?.attemptsMade,
+      error: err?.message,
+      stack: err?.stack
+    });
   });
 
   queue.on('completed', (job) => {
-    console.log(`Job ${job.id} in queue ${queue.name} completed`);
+    logger.debug(`[Queue:${queue.name}] job completed`, {
+      queue: queue.name,
+      jobId: job?.id
+    });
   });
 });
 
@@ -62,4 +93,3 @@ module.exports = {
   brandAnalysisQueue,
   queueConfig
 };
-

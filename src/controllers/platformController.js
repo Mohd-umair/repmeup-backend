@@ -8,6 +8,8 @@ const whatsappService = require('../integrations/whatsapp/whatsappService');
 const crypto = require('crypto');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
+const platformSyncService = require('../services/platformSyncService');
+const whatsappConnectionService = require('../services/whatsappConnectionService');
 
 /**
  * @desc    Initiate Google OAuth flow
@@ -477,215 +479,36 @@ exports.syncPlatform = async (req, res, next) => {
     });
 
     if (!connection) {
-      return res.status(404).json({
-        success: false,
-        error: 'Platform connection not found'
-      });
+      return res.status(404).json({ success: false, error: 'Platform connection not found' });
     }
 
     const organizationId = req.user.organization._id.toString();
-    let result = { count: 0, interactions: [] };
+    const syncResult = await platformSyncService.syncPlatform(connection, organizationId);
 
-    // Ensure token is valid and fetch data
-    if (connection.platform === 'youtube') {
-      await youtubeService.ensureValidToken(connection);
-      result = await youtubeService.fetchAllChannelComments(connection);
-      console.log('🔍 [Sync] YouTube sync result:', result);
-    } else if (connection.platform === 'google') {
-      await googleService.ensureValidToken(connection);
-      result = await googleService.fetchAllReviews(connection);
-      
-      if (!result.success && result.error) {
-        return res.status(400).json({
-          success: false,
-          error: result.error,
-          data: {
-            interactionsAdded: result.count || 0
-          }
-        });
-      }
-    } else if (connection.platform === 'instagram') {
-      // Check sync settings
-      const syncComments = connection.settings?.syncComments !== false; // Default true
-      const syncDMs = connection.settings?.syncDMs !== false; // Default true
-
-      if (syncComments && syncDMs) {
-        // Fetch both comments and DMs
-        result = await instagramService.fetchAllInteractions(connection);
-      } else if (syncComments) {
-        // Only fetch comments
-        result = await instagramService.fetchComments(connection);
-      } else if (syncDMs) {
-        // Only fetch DMs
-        result = await instagramService.fetchMessages(connection);
-      } else {
-        return res.status(400).json({
-          success: false,
-          error: 'Both comments and DMs sync are disabled for this connection'
-        });
-      }
-    } else if (connection.platform === 'facebook') {
-      // User-level Facebook connections (platformPageId null) are for listing pages only; they cannot sync comments
-      if (!connection.platformPageId) {
-        console.warn('⚠️ [Sync] Facebook connection has no Page ID (user-level connection). Sync comments from a connected Page in Page Manager.');
-        result = { count: 0, interactions: [] };
-      } else {
-        result = await facebookService.fetchAllInteractions(connection);
-      }
-    } else if (connection.platform === 'linkedin') {
-      try {
-        // Fetch LinkedIn posts and comments
-        result = await linkedinService.fetchAllInteractions(connection);
-      } catch (linkedinError) {
-        console.error('❌ [Sync] LinkedIn sync error:', linkedinError.message);
-        return res.status(400).json({
-          success: false,
-          error: linkedinError.message || 'LinkedIn sync failed',
-          data: {
-            interactionsAdded: 0
-          }
-        });
-      }
-    } else if (connection.platform === 'whatsapp') {
-      // WhatsApp Cloud API does not expose a "fetch history" endpoint for arbitrary conversations.
-      // We surface the last known messages already stored and update connection quality/profile.
-      try {
-        const verifyResult = await whatsappService.verifyConnection(connection);
-        if (verifyResult.success) {
-          connection.platformData = {
-            ...connection.platformData,
-            qualityRating: verifyResult.qualityRating,
-            codeVerificationStatus: verifyResult.codeVerificationStatus
-          };
-          connection.lastSyncAt = new Date();
-          await connection.save();
-          console.log('[Sync] WhatsApp connection health refreshed');
-        }
-      } catch (waErr) {
-        console.warn('[Sync] WhatsApp health check failed (non-fatal):', waErr.message);
-      }
-      result = { count: 0, interactions: [] };
-    } else {
+    // Non-fatal platform-level error (e.g. sync disabled, unsupported platform)
+    if (syncResult.error) {
       return res.status(400).json({
         success: false,
-        error: 'Platform sync not implemented'
+        error: syncResult.error,
+        data: { interactionsAdded: syncResult.count || 0 }
       });
     }
 
-    // Queue auto-reply ONLY for newly synced interactions (not all)
-    let autoReplyQueued = 0;
-    let sentimentAnalyzed = 0;
-    
-    if (result.count > 0 && result.interactions && result.interactions.length > 0) {
-      const autoReplyScheduler = require('../services/autoReplyScheduler');
-      const { aiQueue } = require('../config/queue');
-      const Interaction = require('../models/Interaction');
-      const aiService = require('../services/aiService');
-      
-      // Get platform IDs from NEWLY synced interactions only
-      const platformIds = result.interactions.map(i => i.platformId);
-      
-      // Find the newly synced interactions that are unread and have no replies
-      const newInteractions = await Interaction.find({
-        platformId: { $in: platformIds },
-        organization: organizationId,
-        status: 'unread',
-        $or: [
-          { replies: { $size: 0 } },
-          { replies: { $exists: false } }
-        ]
-      });
-      
-      // AUTOMATIC SENTIMENT ANALYSIS: Analyze sentiment for new interactions immediately
-      for (const interaction of newInteractions) {
-        // Only analyze if sentiment is missing
-        if (!interaction.sentiment && interaction.content) {
-          try {
-            const sentimentResult = aiService.fallbackSentimentAnalysis(interaction.content);
-            interaction.sentiment = sentimentResult.sentiment;
-            interaction.sentimentScore = sentimentResult.sentimentScore;
-            interaction.sentimentConfidence = sentimentResult.sentimentConfidence;
-            await interaction.save();
-            sentimentAnalyzed++;
-          } catch (sentimentError) {
-            console.error(`⚠️ [Sync] Sentiment analysis failed for ${interaction._id}:`, sentimentError.message);
-          }
-        }
-      }
-      
-      // Messages older than this threshold are treated as historical and never
-      // auto-replied to, even if they arrived during a sync of a newly connected account.
-      const SYNC_AUTO_REPLY_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-      for (const interaction of newInteractions) {
-        try {
-          // Double-check: Skip if already has replies (safety check)
-          if (interaction.replies && interaction.replies.length > 0) {
-            console.log(`⏭️  [Sync] Skipping AI queue for ${interaction._id} - already has replies`);
-            continue;
-          }
-
-          // Queue AI processing for every new interaction so buckets/sentiment are set.
-          await aiQueue.add({
-            interactionId: interaction._id
-          }, {
-            attempts: 3,
-            backoff: 2000,
-            jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
-          });
-
-          // Guard: skip auto-reply for historical/old messages fetched during sync.
-          // A message is historical if it predates when the account was first connected,
-          // or if it is older than 24 hours (catches accounts whose connectedAt wasn't set).
-          const msgDate = interaction.platformCreatedAt || interaction.createdAt;
-          const isHistorical = connection.connectedAt && msgDate < connection.connectedAt;
-          const isTooOld = (Date.now() - new Date(msgDate).getTime()) > SYNC_AUTO_REPLY_AGE_MS;
-
-          if (isHistorical || isTooOld) {
-            console.log(`⏭️  [Sync] Skipping auto-reply for historical/old interaction ${interaction._id} (msgDate=${msgDate}, connectedAt=${connection.connectedAt})`);
-            continue;
-          }
-
-          // Queue auto-reply only for genuinely new messages
-          const queued = await autoReplyScheduler.queueImmediateAutoReply(
-            interaction._id.toString(),
-            organizationId
-          );
-          
-          if (queued) {
-            autoReplyQueued++;
-          }
-        } catch (queueError) {
-          console.error(`Error queueing interaction ${interaction._id}:`, queueError);
-        }
-      }
-    }
-    
-    console.log(`📊 [Sync] Total: ${result.count} new interactions, ${sentimentAnalyzed} sentiments analyzed, ${autoReplyQueued} auto-replies queued`)
-    
-    // Invalidate interactions cache so frontend sees new data immediately
-    if (result.count > 0) {
-      const cacheService = require('../services/cacheService');
-      const cachePattern = `interactions:${organizationId}:*`;
-      await cacheService.delPattern(cachePattern);
-      console.log(`🗑️  [Cache] Invalidated interaction cache: ${cachePattern}`);
-    }
-      
-    const linkedInHint = result.linkedInSyncHint;
+    const { count, autoReplyQueued, linkedInSyncHint } = syncResult;
     const message =
-      result.count > 0
-        ? `Sync completed. Found ${result.count} new interactions. ${autoReplyQueued} auto-replies queued.`
-        : linkedInHint
-          ? 'Sync completed. No new interactions. LinkedIn did not allow listing posts (read access)—see data.linkedInSyncHint or server logs.'
+      count > 0
+        ? `Sync completed. Found ${count} new interactions. ${autoReplyQueued} auto-replies queued.`
+        : linkedInSyncHint
+          ? 'Sync completed. No new interactions. LinkedIn did not allow listing posts (read access).'
           : 'Sync completed. No new interactions found.';
 
     res.status(200).json({
       success: true,
       message,
       data: {
-        interactionsAdded: result.count,
+        interactionsAdded: count,
         autoRepliesQueued: autoReplyQueued,
-        ...(linkedInHint && { linkedInSyncHint })
+        ...(linkedInSyncHint && { linkedInSyncHint })
       }
     });
   } catch (error) {
@@ -920,81 +743,20 @@ exports.handleWhatsAppCallback = async (req, res, next) => {
  */
 exports.connectWhatsApp = async (req, res, next) => {
   try {
-    const organizationId = req.user.organization._id;
-
-    const verificationResult = await whatsappService.verifyConnection(null);
-
-    if (!verificationResult.success) {
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to verify WhatsApp connection',
-        message: 'Please check your WhatsApp credentials in environment variables'
-      });
-    }
-
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-    const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
-
-    const existingConnection = await PlatformConnection.findOne({
-      organization: organizationId,
-      platform: 'whatsapp',
-      isActive: true
-    });
-
-    if (existingConnection) {
-      return res.status(400).json({
-        success: false,
-        error: 'WhatsApp already connected',
-        message: 'This organization already has an active WhatsApp connection'
-      });
-    }
-
-    const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
-      'whatsapp', phoneNumberId, organizationId
+    const { connection } = await whatsappConnectionService.connectDirect(
+      req.user.organization._id,
+      req.user._id
     );
-    if (crossOrgConflict) {
-      return res.status(409).json({
+    res.status(200).json({ success: true, data: connection, message: 'WhatsApp connected successfully' });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
         success: false,
-        error: 'This WhatsApp number is already connected to another workspace.',
-        code: 'CROSS_ORG_CONFLICT'
+        error: error.message,
+        ...(error.clientMessage && { message: error.clientMessage }),
+        ...(error.code && { code: error.code })
       });
     }
-
-    const profileResult = await whatsappService.getBusinessProfile({ accessToken, platformData: { phoneNumberId }, platformUserId: phoneNumberId });
-
-    const connection = await PlatformConnection.create({
-      organization: organizationId,
-      platform: 'whatsapp',
-      platformUserId: phoneNumberId,
-      platformDisplayName: verificationResult.verifiedName,
-      accessToken,
-      createdBy: req.user._id,
-      platformData: {
-        phoneNumberId,
-        businessAccountId,
-        wabaId: businessAccountId,
-        displayPhoneNumber: verificationResult.phoneNumber,
-        verifiedName: verificationResult.verifiedName,
-        qualityRating: verificationResult.qualityRating,
-        codeVerificationStatus: verificationResult.codeVerificationStatus,
-        businessProfile: profileResult.profile
-      },
-      metadata: { connectionType: 'whatsapp_direct_env' },
-      status: 'connected',
-      isActive: true
-    });
-
-    console.log('✅ [WhatsApp] Direct connection created:', connection._id);
-
-    res.status(200).json({
-      success: true,
-      data: connection,
-      message: 'WhatsApp connected successfully'
-    });
-
-  } catch (error) {
-    console.error('❌ [WhatsApp] Connection error:', error);
     next(error);
   }
 };
@@ -1006,41 +768,13 @@ exports.connectWhatsApp = async (req, res, next) => {
  */
 exports.disconnectWhatsApp = async (req, res, next) => {
   try {
-    const organizationId = req.user.organization._id;
-    const connectionId = req.query.connectionId || req.body?.connectionId;
-
-    const query = { organization: organizationId, platform: 'whatsapp', isActive: true };
-    if (connectionId) query._id = connectionId;
-
-    const connection = await PlatformConnection.findOne(query);
-
-    if (!connection) {
-      return res.status(404).json({
-        success: false,
-        error: 'WhatsApp connection not found'
-      });
-    }
-
-    // Unsubscribe WABA from webhooks before deactivating
-    const wabaId = connection.platformData?.wabaId;
-    if (wabaId && connection.accessToken) {
-      const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
-      await whatsappLoginAuth.unsubscribeFromWebhook(wabaId, connection.accessToken);
-    }
-
-    connection.isActive = false;
-    connection.status = 'disconnected';
-    await connection.save();
-
-    console.log('✅ [WhatsApp] Connection disconnected:', connection._id);
-
-    res.status(200).json({
-      success: true,
-      message: 'WhatsApp disconnected successfully'
-    });
-
+    const connectionId = req.query.connectionId || req.body?.connectionId || null;
+    await whatsappConnectionService.disconnect(req.user.organization._id, connectionId);
+    res.status(200).json({ success: true, message: 'WhatsApp disconnected successfully' });
   } catch (error) {
-    console.error('❌ [WhatsApp] Disconnect error:', error);
+    if (error.statusCode === 404) {
+      return res.status(404).json({ success: false, error: error.message });
+    }
     next(error);
   }
 };
@@ -1052,40 +786,9 @@ exports.disconnectWhatsApp = async (req, res, next) => {
  */
 exports.getWhatsAppStatus = async (req, res, next) => {
   try {
-    const organizationId = req.user.organization._id;
-
-    const connection = await PlatformConnection.findOne({
-      organization: organizationId,
-      platform: 'whatsapp',
-      isActive: true
-    });
-
-    if (!connection) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          isConnected: false,
-          connection: null
-        }
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        isConnected: true,
-        connection: {
-          id: connection._id,
-          displayPhoneNumber: connection.platformData.displayPhoneNumber,
-          verifiedName: connection.platformData.verifiedName,
-          qualityRating: connection.platformData.qualityRating,
-          status: connection.status
-        }
-      }
-    });
-
+    const status = await whatsappConnectionService.getStatus(req.user.organization._id);
+    res.status(200).json({ success: true, data: status });
   } catch (error) {
-    console.error('❌ [WhatsApp] Status check error:', error);
     next(error);
   }
 };

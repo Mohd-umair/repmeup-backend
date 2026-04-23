@@ -1,47 +1,21 @@
 const ScheduledPost = require('../models/ScheduledPost');
 const PlatformConnection = require('../models/PlatformConnection');
 const Media = require('../models/Media');
-const VideoJob = require('../models/VideoJob');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const storageService = require('../services/storageService');
-const instagramService = require('../integrations/meta/instagramService');
-const facebookService = require('../integrations/meta/facebookService');
-const linkedinService = require('../integrations/linkedin/linkedinService');
-const aiService = require('../services/aiService');
 const aiCreditService = require('../services/aiCreditService');
-const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
+const postAiGenerationService = require('../services/postAiGenerationService');
+const { PostAiGenerationError } = postAiGenerationService;
+const postPublishService = require('../services/postPublishService');
+const { PostPublishError } = postPublishService;
 const auditLogController = require('./auditLogController');
+const logger = require('../config/logger');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
-const crypto = require('crypto');
-const axios = require('axios');
 const { validateMedia, getRequirementsText } = require('../config/platformMediaRequirements');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
-
-/** Image bytes for Facebook/LinkedIn when media is a public URL (S3/CDN) or local path */
-async function readImageBufferForPublish(mediaRef) {
-  if (!mediaRef) throw new Error('Missing media');
-  if (/^https?:\/\//i.test(String(mediaRef))) {
-    const r = await axios.get(String(mediaRef), {
-      responseType: 'arraybuffer',
-      timeout: 120000,
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    });
-    return Buffer.from(r.data);
-  }
-  return fs.readFile(mediaRef);
-}
-
-function contentTypeFromMediaRef(mediaRef) {
-  const ext = path.extname(String(mediaRef).split('?')[0]).toLowerCase();
-  if (ext === '.png') return 'image/png';
-  if (ext === '.gif') return 'image/gif';
-  if (ext === '.webp') return 'image/webp';
-  return 'image/jpeg';
-}
 
 async function removeStoredMediaRef(ref) {
   if (!ref) return;
@@ -54,6 +28,7 @@ async function removeStoredMediaRef(ref) {
     await fs.unlink(s);
   } catch (_) {}
 }
+
 
 // Configure multer for media uploads
 const storage = multer.diskStorage({
@@ -121,7 +96,7 @@ async function notifyAdminsOfPendingPost(organizationId, post, agentName) {
 
     await Notification.insertMany(notifications, { ordered: false });
   } catch (err) {
-    console.error('[notifyAdminsOfPendingPost] Error creating notifications:', err.message);
+    logger.error('[notifyAdminsOfPendingPost] Error creating notifications', { error: err.message });
   }
 }
 
@@ -148,737 +123,114 @@ async function notifyAgentOfDecision(userId, organizationId, post, decision, rej
       deliveryMethod: ['in_app']
     });
   } catch (err) {
-    console.error('[notifyAgentOfDecision] Error creating notification:', err.message);
+    logger.error('[notifyAgentOfDecision] Error creating notification', { error: err.message });
   }
 }
 
 /**
- * @desc    Generate post content with AI
- * @route   POST /api/posts/generate
- * @access  Private
+ * AI-generation endpoints.
+ *
+ * These handlers are intentionally thin: parse req → delegate to
+ * `postAiGenerationService` → translate `PostAiGenerationError` into the
+ * HTTP response. All prompt building, credit management, storage, and Sora
+ * orchestration lives in the service.
  */
+function respondPostAiError(res, err, fallbackMessage) {
+  if (err instanceof PostAiGenerationError) {
+    return res.status(err.statusCode).json({
+      success: false,
+      code: err.code || undefined,
+      message: err.message,
+      ...(err.extras || {})
+    });
+  }
+  logger.error('[postController] unexpected AI error', { error: err.message, stack: err.stack });
+  return res.status(500).json({ success: false, message: err.message || fallbackMessage });
+}
+
 exports.generatePostWithAI = async (req, res) => {
-  let creditsDeducted = 0;
-  let organizationId;
   try {
     const { prompt, platforms, mode, postType } = req.body;
-    organizationId = req.user.organization?._id || req.user.organization;
-
-    if (!prompt || !platforms || platforms.length === 0) {
-      return res.status(400).json({ success: false, message: 'Prompt and platforms are required' });
-    }
-    if (!['same', 'custom'].includes(mode)) {
-      return res.status(400).json({ success: false, message: 'Mode must be "same" or "custom"' });
-    }
-
-    const creditsNeeded = mode === 'same' ? 1 : platforms.length;
-    const creditCheck = await aiCreditService.checkCredits(organizationId, creditsNeeded);
-    if (!creditCheck.allowed) {
-      return res.status(403).json({
-        success: false,
-        message: creditCheck.error || 'Insufficient AI credits',
-        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining, needed: creditsNeeded }
-      });
-    }
-
-    const { result, aiApiUsageId } = await runWithAiContextAndUsageId(
-      {
-        organizationId,
-        userId: req.user._id,
-        feature: 'content_studio.post_generate'
-      },
-      () => aiService.generatePost(prompt, platforms, mode, postType, organizationId)
-    );
-
-    await aiCreditService.deductCredits(
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const result = await postAiGenerationService.generatePostText({
+      prompt, platforms, mode, postType,
       organizationId,
-      result.creditsUsed,
-      {
-        operation: 'post_generation',
-        userId: req.user._id,
-        prompt: prompt.substring(0, 100),
-        platforms,
-        mode,
-        postType
-      },
-      { aiApiUsageId }
-    );
-    creditsDeducted = result.creditsUsed;
-
-    const updatedCredits = await aiCreditService.getUsage(organizationId);
-
-    res.status(200).json({
-      success: true, data: result,
-      credits: { used: result.creditsUsed, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
+      userId: req.user._id
     });
-  } catch (error) {
-    console.error('Generate post with AI error:', error);
-    if (creditsDeducted > 0 && organizationId) {
-      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_generation', userId: req.user?._id, reason: error.message });
-    }
-    res.status(500).json({ success: false, message: error.message || 'Failed to generate post' });
+    res.status(200).json({ success: true, data: result.data, credits: result.credits });
+  } catch (err) {
+    respondPostAiError(res, err, 'Failed to generate post');
   }
 };
 
-/**
- * @desc    Generate multiple post variants (Content Studio)
- * @route   POST /api/posts/generate-variants
- * @access  Private
- */
 exports.generatePostVariantsWithAI = async (req, res) => {
-  let creditsDeducted = 0;
-  let organizationId;
   try {
-    const { topic, platforms, count, audience, intent, mood, includeTrend, postType, generationMode, eventTemplateId } = req.body;
-    organizationId = req.user.organization?._id || req.user.organization;
-
-    if (!topic || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
-      return res.status(400).json({ success: false, message: 'Topic and platforms are required' });
-    }
-
-    const variantCount = Math.min(parseInt(count, 10) || 3, 5);
-
-    const creditCheck = await aiCreditService.checkCredits(organizationId, variantCount);
-    if (!creditCheck.allowed) {
-      return res.status(403).json({
-        success: false, message: creditCheck.error || 'Insufficient AI credits',
-        credits: { current: creditCheck.current, limit: creditCheck.limit, remaining: creditCheck.remaining, needed: variantCount }
-      });
-    }
-
-    const { result, aiApiUsageId } = await runWithAiContextAndUsageId(
-      {
-        organizationId,
-        userId: req.user._id,
-        feature: 'content_studio.post_variants'
-      },
-      () =>
-        (async () => {
-          let occasionContext = null;
-          if (eventTemplateId) {
-            const EventTemplate = require('../models/EventTemplate');
-            const tpl = await EventTemplate.findOne({ _id: eventTemplateId, organization: organizationId }).lean();
-            if (tpl) {
-              occasionContext = {
-                name: tpl.name,
-                eventType: tpl.eventType,
-                sampleCaption: tpl.sampleCaption || '',
-                hashtags: tpl.hashtags || [],
-                cta: tpl.cta || '',
-                eventStyle: tpl.eventStyle || null
-              };
-            }
-          }
-          return aiService.generatePostVariants(topic, platforms, {
-            count: variantCount,
-            organizationId,
-            userId: req.user._id,
-            postType: postType || 'post',
-            audience: audience || '',
-            intent: intent || '',
-            mood: mood || '',
-            includeTrend: !!includeTrend,
-            generationMode: generationMode || 'instant',
-            occasionContext
-          });
-        })()
-    );
-
-    await aiCreditService.deductCredits(
+    const {
+      topic, platforms, count, audience, intent, mood,
+      includeTrend, postType, generationMode, eventTemplateId
+    } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const result = await postAiGenerationService.generatePostVariants({
+      topic, platforms, count, audience, intent, mood,
+      includeTrend, postType, generationMode, eventTemplateId,
       organizationId,
-      variantCount,
-      {
-        operation: 'post_variants',
-        userId: req.user._id,
-        topic: topic.substring(0, 100),
-        platforms,
-        variantCount
-      },
-      { aiApiUsageId }
-    );
-    creditsDeducted += variantCount;
-
-    const updatedCredits = await aiCreditService.getUsage(organizationId);
-
-    res.status(200).json({
-      success: true, data: result,
-      credits: { used: variantCount, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
+      userId: req.user._id
     });
-  } catch (error) {
-    console.error('Generate post variants error:', error);
-    if (creditsDeducted > 0 && organizationId) {
-      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_variants', userId: req.user?._id, reason: error.message });
-    }
-    res.status(500).json({ success: false, message: error.message || 'Failed to generate variants' });
+    res.status(200).json({ success: true, data: result.data, credits: result.credits });
+  } catch (err) {
+    respondPostAiError(res, err, 'Failed to generate variants');
   }
 };
-
-/**
- * @desc    Generate a single AI image for one content-studio variant.
- *          Called per-variant from the frontend AFTER text variants are received,
- *          so each request is independent and well within any proxy timeout.
- * @route   POST /api/posts/generate-variant-image
- * @access  Private
- */
-/**
- * Build a richly structured, unique image prompt from user-selected style options.
- * Each variant index gets a different primary variation directive to enforce diversity.
- */
-/**
- * Replaces known copyrighted / safety-triggering IP terms with safe generic alternatives
- * so DALL-E doesn't reject the prompt for copyright or policy violations.
- */
-const IP_REPLACEMENTS = [
-  // Anime / manga characters & franchises
-  [/(pokémon|pokemon)\s*characters?/gi,   'animated creatures'],
-  [/(pokémon|pokemon)/gi,                 'animated cartoon series'],
-  [/(pikachu|charmander|squirtle|bulbasaur|eevee|mewtwo)/gi, 'animated creature'],
-  [/(ash\s+ketchum|misty|brock|team\s+rocket)/gi, 'animated series protagonist'],
-  [/(goku|vegeta|piccolo|gohan|bulma)/gi, 'anime warrior hero'],
-  [/(naruto|sasuke|kakashi|sakura|itachi)/gi, 'anime ninja protagonist'],
-  [/(luffy|zoro|nami|sanji|usopp)/gi,    'anime adventure hero'],
-  [/(dragon\s*ball(\s*z|\s*super)?)/gi,  'classic anime series'],
-  [/(one\s*piece)/gi,                    'anime adventure series'],
-  [/(attack\s+on\s+titan|aot)/gi,        'anime action series'],
-  [/(fullmetal\s+alchemist)/gi,           'anime series'],
-  [/(sailor\s*moon)/gi,                  'magical anime series'],
-  [/(death\s+note)/gi,                   'anime thriller series'],
-  [/(evangelion|neon\s+genesis)/gi,      'mecha anime series'],
-  // Gaming characters
-  [/(mario|luigi|princess\s+peach|bowser|toad)/gi, 'video game character'],
-  [/(link|zelda|ganon(dorf)?)/gi,        'fantasy video game hero'],
-  [/(sonic\s+the\s+hedgehog|sonic)/gi,   'video game character'],
-  [/(master\s+chief|halo)/gi,            'sci-fi video game hero'],
-  [/(pac.?man)/gi,                       'arcade game character'],
-  // Comics / superheroes
-  [/(spider.?man|peter\s+parker)/gi,     'web-slinging superhero'],
-  [/(batman|bruce\s+wayne)/gi,           'dark knight superhero'],
-  [/(superman|clark\s+kent)/gi,          'caped superhero'],
-  [/(iron\s*man|tony\s+stark)/gi,        'armored superhero'],
-  [/(captain\s+america|steve\s+rogers)/gi, 'patriotic superhero'],
-  [/(thor|loki|avengers)/gi,             'superhero character'],
-  [/(wonder\s+woman)/gi,                 'warrior superhero'],
-  [/(black\s+panther)/gi,                'superhero character'],
-  // Movies & TV franchise characters
-  [/(darth\s+vader|luke\s+skywalker|yoda|obi.?wan|star\s+wars|jedi|sith|the\s+force)/gi, 'sci-fi space hero'],
-  [/(harry\s+potter|hermione|ron\s+weasley|dumbledore|voldemort|hogwarts)/gi, 'young wizard protagonist'],
-  [/(gandalf|frodo|bilbo|aragorn|sauron|lord\s+of\s+the\s+rings|hobbit)/gi, 'fantasy hero'],
-  [/(mickey\s+mouse|minnie\s+mouse|donald\s+duck|goofy)/gi, 'classic cartoon character'],
-  [/(simpsons?|homer|bart|marge|lisa)/gi, 'animated sitcom character'],
-  [/(shrek|fiona|donkey)/gi,             'animated movie character'],
-  // General safety — things that commonly trigger DALL-E
-  [/real\s+person|celebrity|influencer\s+named/gi, 'public figure'],
-];
-
-function sanitizeForImagePrompt(text) {
-  if (!text) return '';
-  let result = text
-    .replace(/[#@\n\r]/g, ' ')
-    .replace(/[^\x20-\x7E]/g, '')   // strip non-printable / emoji
-    .replace(/\s+/g, ' ')
-    .trim();
-  for (const [pattern, replacement] of IP_REPLACEMENTS) {
-    result = result.replace(pattern, replacement);
-  }
-  return result;
-}
-
-function buildImagePrompt({ topic, variantContent, imageConfig = {}, variantIndex = 0, contentType = '' }) {
-  const styleDescriptors = {
-    'photorealistic': 'ultra-realistic photography, DSLR quality, sharp 8K detail, no CGI',
-    'cinematic':      'cinematic film still, anamorphic lens flare, movie-grade color grading, widescreen',
-    'minimalist':     'minimalist design, vast clean white space, geometric simplicity, negative space composition',
-    '3d-render':      '3D CGI render, soft ambient occlusion, ray-traced depth of field, product visualization quality',
-    'illustration':   'digital illustration, flat design vector art, modern graphic style, clean lines',
-    'corporate':      'professional corporate photography, polished business aesthetic, high-end office environment',
-    'futuristic':     'futuristic sci-fi concept art, neon light accents, holographic UI elements, cyberpunk aesthetic',
-    'vintage':        'vintage retro film photography, analog grain texture, faded warm palette, nostalgic 1970s feel',
-    'bold-graphic':   'bold high-contrast graphic poster art, editorial design, strong geometric composition',
-    'watercolor':     'soft watercolor painting, visible expressive brushstrokes, artistic paper texture, painterly',
-    'dark-moody':     'dark moody noir photography, deep dramatic shadows, chiaroscuro contrast, cinematic atmosphere',
-    'pastel-life':    'bright airy lifestyle photography, pastel soft tones, natural golden light, consumer-friendly warmth'
-  };
-
-  // Each variant index forces a distinct visual angle to prevent identical outputs
-  const variationDirectives = [
-    'Hero shot: subject centered prominently, clean uncluttered background, confident direct composition.',
-    'Environmental context: subject integrated into relevant setting, rule-of-thirds framing, storytelling depth.',
-    'Abstract close-up: tight macro detail of subject, bold foreground crop, abstract artistic interpretation.',
-    'Wide establishing shot: expansive scene with subject as part of larger narrative, atmospheric depth.',
-    'Dynamic diagonal: subject at striking diagonal angle, energy and motion implied, graphic impact.',
-    'Flat lay overhead: bird\'s eye top-down arrangement, organized flat lay aesthetic, product catalog feel.'
-  ];
-
-  const styleDesc        = styleDescriptors[imageConfig.style] || 'professional social media photography, high quality';
-  const moodPart         = imageConfig.mood        ? `${imageConfig.mood.toLowerCase()} emotional atmosphere` : '';
-  const lightingPart     = imageConfig.lighting    ? `${imageConfig.lighting.toLowerCase()} lighting` : '';
-  const compositionPart  = imageConfig.composition ? `${imageConfig.composition.toLowerCase()} composition` : '';
-  const palettePart      = imageConfig.colorPalette? `${imageConfig.colorPalette.toLowerCase()} color palette` : '';
-  const anglePart        = imageConfig.cameraAngle ? `${imageConfig.cameraAngle.toLowerCase()} camera angle` : '';
-  const variationNote    = variationDirectives[variantIndex % variationDirectives.length];
-
-  // Sanitize topic — strip IP/copyright terms so DALL-E safety system doesn't reject
-  const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 120);
-
-  // NOTE: variantContent (caption) is intentionally NOT included in the image prompt.
-  // AI image models distort brand names and unusual words from captions. The caption
-  // is shown as post text outside the image — never rendered inside it.
-
-  const promptParts = [
-    styleDesc,
-    `Subject: ${safeTopic}`,
-    moodPart,
-    lightingPart,
-    compositionPart,
-    palettePart,
-    anglePart,
-    variationNote,
-    contentType === 'image-layover'
-      ? `HEADLINE TEXT (render exactly as written, exactly these words): "${safeTopic.split(' ').slice(0, 8).join(' ')}". Bold modern typography, high contrast. No other words or text anywhere else in the image.`
-      : 'Do NOT render any brand name, company name, or organisation name as text inside the image — brands are represented by their logo only. Any other text visible (on signs, screens, props) must be real, common English words relevant to the topic.',
-    'Ultra high quality, suitable for professional social media post.',
-    `seed:${Date.now() % 100000 + variantIndex * 13337}`  // soft uniqueness token
-  ].filter(Boolean);
-
-  return promptParts.join(', ');
-}
 
 exports.generateVariantImage = async (req, res) => {
-  let creditsDeducted = 0;
-  let organizationId;
   try {
-    const { topic, variantContent, imageConfig, variantIndex, contentType, generationMode, logoOverlay, logoPosition, logoUrl, eventTemplateId, includePeople, peopleNationality } = req.body;
-    organizationId = req.user.organization?._id || req.user.organization;
-    const userId = req.user._id;
-
-    if (!topic) {
-      return res.status(400).json({ success: false, message: 'topic is required' });
-    }
-
-    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
-    if (!creditCheck.allowed) {
-      return res.status(403).json({
-        success: false, message: creditCheck.error || 'Insufficient AI credits',
-        code: 'AI_CREDITS_EXCEEDED'
-      });
-    }
-
-    // In reference mode the visual style context from reference images fully controls output.
-    // Using a neutral subject-only prompt prevents the photography defaults in buildImagePrompt
-    // from overriding the graphic-design / illustrated style of the uploaded brand references.
-    const isReferenceMode = generationMode === 'reference';
-    let imagePrompt;
-    if (isReferenceMode) {
-      const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 120);
-      // Caption text is intentionally excluded — AI models distort brand names and unusual words.
-      imagePrompt = [
-        `Social media post about: ${safeTopic}`,
-        contentType === 'image-layover'
-          ? `HEADLINE TEXT (render exactly as written, exactly these words): "${safeTopic.split(' ').slice(0, 8).join(' ')}". No other words or text anywhere else in the image.`
-          : 'Do NOT render any brand name, company name, or organisation name as text inside the image — brands are represented by their logo only. Any other text visible (on signs, screens, props) must be real, common English words relevant to the topic.',
-        'High quality, platform-ready.',
-        `seed:${Date.now() % 100000 + (typeof variantIndex === 'number' ? variantIndex : 0) * 13337}`
-      ].filter(Boolean).join(', ');
-    } else {
-      imagePrompt = buildImagePrompt({
-        topic,
-        variantContent,
-        imageConfig: imageConfig || {},
-        variantIndex: typeof variantIndex === 'number' ? variantIndex : 0,
-        contentType: contentType || ''
-      });
-    }
-
-    if (includePeople) {
-      const nationalityPart = peopleNationality ? `${peopleNationality} ` : '';
-      imagePrompt += ` Include ${nationalityPart}people naturally in the scene — diverse, authentic, candid.`;
-    } else {
-      imagePrompt += ' Do NOT include any people, faces, or human figures in the image.';
-    }
-
-    console.log('[Content Studio] AI image prompt (variant %d):\n', variantIndex, imagePrompt);
-
-    // Determine which brand context to apply based on the requested generation mode:
-    // 'instant'     → no brand context (generic AI generation)
-    // 'brand-voice' → full visual style context (brand profile + reference images)
-    // 'reference'   → reference images only (ignores brand profile visuals)
-    const imageOrgId = generationMode && generationMode !== 'instant' ? organizationId : null;
-    const imageOptions = generationMode === 'reference' ? { referenceOnly: true } : {};
-
-    // If an occasion template is selected, append its visual style as priority context
-    if (eventTemplateId) {
-      const EventTemplate = require('../models/EventTemplate');
-      const tpl = await EventTemplate.findOne({ _id: eventTemplateId, organization: organizationId }).lean();
-      if (tpl?.eventStyle) {
-        imageOptions.occasionVisualStyle = tpl.eventStyle;
-      }
-    }
-
-    const { result: genResult, aiApiUsageId } = await runWithAiContextAndUsageId(
-      {
-        organizationId,
-        userId,
-        feature: `content_studio.variant_image.${typeof variantIndex === 'number' ? variantIndex : 0}`
-      },
-      () => aiService.generateImage(imagePrompt, imageOrgId, imageOptions)
-    );
-    // generateImage now returns { buffer, styleSpec, imagePrompt } or null
-    const buffer = genResult?.buffer ?? null;
-    const capturedStyleSpec = genResult?.styleSpec ?? null;
-    const capturedImagePrompt = genResult?.imagePrompt ?? imagePrompt;
-
-    if (!buffer) {
-      return res.status(500).json({ success: false, message: 'Image generation failed. Please try again.' });
-    }
-
-    // ── Optional: logo compositing via sharp ─────────────────────────────────
-    let finalBuffer = buffer;
-    if (logoOverlay && logoUrl && logoPosition) {
-      try {
-        const sharp = require('sharp');
-        const https = require('https');
-        const http = require('http');
-
-        // Fetch logo buffer from URL
-        const fetchBuffer = (url) => new Promise((resolve, reject) => {
-          const mod = url.startsWith('https') ? https : http;
-          mod.get(url, (resp) => {
-            const chunks = [];
-            resp.on('data', (c) => chunks.push(c));
-            resp.on('end', () => resolve(Buffer.concat(chunks)));
-            resp.on('error', reject);
-          }).on('error', reject);
-        });
-
-        const logoBuffer = await fetchBuffer(logoUrl);
-        const baseImage = sharp(buffer);
-        const meta = await baseImage.metadata();
-        const logoSize = Math.round(Math.min(meta.width, meta.height) * 0.18);
-        const margin  = Math.round(logoSize * 0.3);
-
-        const resizedLogo = await sharp(logoBuffer)
-          .resize(logoSize, logoSize, { fit: 'inside', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-          .png()
-          .toBuffer();
-
-        const logoMeta = await sharp(resizedLogo).metadata();
-        const lw = logoMeta.width;
-        const lh = logoMeta.height;
-
-        const posMap = {
-          'top-left':      { top: margin,                             left: margin },
-          'top-center':    { top: margin,                             left: Math.round((meta.width - lw) / 2) },
-          'top-right':     { top: margin,                             left: meta.width - lw - margin },
-          'bottom-left':   { top: meta.height - lh - margin,         left: margin },
-          'bottom-center': { top: meta.height - lh - margin,         left: Math.round((meta.width - lw) / 2) },
-          'bottom-right':  { top: meta.height - lh - margin,         left: meta.width - lw - margin },
-        };
-        const gravity = posMap[logoPosition] || posMap['bottom-right'];
-
-        finalBuffer = await baseImage
-          .composite([{ input: resizedLogo, ...gravity }])
-          .png()
-          .toBuffer();
-        console.log(`[Content Studio] Logo composited at ${logoPosition}`);
-      } catch (logoErr) {
-        console.warn('[Content Studio] Logo compositing failed, using original image:', logoErr.message);
-        finalBuffer = buffer;
-      }
-    }
-
-    const filename = `ai-${Date.now()}-${Math.floor(Math.random() * 1000)}.png`;
-    let imageUrl;
-    let mediaFilePath;
-    let mediaS3Key = null;
-    let mediaStorageType = 'local';
-
-    if (storageService.isS3Configured()) {
-      const key = storageService.buildPostsKey(organizationId, filename);
-      const { publicUrl, key: s3Key } = await storageService.uploadBuffer(key, finalBuffer, 'image/png');
-      imageUrl = publicUrl;
-      mediaFilePath = publicUrl;
-      mediaS3Key = s3Key;
-      mediaStorageType = 's3';
-    } else {
-      const uploadDir = path.join(__dirname, '../../uploads/posts');
-      await fs.mkdir(uploadDir, { recursive: true });
-      mediaFilePath = path.join(uploadDir, filename);
-      await fs.writeFile(mediaFilePath, finalBuffer);
-      imageUrl = getPublicMediaUrl(mediaFilePath, req);
-    }
-
-    const byteSize = finalBuffer.length;
-
-    // ── Auto-save to Media Library ────────────────────────────────────────────
-    let savedToLibrary = false;
-    try {
-      await Media.create({
-        filename,
-        originalName: filename,
-        filePath: mediaFilePath,
-        publicUrl: imageUrl,
-        s3Key: mediaS3Key || undefined,
-        storageType: mediaStorageType,
-        mimeType: 'image/png',
-        mediaType: 'image',
-        size: byteSize,
-        user: userId,
-        organization: organizationId,
-        tags: ['ai-generated', 'content-studio'],
-        description: `AI generated for: ${topic.substring(0, 80)}`
-      });
-      savedToLibrary = true;
-    } catch (mediaErr) {
-      console.warn('[Content Studio] Failed to save image to media library:', mediaErr.message);
-    }
-
-    await aiCreditService.deductCredits(
+    const {
+      topic, variantContent, imageConfig, variantIndex, contentType,
+      generationMode, logoOverlay, logoPosition, logoUrl,
+      eventTemplateId, includePeople, peopleNationality
+    } = req.body;
+    const organizationId = req.user.organization?._id || req.user.organization;
+    const out = await postAiGenerationService.generateVariantImage({
+      topic, variantContent, imageConfig, variantIndex, contentType,
+      generationMode, logoOverlay, logoPosition, logoUrl,
+      eventTemplateId, includePeople, peopleNationality,
       organizationId,
-      1,
-      {
-        operation: 'post_variants_image',
-        userId: req.user._id,
-        topic: topic.substring(0, 100)
-      },
-      { aiApiUsageId }
-    );
-    creditsDeducted = 1;
-
-    const updatedCredits = await aiCreditService.getUsage(organizationId);
-
-    const designDna = {
-      generationPrompt: capturedImagePrompt,
-      layoutType: capturedStyleSpec?.layout || null,
-      colors: capturedStyleSpec?.colorPalette || [],
-      medium: capturedStyleSpec?.medium || null,
-      style: capturedStyleSpec?.style || null
-    };
-
-    res.status(200).json({
-      success: true, imageUrl, savedToLibrary, designDna,
-      credits: { used: 1, current: updatedCredits.current, limit: updatedCredits.limit, remaining: updatedCredits.remaining, isUnlimited: updatedCredits.isUnlimited }
+      userId: req.user._id,
+      req
     });
-  } catch (error) {
-    console.error('Generate variant image error:', error);
-    if (creditsDeducted > 0 && organizationId) {
-      await aiCreditService.rollbackCredits(organizationId, creditsDeducted, { operation: 'post_variants_image', userId: req.user?._id, reason: error.message });
-    }
-
-    // Detect OpenAI safety / content-policy rejection (HTTP 400 with safety message)
-    const openaiMsg = error?.response?.data?.error?.message || error?.openaiError || '';
-    const isSafetyRejection =
-      error?.response?.status === 400 &&
-      (openaiMsg.toLowerCase().includes('safety') ||
-       openaiMsg.toLowerCase().includes('rejected') ||
-       openaiMsg.toLowerCase().includes('content policy') ||
-       openaiMsg.toLowerCase().includes('content_policy') ||
-       openaiMsg.toLowerCase().includes('violates') ||
-       openaiMsg.toLowerCase().includes('blocked') ||
-       openaiMsg.toLowerCase().includes('moderation'));
-
-    if (isSafetyRejection) {
-      return res.status(422).json({
-        success: false,
-        code: 'CONTENT_POLICY',
-        message: 'Image could not be generated because the topic or content references copyrighted characters, brands, or restricted subjects. Try rephrasing your topic to be more generic (e.g. "nostalgic cartoon memories" instead of specific character names).'
-      });
-    }
-
-    res.status(500).json({ success: false, message: error.message || 'Failed to generate image' });
+    res.status(200).json({
+      success: true,
+      imageUrl: out.imageUrl,
+      savedToLibrary: out.savedToLibrary,
+      designDna: out.designDna,
+      credits: out.credits
+    });
+  } catch (err) {
+    respondPostAiError(res, err, 'Failed to generate image');
   }
 };
 
-// ─── Video Generation ────────────────────────────────────────────────────────
-
-/**
- * Build a cinematic direction prompt for Sora from the user's VideoConfig.
- * Sanitised the same way as image prompts so copyrighted terms don't trigger rejections.
- */
-function buildVideoPrompt({ topic, variantContent, videoConfig = {}, variantIndex = 0 }) {
-  const styleDescriptors = {
-    cinematic:    'cinematic short film scene, anamorphic lens, movie-grade color grading, dramatic lighting',
-    realistic:    'ultra-realistic live action footage, natural lighting, documentary handheld camera feel',
-    animated:     'smooth 3D animation, modern motion graphics, vibrant colors, fluid transitions',
-    documentary:  'documentary style footage, authentic real-world setting, journalistic framing',
-    energetic:    'fast-paced dynamic edit, quick cuts, high energy motion, bold visual rhythm',
-  };
-
-  const toneDescriptors = {
-    energetic:    'high-energy, fast-paced, exciting',
-    calm:         'calm, serene, slow-motion elegance',
-    professional: 'polished, corporate, clean and authoritative',
-    playful:      'fun, colorful, upbeat, cheerful',
-  };
-
-  const variationAngles = [
-    'Opening establishing shot with gradual zoom-in, setting the scene.',
-    'Close-up product or subject detail reveal with motion blur transitions.',
-    'Aerial or wide cinematic sweep across the subject environment.',
-  ];
-
-  const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 100);
-  const rawHint   = variantContent ? variantContent.split(/[.\n!?]/)[0].trim() : '';
-  const hint      = sanitizeForImagePrompt(rawHint).substring(0, 80);
-
-  const styleDesc = styleDescriptors[videoConfig.style] || 'professional social media short video, high quality';
-  const toneDesc  = toneDescriptors[videoConfig.tone]   || 'engaging and professional';
-  const angleNote = variationAngles[variantIndex % variationAngles.length];
-
-  const parts = [
-    styleDesc,
-    `Subject: ${safeTopic}`,
-    hint ? `Theme: ${hint}` : '',
-    toneDesc,
-    angleNote,
-    'No text overlays, no captions, no subtitles, no watermarks.',
-    'Ultra high quality, suitable for professional social media reel.',
-  ].filter(Boolean);
-
-  return parts.join(', ');
-}
-
-/**
- * @desc    Submit an AI video generation job (returns jobId immediately — non-blocking).
- *          Avoids nginx proxy-timeout issues by not holding the HTTP connection open.
- * @route   POST /api/posts/generate-variant-video
- * @access  Private
- */
 exports.generateVariantVideo = async (req, res) => {
   try {
     const { topic, variantContent, videoConfig, variantIndex } = req.body;
     const organizationId = req.user.organization?._id || req.user.organization;
-    const userId = req.user._id;
-
-    if (!topic) {
-      return res.status(400).json({ success: false, message: 'topic is required' });
-    }
-
-    // Credit gate — fail fast before we even start
-    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
-    if (!creditCheck.allowed) {
-      return res.status(403).json({
-        success: false, message: creditCheck.error || 'Insufficient AI credits',
-        code: 'AI_CREDITS_EXCEEDED'
-      });
-    }
-
-    const jobId = `vjob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    await VideoJob.create({ jobId, status: 'pending', organizationId });
-
-    // ── Respond immediately so the browser connection is released ────────────
+    const { jobId } = await postAiGenerationService.submitVariantVideoJob({
+      topic, variantContent, videoConfig, variantIndex,
+      organizationId,
+      userId: req.user._id
+    });
     res.status(202).json({ success: true, jobId });
-
-    // ── Background generation (no await — runs after response is sent) ───────
-    ;(async () => {
-      try {
-        const videoPrompt = buildVideoPrompt({
-          topic,
-          variantContent,
-          videoConfig: videoConfig || {},
-          variantIndex: typeof variantIndex === 'number' ? variantIndex : 0
-        });
-        console.log('[Content Studio] AI video prompt (variant %d):\n', variantIndex, videoPrompt);
-
-        const cfg = videoConfig || {};
-        const vIdx = typeof variantIndex === 'number' ? variantIndex : 0;
-        const { result: buffer, aiApiUsageId } = await runWithAiContextAndUsageId(
-          {
-            organizationId,
-            userId,
-            feature: `content_studio.variant_video.${vIdx}`
-          },
-          () =>
-            aiService.generateVideo(videoPrompt, {
-              duration: cfg.duration || 4,
-              aspect: cfg.aspect || '9:16'
-            })
-        );
-
-        if (!buffer) {
-          await VideoJob.findOneAndUpdate({ jobId }, {
-            status: 'failed',
-            error: { code: 'VIDEO_FAILED', message: 'Video generation returned no data. Please try again.' }
-          });
-          return;
-        }
-
-        const filename = `ai-video-${Date.now()}-${Math.floor(Math.random() * 1000)}.mp4`;
-        let videoUrl;
-        if (storageService.isS3Configured()) {
-          const key = storageService.buildPostsKey(organizationId, filename);
-          const { publicUrl } = await storageService.uploadBuffer(key, buffer, 'video/mp4');
-          videoUrl = publicUrl;
-        } else {
-          const uploadDir = path.join(__dirname, '../../uploads/posts');
-          await fs.mkdir(uploadDir, { recursive: true });
-          const fullPath = path.join(uploadDir, filename);
-          await fs.writeFile(fullPath, buffer);
-          const baseUrl = (process.env.BASE_URL || process.env.API_URL || 'https://repmeup.in').replace(/\/api\/?$/, '');
-          videoUrl = `${baseUrl}/api/posts/media/${filename}`;
-        }
-
-        await VideoJob.findOneAndUpdate({ jobId }, { status: 'completed', videoUrl });
-
-        await aiCreditService.deductCredits(
-          organizationId,
-          1,
-          {
-            operation: 'post_variants_video',
-            userId,
-            topic: topic.substring(0, 100)
-          },
-          { aiApiUsageId }
-        );
-
-        console.log('[Video] Job completed:', jobId, videoUrl);
-      } catch (err) {
-        console.error('[Video] Background generation error:', err.message);
-
-        const openaiMsg = err?.response?.data?.error?.message || err?.openaiError || err?.message || '';
-        const isSafety =
-          (err?.response?.status === 400 || err?.soraFailed) &&
-          (openaiMsg.toLowerCase().includes('safety') ||
-           openaiMsg.toLowerCase().includes('rejected') ||
-           openaiMsg.toLowerCase().includes('content policy') ||
-           openaiMsg.toLowerCase().includes('content_policy') ||
-           openaiMsg.toLowerCase().includes('violates') ||
-           openaiMsg.toLowerCase().includes('blocked') ||
-           openaiMsg.toLowerCase().includes('moderation'));
-
-        await VideoJob.findOneAndUpdate({ jobId }, {
-          status: 'failed',
-          error: isSafety
-            ? { code: 'CONTENT_POLICY', message: 'Video blocked due to content policy. Try rephrasing your topic.' }
-            : { code: 'VIDEO_FAILED', message: err.message || 'Video generation failed.' }
-        });
-      }
-    })();
-
-  } catch (error) {
-    console.error('Generate variant video submit error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to start video generation' });
+  } catch (err) {
+    respondPostAiError(res, err, 'Failed to start video generation');
   }
 };
 
-/**
- * @desc    Poll the status of a video generation job
- * @route   GET /api/posts/video-job/:jobId
- * @access  Private
- */
 exports.getVideoJobStatus = async (req, res) => {
   try {
-    const job = await VideoJob.findOne({ jobId: req.params.jobId })
-      .select('jobId status videoUrl error')
-      .lean();
-
-    if (!job) {
-      return res.status(404).json({ success: false, message: 'Job not found or expired' });
-    }
-
-    res.json({ success: true, status: job.status, videoUrl: job.videoUrl || null, error: job.error || null });
+    const status = await postAiGenerationService.getVideoJobStatus(req.params.jobId);
+    res.json({ success: true, ...status });
   } catch (err) {
-    console.error('Video job status error:', err);
-    res.status(500).json({ success: false, message: 'Failed to fetch job status' });
+    respondPostAiError(res, err, 'Failed to fetch job status');
   }
 };
 
@@ -958,29 +310,29 @@ exports.saveDraft = async (req, res) => {
     }
 
     const draft = await ScheduledPost.create(draftData);
-    console.log(`[Content Studio] Draft saved: ${draft._id} for org ${organizationId}`);
+    logger.info(`[Content Studio] Draft saved: ${draft._id} for org ${organizationId}`);
 
     res.status(201).json({ success: true, draft });
   } catch (err) {
-    console.error('Save draft error:', err);
+    logger.error('Save draft error', { error: err.message, stack: err.stack });
     res.status(500).json({ success: false, message: err.message || 'Failed to save draft' });
   }
 };
 
 /**
- * @desc    Publish post immediately
+ * @desc    Publish post immediately (or schedule it / route to approval).
  * @route   POST /api/posts/publish
  * @access  Private
  */
 exports.publishPost = async (req, res) => {
   upload(req, res, async function (err) {
     if (err) {
-      console.error('Upload error:', err);
+      logger.error('[postController] publishPost upload error', { error: err.message });
       return res.status(400).json({ message: err.message });
     }
 
     try {
-      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds, mediaUrl, generatedBy, designDna } = req.body;
+      const { platform, content, scheduledFor, postType, generatedBy, designDna } = req.body;
       const userId = req.user.id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -988,51 +340,12 @@ exports.publishPost = async (req, res) => {
         return res.status(400).json({ message: 'Platform and content are required' });
       }
 
-      // Get platform connection
-      // For Facebook, we need a page-level connection with platformPageId
-      let query = {
-        organization: organizationId,
-        platform: platform.toLowerCase(),
-        isActive: true
-      };
+      const connection = await postPublishService.resolvePlatformConnection(organizationId, platform);
 
-      // For Facebook, specifically look for page connections (with platformPageId)
-      if (platform.toLowerCase() === 'facebook') {
-        query.platformPageId = { $exists: true, $ne: null };
-        query.usesAccountSlot = true; // Page connections use account slots
-      }
+      const mediaFields = await postPublishService.resolveMediaForPost(
+        req, organizationId, platform, postType
+      );
 
-      const connection = await PlatformConnection.findOne(query);
-
-      if (!connection) {
-        if (platform.toLowerCase() === 'facebook') {
-          return res.status(404).json({ 
-            message: 'No Facebook page connection found. Please connect a Facebook page from Settings.' 
-          });
-        }
-        if (platform.toLowerCase() === 'youtube') {
-          return res.status(404).json({
-            success: false,
-            code: 'PLATFORM_NOT_CONNECTED',
-            message: 'YouTube is not connected. Go to Settings → Social Accounts and connect your YouTube channel before posting videos.',
-            platform: 'youtube'
-          });
-        }
-        return res.status(404).json({ message: `No active ${platform} connection found` });
-      }
-
-      // YouTube publishing guard — not yet implemented, guide user to download
-      if (platform.toLowerCase() === 'youtube') {
-        return res.status(501).json({
-          success: false,
-          code: 'PLATFORM_NOT_IMPLEMENTED',
-          message: 'Direct YouTube publishing is coming soon. For now, download your video and upload it via YouTube Studio.',
-          platform: 'youtube',
-          downloadUrl: req.body.mediaUrl || null
-        });
-      }
-
-      // Prepare post data
       const postData = {
         organization: organizationId,
         user: userId,
@@ -1041,194 +354,17 @@ exports.publishPost = async (req, res) => {
         content: content.trim(),
         postType: postType || 'post',
         generatedBy: generatedBy === 'ai' ? 'ai' : 'human',
-        ...(designDna ? {
-          metadata: {
-            generationPrompt: designDna.generationPrompt || null,
-            layoutType: designDna.layoutType || null,
-            colors: designDna.colors || [],
-            medium: designDna.medium || null,
-            style: designDna.style || null,
-            designScore: null
-          }
-        } : {})
+        ...(designDna ? { metadata: {
+          generationPrompt: designDna.generationPrompt || null,
+          layoutType: designDna.layoutType || null,
+          colors: designDna.colors || [],
+          medium: designDna.medium || null,
+          style: designDna.style || null,
+          designScore: null
+        } } : {}),
+        ...mediaFields
       };
 
-      // Check if using media from library or uploading new media
-      if (mediaLibraryIds && mediaLibraryIds.length > 0) {
-        // Multiple media from library (carousel)
-        const libraryIds = Array.isArray(mediaLibraryIds) ? mediaLibraryIds : JSON.parse(mediaLibraryIds);
-        const libraryMediaItems = await Media.find({
-          _id: { $in: libraryIds },
-          organization: organizationId
-        });
-
-        if (libraryMediaItems.length !== libraryIds.length) {
-          return res.status(404).json({
-            success: false,
-            message: 'Some media items not found in library or do not belong to your organization'
-          });
-        }
-
-        postData.mediaStoragePaths = libraryMediaItems.map(m => m.publicUrl || storageService.resolvePublicUrl(m.filePath, req));
-        postData.mediaTypes = libraryMediaItems.map(m => m.mediaType);
-        postData.mediaLibraryIds = libraryMediaItems.map(m => m._id);
-        
-        // For backward compatibility
-        postData.mediaStoragePath = postData.mediaStoragePaths[0];
-        postData.mediaType = libraryMediaItems[0].mediaType;
-
-        console.log(`📚 [Post] Using ${libraryMediaItems.length} items from library for carousel`);
-      } else if (mediaLibraryId) {
-        // Single media from library
-        const libraryMedia = await Media.findOne({
-          _id: mediaLibraryId,
-          organization: organizationId
-        });
-
-        if (!libraryMedia) {
-          return res.status(404).json({
-            success: false,
-            message: 'Media not found in library or does not belong to your organization'
-          });
-        }
-
-        postData.mediaStoragePath = libraryMedia.publicUrl || storageService.resolvePublicUrl(libraryMedia.filePath, req);
-        postData.mediaType = libraryMedia.mediaType;
-        postData.mediaLibraryId = libraryMedia._id;
-
-        console.log(`📚 [Post] Using media from library: ${libraryMedia.originalName}`);
-      } else if (req.files && req.files.length > 0) {
-        // Multiple media files (carousel)
-        const mediaStoragePaths = [];
-        const mediaTypes = [];
-        
-        for (const file of req.files) {
-          const mediaType = file.mimetype.startsWith('image') ? 'image' : 'video';
-          const fileExtension = path.extname(file.originalname);
-          
-          // Validate each media file
-          const validation = validateMedia(
-            platform.toLowerCase(),
-            mediaType,
-            file.size,
-            fileExtension,
-            postType
-          );
-
-          if (!validation.valid) {
-            // Delete all uploaded files on validation failure
-            for (const f of req.files) {
-              try {
-                await fs.unlink(f.path);
-              } catch (err) {
-                console.error('Error deleting file:', err);
-              }
-            }
-            
-            return res.status(400).json({
-              success: false,
-              message: `Media validation failed for ${file.originalname}`,
-              errors: validation.errors,
-              warnings: validation.warnings
-            });
-          }
-
-          if (validation.warnings.length > 0) {
-            console.warn(`⚠️ Media warnings for ${file.originalname}:`, validation.warnings);
-          }
-
-          if (storageService.isS3Configured()) {
-            const buf = await fs.readFile(file.path);
-            const key = storageService.buildPostsKey(organizationId, path.basename(file.path));
-            const { publicUrl } = await storageService.uploadBuffer(key, buf, file.mimetype);
-            try {
-              await fs.unlink(file.path);
-            } catch (err) {
-              console.warn('Temp file unlink after S3:', err.message);
-            }
-            mediaStoragePaths.push(publicUrl);
-          } else {
-            mediaStoragePaths.push(file.path);
-          }
-          mediaTypes.push(mediaType);
-        }
-
-        postData.mediaStoragePaths = mediaStoragePaths;
-        postData.mediaTypes = mediaTypes;
-        
-        // For backward compatibility, also set single media fields to first item
-        postData.mediaStoragePath = mediaStoragePaths[0];
-        postData.mediaType = mediaTypes[0];
-        
-        console.log(`📎 [Upload] ${mediaStoragePaths.length} media files uploaded for carousel`);
-      } else if (req.file) {
-        // Single media file (legacy support)
-        const mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
-        const fileExtension = path.extname(req.file.originalname);
-        
-        // Validate media against platform requirements
-        const validation = validateMedia(
-          platform.toLowerCase(),
-          mediaType,
-          req.file.size,
-          fileExtension,
-          postType
-        );
-
-        if (!validation.valid) {
-          // Delete uploaded file
-          try {
-            await fs.unlink(req.file.path);
-          } catch (err) {
-            console.error('Error deleting invalid file:', err);
-          }
-          
-          return res.status(400).json({
-            success: false,
-            message: 'Media validation failed',
-            errors: validation.errors,
-            warnings: validation.warnings
-          });
-        }
-
-        // Log warnings if any
-        if (validation.warnings.length > 0) {
-          console.warn('⚠️ Media warnings:', validation.warnings);
-        }
-
-        if (storageService.isS3Configured()) {
-          const buf = await fs.readFile(req.file.path);
-          const key = storageService.buildPostsKey(organizationId, path.basename(req.file.path));
-          const { publicUrl } = await storageService.uploadBuffer(key, buf, req.file.mimetype);
-          try {
-            await fs.unlink(req.file.path);
-          } catch (err) {
-            console.warn('Temp file unlink after S3:', err.message);
-          }
-          postData.mediaStoragePath = publicUrl;
-        } else {
-          postData.mediaStoragePath = req.file.path;
-        }
-        postData.mediaType = mediaType;
-      } else if (mediaUrl && typeof mediaUrl === 'string' && /^https?:\/\//i.test(mediaUrl.trim())) {
-        postData.mediaStoragePath = mediaUrl.split('?')[0].trim();
-        postData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
-      } else if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
-        const filename = mediaUrl.split('/api/posts/media/').pop()?.split('?')[0]?.trim();
-        if (filename) {
-          const uploadDir = path.join(__dirname, '../../uploads/posts');
-          const fullPath = path.join(uploadDir, filename);
-          try {
-            await fs.access(fullPath);
-            postData.mediaStoragePath = fullPath;
-            postData.mediaType = 'image';
-          } catch {
-            console.warn('[Publish] AI-generated media file not found, publishing without image');
-          }
-        }
-      }
-
-      // Agent posts always require approval — redirect to pending_approval regardless of publish/schedule intent
       if (req.user.role === 'agent') {
         if (scheduledFor) postData.scheduledFor = new Date(scheduledFor);
         postData.status = 'pending_approval';
@@ -1241,105 +377,42 @@ exports.publishPost = async (req, res) => {
         });
       }
 
-      // If scheduled for later, save and return
       if (scheduledFor) {
         postData.scheduledFor = new Date(scheduledFor);
         postData.status = 'scheduled';
-
         const scheduledPost = await ScheduledPost.create(postData);
-
         return res.status(201).json({
           message: 'Post scheduled successfully',
           post: scheduledPost
         });
       }
 
-      // Publish immediately
-      postData.status = 'publishing';
       const post = await ScheduledPost.create(postData);
-
-      let result;
       try {
-        // Publish to platform
-        switch (platform.toLowerCase()) {
-          case 'instagram':
-            result = await publishToInstagram(connection, post, req);
-            break;
-          case 'facebook':
-            result = await publishToFacebook(connection, post, req);
-            break;
-          case 'linkedin':
-            result = await publishToLinkedIn(connection, post);
-            break;
-          case 'youtube':
-            // Guarded above — should not reach here
-            throw new Error('YouTube publishing is not yet implemented. Please upload via YouTube Studio.');
-          default:
-            throw new Error(`Publishing to ${platform} is not yet supported`);
-        }
-
-        // Update post with result
-        post.status = 'published';
-        post.publishedAt = new Date();
-        post.platformPostId = result.postId;
-        post.platformPostUrl = result.postUrl;
-        await post.save();
-
-        // Track media usage if using library media
-        if (post.mediaLibraryId) {
-          try {
-            const media = await Media.findById(post.mediaLibraryId);
-            if (media) {
-              await media.incrementUsage();
-              console.log(`📈 [Media Library] Usage incremented for ${media.originalName}`);
-            }
-          } catch (err) {
-            console.error('Error tracking media usage:', err);
-            // Non-critical, don't fail the request
-          }
-        }
-
-        // Track usage for carousel media
-        if (post.mediaLibraryIds && post.mediaLibraryIds.length > 0) {
-          try {
-            for (const mediaId of post.mediaLibraryIds) {
-              const media = await Media.findById(mediaId);
-              if (media) {
-                await media.incrementUsage();
-              }
-            }
-            console.log(`📈 [Media Library] Usage incremented for ${post.mediaLibraryIds.length} carousel items`);
-          } catch (err) {
-            console.error('Error tracking carousel media usage:', err);
-            // Non-critical, don't fail the request
-          }
-        }
-
+        const result = await postPublishService.publishExistingPost(post, connection, req);
         res.status(201).json({
           message: 'Post published successfully',
-          post: post,
-          platformPostUrl: result.postUrl
+          post: result.post,
+          platformPostUrl: result.platformPostUrl
         });
-      } catch (error) {
-        console.error('Publishing error:', error);
-        post.status = 'failed';
-        post.error = error.message;
-        await post.save();
-
-        // Return detailed platform error if available
-        const errorResponse = {
-          message: 'Failed to publish post',
-          error: error.message
-        };
-
-        if (error.platformError) {
-          errorResponse.platformError = error.platformError;
-        }
-
-        res.status(500).json(errorResponse);
+      } catch (publishError) {
+        logger.error('[postController] publishPost platform error', {
+          error: publishError.message, platformError: publishError.platformError
+        });
+        const errorResponse = { message: 'Failed to publish post', error: publishError.message };
+        if (publishError.platformError) errorResponse.platformError = publishError.platformError;
+        res.status(publishError.statusCode || 500).json(errorResponse);
       }
     } catch (error) {
-      console.error('Publish post error:', error);
+      if (error instanceof PostPublishError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          code: error.code || undefined,
+          message: error.message,
+          ...(error.extras || {})
+        });
+      }
+      logger.error('[postController] publishPost error', { error: error.message, stack: error.stack });
       res.status(500).json({ message: error.message });
     }
   });
@@ -1353,7 +426,7 @@ exports.publishPost = async (req, res) => {
 exports.schedulePost = async (req, res) => {
   upload(req, res, async function (err) {
     if (err) {
-      console.error('Upload error:', err);
+      logger.error('Upload error', { error: err.message, stack: err.stack });
       return res.status(400).json({ message: err.message });
     }
 
@@ -1420,7 +493,7 @@ exports.schedulePost = async (req, res) => {
         postData.mediaType = libraryMedia.mediaType;
         postData.mediaLibraryId = libraryMedia._id; // Track which library media is used
 
-        console.log(`📚 [Post] Using media from library: ${libraryMedia.originalName} (${libraryMedia._id})`);
+        logger.info(`📚 [Post] Using media from library: ${libraryMedia.originalName} (${libraryMedia._id})`);
       } else if (mediaUrl && typeof mediaUrl === 'string' && /^https?:\/\//i.test(mediaUrl.trim())) {
         postData.mediaStoragePath = mediaUrl.split('?')[0].trim();
         postData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
@@ -1455,7 +528,7 @@ exports.schedulePost = async (req, res) => {
           try {
             await fs.unlink(req.file.path);
           } catch (err) {
-            console.error('Error deleting invalid file:', err);
+            logger.error('Error deleting invalid file', { error: err.message, stack: err.stack });
           }
           
           return res.status(400).json({
@@ -1468,7 +541,7 @@ exports.schedulePost = async (req, res) => {
 
         // Log warnings if any
         if (validation.warnings.length > 0) {
-          console.warn('⚠️ Media warnings:', validation.warnings);
+          logger.warn('⚠️ Media warnings', { arg1: validation.warnings });
         }
 
         if (storageService.isS3Configured()) {
@@ -1478,7 +551,7 @@ exports.schedulePost = async (req, res) => {
           try {
             await fs.unlink(req.file.path);
           } catch (err) {
-            console.warn('Temp file unlink after S3:', err.message);
+            logger.warn('Temp file unlink after S3', { error: err.message });
           }
           postData.mediaStoragePath = publicUrl;
         } else {
@@ -1503,7 +576,7 @@ exports.schedulePost = async (req, res) => {
         post: scheduledPost
       });
     } catch (error) {
-      console.error('Schedule post error:', error);
+      logger.error('Schedule post error', { error: error.message, stack: error.stack });
       res.status(500).json({ message: error.message });
     }
   });
@@ -1532,7 +605,7 @@ exports.getDashboardCounts = async (req, res) => {
       data: { scheduled, pendingApproval, aiGeneratedPercent }
     });
   } catch (error) {
-    console.error('Get dashboard counts error:', error);
+    logger.error('Get dashboard counts error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -1560,7 +633,7 @@ exports.getScheduledPosts = async (req, res) => {
       count: posts.length
     });
   } catch (error) {
-    console.error('Get scheduled posts error:', error);
+    logger.error('Get scheduled posts error', { error: error.message, stack: error.stack });
     res.status(500).json({ 
       success: false,
       error: error.message 
@@ -1601,7 +674,7 @@ exports.getPendingApprovalPosts = async (req, res) => {
       pagination: paginationMeta(total, page, limit)
     });
   } catch (error) {
-    console.error('Get pending approval posts error:', error);
+    logger.error('Get pending approval posts error', { error: error.message, stack: error.stack });
     res.status(500).json({
       success: false,
       error: error.message
@@ -1610,11 +683,9 @@ exports.getPendingApprovalPosts = async (req, res) => {
 };
 
 /**
- * @desc    Approve a post.
- *          - If scheduledFor is provided (by admin or already on the post) → schedule it.
- *          - Otherwise → publish to the platform immediately.
+ * @desc    Approve a post (and publish immediately or re-schedule).
  * @route   PATCH /api/posts/:id/approve
- * @access  Private — admin, manager, super_admin only
+ * @access  Private
  */
 exports.approvePost = async (req, res) => {
   try {
@@ -1629,23 +700,17 @@ exports.approvePost = async (req, res) => {
     }).populate('platformConnection');
 
     if (!post) {
-      return res.status(404).json({
-        success: false,
-        message: 'Post not found or not pending approval'
-      });
+      return res.status(404).json({ success: false, message: 'Post not found or not pending approval' });
     }
 
     post.approvedBy = req.user._id;
     post.approvedAt = new Date();
 
-    // Resolve the effective schedule date:
-    // admin can override via request body, or keep the date the agent originally set
     const effectiveScheduledFor = scheduledForBody
       ? new Date(scheduledForBody)
       : (post.scheduledFor ? new Date(post.scheduledFor) : null);
 
     if (effectiveScheduledFor && effectiveScheduledFor > new Date()) {
-      // ── Schedule for later ──────────────────────────────────────────────
       post.scheduledFor = effectiveScheduledFor;
       post.status = 'scheduled';
       await post.save();
@@ -1658,7 +723,6 @@ exports.approvePost = async (req, res) => {
       return res.status(200).json({ success: true, scheduled: true, data: post });
     }
 
-    // ── Publish immediately ───────────────────────────────────────────────
     const connection = post.platformConnection;
     if (!connection) {
       return res.status(400).json({
@@ -1667,43 +731,11 @@ exports.approvePost = async (req, res) => {
       });
     }
 
-    post.status = 'publishing';
-    await post.save();
-
-    // Build a minimal req-like object needed by the publish helpers (media URL building)
-    const fakeReq = {
-      protocol: req.protocol || 'https',
-      get: (name) => name === 'host' ? req.get('host') : null
-    };
-
-    let result;
     try {
-      switch (post.platform.toLowerCase()) {
-        case 'instagram':
-          result = await publishToInstagram(connection, post, fakeReq);
-          break;
-        case 'facebook':
-          result = await publishToFacebook(connection, post, fakeReq);
-          break;
-        case 'linkedin':
-          result = await publishToLinkedIn(connection, post);
-          break;
-        default:
-          post.status = 'failed';
-          post.error = `Publishing to ${post.platform} is not yet supported`;
-          await post.save();
-          return res.status(422).json({ success: false, message: post.error });
-      }
-
-      post.status = 'published';
-      post.publishedAt = new Date();
-      post.platformPostId = result.postId;
-      post.platformPostUrl = result.postUrl;
-      post.error = undefined;
-      await post.save();
+      const { platformPostUrl } = await postPublishService.publishExistingPost(post, connection, req);
 
       await auditLogController.log(organizationId, 'post', post._id, 'approved', req.user._id,
-        { status: post.status, platformPostUrl: post.platformPostUrl });
+        { status: post.status, platformPostUrl });
 
       notifyAgentOfDecision(post.user, organizationId, post, 'approved', null);
 
@@ -1711,20 +743,18 @@ exports.approvePost = async (req, res) => {
         success: true,
         published: true,
         data: post,
-        platformPostUrl: result.postUrl
+        platformPostUrl
       });
     } catch (publishError) {
-      console.error('Approve+publish error:', publishError);
-      post.status = 'failed';
-      post.error = publishError.message;
-      await post.save();
-
+      logger.error('[postController] approvePost platform error', {
+        error: publishError.message, platformError: publishError.platformError
+      });
       const errBody = { success: false, message: 'Post approved but publishing failed', error: publishError.message };
       if (publishError.platformError) errBody.platformError = publishError.platformError;
-      return res.status(500).json(errBody);
+      return res.status(publishError.statusCode || 500).json(errBody);
     }
   } catch (error) {
-    console.error('Approve post error:', error);
+    logger.error('[postController] approvePost error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -1775,7 +805,7 @@ exports.rejectPost = async (req, res) => {
       data: post
     });
   } catch (error) {
-    console.error('Reject post error:', error);
+    logger.error('Reject post error', { error: error.message, stack: error.stack });
     res.status(500).json({
       success: false,
       error: error.message
@@ -1832,7 +862,7 @@ exports.getApprovalHistory = async (req, res) => {
 
     res.status(200).json({ success: true, data: posts, pagination: paginationMeta(total, page, limit) });
   } catch (error) {
-    console.error('Get approval history error:', error);
+    logger.error('Get approval history error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2003,7 +1033,7 @@ exports.updatePendingPostByAdmin = (req, res) => {
           try {
             await fs.unlink(file.path);
           } catch (e) {
-            console.warn('Temp file unlink after S3:', e.message);
+            logger.warn('Temp file unlink after S3', { error: e.message });
           }
           newRef = publicUrl;
         } else {
@@ -2027,7 +1057,7 @@ exports.updatePendingPostByAdmin = (req, res) => {
 
       res.status(200).json({ success: true, data: lean });
     } catch (error) {
-      console.error('Update pending post error:', error);
+      logger.error('Update pending post error', { error: error.message, stack: error.stack });
       await cleanupUploaded(req.files || []);
       res.status(500).json({ success: false, error: error.message });
     }
@@ -2121,7 +1151,7 @@ exports.resubmitPost = async (req, res) => {
       data: post
     });
   } catch (error) {
-    console.error('Resubmit post error:', error);
+    logger.error('Resubmit post error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2196,7 +1226,7 @@ exports.sendToApproval = async (req, res) => {
       data: post
     });
   } catch (error) {
-    console.error('Send to approval error:', error);
+    logger.error('Send to approval error', { error: error.message, stack: error.stack });
     res.status(500).json({
       success: false,
       error: error.message
@@ -2228,7 +1258,7 @@ exports.getPublishedPosts = async (req, res) => {
 
     res.status(200).json({ success: true, data: posts, pagination: paginationMeta(total, page, limit) });
   } catch (error) {
-    console.error('Get published posts error:', error);
+    logger.error('Get published posts error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2255,7 +1285,7 @@ exports.reschedulePost = async (req, res) => {
     }
     res.status(200).json({ success: true, data: post });
   } catch (error) {
-    console.error('Reschedule post error:', error);
+    logger.error('Reschedule post error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2282,17 +1312,17 @@ exports.deleteScheduledPost = async (req, res) => {
     if (post.mediaStoragePaths && post.mediaStoragePaths.length > 0) {
       for (const mediaPath of post.mediaStoragePaths) {
         await removeStoredMediaRef(mediaPath);
-        console.log(`🗑️  Removed carousel media ref: ${mediaPath}`);
+        logger.info(`🗑️  Removed carousel media ref: ${mediaPath}`);
       }
     } else if (post.mediaStoragePath) {
       await removeStoredMediaRef(post.mediaStoragePath);
-      console.log(`🗑️  Removed media ref: ${post.mediaStoragePath}`);
+      logger.info(`🗑️  Removed media ref: ${post.mediaStoragePath}`);
     }
 
     await ScheduledPost.findByIdAndDelete(post._id);
     res.status(200).json({ message: 'Scheduled post deleted' });
   } catch (error) {
-    console.error('Delete scheduled post error:', error);
+    logger.error('Delete scheduled post error', { error: error.message, stack: error.stack });
     res.status(500).json({ message: error.message });
   }
 };
@@ -2321,7 +1351,7 @@ exports.getDraftPosts = async (req, res) => {
 
     res.status(200).json({ success: true, data: posts, pagination: paginationMeta(total, page, limit) });
   } catch (error) {
-    console.error('Get draft posts error:', error);
+    logger.error('Get draft posts error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2352,7 +1382,7 @@ exports.updateDraft = async (req, res) => {
 
     res.status(200).json({ success: true, data: draft });
   } catch (error) {
-    console.error('Update draft error:', error);
+    logger.error('Update draft error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2382,7 +1412,7 @@ exports.sendDraftToApproval = async (req, res) => {
 
     res.status(200).json({ success: true, data: draft, message: 'Draft sent for approval.' });
   } catch (error) {
-    console.error('Send draft to approval error:', error);
+    logger.error('Send draft to approval error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2418,7 +1448,7 @@ exports.scheduleDraft = async (req, res) => {
 
     res.status(200).json({ success: true, data: draft });
   } catch (error) {
-    console.error('Schedule draft error:', error);
+    logger.error('Schedule draft error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2453,14 +1483,14 @@ exports.deleteDraft = async (req, res) => {
     await ScheduledPost.findByIdAndDelete(draft._id);
     res.status(200).json({ success: true, message: 'Draft deleted' });
   } catch (error) {
-    console.error('Delete draft error:', error);
+    logger.error('Delete draft error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
 
 /**
- * @desc    Publish a draft immediately to the connected platform
- * @route   POST /api/posts/drafts/:id/publish
+ * @desc    Publish an existing draft.
+ * @route   POST /api/posts/draft/:id/publish
  * @access  Private
  */
 exports.publishDraft = async (req, res) => {
@@ -2482,9 +1512,7 @@ exports.publishDraft = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Platform connection not found on this draft.' });
     }
 
-    const platform = draft.platform.toLowerCase();
-
-    if (platform === 'youtube') {
+    if (String(draft.platform).toLowerCase() === 'youtube') {
       return res.status(501).json({
         success: false,
         code: 'PLATFORM_NOT_IMPLEMENTED',
@@ -2493,12 +1521,10 @@ exports.publishDraft = async (req, res) => {
       });
     }
 
-    // Agent posts require admin approval before publishing
     if (req.user.role === 'agent') {
       draft.status = 'pending_approval';
       await draft.save();
-      const orgId = req.user.organization?._id || req.user.organization;
-      notifyAdminsOfPendingPost(orgId, draft, req.user.name || req.user.email || 'An agent');
+      notifyAdminsOfPendingPost(organizationId, draft, req.user.name || req.user.email || 'An agent');
       return res.status(200).json({
         success: true,
         message: 'Post submitted for approval',
@@ -2507,54 +1533,26 @@ exports.publishDraft = async (req, res) => {
       });
     }
 
-    // Transition to publishing state
-    draft.status = 'publishing';
-    await draft.save();
-
-    let result;
     try {
-      switch (platform) {
-        case 'instagram':
-          result = await publishToInstagram(connection, draft, req);
-          break;
-        case 'facebook':
-          result = await publishToFacebook(connection, draft, req);
-          break;
-        case 'linkedin':
-          result = await publishToLinkedIn(connection, draft);
-          break;
-        default:
-          throw new Error(`Publishing to ${platform} is not yet supported`);
-      }
-
-      draft.status = 'published';
-      draft.publishedAt = new Date();
-      draft.platformPostId = result.postId;
-      draft.platformPostUrl = result.postUrl;
-      await draft.save();
-
+      const { platformPostUrl } = await postPublishService.publishExistingPost(draft, connection, req);
       res.status(200).json({
         success: true,
         message: 'Draft published successfully',
         data: draft,
-        platformPostUrl: result.postUrl
+        platformPostUrl
       });
     } catch (publishError) {
-      console.error('Publish draft platform error:', publishError);
-      draft.status = 'failed';
-      draft.error = publishError.message;
-      await draft.save();
-
+      logger.error('[postController] publishDraft platform error', {
+        error: publishError.message, platformError: publishError.platformError
+      });
       const errorResponse = {
-        success: false,
-        message: 'Failed to publish draft',
-        error: publishError.message
+        success: false, message: 'Failed to publish draft', error: publishError.message
       };
       if (publishError.platformError) errorResponse.platformError = publishError.platformError;
-      res.status(500).json(errorResponse);
+      res.status(publishError.statusCode || 500).json(errorResponse);
     }
   } catch (error) {
-    console.error('Publish draft error:', error);
+    logger.error('[postController] publishDraft error', { error: error.message, stack: error.stack });
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2594,7 +1592,7 @@ exports.getMediaRequirements = (req, res) => {
       data: allRequirements
     });
   } catch (error) {
-    console.error('Get media requirements error:', error);
+    logger.error('Get media requirements error', { error: error.message, stack: error.stack });
     res.status(500).json({
       success: false,
       message: error.message
@@ -2605,273 +1603,8 @@ exports.getMediaRequirements = (req, res) => {
 /**
  * Helper: Get public URL for media file (must be reachable by Instagram/Facebook)
  */
-function getPublicMediaUrl(filePath, req) {
-  return storageService.resolvePublicUrl(filePath, req);
-}
-
 /**
- * Helper: Publish to Instagram
+ * Execute publish for a single scheduled post (delegates to postPublishService).
+ * Kept here as a named export for backward compat — worker now imports directly from the service.
  */
-async function publishToInstagram(connection, post, req) {
-  const { content, mediaStoragePath, mediaStoragePaths, mediaType, mediaTypes, postType } = post;
-
-  // Check if carousel (multiple media)
-  const isCarousel = mediaStoragePaths && mediaStoragePaths.length > 1;
-
-  if (!mediaStoragePath && !isCarousel) {
-    throw new Error('Instagram posts require an image or video');
-  }
-
-  let result;
-
-  // Handle carousel posts (multiple media)
-  if (isCarousel) {
-    console.log(`🎠 [Instagram] Publishing carousel with ${mediaStoragePaths.length} items`);
-    
-    // Generate public URLs for all media
-    const mediaUrls = mediaStoragePaths.map((storagePath, index) => {
-      return {
-        url: getPublicMediaUrl(storagePath, req),
-        type: mediaTypes[index]
-      };
-    });
-
-    result = await instagramService.createCarouselPost(connection, {
-      caption: content,
-      mediaUrls: mediaUrls
-    });
-
-    return {
-      postId: result.postId,
-      postUrl: result.postUrl
-    };
-  }
-
-  // Handle single media posts
-  const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
-  console.log(`📸 [Instagram] Publishing ${postType || 'post'} with media: ${mediaUrl}`);
-
-  // Route to appropriate method based on post type
-  switch (postType) {
-    case 'story':
-      console.log(`📖 [Instagram] Creating story`);
-      result = await instagramService.createStory(connection, {
-        mediaUrl: mediaUrl,
-        mediaType: mediaType
-      });
-      break;
-
-    case 'reel':
-      if (mediaType !== 'video') {
-        throw new Error('Instagram Reels require a video file');
-      }
-      console.log(`🎬 [Instagram] Creating reel`);
-      result = await instagramService.createReel(connection, {
-        caption: content,
-        mediaUrl: mediaUrl
-      });
-      break;
-
-    case 'post':
-    default:
-      console.log(`📸 [Instagram] Creating regular post`);
-      result = await instagramService.createPost(connection, {
-        caption: content,
-        mediaUrl: mediaUrl,
-        mediaType: mediaType
-      });
-      break;
-  }
-
-  return {
-    postId: result.postId,
-    postUrl: result.postUrl
-  };
-}
-
-/**
- * Helper: Publish to Facebook (pages_manage_posts)
- */
-async function publishToFacebook(connection, post, req) {
-  const { content, mediaStoragePath, mediaType, postType } = post;
-  
-  console.log(`📘 [Facebook] Publishing ${postType || 'post'} with media: ${mediaStoragePath ? 'yes' : 'no'}`);
-
-  let result;
-
-  // Route to appropriate method based on post type
-  switch (postType) {
-    case 'story':
-      // Facebook Stories
-      if (!mediaStoragePath) {
-        throw new Error('Facebook stories require an image or video');
-      }
-      
-      console.log(`📖 [Facebook] Creating story`);
-      
-      if (mediaType === 'image') {
-        const imageBuffer = await readImageBufferForPublish(mediaStoragePath);
-        result = await facebookService.createStory(connection, {
-          imageBuffer: imageBuffer
-        });
-      } else if (mediaType === 'video') {
-        const videoUrl = getPublicMediaUrl(mediaStoragePath, req);
-        result = await facebookService.createStory(connection, {
-          videoUrl: videoUrl
-        });
-      } else {
-        throw new Error('Invalid media type for story');
-      }
-      break;
-
-    case 'reel':
-    case 'short':
-      // Facebook Reels (also called Shorts)
-      if (!mediaStoragePath || mediaType !== 'video') {
-        throw new Error('Facebook Reels require a video file');
-      }
-      
-      console.log(`🎬 [Facebook] Creating reel/short`);
-      const reelVideoUrl = getPublicMediaUrl(mediaStoragePath, req);
-      
-      result = await facebookService.createReel(connection, {
-        videoUrl: reelVideoUrl,
-        description: content,
-        title: content ? content.substring(0, 50) : 'Reel'
-      });
-      break;
-
-    case 'post':
-    default:
-      // Regular Facebook Post
-      if (mediaStoragePath && mediaType === 'image') {
-        try {
-          console.log(`📸 [Facebook] Reading image file: ${mediaStoragePath}`);
-          
-          const imageBuffer = await readImageBufferForPublish(mediaStoragePath);
-          
-          console.log(`📤 [Facebook] Uploading image directly (${imageBuffer.length} bytes)`);
-          
-          const payload = { 
-            message: content || ' ',
-            imageBuffer: imageBuffer
-          };
-          
-          result = await facebookService.createPost(connection, payload);
-        } catch (imageError) {
-          console.warn(`⚠️ [Facebook] Direct image upload failed, falling back to text-only:`, imageError.message);
-          
-          // Fallback: Post as text-only to feed
-          const textPayload = { message: content || 'Posted from RepMeUp' };
-          result = await facebookService.createPost(connection, textPayload);
-        }
-      } else if (mediaStoragePath && mediaType === 'video') {
-        // Video post
-        const videoUrl = getPublicMediaUrl(mediaStoragePath, req);
-        result = await facebookService.createVideoPost(connection, {
-          videoUrl: videoUrl,
-          description: content
-        });
-      } else {
-        // Text-only post
-        console.log(`📝 [Facebook] Publishing text-only post`);
-        const payload = { message: content || 'Posted from RepMeUp' };
-        result = await facebookService.createPost(connection, payload);
-      }
-      break;
-  }
-
-  return {
-    postId: result.postId,
-    postUrl: result.postUrl
-  };
-}
-
-/**
- * Helper: Publish to LinkedIn (Company Page or personal profile)
- */
-async function publishToLinkedIn(connection, post) {
-  const { content, mediaStoragePath, mediaStoragePaths, mediaType, mediaTypes } = post;
-
-  let storagePath = mediaStoragePath;
-  let resolvedType = mediaType;
-  if (!storagePath && mediaStoragePaths && mediaStoragePaths.length > 0) {
-    storagePath = mediaStoragePaths[0];
-    resolvedType = (mediaTypes && mediaTypes[0]) || 'image';
-  }
-
-  console.log(
-    `💼 [LinkedIn] Publishing post (media: ${storagePath ? resolvedType || 'file' : 'none'})`
-  );
-
-  let media = null;
-  if (storagePath) {
-    if (resolvedType === 'video') {
-      throw new Error(
-        'LinkedIn publishing with video is not supported yet. Use an image or text-only post.'
-      );
-    }
-    if (resolvedType === 'image') {
-      const imageBuffer = await readImageBufferForPublish(storagePath);
-      const contentType = contentTypeFromMediaRef(storagePath);
-      media = { imageBuffer, contentType };
-    }
-  }
-
-  const result = await linkedinService.createPost(connection, content || '', media);
-
-  return {
-    postId: result.postId,
-    postUrl: result.postUrl
-  };
-}
-
-/**
- * Execute publish for a single scheduled post (used by processScheduledPublish job).
- */
-exports.executePublishForScheduledPost = async function (postId) {
-  const post = await ScheduledPost.findById(postId).populate('platformConnection');
-  if (!post || post.status !== 'scheduled') {
-    return { success: false, error: 'Post not found or not scheduled' };
-  }
-  const connection = post.platformConnection;
-  if (!connection) {
-    post.status = 'failed';
-    post.error = 'Platform connection not found';
-    await post.save();
-    return { success: false, error: post.error };
-  }
-  const req = {
-    protocol: 'https',
-    get: (name) => (name === 'host' ? (process.env.API_URL || process.env.BASE_URL || 'localhost:3000').replace(/^https?:\/\//, '') : null)
-  };
-  post.status = 'publishing';
-  await post.save();
-  try {
-    let result;
-    if (post.platform === 'instagram') {
-      result = await publishToInstagram(connection, post, req);
-    } else if (post.platform === 'facebook') {
-      result = await publishToFacebook(connection, post, req);
-    } else if (post.platform === 'linkedin') {
-      result = await publishToLinkedIn(connection, post);
-    } else {
-      post.status = 'failed';
-      post.error = 'Unsupported platform: ' + post.platform;
-      await post.save();
-      return { success: false, error: post.error };
-    }
-    post.status = 'published';
-    post.publishedAt = new Date();
-    post.platformPostId = result.postId;
-    post.platformPostUrl = result.postUrl;
-    post.error = undefined;
-    await post.save();
-    return { success: true };
-  } catch (err) {
-    post.status = 'failed';
-    post.error = err.message;
-    await post.save();
-    return { success: false, error: err.message };
-  }
-};
+exports.executePublishForScheduledPost = postPublishService.executePublishForScheduledPost;

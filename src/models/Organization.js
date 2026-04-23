@@ -32,7 +32,15 @@ const organizationSchema = new mongoose.Schema({
     default: ''
   },
   
-  // Subscription details
+  // ────────────────────────────────────────────────────────────────────────────
+  // @deprecated Subscription details (legacy embedded copy).
+  //
+  // The authoritative subscription record is the Subscription model, and the
+  // authoritative plan definition is the Plan model. Always read entitlements
+  // via services/entitlementsService.js — never read these fields directly in
+  // new code. Kept here so that orgs migrated before the Subscription model
+  // existed still have resolvable defaults.
+  // ────────────────────────────────────────────────────────────────────────────
   subscription: {
     plan: {
       type: String,
@@ -48,8 +56,14 @@ const organizationSchema = new mongoose.Schema({
     endDate: Date,
     billingEmail: String
   },
-  
-  // Plan limits
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // @deprecated Plan limits (legacy embedded copy).
+  //
+  // Read limits through services/entitlementsService.js — do NOT read these
+  // fields in new code. They drift from Plan.limits whenever a plan definition
+  // is updated and are only kept as a fallback for orgs without a Subscription.
+  // ────────────────────────────────────────────────────────────────────────────
   limits: {
     maxUsers: {
       type: Number,

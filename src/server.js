@@ -74,50 +74,10 @@ async function startServer() {
       app.upgradeRateLimiting();
     }
 
-    // Initialize queue processors (unless DISABLE_WORKERS is set)
-    if (process.env.DISABLE_WORKERS !== 'true') {
-      const { webhookQueue, aiQueue, autoReplyQueue, syncQueue } = require('./config/queue');
-      const processWebhook = require('./jobs/processWebhook');
-      const processAI = require('./jobs/processAI');
-      const processAutoReply = require('./jobs/processAutoReply');
-
-      // Queue concurrency from environment or defaults
-      const WEBHOOK_CONCURRENCY = parseInt(process.env.WEBHOOK_CONCURRENCY) || 10;
-      const AI_CONCURRENCY = parseInt(process.env.AI_CONCURRENCY) || 10;
-      const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
-
-      logger.info('Queue concurrency configuration', {
-        webhook: WEBHOOK_CONCURRENCY,
-        ai: AI_CONCURRENCY,
-        autoReply: AUTOREPLY_CONCURRENCY
-      });
-
-      // Start webhook queue processor
-      webhookQueue.process(WEBHOOK_CONCURRENCY, async (job) => {
-        const jobLogger = logger.createChild({ module: 'webhook-queue', jobId: job.id });
-        jobLogger.info('Processing webhook job');
-        return await processWebhook(job);
-      });
-      logger.info('Webhook queue processor started');
-
-      // Start AI queue processor
-      aiQueue.process(AI_CONCURRENCY, async (job) => {
-        const jobLogger = logger.createChild({ module: 'ai-queue', jobId: job.id });
-        jobLogger.info('Processing AI job');
-        return await processAI(job);
-      });
-      logger.info('AI queue processor started');
-
-      // Start auto-reply queue processor
-      autoReplyQueue.process(AUTOREPLY_CONCURRENCY, async (job) => {
-        const jobLogger = logger.createChild({ module: 'autoreply-queue', jobId: job.id });
-        jobLogger.info('Processing auto-reply job');
-        return await processAutoReply(job);
-      });
-      logger.info('Auto-reply queue processor started');
-    } else {
-      logger.warn('Queue processors disabled (DISABLE_WORKERS=true). Workers should run separately.');
-    }
+    // Queue processors are intentionally NOT started here.
+    // Run worker.js as a separate PM2 process to handle all queue jobs.
+    // This prevents double-processing when both server.js and worker.js are running.
+    logger.info('Queue processors not started in server process — run worker.js separately.');
 
     // Initialize auto-reply scheduler
     const autoReplyScheduler = require('./services/autoReplyScheduler');

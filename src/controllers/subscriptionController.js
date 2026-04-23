@@ -4,6 +4,7 @@ const Plan = require('../models/Plan');
 const User = require('../models/User');
 const ScheduledPost = require('../models/ScheduledPost');
 const AICreditUsage = require('../models/AICreditUsage');
+const entitlementsService = require('../services/entitlementsService');
 const { cancelRazorpaySubscription } = require('./razorpayController');
 
 /**
@@ -346,8 +347,11 @@ exports.upgradePlan = async (req, res, next) => {
     subscription.tier = newPlan.tier;
     subscription.limits = newPlan.limits;
     subscription.features = newPlan.features;
-    
+
     await subscription.save();
+
+    // Entitlements have changed — drop the cache so the next request re-resolves.
+    await entitlementsService.invalidateEntitlements(subscription.organization);
 
     res.status(200).json({
       success: true,
