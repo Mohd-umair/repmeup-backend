@@ -26,11 +26,14 @@ const interactionSchema = new mongoose.Schema({
     index: true
   },
   
-  // Unique platform identifier
+  // Platform identifier — unique per organization (NOT globally).
+  // The compound unique index { organization: 1, platformId: 1 } is declared below.
+  // Without per-org scoping, two tenants sharing the same external thread id (e.g. a
+  // shared WhatsApp Business phone number, or an Instagram DM from the same customer
+  // reaching two of our customers) would silently drop messages on duplicate-key errors.
   platformId: {
     type: String,
-    required: true,
-    unique: true
+    required: true
   },
   platformUrl: String,
   
@@ -439,7 +442,9 @@ const interactionSchema = new mongoose.Schema({
 });
 
 // Indexes for performance
-// Note: platformId index is automatically created by unique: true
+// platformId is unique PER ORGANIZATION. See note on the field above.
+// Migration: scripts/migrations/2026-04-21-interaction-platformid-compound-unique.js
+interactionSchema.index({ organization: 1, platformId: 1 }, { unique: true });
 interactionSchema.index({ organization: 1, createdAt: -1 });
 interactionSchema.index({ organization: 1, status: 1 });
 interactionSchema.index({ organization: 1, platform: 1, createdAt: -1 });

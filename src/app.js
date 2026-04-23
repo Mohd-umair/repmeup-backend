@@ -120,41 +120,53 @@ app.get('/health', (req, res) => {
 const bullBoardAdapter = require('./config/bullBoard');
 app.use('/admin/queues', bullBoardAdapter.getRouter());
 
-// API routes
-app.use('/api/public', require('./routes/public'));
-app.use('/api/contact', require('./routes/contact'));
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/inbox', require('./routes/inbox'));
-app.use('/api/knowledge-base', require('./routes/knowledgeBase'));
-app.use('/api/platforms', require('./routes/platforms'));
-app.use('/api/webhooks', require('./routes/webhooks'));
-app.use('/api/organizations', require('./routes/organizations'));
-app.use('/api/users', require('./routes/users'));
-app.use('/api/diagnostics', require('./routes/diagnostics'));
-app.use('/api/analytics', require('./routes/analytics'));
-app.use('/api/data-delete', require('./routes/dataDelete'));
-app.use('/api/posts', require('./routes/postRoutes'));
-app.use('/api/platform-posts', require('./routes/platformPosts'));
-app.use('/api/media-library', require('./routes/mediaLibrary'));
-app.use('/api/meta', require('./routes/meta'));
-app.use('/api/notifications', require('./routes/notifications'));
-app.use('/api/menus', require('./routes/menus'));
-app.use('/api/subscription', require('./routes/subscription'));
-app.use('/api/social-accounts', require('./routes/socialAccounts'));
-app.use('/api/plans', require('./routes/plans'));
-app.use('/api/super-admin', require('./routes/super-admin'));
-app.use('/api/brand-config', require('./routes/brandConfig'));
-app.use('/api/inspirations', require('./routes/inspirations'));
-app.use('/api/event-templates', require('./routes/eventTemplates'));
-app.use('/api/post-templates', require('./routes/postTemplates'));
-app.use('/api/intent-buckets', require('./routes/intentBuckets'));
-app.use('/api/products', require('./routes/products'));
-app.use('/api/trends', require('./routes/trends'));
-app.use('/api/audit-logs', require('./routes/auditLog'));
-app.use('/api/tickets', require('./routes/tickets'));
-app.use('/api/contacts', require('./routes/contacts'));
-// app.use('/api/labels', require('./routes/labels'));
-// app.use('/api/templates', require('./routes/templates'));
+// ── Route definitions ─────────────────────────────────────────────────────────
+// Each route module is loaded once and mounted at BOTH the legacy /api/ prefix
+// AND the versioned /api/v1/ prefix.  Existing clients continue to work;
+// new integrations should use /api/v1/.
+const routeMap = [
+  ['/public',         './routes/public'],
+  ['/contact',        './routes/contact'],
+  ['/auth',           './routes/auth'],
+  ['/inbox',          './routes/inbox'],
+  ['/knowledge-base', './routes/knowledgeBase'],
+  ['/platforms',      './routes/platforms'],
+  ['/webhooks',       './routes/webhooks'],
+  ['/organizations',  './routes/organizations'],
+  ['/users',          './routes/users'],
+  ['/diagnostics',    './routes/diagnostics'],
+  ['/analytics',      './routes/analytics'],
+  ['/data-delete',    './routes/dataDelete'],
+  ['/posts',          './routes/postRoutes'],
+  ['/platform-posts', './routes/platformPosts'],
+  ['/media-library',  './routes/mediaLibrary'],
+  ['/meta',           './routes/meta'],
+  ['/notifications',  './routes/notifications'],
+  ['/menus',          './routes/menus'],
+  ['/subscription',   './routes/subscription'],
+  ['/social-accounts','./routes/socialAccounts'],
+  ['/plans',          './routes/plans'],
+  ['/super-admin',    './routes/super-admin'],
+  ['/brand-config',   './routes/brandConfig'],
+  ['/inspirations',   './routes/inspirations'],
+  ['/event-templates','./routes/eventTemplates'],
+  ['/post-templates', './routes/postTemplates'],
+  ['/intent-buckets', './routes/intentBuckets'],
+  ['/products',       './routes/products'],
+  ['/trends',         './routes/trends'],
+  ['/audit-logs',     './routes/auditLog'],
+  ['/tickets',        './routes/tickets'],
+  ['/contacts',       './routes/contacts'],
+  // ['/labels',      './routes/labels'],
+  // ['/templates',   './routes/templates'],
+];
+
+// Mount at both /api (legacy compat) and /api/v1 (canonical versioned path)
+for (const [path, routeFile] of routeMap) {
+  const router = require(routeFile);
+  app.use(`/api${path}`, router);
+  app.use(`/api/v1${path}`, router);
+}
 
 // 404 handler
 app.use((req, res) => {

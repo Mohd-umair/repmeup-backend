@@ -1,6 +1,6 @@
 const PlatformConnection = require('../models/PlatformConnection');
 const Organization = require('../models/Organization');
-const Subscription = require('../models/Subscription');
+const entitlementsService = require('./entitlementsService');
 
 /**
  * Count connections that use an account slot (for plan limit).
@@ -19,61 +19,55 @@ async function countConnectionsUsingSlots(organizationId) {
 /**
  * Platform Connection Service
  * Single Responsibility: Manage platform connection limits and counting.
- * Uses Subscription (plan) as source of truth when present; falls back to Organization.
+ *
+ * All plan-limit resolution goes through entitlementsService — there is exactly
+ * ONE place that answers "how many accounts is this org allowed?".
  */
 class PlatformConnectionService {
   /**
-   * Check if organization can add a new platform connection (uses Subscription limit when present)
+   * Check if organization can add a new platform connection.
+   * Source of truth: entitlementsService → Subscription.planId → Plan.limits.maxAccounts.
+   *
    * @param {String} organizationId - Organization ID
    * @returns {Promise<{canConnect: Boolean, reason?: String, limit?: Number, current?: Number}>}
    */
   async canAddConnection(organizationId) {
-    const organization = await Organization.findById(organizationId);
-    if (!organization) {
-      return { canConnect: false, reason: 'Organization not found' };
-    }
-
-    const subscription = await Subscription.findOne({ organization: organizationId });
     const currentCount = await countConnectionsUsingSlots(organizationId);
-    const maxAccounts = subscription
-      ? subscription.limits.maxAccounts
-      : (organization.limits?.maxPlatformConnections ?? 3);
-    const isUnlimited = maxAccounts === -1;
-    const isAtLimit = !isUnlimited && currentCount >= maxAccounts;
+    const { allowed, limit, isUnlimited } = await entitlementsService.canAddResource(
+      organizationId,
+      'accounts',
+      currentCount
+    );
 
-    if (isAtLimit) {
+    if (!allowed) {
       return {
         canConnect: false,
         reason: 'PLATFORM_LIMIT_REACHED',
-        limit: maxAccounts,
+        limit,
         current: currentCount
       };
     }
 
     return {
       canConnect: true,
-      limit: maxAccounts,
+      limit: isUnlimited ? -1 : limit,
       current: currentCount
     };
   }
 
   /**
-   * Get remaining connection slots (uses Subscription limit when present)
+   * Get remaining connection slots (or 999 for unlimited).
    * @param {String} organizationId
    * @returns {Promise<Number>}
    */
   async getRemainingSlots(organizationId) {
-    const organization = await Organization.findById(organizationId);
-    if (!organization) return 0;
-
-    const subscription = await Subscription.findOne({ organization: organizationId });
     const currentCount = await countConnectionsUsingSlots(organizationId);
-    const maxAccounts = subscription
-      ? subscription.limits.maxAccounts
-      : (organization.limits?.maxPlatformConnections ?? 3);
-
-    if (maxAccounts === -1) return 999;
-    return Math.max(0, maxAccounts - currentCount);
+    const { remaining, isUnlimited } = await entitlementsService.canAddResource(
+      organizationId,
+      'accounts',
+      currentCount
+    );
+    return isUnlimited ? 999 : remaining;
   }
 
   /**
@@ -129,13 +123,14 @@ class PlatformConnectionService {
   }
 
   /**
-   * Get all connections for an organization with limit info.
-   * Uses Subscription (plan) for usage/limits when present so UI matches plan.
+   * Get all connections for an organization together with limit info.
+   * Plan limits come from entitlementsService so UI and middleware agree.
+   *
    * @param {String} organizationId
    * @returns {Promise<{connections: Array, usage: Object, limits: Object}>}
    */
   async getConnectionsWithLimits(organizationId) {
-    const [connections, organization, subscription] = await Promise.all([
+    const [connections, currentCount, entitlements] = await Promise.all([
       PlatformConnection.find({
         organization: organizationId,
         isActive: true,
@@ -143,18 +138,11 @@ class PlatformConnectionService {
       })
         .select('-accessToken -refreshToken')
         .sort({ createdAt: -1 }),
-      Organization.findById(organizationId).select('limits usage'),
-      Subscription.findOne({ organization: organizationId })
+      countConnectionsUsingSlots(organizationId),
+      entitlementsService.getEntitlements(organizationId)
     ]);
 
-    if (!organization) {
-      throw new Error('Organization not found');
-    }
-
-    const currentCount = await countConnectionsUsingSlots(organizationId);
-    const maxAccounts = subscription
-      ? subscription.limits.maxAccounts
-      : (organization.limits?.maxPlatformConnections ?? 3);
+    const maxAccounts = entitlements.limits.maxAccounts;
     const isUnlimited = maxAccounts === -1;
     const remaining = isUnlimited ? 999 : Math.max(0, maxAccounts - currentCount);
 

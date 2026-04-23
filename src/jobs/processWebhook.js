@@ -8,6 +8,8 @@ const cacheService = require('../services/cacheService');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 const { generateChatRef } = require('../utils/chatRefHelper');
 const { resolveContact, normalizeAuthorForPlatform } = require('../services/contactService');
+const instagramWebhookService = require('../services/webhook/instagramWebhookService');
+const whatsappWebhookService = require('../services/webhook/whatsappWebhookService');
 
 /**
  * Process webhook events from social media platforms
@@ -29,15 +31,15 @@ module.exports = async function processWebhook(job) {
 
     switch (platform) {
       case 'instagram':
-        interaction = await handleInstagramWebhook(payload, organizationId);
+        interaction = await instagramWebhookService.handleInstagramMessage(payload, organizationId);
         break;
-      
+
       case 'facebook':
         interaction = await handleFacebookWebhook(payload, organizationId);
         break;
-      
+
       case 'whatsapp':
-        interaction = await handleWhatsAppWebhook(payload, organizationId);
+        interaction = await whatsappWebhookService.handleWhatsAppMessage(payload, organizationId);
         break;
       
       case 'google':
@@ -109,7 +111,7 @@ module.exports = async function processWebhook(job) {
       const threadDm = isThreadStyleDm(interaction);
 
       if (!threadDm && (hasReplies || isAlreadyReplied)) {
-        console.log(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+        logger.info(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
       } else {
         // Thread DMs reuse one interaction id per conversation — jobId must include message id or each new message would be deduped by Bull
         const mid = interaction.metadata?.lastMid;
@@ -129,7 +131,7 @@ module.exports = async function processWebhook(job) {
           }
         );
 
-        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}${threadDm && mid ? ` (mid ${mid})` : ''}`);
+        logger.info(`📝 [Webhook] Queued for AI processing: ${interaction._id}${threadDm && mid ? ` (mid ${mid})` : ''}`);
 
         // Queue auto-reply if webhook mode is enabled
         const autoReplyScheduler = require('../services/autoReplyScheduler');
@@ -139,9 +141,9 @@ module.exports = async function processWebhook(job) {
         );
 
         if (queued) {
-          console.log(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
+          logger.info(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
         } else {
-          console.log(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
+          logger.info(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
         }
       }
     } else {
@@ -155,16 +157,14 @@ module.exports = async function processWebhook(job) {
     };
 
   } catch (error) {
-    console.error('Webhook processing error:', error);
+    logger.error('Webhook processing error', { error: error.message, stack: error.stack });
     throw error;
   }
 };
 
 /**
- * Fetch Instagram commenter/DM author profile (username, name, avatar) for inbox display.
- * Uses Instagram User Profile API; webhook only sends sender.id, not username/name.
- * For DMs, pass accessToken of the Instagram connection that *received* the message (required by Meta).
- * Returns { username, name, avatarUrl } or partial; missing fields left undefined.
+ * @deprecated Logic has been moved to src/services/webhook/instagramWebhookService.js
+ * This file-local copy is no longer called and will be removed in a future cleanup.
  */
 async function fetchInstagramAuthorProfile(organizationId, igUserId, accessTokenFromConnection = null) {
   if (!igUserId) return {};
@@ -179,7 +179,7 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId, accessToken
       }).select('accessToken');
       token = connection?.accessToken;
     } catch (e) {
-      console.warn('[processWebhook] fetchInstagramAuthorProfile: connection lookup failed', e.message);
+      logger.warn('[processWebhook] fetchInstagramAuthorProfile: connection lookup failed', { error: e.message });
       return {};
     }
   }
@@ -194,7 +194,7 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId, accessToken
       avatarUrl
     };
   } catch (e) {
-    console.warn('[processWebhook] fetchInstagramAuthorProfile failed for igUserId=', igUserId, e.message);
+    logger.warn('[processWebhook] fetchInstagramAuthorProfile failed for igUserId=', { igUserId, error: e.message });
     return {};
   }
 }
@@ -254,10 +254,8 @@ function buildInstagramDmAttachmentFields(message) {
 }
 
 /**
- * Handle Instagram webhook
- * Supports two payload formats:
- * 1. Graph API (comments): entry[].changes[] with field "comments" or "messages"
- * 2. Instagram Messaging (DMs): entry[].messaging[] - used by Meta for DM webhooks
+ * @deprecated Logic has been moved to src/services/webhook/instagramWebhookService.js
+ * This file-local copy is no longer called and will be removed in a future cleanup.
  */
 async function handleInstagramWebhook(payload, organizationId) {
   try {
@@ -691,7 +689,7 @@ async function handleInstagramWebhook(payload, organizationId) {
     });
     return null;
   } catch (error) {
-    console.error('Instagram webhook handler error:', error);
+    logger.error('Instagram webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -925,7 +923,7 @@ async function handleFacebookWebhook(payload, organizationId) {
 
     return null;
   } catch (error) {
-    console.error('Facebook webhook handler error:', error);
+    logger.error('Facebook webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -974,21 +972,15 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
   } catch (err) {
     // Suppress the warning for 403 (privacy / no permission) — expected for many users.
     if (err.response?.status !== 403) {
-      console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid,
-        err.response?.data?.error?.message || err.message);
+      logger.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', { psid, error: err.response?.data?.error?.message || err.message });
     }
     return {};
   }
 }
 
 /**
- * Handle WhatsApp webhook (legacy queued path).
- *
- * Threads all messages from the same (phoneNumberId, customer) pair into a single
- * Interaction, matching the primary handler in controllers/webhookController.js
- * and the Instagram/Facebook DM pattern above. Previously this path keyed each
- * Interaction on `message.id` (the per-message wamid), which created a brand-new
- * conversation for every inbound message.
+ * @deprecated Logic has been moved to src/services/webhook/whatsappWebhookService.js
+ * This file-local copy is no longer called and will be removed in a future cleanup.
  */
 async function handleWhatsAppWebhook(payload, organizationId) {
   try {
@@ -1082,7 +1074,7 @@ async function handleWhatsAppWebhook(payload, organizationId) {
 
     return null;
   } catch (error) {
-    console.error('WhatsApp webhook handler error:', error);
+    logger.error('WhatsApp webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -1109,7 +1101,7 @@ async function handleGoogleWebhook(payload, organizationId) {
 
     return null;
   } catch (error) {
-    console.error('Google webhook handler error:', error);
+    logger.error('Google webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -1136,7 +1128,7 @@ async function handleYouTubeWebhook(payload, organizationId) {
 
     return null;
   } catch (error) {
-    console.error('YouTube webhook handler error:', error);
+    logger.error('YouTube webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -1152,12 +1144,12 @@ async function handleYouTubeWebhook(payload, organizationId) {
  */
 async function handleLinkedInWebhook(payload, organizationId) {
   try {
-    console.log('💼 [LinkedIn Webhook] Processing payload:', JSON.stringify(payload, null, 2));
+    logger.info('💼 [LinkedIn Webhook] Processing payload', { payload });
     
     const { eventType, data } = payload;
 
     if (!eventType || !data) {
-      console.log('⚠️  [LinkedIn Webhook] Missing eventType or data');
+      logger.info('⚠️  [LinkedIn Webhook] Missing eventType or data');
       return null;
     }
 
@@ -1168,20 +1160,20 @@ async function handleLinkedInWebhook(payload, organizationId) {
         return await handleLinkedInComment(data, organizationId);
       
       case 'SHARE_CREATED':
-        console.log('💼 [LinkedIn Webhook] New share created (informational only)');
+        logger.info('💼 [LinkedIn Webhook] New share created (informational only)');
         return null; // We don't create interactions for our own posts
       
       case 'SHARE_LIKE_CREATED':
-        console.log('💼 [LinkedIn Webhook] Post liked (informational only)');
+        logger.info('💼 [LinkedIn Webhook] Post liked (informational only)');
         return null; // We might want to track likes in the future
       
       default:
-        console.log(`⚠️  [LinkedIn Webhook] Unknown event type: ${eventType}`);
+        logger.info(`⚠️  [LinkedIn Webhook] Unknown event type: ${eventType}`);
         return null;
     }
 
   } catch (error) {
-    console.error('❌ [LinkedIn Webhook] Handler error:', error);
+    logger.error('❌ [LinkedIn Webhook] Handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -1208,11 +1200,11 @@ async function handleLinkedInComment(data, organizationId) {
     const authorId = authorUrn?.split(':').pop();
 
     if (!commentId || !commentText) {
-      console.log('⚠️  [LinkedIn Webhook] Missing required comment data');
+      logger.info('⚠️  [LinkedIn Webhook] Missing required comment data');
       return null;
     }
 
-    console.log(`💼 [LinkedIn Webhook] Processing comment: ${commentId}`);
+    logger.info(`💼 [LinkedIn Webhook] Processing comment: ${commentId}`);
 
     // Find the platform connection
     const connection = await PlatformConnection.findOne({
@@ -1222,7 +1214,7 @@ async function handleLinkedInComment(data, organizationId) {
     });
 
     if (!connection) {
-      console.log('⚠️  [LinkedIn Webhook] No active LinkedIn connection found');
+      logger.info('⚠️  [LinkedIn Webhook] No active LinkedIn connection found');
       return null;
     }
 
@@ -1259,11 +1251,11 @@ async function handleLinkedInComment(data, organizationId) {
       { upsert: true, new: true }
     );
 
-    console.log(`✅ [LinkedIn Webhook] Interaction created/updated: ${interaction._id}`);
+    logger.info(`✅ [LinkedIn Webhook] Interaction created/updated: ${interaction._id}`);
 
     return interaction;
   } catch (error) {
-    console.error('❌ [LinkedIn Comment] Processing error:', error);
+    logger.error('❌ [LinkedIn Comment] Processing error', { error: error.message, stack: error.stack });
     throw error;
   }
 }

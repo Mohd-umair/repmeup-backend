@@ -2,6 +2,7 @@ const { autoReplyQueue } = require('../config/queue');
 const Organization = require('../models/Organization');
 const aiService = require('./aiService');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const logger = require('../config/logger');
 
 /**
  * Auto-Reply Scheduler Service
@@ -13,7 +14,7 @@ class AutoReplyScheduler {
    */
   async initializeScheduledJobs() {
     try {
-      console.log('\n🔄 [Scheduler] Initializing auto-reply scheduled jobs...');
+      logger.info('\n🔄 [Scheduler] Initializing auto-reply scheduled jobs...');
 
       const query = {
         'autoReplySettings.enabled': true,
@@ -21,22 +22,22 @@ class AutoReplyScheduler {
         'autoReplySettings.scheduleEnabled': true
       };
       
-      console.log('🔍 [Scheduler] Query:', JSON.stringify(query));
+      logger.info('🔍 [Scheduler] Query', { query });
 
       const organizations = await Organization.find(query);
 
-      console.log(`📊 [Scheduler] Found ${organizations.length} organizations with scheduled auto-reply enabled`);
+      logger.info(`📊 [Scheduler] Found ${organizations.length} organizations with scheduled auto-reply enabled`);
 
       if (organizations.length === 0) {
-        console.log('⚠️  [Scheduler] No organizations found! Check your settings:');
-        console.log('   - autoReplySettings.enabled = true');
-        console.log('   - autoReplySettings.triggerMode = "scheduled" or "hybrid"');
-        console.log('   - autoReplySettings.scheduleEnabled = true');
+        logger.info('⚠️  [Scheduler] No organizations found! Check your settings:');
+        logger.info('   - autoReplySettings.enabled = true');
+        logger.info('   - autoReplySettings.triggerMode = "scheduled" or "hybrid"');
+        logger.info('   - autoReplySettings.scheduleEnabled = true');
       }
 
       for (const org of organizations) {
-        console.log(`\n📝 [Scheduler] Processing organization: ${org._id}`);
-        console.log(`   Settings:`, {
+        logger.info(`\n📝 [Scheduler] Processing organization: ${org._id}`);
+        logger.info(`   Settings`, {
           enabled: org.autoReplySettings.enabled,
           triggerMode: org.autoReplySettings.triggerMode,
           scheduleEnabled: org.autoReplySettings.scheduleEnabled,
@@ -45,9 +46,9 @@ class AutoReplyScheduler {
         await this.scheduleForOrganization(org);
       }
 
-      console.log('\n✅ [Scheduler] Auto-reply scheduler initialization complete\n');
+      logger.info('\n✅ [Scheduler] Auto-reply scheduler initialization complete\n');
     } catch (error) {
-      console.error('❌ [Scheduler] Error initializing scheduled jobs:', error);
+      logger.error('❌ [Scheduler] Error initializing scheduled jobs', { error: error.message, stack: error.stack });
     }
   }
 
@@ -80,9 +81,9 @@ class AutoReplyScheduler {
         }
       );
 
-      console.log(`Scheduled auto-reply job for org ${orgId} with interval: ${organization.autoReplySettings.scheduleInterval}`);
+      logger.info(`Scheduled auto-reply job for org ${orgId} with interval: ${organization.autoReplySettings.scheduleInterval}`);
     } catch (error) {
-      console.error(`Error scheduling job for org ${organization._id}:`, error);
+      logger.error(`Error scheduling job for org ${organization._id}`, { error: error.message, stack: error.stack });
     }
   }
 
@@ -96,10 +97,10 @@ class AutoReplyScheduler {
       
       if (jobToRemove) {
         await autoReplyQueue.removeRepeatableByKey(jobToRemove.key);
-        console.log(`Removed existing scheduled job for org ${orgId}`);
+        logger.info(`Removed existing scheduled job for org ${orgId}`);
       }
     } catch (error) {
-      console.error(`Error removing scheduled job for org ${orgId}:`, error);
+      logger.error(`Error removing scheduled job for org ${orgId}`, { error: error.message, stack: error.stack });
     }
   }
 
@@ -127,12 +128,12 @@ class AutoReplyScheduler {
       const organization = await Organization.findById(organizationId);
       
       if (!organization) {
-        console.log(`⚠️  [Auto-Reply Queue] Organization ${organizationId} not found`);
+        logger.info(`⚠️  [Auto-Reply Queue] Organization ${organizationId} not found`);
         return false;
       }
 
       if (!organization.autoReplySettings.enabled) {
-        console.log(`⚠️  [Auto-Reply Queue] Auto-reply disabled for org ${organizationId}`);
+        logger.info(`⚠️  [Auto-Reply Queue] Auto-reply disabled for org ${organizationId}`);
         return false;
       }
 
@@ -140,12 +141,12 @@ class AutoReplyScheduler {
       
       // Check if webhook mode or hybrid mode is enabled
       if (settings.triggerMode !== 'webhook' && settings.triggerMode !== 'hybrid') {
-        console.log(`⚠️  [Auto-Reply Queue] Skipping — triggerMode is "${settings.triggerMode || 'not set'}" (must be "webhook" or "hybrid" for immediate replies). Org: ${organizationId}`);
+        logger.info(`⚠️  [Auto-Reply Queue] Skipping — triggerMode is "${settings.triggerMode || 'not set'}" (must be "webhook" or "hybrid" for immediate replies). Org: ${organizationId}`);
         return false;
       }
 
       if (!settings.webhookImmediate) {
-        console.log(`⚠️  [Auto-Reply Queue] Skipping — webhookImmediate is false/not set. Org: ${organizationId}`);
+        logger.info(`⚠️  [Auto-Reply Queue] Skipping — webhookImmediate is false/not set. Org: ${organizationId}`);
         return false;
       }
 
@@ -155,21 +156,21 @@ class AutoReplyScheduler {
       );
 
       if (!interaction) {
-        console.log(`⚠️  [Auto-Reply Queue] Interaction ${interactionId} not found`);
+        logger.info(`⚠️  [Auto-Reply Queue] Interaction ${interactionId} not found`);
         return false;
       }
 
       const threadDm = isThreadStyleDm(interaction);
       if (!threadDm) {
         if (interaction.replies && interaction.replies.length > 0) {
-          console.log(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} already has replies`);
+          logger.info(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} already has replies`);
           return false;
         }
       }
       // Thread DMs: a new inbound webhook sets status to unread first; if still replied/resolved,
       // do not enqueue (e.g. human already replied — matches processAutoReply single-job guards).
       if (interaction.status === 'replied' || interaction.status === 'resolved') {
-        console.log(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} status is "${interaction.status}"`);
+        logger.info(`⚠️  [Auto-Reply Queue] Skipping — interaction ${interactionId} status is "${interaction.status}"`);
         return false;
       }
 
@@ -177,7 +178,7 @@ class AutoReplyScheduler {
       if (!aiService.shouldQueueImmediateAutoReply(interaction, organization)) {
         const enabledPlats = settings.enabledPlatforms?.join(', ') || 'all';
         const enabledTypes = settings.enabledTypes?.join(', ') || 'all';
-        console.log(`⚠️  [Auto-Reply Queue] Skipping — platform/type not enabled. Interaction: platform="${interaction.platform}" type="${interaction.type}". Settings: enabledPlatforms=[${enabledPlats}] enabledTypes=[${enabledTypes}]. Org: ${organizationId}`);
+        logger.info(`⚠️  [Auto-Reply Queue] Skipping — platform/type not enabled. Interaction: platform="${interaction.platform}" type="${interaction.type}". Settings: enabledPlatforms=[${enabledPlats}] enabledTypes=[${enabledTypes}]. Org: ${organizationId}`);
         return false;
       }
 
@@ -216,7 +217,7 @@ class AutoReplyScheduler {
       return true;
 
     } catch (error) {
-      console.error('❌ [Auto-Reply Queue] Error:', error);
+      logger.error('❌ [Auto-Reply Queue] Error', { error: error.message, stack: error.stack });
       return false;
     }
   }
@@ -244,7 +245,7 @@ class AutoReplyScheduler {
       const repeatableJobs = await autoReplyQueue.getRepeatableJobs();
       return repeatableJobs.filter(j => j.id && j.id.startsWith('auto-reply-scheduled-'));
     } catch (error) {
-      console.error('Error getting scheduled jobs status:', error);
+      logger.error('Error getting scheduled jobs status', { error: error.message, stack: error.stack });
       return [];
     }
   }

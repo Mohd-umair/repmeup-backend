@@ -6,6 +6,7 @@ const Transaction = require('../models/Transaction');
 const Organization = require('../models/Organization');
 const User = require('../models/User');
 const logger = require('../config/logger');
+const entitlementsService = require('../services/entitlementsService');
 
 /** For webhook-created transactions: org display name + a user id to link in super-admin (admin first, else earliest user). */
 async function resolveTransactionUserContext(organizationId) {
@@ -228,6 +229,7 @@ exports.verifyPayment = async (req, res, next) => {
     subscription.currentPeriodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
     await subscription.save();
+    await entitlementsService.invalidateEntitlements(subscription.organization);
 
     // Record the completed payment event for the admin transactions view
     try {
@@ -439,6 +441,7 @@ async function handleSubscriptionCompleted(payload) {
   subscription.status = 'cancelled';
   subscription.razorpaySubscriptionId = undefined;
   await subscription.save();
+  await entitlementsService.invalidateEntitlements(subscription.organization);
   logger.info('[Razorpay Webhook] Subscription completed — reverted to free plan', { razorpaySubscriptionId: rzpSub.id });
 }
 

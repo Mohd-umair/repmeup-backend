@@ -3,7 +3,7 @@
  * Runs periodically (e.g. every 1 min) to publish ScheduledPosts whose scheduledFor is in the past.
  */
 const ScheduledPost = require('../models/ScheduledPost');
-const postController = require('../controllers/postController');
+const { executePublishForScheduledPost } = require('../services/postPublishService');
 
 module.exports = async function processScheduledPublish() {
   const now = new Date();
@@ -22,7 +22,7 @@ module.exports = async function processScheduledPublish() {
   let failed = 0;
   for (const { _id } of due) {
     try {
-      const result = await postController.executePublishForScheduledPost(_id.toString());
+      const result = await executePublishForScheduledPost(_id.toString());
       if (result.success) published++;
       else failed++;
     } catch (err) {

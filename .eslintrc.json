@@ -1,0 +1,75 @@
+{
+  "root": true,
+  "env": {
+    "node": true,
+    "es2022": true,
+    "jest": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "rules": {
+    "no-console": [
+      "warn",
+      {
+        "allow": ["warn", "error"]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "scripts/**/*.js",
+        "src/scripts/**/*.js",
+        "verify-credit-tracking.js",
+        "check-google-connection.js",
+        "check-queues.js",
+        "clear-queues.js",
+        "test-summarization.js"
+      ],
+      "rules": {
+        "no-console": "off"
+      }
+    },
+    {
+      "files": [
+        "src/config/logger.js",
+        "src/server.js"
+      ],
+      "rules": {
+        "no-console": "off"
+      }
+    },
+    {
+      "files": [
+        "src/config/queue.js",
+        "src/config/bullBoard.js",
+        "src/worker.js",
+        "src/controllers/inboxController.js",
+        "src/controllers/webhookController.js",
+        "src/controllers/analyticsController.js",
+        "src/controllers/postController.js",
+        "src/services/autoReplyScheduler.js",
+        "src/services/aiService.js",
+        "src/services/analyticsService.js",
+        "src/services/cacheService.js",
+        "src/services/postAiGenerationService.js",
+        "src/services/postPublishService.js",
+        "src/services/webhook/whatsappWebhookService.js",
+        "src/services/inbox/**/*.js",
+        "src/services/ai/**/*.js",
+        "src/jobs/processWebhook.js",
+        "tests/**/*.js"
+      ],
+      "rules": {
+        "no-console": [
+          "error",
+          {
+            "allow": ["warn", "error"]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 const mongoose = require('mongoose');
 const Subscription = require('../models/Subscription');
-const Plan = require('../models/Plan');
 const AICreditUsage = require('../models/AICreditUsage');
 const AiApiUsage = require('../models/AiApiUsage');
+const entitlementsService = require('./entitlementsService');
 const { getAiRequestContext, clearLastAiApiUsageId } = require('./aiRequestContext');
 
 /**
@@ -18,31 +18,20 @@ class AICreditService {
    */
   async checkCredits(organizationId, estimatedCost = 1) {
     try {
-      const subscription = await Subscription.findOne({ organization: organizationId });
+      // Limit comes from entitlementsService (Plan.limits, cached): plan definitions
+      // rarely change, so a 60s cache is safe.
+      // Usage is read LIVE from the Subscription doc because AI credits burn rapidly
+      // and a stale cached counter would let an org blast past their quota.
+      const [entitlements, subscription] = await Promise.all([
+        entitlementsService.getEntitlements(organizationId),
+        Subscription.findOne({ organization: organizationId })
+          .select('usage.aiCreditsThisMonth')
+          .lean()
+      ]);
 
-      if (!subscription) {
-        // No subscription yet - create free plan or deny
-        const freePlan = await Plan.getByPlanId('free');
-        if (!freePlan) {
-          return {
-            allowed: false,
-            error: 'No subscription found. Please contact support.',
-            code: 'NO_SUBSCRIPTION'
-          };
-        }
-
-        return {
-          allowed: true,
-          current: 0,
-          limit: freePlan.limits.maxAICreditsPerMonth,
-          remaining: freePlan.limits.maxAICreditsPerMonth,
-          isUnlimited: freePlan.limits.maxAICreditsPerMonth === -1
-        };
-      }
-
-      const currentUsage = subscription.usage.aiCreditsThisMonth || 0;
-      const limit = subscription.limits.maxAICreditsPerMonth || 0;
+      const limit = entitlements.limits.maxAICreditsPerMonth ?? 0;
       const isUnlimited = limit === -1;
+      const currentUsage = subscription?.usage?.aiCreditsThisMonth ?? 0;
 
       if (isUnlimited) {
         return {
@@ -61,8 +50,8 @@ class AICreditService {
         return {
           allowed: false,
           current: currentUsage,
-          limit: limit,
-          remaining: remaining,
+          limit,
+          remaining,
           needed: estimatedCost,
           exceededBy: (currentUsage + estimatedCost) - limit,
           code: 'AI_CREDITS_EXCEEDED',
@@ -73,8 +62,8 @@ class AICreditService {
       return {
         allowed: true,
         current: currentUsage,
-        limit: limit,
-        remaining: remaining,
+        limit,
+        remaining,
         needed: estimatedCost
       };
     } catch (error) {
