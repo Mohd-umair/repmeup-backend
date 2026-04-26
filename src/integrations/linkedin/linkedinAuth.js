@@ -390,14 +390,19 @@ class LinkedInAuthService {
    * Generate and store state parameter for OAuth
    */
   generateState(userId, organizationId) {
+    if (!userId || !organizationId) {
+      throw new Error(
+        `Cannot generate LinkedIn OAuth state: userId=${userId}, organizationId=${organizationId}`
+      );
+    }
     const stateData = {
-      userId,
-      organizationId,
+      userId: String(userId),
+      organizationId: String(organizationId),
       platform: 'linkedin',
       timestamp: Date.now(),
       nonce: crypto.randomBytes(16).toString('hex')
     };
-    
+
     return Buffer.from(JSON.stringify(stateData)).toString('base64');
   }
 

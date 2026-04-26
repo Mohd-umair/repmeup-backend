@@ -29,9 +29,18 @@ class InstagramLoginAuthService {
   // ---------------------------------------------------------------------------
 
   generateState(userId, organizationId) {
+    // Fail fast here so a bad caller doesn't produce a state that only
+    // breaks AFTER the user authorizes on Meta and bounces back.
+    // JSON.stringify silently drops undefined values, which is exactly
+    // how the "State parameter is missing required fields" bug was hidden.
+    if (!userId || !organizationId) {
+      throw new Error(
+        `Cannot generate Instagram Login state: userId=${userId}, organizationId=${organizationId}`
+      );
+    }
     const data = {
-      userId,
-      organizationId,
+      userId: String(userId),
+      organizationId: String(organizationId),
       platform: 'instagram-login',
       timestamp: Date.now(),
       nonce: crypto.randomBytes(16).toString('hex')

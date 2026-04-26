@@ -47,8 +47,8 @@ router.get('/facebook', protect, checkConnectionLimit, async (req, res, next) =>
     const options = {};
     if (req.query.auth_type === 'reauthorize') options.auth_type = 'reauthorize';
     const authURL = metaAuth.getFacebookAuthURL(
-      req.user.id,
-      req.user.organization._id || req.user.organization,
+      String(req.user._id),
+      String(req.user.organization?._id || req.user.organization),
       options
     );
 
@@ -204,8 +204,8 @@ router.get('/instagram', protect, checkConnectionLimit, async (req, res, next) =
     const options = {};
     if (req.query.auth_type === 'reauthorize') options.auth_type = 'reauthorize';
     const authURL = metaAuth.getInstagramAuthURL(
-      req.user.id,
-      req.user.organization._id || req.user.organization,
+      String(req.user._id),
+      String(req.user.organization?._id || req.user.organization),
       options
     );
 
@@ -332,8 +332,8 @@ router.get('/instagram-direct', protect, checkConnectionLimit, async (req, res, 
     }
 
     const state = metaAuth.generateState(
-      req.user.id,
-      req.user.organization._id || req.user.organization,
+      String(req.user._id),
+      String(req.user.organization?._id || req.user.organization),
       'instagram-direct'
     );
 
@@ -470,8 +470,8 @@ const instagramLoginAuth = require('../integrations/meta/instagramLoginAuth');
 router.get('/instagram-login', protect, checkConnectionLimit, async (req, res, next) => {
   try {
     const authUrl = instagramLoginAuth.getAuthURL(
-      req.user.id,
-      req.user.organization._id || req.user.organization
+      String(req.user._id),
+      String(req.user.organization?._id || req.user.organization)
     );
     res.json({ success: true, authUrl });
   } catch (error) {
@@ -553,8 +553,8 @@ router.get('/instagram-login/callback', async (req, res) => {
 router.get('/linkedin', protect, async (req, res, next) => {
   try {
     const state = linkedinAuth.generateState(
-      req.user.id,
-      req.user.organization._id || req.user.organization
+      String(req.user._id),
+      String(req.user.organization?._id || req.user.organization)
     );
     
     const authURL = linkedinAuth.getAuthURL(state);

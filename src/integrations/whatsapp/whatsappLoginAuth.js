@@ -33,9 +33,14 @@ class WhatsAppLoginAuthService {
   // ---------------------------------------------------------------------------
 
   generateState(userId, organizationId) {
+    if (!userId || !organizationId) {
+      throw new Error(
+        `Cannot generate WhatsApp OAuth state: userId=${userId}, organizationId=${organizationId}`
+      );
+    }
     const data = {
-      userId,
-      organizationId,
+      userId: String(userId),
+      organizationId: String(organizationId),
       platform: 'whatsapp',
       timestamp: Date.now(),
       nonce: crypto.randomBytes(16).toString('hex')
