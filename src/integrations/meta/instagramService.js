@@ -1127,25 +1127,109 @@ class InstagramService {
   }
 
   /**
+   * Resolve a /api/posts/media/:filename URL to the local disk path.
+   * Returns null when the URL is not a local media URL or the file is absent.
+   */
+  _resolveLocalMediaPath(mediaUrl) {
+    if (!mediaUrl) return null;
+    const match = String(mediaUrl).match(/\/api\/posts\/media\/([^?#]+)$/);
+    if (!match) return null;
+    const fsSync = require('fs');
+    const pathLib = require('path');
+    const filename = pathLib.basename(match[1]);
+    const candidate = pathLib.join(__dirname, '../../../uploads/posts', filename);
+    return fsSync.existsSync(candidate) ? candidate : null;
+  }
+
+  /**
+   * Upload an image binary directly to Meta's servers using multipart/form-data
+   * (source parameter). This bypasses the URL-fetch step entirely, which avoids
+   * the "media could not be fetched" CDN error (9004 / 2207052) that occurs when
+   * Meta's CDN cannot reach the hosting server from the public internet.
+   *
+   * Supported by graph.facebook.com (Facebook Login) and graph.instagram.com
+   * (Instagram Login) for image containers. Videos require the resumable upload
+   * API and are not handled here.
+   *
+   * @returns {Promise<string>} container ID
+   * @throws if the API call fails
+   */
+  async _createImageContainerBinary(platformConnection, { caption, localFilePath }) {
+    const FormData = require('form-data');
+    const fsLib = require('fs');
+
+    const { accessToken } = platformConnection;
+    const accountPath = this._accountPath(platformConnection);
+    const apiBase = this._getApiBase(this._connectionType(platformConnection));
+
+    const form = new FormData();
+    form.append('source', fsLib.createReadStream(localFilePath));
+    form.append('caption', caption || '');
+    form.append('access_token', accessToken);
+
+    console.log(`📤 [Instagram] Binary image upload to ${apiBase}/${accountPath}/media`);
+
+    const response = await axios.post(
+      `${apiBase}/${accountPath}/media`,
+      form,
+      {
+        headers: form.getHeaders(),
+        timeout: 60000,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+
+    console.log(`✅ [Instagram] Binary container created: ${response.data.id}`);
+    return response.data.id;
+  }
+
+  /**
    * Create Instagram Media Container
-   * Step 1 of publishing process
+   * Step 1 of publishing process.
+   *
+   * Strategy for images:
+   *   1. If the mediaUrl resolves to a local disk file, attempt a binary
+   *      (multipart source) upload — this bypasses Meta's CDN fetch step,
+   *      which can fail when the hosting server is not reachable from Meta's
+   *      IP ranges (error 9004 / subcode 2207052).
+   *   2. On any binary-upload failure, fall back to the image_url approach.
+   *
+   * Videos always use the URL approach (resumable upload is handled elsewhere).
    */
   async createMediaContainer(platformConnection, { caption, mediaUrl, mediaType }) {
-    try {
-      const { accessToken } = platformConnection;
-      const accountPath = this._accountPath(platformConnection);
-      const apiBase = this._getApiBase(this._connectionType(platformConnection));
+    const { accessToken } = platformConnection;
+    const accountPath = this._accountPath(platformConnection);
+    const apiBase = this._getApiBase(this._connectionType(platformConnection));
 
-      if (!accountPath || accountPath === 'undefined') {
-        throw new Error('Instagram Business Account ID not found');
+    if (!accountPath || accountPath === 'undefined') {
+      throw new Error('Instagram Business Account ID not found');
+    }
+
+    console.log(`📸 [Instagram] Creating media container for account: ${accountPath}`);
+
+    // ── Binary-first path for images ──────────────────────────────────────────
+    if (mediaType === 'image') {
+      const localFilePath = this._resolveLocalMediaPath(mediaUrl);
+      if (localFilePath) {
+        try {
+          const containerId = await this._createImageContainerBinary(
+            platformConnection, { caption, localFilePath }
+          );
+          return { containerId, mediaType };
+        } catch (binaryErr) {
+          const apiErr = binaryErr.response?.data?.error;
+          console.warn(
+            `⚠️  [Instagram] Binary upload failed (${apiErr?.code ?? binaryErr.message}), falling back to image_url`
+          );
+          // Fall through to URL-based approach below
+        }
       }
+    }
 
-      console.log(`📸 [Instagram] Creating media container for account: ${accountPath}`);
-
-      const params = {
-        access_token: accessToken,
-        caption: caption || ''
-      };
+    // ── URL-based path (images without local file, or binary-upload fallback) ─
+    try {
+      const params = { access_token: accessToken, caption: caption || '' };
 
       if (mediaType === 'image') {
         params.image_url = mediaUrl;
@@ -1163,15 +1247,10 @@ class InstagramService {
       );
 
       console.log(`✅ [Instagram] Media container created:`, response.data.id);
-
-      return {
-        containerId: response.data.id,
-        mediaType
-      };
+      return { containerId: response.data.id, mediaType };
     } catch (error) {
       console.error('❌ [Instagram] Create container error:', error.response?.data || error.message);
-      
-      // Extract detailed error info from Instagram API
+
       const apiError = error.response?.data?.error;
       if (apiError) {
         const detailedError = new Error(apiError.message || 'Failed to create media container');
@@ -1184,7 +1263,7 @@ class InstagramService {
         };
         throw detailedError;
       }
-      
+
       throw new Error('Failed to create media container');
     }
   }
@@ -1413,32 +1492,45 @@ class InstagramService {
 
       console.log(`📖 [Instagram] Starting story creation for account: ${accountPath}`);
 
-      // Pre-check: Verify URL is publicly accessible
-      await this.verifyMediaUrlAccessible(mediaUrl);
-
-      // Step 1: Create story container
-      const params = {
-        access_token: accessToken,
-        media_type: 'STORIES' // This tells Instagram it's a story
-      };
+      // Pre-check: Verify URL is publicly accessible (skipped when binary upload succeeds)
+      // Step 1: Create story container — binary-first for local images
+      let containerId;
 
       if (mediaType === 'image') {
-        params.image_url = mediaUrl;
-      } else if (mediaType === 'video') {
-        params.video_url = mediaUrl;
-      } else {
-        throw new Error('Invalid media type. Must be "image" or "video"');
+        const localFilePath = this._resolveLocalMediaPath(mediaUrl);
+        if (localFilePath) {
+          try {
+            const FormData = require('form-data');
+            const fsLib = require('fs');
+            const form = new FormData();
+            form.append('source', fsLib.createReadStream(localFilePath));
+            form.append('media_type', 'STORIES');
+            form.append('access_token', accessToken);
+            console.log(`📤 [Instagram] Binary story upload`);
+            const bRes = await axios.post(`${apiBase}/${accountPath}/media`, form, {
+              headers: form.getHeaders(), timeout: 60000,
+              maxContentLength: Infinity, maxBodyLength: Infinity
+            });
+            containerId = bRes.data.id;
+            console.log(`✅ [Instagram] Story container (binary) created: ${containerId}`);
+          } catch (bErr) {
+            console.warn(`⚠️  [Instagram] Binary story upload failed, falling back to image_url: ${bErr.response?.data?.error?.message ?? bErr.message}`);
+          }
+        }
       }
 
-      console.log(`📸 [Instagram] Creating story container`);
-      const containerResponse = await axios.post(
-        `${apiBase}/${accountPath}/media`,
-        null,
-        { params }
-      );
-
-      const containerId = containerResponse.data.id;
-      console.log(`✅ [Instagram] Story container created: ${containerId}`);
+      if (!containerId) {
+        // URL-based fallback (or video path)
+        await this.verifyMediaUrlAccessible(mediaUrl);
+        const params = { access_token: accessToken, media_type: 'STORIES' };
+        if (mediaType === 'image') params.image_url = mediaUrl;
+        else if (mediaType === 'video') params.video_url = mediaUrl;
+        else throw new Error('Invalid media type. Must be "image" or "video"');
+        console.log(`📸 [Instagram] Creating story container (URL)`);
+        const containerResponse = await axios.post(`${apiBase}/${accountPath}/media`, null, { params });
+        containerId = containerResponse.data.id;
+        console.log(`✅ [Instagram] Story container created: ${containerId}`);
+      }
 
       if (mediaType === 'video') {
         await this.checkContainerStatus(accessToken, containerId, 30, connType);
@@ -1645,36 +1737,49 @@ class InstagramService {
 
       console.log(`📸 [Instagram] Creating carousel with ${mediaUrls.length} items`);
 
-      // Pre-check: Verify all URLs are publicly accessible
+      // Step 1: Create containers for each media item (binary-first for images)
+      const containerIds = [];
       for (let i = 0; i < mediaUrls.length; i++) {
         const mediaItem = mediaUrls[i];
-        console.log(`🔍 [Instagram] Verifying carousel item ${i + 1}/${mediaUrls.length}`);
-        await this.verifyMediaUrlAccessible(mediaItem.url);
-      }
-
-      // Step 1: Create containers for each media item
-      const containerIds = [];
-      for (const mediaItem of mediaUrls) {
-        const params = {
-          access_token: accessToken,
-          is_carousel_item: true
-        };
+        let itemContainerId = null;
 
         if (mediaItem.type === 'image') {
-          params.image_url = mediaItem.url;
-        } else if (mediaItem.type === 'video') {
-          params.media_type = 'VIDEO';
-          params.video_url = mediaItem.url;
+          const localFilePath = this._resolveLocalMediaPath(mediaItem.url);
+          if (localFilePath) {
+            try {
+              const FormData = require('form-data');
+              const fsLib = require('fs');
+              const form = new FormData();
+              form.append('source', fsLib.createReadStream(localFilePath));
+              form.append('is_carousel_item', 'true');
+              form.append('access_token', accessToken);
+              const bRes = await axios.post(`${apiBase}/${accountPath}/media`, form, {
+                headers: form.getHeaders(), timeout: 60000,
+                maxContentLength: Infinity, maxBodyLength: Infinity
+              });
+              itemContainerId = bRes.data.id;
+              console.log(`✅ [Instagram] Carousel item ${i + 1} binary created: ${itemContainerId}`);
+            } catch (bErr) {
+              console.warn(`⚠️  [Instagram] Binary carousel item ${i + 1} failed, falling back to URL: ${bErr.response?.data?.error?.message ?? bErr.message}`);
+            }
+          }
         }
 
-        const response = await axios.post(
-          `${apiBase}/${accountPath}/media`,
-          null,
-          { params }
-        );
+        if (!itemContainerId) {
+          await this.verifyMediaUrlAccessible(mediaItem.url);
+          const params = { access_token: accessToken, is_carousel_item: true };
+          if (mediaItem.type === 'image') {
+            params.image_url = mediaItem.url;
+          } else if (mediaItem.type === 'video') {
+            params.media_type = 'VIDEO';
+            params.video_url = mediaItem.url;
+          }
+          const response = await axios.post(`${apiBase}/${accountPath}/media`, null, { params });
+          itemContainerId = response.data.id;
+          console.log(`✅ [Instagram] Carousel item ${i + 1} (URL) created: ${itemContainerId}`);
+        }
 
-        containerIds.push(response.data.id);
-        console.log(`✅ [Instagram] Carousel item ${containerIds.length} created`);
+        containerIds.push(itemContainerId);
       }
 
       // Step 2: Create carousel container
