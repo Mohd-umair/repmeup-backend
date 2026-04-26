@@ -128,8 +128,7 @@ module.exports = async function processAutoReply(job) {
     }
     await organization.save();
 
-    // Clear cache
-    await cacheService.delPattern(`interactions:${organizationId}*`);
+    await cacheService.invalidateInteractionCaches(organizationId);
 
     // Only log at info level if something was sent or processed
     // Use debug level for skipped-only jobs to reduce log spam
@@ -1181,7 +1180,7 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
       // (avoids the stale-cache race where the 30s frontend poll overwrites
       //  the socket-updated 'replied' status with cached 'unread' data)
       try {
-        await cacheService.delPattern(`interactions:${interaction.organization.toString()}*`);
+        await cacheService.invalidateInteractionCaches(interaction.organization.toString());
       } catch (_cacheErr) { /* non-fatal */ }
 
       // Emit real-time update so the inbox list reflects 'replied' status immediately

@@ -49,7 +49,7 @@ async function bulkAssign({ interactionIds, userId, assignedBy, organizationId }
     }
   );
 
-  await cacheService.delPattern(`interactions:${organizationId}*`).catch(() => {});
+  await cacheService.invalidateInteractionCaches(organizationId).catch(() => {});
 
   return {
     updated: result.modifiedCount,
@@ -81,7 +81,7 @@ async function bulkUpdateStatus({ interactionIds, status, organizationId }) {
     { $set: update }
   );
 
-  await cacheService.delPattern(`interactions:${organizationId}*`).catch(() => {});
+  await cacheService.invalidateInteractionCaches(organizationId).catch(() => {});
 
   return { updated: result.modifiedCount };
 }
@@ -116,7 +116,7 @@ async function bulkAddLabel({ interactionIds, labelId, organizationId }) {
     }
   }
 
-  await cacheService.delPattern(`interactions:${organizationId}*`).catch(() => {});
+  await cacheService.invalidateInteractionCaches(organizationId).catch(() => {});
 
   return { updated };
 }

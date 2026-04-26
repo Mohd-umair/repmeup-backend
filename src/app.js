@@ -157,6 +157,7 @@ const routeMap = [
   ['/audit-logs',     './routes/auditLog'],
   ['/tickets',        './routes/tickets'],
   ['/contacts',       './routes/contacts'],
+  ['/email',          './routes/emailAccounts'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];

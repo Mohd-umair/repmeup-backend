@@ -42,13 +42,14 @@ function roundToMinute(d) {
  */
 function resolveDateRange(dateRange) {
   if (dateRange?.startDate && dateRange?.endDate) {
+    // Round to the minute so cache keys are stable across burst requests in the same minute.
     return {
-      startDate: new Date(dateRange.startDate),
-      endDate: new Date(dateRange.endDate),
+      startDate: roundToMinute(new Date(dateRange.startDate)),
+      endDate:   roundToMinute(new Date(dateRange.endDate)),
       defaulted: false
     };
   }
-  const endDate = roundToMinute(new Date());
+  const endDate   = roundToMinute(new Date());
   const startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
   return { startDate, endDate, defaulted: true };
 }

@@ -6,13 +6,21 @@ const {
   aiQueue,
   autoReplyQueue,
   scheduledPublishQueue,
-  brandAnalysisQueue
+  brandAnalysisQueue,
+  emailWebhookQueue,
+  imapPollingQueue,
+  gmailWatchRenewalQueue,
+  outlookRenewalQueue
 } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
 const processAutoReply = require('./jobs/processAutoReply');
 const processScheduledPublish = require('./jobs/processScheduledPublish');
 const processBrandAnalysis = require('./jobs/processBrandAnalysis');
+const processEmailWebhook = require('./jobs/processEmailWebhook');
+const processImapPolling = require('./jobs/processImapPolling');
+const renewGmailWatches = require('./jobs/renewGmailWatches');
+const renewOutlookSubscriptions = require('./jobs/renewOutlookSubscriptions');
 const logger = require('./config/logger');
 
 // Concurrency from env
@@ -20,6 +28,8 @@ const WEBHOOK_CONCURRENCY = parseInt(process.env.WEBHOOK_CONCURRENCY) || 10;
 const AI_CONCURRENCY = parseInt(process.env.AI_CONCURRENCY) || 10;
 const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
 const BRAND_ANALYSIS_CONCURRENCY = parseInt(process.env.BRAND_ANALYSIS_CONCURRENCY) || 2;
+const EMAIL_WEBHOOK_CONCURRENCY = parseInt(process.env.EMAIL_WEBHOOK_CONCURRENCY) || 5;
+const IMAP_POLL_CONCURRENCY = parseInt(process.env.IMAP_POLL_CONCURRENCY) || 3;
 
 async function startWorker() {
   try {
@@ -71,11 +81,76 @@ async function startWorker() {
     });
     logger.info('[Worker] brand-analysis processor started', { concurrency: BRAND_ANALYSIS_CONCURRENCY });
 
+    // Email webhook processor (Gmail Pub/Sub + Outlook Graph)
+    emailWebhookQueue.process(EMAIL_WEBHOOK_CONCURRENCY, async (job) => {
+      logger.debug('[Worker:email-webhook] picked up job', { jobId: job.id, provider: job.data?.provider });
+      return await processEmailWebhook(job);
+    });
+    logger.info('[Worker] email-webhook processor started', { concurrency: EMAIL_WEBHOOK_CONCURRENCY });
+
+    // IMAP polling processor (runs every 5 minutes per connection)
+    imapPollingQueue.process(IMAP_POLL_CONCURRENCY, async (job) => {
+      logger.debug('[Worker:imap-polling] picked up job', { jobId: job.id });
+      return await processImapPolling(job);
+    });
+    // Register repeatable IMAP polling job (every 5 minutes)
+    const imapRepeatableJobs = await imapPollingQueue.getRepeatableJobs();
+    const imapAlreadyScheduled = imapRepeatableJobs.some(j => j.id && j.id.includes('imap-poll-repeat'));
+    if (!imapAlreadyScheduled) {
+      await imapPollingQueue.add({}, {
+        repeat: { every: 5 * 60 * 1000 },
+        jobId: 'imap-poll-repeat',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] imap-polling repeat job registered (every 5 min)');
+    } else {
+      logger.info('[Worker] imap-polling repeat job already exists — skipping registration');
+    }
+    logger.info('[Worker] imap-polling processor started (every 5 min)');
+
+    // Gmail watch renewal (every 6 days — watches expire after 7 days)
+    gmailWatchRenewalQueue.process(1, async (job) => {
+      return await renewGmailWatches(job);
+    });
+    const watchRepeatableJobs = await gmailWatchRenewalQueue.getRepeatableJobs();
+    const watchAlreadyScheduled = watchRepeatableJobs.some(j => j.id && j.id.includes('gmail-watch-renewal-repeat'));
+    if (!watchAlreadyScheduled) {
+      await gmailWatchRenewalQueue.add({}, {
+        repeat: { every: 6 * 24 * 60 * 60 * 1000 },
+        jobId: 'gmail-watch-renewal-repeat',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] gmail-watch-renewal repeat job registered (every 6 days)');
+    } else {
+      logger.info('[Worker] gmail-watch-renewal repeat job already exists — skipping registration');
+    }
+    logger.info('[Worker] gmail-watch-renewal processor started (every 6 days)');
+
+    // Outlook subscription renewal (every 2 days — subscriptions expire after 3 days)
+    outlookRenewalQueue.process(1, async (job) => {
+      return await renewOutlookSubscriptions(job);
+    });
+    const outlookRepeatableJobs = await outlookRenewalQueue.getRepeatableJobs();
+    const outlookAlreadyScheduled = outlookRepeatableJobs.some(j => j.id && j.id.includes('outlook-renewal-repeat'));
+    if (!outlookAlreadyScheduled) {
+      await outlookRenewalQueue.add({}, {
+        repeat: { every: 2 * 24 * 60 * 60 * 1000 },
+        jobId: 'outlook-renewal-repeat',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] outlook-subscription-renewal repeat job registered (every 2 days)');
+    } else {
+      logger.info('[Worker] outlook-subscription-renewal repeat job already exists — skipping registration');
+    }
+    logger.info('[Worker] outlook-subscription-renewal processor started (every 2 days)');
+
     logger.info('✨ Worker started successfully', {
       webhook: WEBHOOK_CONCURRENCY,
       ai: AI_CONCURRENCY,
       autoReply: AUTOREPLY_CONCURRENCY,
-      brandAnalysis: BRAND_ANALYSIS_CONCURRENCY
+      brandAnalysis: BRAND_ANALYSIS_CONCURRENCY,
+      emailWebhook: EMAIL_WEBHOOK_CONCURRENCY,
+      imapPoll: IMAP_POLL_CONCURRENCY
     });
 
     const shutdown = async (signal) => {
@@ -86,7 +161,11 @@ async function startWorker() {
           aiQueue.close(),
           autoReplyQueue.close(),
           scheduledPublishQueue.close(),
-          brandAnalysisQueue.close()
+          brandAnalysisQueue.close(),
+          emailWebhookQueue.close(),
+          imapPollingQueue.close(),
+          gmailWatchRenewalQueue.close(),
+          outlookRenewalQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

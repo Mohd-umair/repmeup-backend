@@ -78,35 +78,70 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
 }
 
 /**
- * Meta sometimes delivers a user-shared IG post in DM with is_echo:true, sender = IG business id.
- * We still want an inbox thread for the user who shared the post.
+ * Attachment shapes Meta sends when a user shares IG content in DM.
+ * Often delivered as is_echo with sender = professional account id and recipient = the customer
+ * (same pattern as shared feed posts).
+ *
+ * Reels in particular use type `ig_reel` / `reel` — if we only allow `share` / `ig_post`,
+ * those echoes are skipped and never reach the inbox.
+ *
+ * @see https://developers.facebook.com/docs/instagram-messaging/webhooks/
+ */
+function isInstagramUserSharedMediaEchoAttachment(att) {
+  if (!att) return false;
+  const t = String(att.type || '').toLowerCase();
+  return (
+    t === 'share' ||
+    t === 'ig_post' ||
+    t === 'ig_reel' ||
+    t === 'reel' ||
+    t === 'story' ||
+    t === 'ig_story' ||
+    !!(att.payload && att.payload.ig_post_media_id)
+  );
+}
+
+/**
+ * Meta sometimes delivers a user-shared IG post/reel/story in DM with is_echo:true, sender = IG business id.
+ * We still want an inbox thread for the user who shared the content.
  */
 function isInstagramSharePostEcho(event, message, igAccountId) {
   if (!message?.is_echo || !igAccountId) return false;
   if (String(event.sender?.id) !== String(igAccountId) || !event.recipient?.id) return false;
   const atts = message.attachments || [];
-  return atts.some(
-    (a) =>
-      a.type === 'share' ||
-      a.type === 'ig_post' ||
-      !!(a.payload && a.payload.ig_post_media_id)
-  );
+  return atts.some(isInstagramUserSharedMediaEchoAttachment);
 }
 
-/** Pick the best attachment field for a shared IG post / media in DMs. */
+/** Pick the best attachment field for shared IG post / reel / story / media in DMs. */
 function buildInstagramDmAttachmentFields(message) {
   const atts = message.attachments || [];
+  const lower = (t) => String(t || '').toLowerCase();
+
   const primary =
-    atts.find((a) => a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id)) ||
-    atts.find((a) => a.type === 'share') ||
+    atts.find((a) => a && (a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id))) ||
+    atts.find((a) => a && ['ig_reel', 'reel'].includes(lower(a.type))) ||
+    atts.find((a) => a && ['story', 'ig_story'].includes(lower(a.type))) ||
+    atts.find((a) => a && a.type === 'share') ||
     atts[0];
   const p = primary?.payload || {};
+  const igPostMediaId =
+    p.ig_post_media_id || p.reel_media_id || p.media_id || null;
   return {
     attachmentType: primary?.type || 'file',
-    attachmentUrl: p.url || null,
-    igPostMediaId: p.ig_post_media_id || null,
+    attachmentUrl: p.url || p.attachment_url || null,
+    igPostMediaId,
     shareTitle: typeof p.title === 'string' ? p.title : null
   };
+}
+
+/** Placeholder line for thread `content` and incomingMessages when there is no caption text. */
+function buildInstagramDmPlaceholderText(attachmentType, igPostMediaId) {
+  const t = String(attachmentType || '').toLowerCase();
+  if (igPostMediaId) return '[Shared Instagram post]';
+  if (t === 'ig_reel' || t === 'reel') return '[Shared Instagram reel]';
+  if (t === 'story' || t === 'ig_story') return '[Shared Instagram story]';
+  if (attachmentType) return `[${attachmentType}]`;
+  return '';
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -190,7 +225,7 @@ async function handleInstagramMessage(payload, organizationId) {
 
       const sharePostEcho = isInstagramSharePostEcho(event, message, igAccountId);
       if (message.is_echo && !sharePostEcho) {
-        logger.info('[instagramWebhookService] Skipping echo (not user-shared post)');
+        logger.info('[instagramWebhookService] Skipping echo (not user-shared media)');
         continue;
       }
 
@@ -200,7 +235,7 @@ async function handleInstagramMessage(payload, organizationId) {
       const text =
         message.text ||
         shareTitle ||
-        (igPostMediaId ? '[Shared Instagram post]' : attachmentType ? `[${attachmentType}]` : '');
+        buildInstagramDmPlaceholderText(attachmentType, igPostMediaId);
 
       if (!mid || !partnerId) {
         logger.warn('[instagramWebhookService] Message missing mid or partnerId', {
@@ -209,6 +244,14 @@ async function handleInstagramMessage(payload, organizationId) {
           sharePostEcho
         });
         continue;
+      }
+
+      if (sharePostEcho) {
+        logger.info('[instagramWebhookService] User-shared media echo routed to inbox', {
+          partnerId: String(partnerId),
+          attachmentType: attachmentType || undefined,
+          igPostMediaId: igPostMediaId || undefined
+        });
       }
 
       // Fetch username/name/profile_pic from IG User Profile API (webhook only sends ids)

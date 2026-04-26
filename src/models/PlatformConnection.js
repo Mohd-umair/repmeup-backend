@@ -9,7 +9,7 @@ const platformConnectionSchema = new mongoose.Schema({
   
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin'],
+    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin', 'email'],
     required: true
   },
   
@@ -55,7 +55,26 @@ const platformConnectionSchema = new mongoose.Schema({
     organizationId: String,
     organizationName: String,
     organizationUrn: String,
-    personUrn: String
+    personUrn: String,
+
+    // For Email (Gmail / Outlook / IMAP)
+    emailProvider: {
+      type: String,
+      enum: ['gmail', 'outlook', 'imap'],
+      default: null
+    },
+    emailAddress: String,           // The connected inbox address
+    watchHistoryId: String,         // Gmail: historyId for delta sync via Pub/Sub
+    watchExpiry: Date,              // Gmail: watch() expires every 7 days — renewal required
+    msSubscriptionId: String,       // Outlook: Microsoft Graph subscription ID
+    msSubscriptionExpiry: Date,     // Outlook: Graph subscriptions expire every 3 days
+    imapHost: String,
+    imapPort: Number,
+    imapSecure: { type: Boolean, default: true },
+    smtpHost: String,
+    smtpPort: Number,
+    smtpSecure: { type: Boolean, default: true },
+    lastPolledUid: Number           // IMAP: last seen UID for delta polling
   },
   
   // Metadata for connection relationships

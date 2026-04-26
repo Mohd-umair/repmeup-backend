@@ -7,6 +7,7 @@ const { runWithAiContext } = require('../services/aiRequestContext');
 const aiService = require('../services/aiService');
 const aiCreditService = require('../services/aiCreditService');
 const emailService = require('../services/emailService');
+const cacheService = require('../services/cacheService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
@@ -150,6 +151,8 @@ module.exports = async function processAI(job) {
     } else {
       await Interaction.findByIdAndUpdate(interactionId, { $set: aiUpdate }, { new: false });
     }
+
+    cacheService.invalidateAnalytics(orgIdCtx).catch(() => {});
 
     jobLogger.info('AI processing completed', { interactionId });
 

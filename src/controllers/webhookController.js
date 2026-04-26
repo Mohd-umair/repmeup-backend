@@ -933,3 +933,104 @@ exports.handleProductPaymentWebhook = async (req, res) => {
   }
 };
 
+// ── Gmail Pub/Sub Webhook ─────────────────────────────────────────────────────
+
+/**
+ * POST /api/webhooks/gmail
+ *
+ * Receives push notifications from Google Pub/Sub when new Gmail messages arrive.
+ * Payload shape (base64-encoded JSON in message.data):
+ *   { emailAddress: string, historyId: string }
+ *
+ * Google requires a 2xx response within 10 seconds; processing is queued
+ * so we ACK immediately and do the DB work asynchronously.
+ */
+exports.handleGmailWebhook = async (req, res) => {
+  // Always ACK immediately to prevent Pub/Sub from retrying
+  res.status(200).json({ received: true });
+
+  try {
+    const message = req.body?.message;
+    if (!message?.data) {
+      logger.warn('[GmailWebhook] push received with no message.data');
+      return;
+    }
+
+    // Decode base64-encoded JSON payload
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(message.data, 'base64').toString('utf-8'));
+    } catch {
+      logger.warn('[GmailWebhook] could not decode message.data');
+      return;
+    }
+
+    const { emailAddress, historyId } = payload;
+    if (!emailAddress) {
+      logger.warn('[GmailWebhook] push missing emailAddress');
+      return;
+    }
+
+    logger.debug('[GmailWebhook] push received', { emailAddress, historyId });
+
+    // Queue the processing job — same pattern as WhatsApp
+    const { emailWebhookQueue, queueConfig } = require('../config/queue');
+    await emailWebhookQueue.add(
+      { provider: 'gmail', emailAddress, historyId },
+      queueConfig
+    );
+  } catch (err) {
+    logger.error('[GmailWebhook] error queuing job', { error: err.message });
+  }
+};
+
+// ── Outlook / Microsoft Graph Webhook ────────────────────────────────────────
+
+/**
+ * POST /api/webhooks/outlook
+ *
+ * Handles both the Graph subscription validation challenge (GET-like POST with
+ * validationToken query param) and the actual change notification payload.
+ *
+ * Security: validates the clientState secret on every notification.
+ */
+exports.handleOutlookWebhook = async (req, res) => {
+  // Graph subscription validation: respond with the validationToken as plain text
+  const validationToken = req.query.validationToken;
+  if (validationToken) {
+    return res.status(200).contentType('text/plain').send(validationToken);
+  }
+
+  // ACK immediately
+  res.status(202).json({ received: true });
+
+  try {
+    const notifications = req.body?.value;
+    if (!Array.isArray(notifications) || notifications.length === 0) return;
+
+    const expectedClientState = process.env.OUTLOOK_WEBHOOK_CLIENT_STATE;
+
+    for (const notification of notifications) {
+      // Validate clientState to prevent spoofing
+      if (expectedClientState && notification.clientState !== expectedClientState) {
+        logger.warn('[OutlookWebhook] clientState mismatch — ignoring notification');
+        continue;
+      }
+
+      const { subscriptionId, resource, resourceData } = notification;
+      const messageId = resourceData?.id || resource?.split('/').pop();
+      if (!messageId) continue;
+
+      logger.debug('[OutlookWebhook] notification received', { subscriptionId, messageId });
+
+      const { emailWebhookQueue, queueConfig } = require('../config/queue');
+      await emailWebhookQueue.add(
+        { provider: 'outlook', subscriptionId, messageId },
+        queueConfig
+      );
+    }
+  } catch (err) {
+    logger.error('[OutlookWebhook] error queuing job', { error: err.message });
+  }
+};
+

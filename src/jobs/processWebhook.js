@@ -89,10 +89,10 @@ module.exports = async function processWebhook(job) {
         })();
       }
 
-      // Invalidate inbox list cache so next GET /api/inbox returns this interaction (fixes DMs not showing until refresh/sync)
+      // Invalidate inbox + analytics cache (dashboard counts / charts use Redis analytics:* keys)
       if (organizationId) {
-        cacheService.delPattern(`interactions:${organizationId}*`).catch(err => {
-          jobLogger.warn('Failed to invalidate inbox cache', { err: err?.message });
+        cacheService.invalidateInteractionCaches(organizationId).catch(err => {
+          jobLogger.warn('Failed to invalidate interaction caches', { err: err?.message });
         });
       }
 
@@ -221,36 +221,61 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
   }
 }
 
+/** @deprecated Prefer instagramWebhookService — kept in sync for legacy callers */
+function isInstagramUserSharedMediaEchoAttachment(att) {
+  if (!att) return false;
+  const t = String(att.type || '').toLowerCase();
+  return (
+    t === 'share' ||
+    t === 'ig_post' ||
+    t === 'ig_reel' ||
+    t === 'reel' ||
+    t === 'story' ||
+    t === 'ig_story' ||
+    !!(att.payload && att.payload.ig_post_media_id)
+  );
+}
+
 /**
- * Meta sometimes delivers a user-shared post in DM with is_echo:true, sender=IG business id, recipient=user id.
- * We still want an inbox thread for the user who shared the post.
+ * Meta sometimes delivers user-shared IG post/reel/story in DM with is_echo:true, sender=IG business id.
+ * @deprecated Prefer instagramWebhookService
  */
 function isInstagramSharePostEcho(event, message, igAccountId) {
   if (!message?.is_echo || !igAccountId) return false;
   if (String(event.sender?.id) !== String(igAccountId) || !event.recipient?.id) return false;
   const atts = message.attachments || [];
-  return atts.some(
-    (a) =>
-      a.type === 'share' ||
-      a.type === 'ig_post' ||
-      !!(a.payload && a.payload.ig_post_media_id)
-  );
+  return atts.some(isInstagramUserSharedMediaEchoAttachment);
 }
 
-/** Pick best attachment for shared IG post / media in DMs. */
+/** @deprecated Prefer instagramWebhookService */
 function buildInstagramDmAttachmentFields(message) {
   const atts = message.attachments || [];
+  const lower = (t) => String(t || '').toLowerCase();
   const primary =
-    atts.find((a) => a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id)) ||
-    atts.find((a) => a.type === 'share') ||
+    atts.find((a) => a && (a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id))) ||
+    atts.find((a) => a && ['ig_reel', 'reel'].includes(lower(a.type))) ||
+    atts.find((a) => a && ['story', 'ig_story'].includes(lower(a.type))) ||
+    atts.find((a) => a && a.type === 'share') ||
     atts[0];
   const p = primary?.payload || {};
+  const igPostMediaId =
+    p.ig_post_media_id || p.reel_media_id || p.media_id || null;
   return {
     attachmentType: primary?.type || 'file',
-    attachmentUrl: p.url || null,
-    igPostMediaId: p.ig_post_media_id || null,
+    attachmentUrl: p.url || p.attachment_url || null,
+    igPostMediaId,
     shareTitle: typeof p.title === 'string' ? p.title : null
   };
+}
+
+/** @deprecated Prefer instagramWebhookService */
+function buildInstagramDmPlaceholderText(attachmentType, igPostMediaId) {
+  const t = String(attachmentType || '').toLowerCase();
+  if (igPostMediaId) return '[Shared Instagram post]';
+  if (t === 'ig_reel' || t === 'reel') return '[Shared Instagram reel]';
+  if (t === 'story' || t === 'ig_story') return '[Shared Instagram story]';
+  if (attachmentType) return `[${attachmentType}]`;
+  return '';
 }
 
 /**
@@ -348,7 +373,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       const text =
         message.text ||
         shareTitle ||
-        (igPostMediaId ? '[Shared Instagram post]' : attachmentType ? `[${attachmentType}]` : '');
+        buildInstagramDmPlaceholderText(attachmentType, igPostMediaId);
       if (!mid || !partnerId) {
         logger.warn('[processWebhook] Instagram: message missing mid or partnerId', {
           mid: !!mid,

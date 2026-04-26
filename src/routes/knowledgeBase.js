@@ -10,6 +10,9 @@ router.use(protect);
 // Get all knowledge base entries
 router.get('/', knowledgeBaseController.getAllKnowledgeBase);
 
+// Lightweight existence check (used by inbox setup guide)
+router.get('/exists', knowledgeBaseController.knowledgeBaseExists);
+
 // Get categories
 router.get('/categories', knowledgeBaseController.getCategories);
 
