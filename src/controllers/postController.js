@@ -333,7 +333,7 @@ exports.publishPost = async (req, res) => {
 
     try {
       const { platform, content, scheduledFor, postType, generatedBy, designDna } = req.body;
-      const userId = req.user.id;
+      const userId = req.user._id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
       if (!platform || !content) {
@@ -432,7 +432,7 @@ exports.schedulePost = async (req, res) => {
 
     try {
       const { platform, content, scheduledFor, postType, mediaLibraryId, mediaUrl, generatedBy } = req.body;
-      const userId = req.user.id;
+      const userId = req.user._id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
       if (!platform || !content || !scheduledFor) {
