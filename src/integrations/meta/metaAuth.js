@@ -46,9 +46,17 @@ class MetaAuthService {
    * Generate state parameter for OAuth (security)
    */
   generateState(userId, organizationId, platform = 'facebook') {
+    // Fail fast here so a bad caller doesn't produce a state that only
+    // breaks AFTER the user authorizes on Meta and bounces back.
+    // JSON.stringify silently drops undefined values.
+    if (!userId || !organizationId) {
+      throw new Error(
+        `Cannot generate Meta OAuth state: userId=${userId}, organizationId=${organizationId}`
+      );
+    }
     const stateData = {
-      userId,
-      organizationId,
+      userId: String(userId),
+      organizationId: String(organizationId),
       platform,
       timestamp: Date.now(),
       nonce: crypto.randomBytes(16).toString('hex')
