@@ -24,6 +24,10 @@ const aiQueue = new Queue('ai-processing', queueOptions);
 const autoReplyQueue = new Queue('auto-reply', queueOptions);
 const scheduledPublishQueue = new Queue('scheduled-publish', queueOptions);
 const brandAnalysisQueue = new Queue('brand-analysis', queueOptions);
+const emailWebhookQueue = new Queue('email-webhook', queueOptions);
+const imapPollingQueue = new Queue('imap-polling', queueOptions);
+const gmailWatchRenewalQueue = new Queue('gmail-watch-renewal', queueOptions);
+const outlookRenewalQueue = new Queue('outlook-subscription-renewal', queueOptions);
 
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
@@ -53,7 +57,11 @@ const queues = [
   notificationQueue,
   autoReplyQueue,
   scheduledPublishQueue,
-  brandAnalysisQueue
+  brandAnalysisQueue,
+  emailWebhookQueue,
+  imapPollingQueue,
+  gmailWatchRenewalQueue,
+  outlookRenewalQueue
 ];
 
 queues.forEach(queue => {
@@ -91,5 +99,9 @@ module.exports = {
   autoReplyQueue,
   scheduledPublishQueue,
   brandAnalysisQueue,
+  emailWebhookQueue,
+  imapPollingQueue,
+  gmailWatchRenewalQueue,
+  outlookRenewalQueue,
   queueConfig
 };

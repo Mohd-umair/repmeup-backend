@@ -197,7 +197,7 @@ exports.getInteraction = async (req, res, next) => {
           interaction.status = 'read';
         }
         await interaction.save();
-        await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+        await cacheService.invalidateInteractionCaches(req.user.organization._id);
       }
     }
 
@@ -339,7 +339,7 @@ exports.deleteReply = async (req, res, next) => {
     reply.status = 'deleted';
     await interaction.save();
 
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     return res.status(200).json({
       success: true,
@@ -445,7 +445,7 @@ exports.replyToInteraction = async (req, res, next) => {
       }
     }
 
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     if (replyStatus === 'sent') {
       return res.status(200).json({ success: true, data: interaction, message: 'Reply sent successfully' });
@@ -524,7 +524,7 @@ exports.deleteInteraction = async (req, res, next) => {
 
     await Interaction.findByIdAndDelete(interaction._id);
 
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     return res.status(200).json({
       success: true,
@@ -575,7 +575,7 @@ exports.assignInteraction = async (req, res, next) => {
       await interaction.save();
 
       // Clear cache
-      await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+      await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
       return res.status(200).json({
         success: true,
@@ -631,7 +631,7 @@ exports.assignInteraction = async (req, res, next) => {
     }
 
     // Clear cache
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     res.status(200).json({
       success: true,
@@ -676,7 +676,7 @@ exports.addLabel = async (req, res, next) => {
     }
 
     // Clear cache
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     res.status(200).json({
       success: true,
@@ -739,7 +739,7 @@ exports.updateStatus = async (req, res, next) => {
     await interaction.save();
 
     // Clear cache
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     res.status(200).json({
       success: true,
@@ -788,7 +788,7 @@ exports.updateChatOpen = async (req, res, next) => {
     interaction.chatOpen = chatOpen;
     await interaction.save();
 
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     const populated = await Interaction.findById(interaction._id)
       .populate('assignedTo', 'firstName lastName email avatar')
@@ -1243,7 +1243,7 @@ exports.escalateInteractionManually = async (req, res, next) => {
     );
 
     // Clear cache
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     res.status(200).json({
       success: true,

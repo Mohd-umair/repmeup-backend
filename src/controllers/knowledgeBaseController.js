@@ -139,6 +139,21 @@ const upload = multer({
 });
 
 /**
+ * Lightweight existence check — used by the inbox setup guide.
+ * GET /api/knowledge-base/exists
+ * Returns { exists: boolean } without running any aggregation.
+ */
+exports.knowledgeBaseExists = async (req, res) => {
+  try {
+    const orgId = req.user.organization._id || req.user.organization;
+    const count = await KnowledgeBase.countDocuments({ organization: orgId }).limit(1).lean();
+    res.json({ success: true, exists: count > 0 });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to check knowledge base' });
+  }
+};
+
+/**
  * Get knowledge base entries (paginated; same envelope as GET /api/users)
  * GET /api/knowledge-base
  */
@@ -258,7 +273,7 @@ exports.createManualKnowledgeBase = async (req, res) => {
       source: 'manual',
       metadata: metadata || {},
       organization: req.user.organization,
-      createdBy: req.user.id
+      createdBy: req.user._id
     });
 
     await knowledgeBase.save();
@@ -311,7 +326,7 @@ exports.createPDFKnowledgeBase = async (req, res) => {
         uploadedAt: new Date()
       },
       organization: req.user.organization,
-      createdBy: req.user.id
+      createdBy: req.user._id
     });
 
     await knowledgeBase.save();
@@ -427,7 +442,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
         ...scrapedData.metadata
       },
       organization: req.user.organization,
-      createdBy: req.user.id
+      createdBy: req.user._id
     });
 
     await knowledgeBase.save();
@@ -531,7 +546,7 @@ exports.updateKnowledgeBase = async (req, res) => {
     if (isTrainingData !== undefined)   knowledgeBase.isTrainingData = Boolean(isTrainingData);
     if (Array.isArray(templateFields))  knowledgeBase.templateFields = templateFields;
 
-    knowledgeBase.updatedBy = req.user.id;
+    knowledgeBase.updatedBy = req.user._id;
 
     await knowledgeBase.save();
 

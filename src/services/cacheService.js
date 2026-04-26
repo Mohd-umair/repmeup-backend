@@ -218,6 +218,25 @@ class CacheService {
   }
 
   /**
+   * After any interaction write that affects inbox lists or dashboard aggregates
+   * (counts, time series, AI vs human, intent breakdown).
+   */
+  async invalidateInteractionCaches(orgId) {
+    if (orgId == null) return;
+    const id = String(orgId);
+    try {
+      await this.delPattern(`interactions:${id}*`);
+    } catch (error) {
+      console.error('invalidateInteractionCaches (inbox) error:', error);
+    }
+    try {
+      await this.invalidateAnalytics(id);
+    } catch (error) {
+      console.error('invalidateInteractionCaches (analytics) error:', error);
+    }
+  }
+
+  /**
    * Generate cache key for resolved entitlements (plan + limits + usage).
    * Used by services/entitlementsService.js.
    */

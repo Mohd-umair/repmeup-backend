@@ -257,6 +257,12 @@ async function sendReplyToPlatform({
         return { platformResponseId: null, status: 'failed', errorMessage: 'Failed to send WhatsApp message' };
       }
 
+      // ── Email (Gmail / Outlook / IMAP) ───────────────────────────────────
+      case 'email': {
+        const emailReplyService = require('./email/emailReplyService');
+        return await emailReplyService.sendEmailReply(interaction, replyContent);
+      }
+
       // ── Google Review ────────────────────────────────────────────────────
       case 'google': {
         if (interaction.type !== 'review') {

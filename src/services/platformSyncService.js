@@ -194,7 +194,7 @@ async function syncPlatform(connection, organizationId) {
     }
 
     // Invalidate inbox list cache so frontend sees new data without a page refresh
-    await cacheService.delPattern(`interactions:${organizationId}:*`).catch(() => {});
+    await cacheService.invalidateInteractionCaches(organizationId).catch(() => {});
   }
 
   logger.info('[platformSyncService] Sync complete', {

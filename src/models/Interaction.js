@@ -11,7 +11,7 @@ const interactionSchema = new mongoose.Schema({
   // Platform information
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'whatsapp', 'youtube', 'google', 'website', 'linkedin'],
+    enum: ['instagram', 'facebook', 'whatsapp', 'youtube', 'google', 'website', 'linkedin', 'email'],
     required: true,
     index: true
   },
@@ -21,7 +21,7 @@ const interactionSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['comment', 'dm', 'review', 'mention'],
+    enum: ['comment', 'dm', 'review', 'mention', 'email'],
     required: true,
     index: true
   },
@@ -44,7 +44,7 @@ const interactionSchema = new mongoose.Schema({
   },
   contentType: {
     type: String,
-    enum: ['text', 'image', 'video', 'audio'],
+    enum: ['text', 'image', 'video', 'audio', 'html'],
     default: 'text'
   },
   language: String,
@@ -260,7 +260,8 @@ const interactionSchema = new mongoose.Schema({
   },
   bucketAssignedBy: {
     type: String,
-    enum: ['keyword', 'ai', 'manual'],
+    // 'default' = org fallback bucket (intentClassificationService when AI/name match uses default bucket)
+    enum: ['keyword', 'ai', 'manual', 'default'],
     default: 'ai'
   },
 
@@ -320,7 +321,43 @@ const interactionSchema = new mongoose.Schema({
     
     // Additional context
     deviceType: String,
-    appVersion: String
+    appVersion: String,
+
+    // Email-specific metadata (platform === 'email')
+    email: {
+      subject: String,
+      from: {
+        name: String,
+        address: String
+      },
+      to: [{
+        _id: false,
+        name: String,
+        address: String
+      }],
+      cc: [{
+        _id: false,
+        name: String,
+        address: String
+      }],
+      // RFC 2822 Message-ID header — used for duplicate detection
+      messageId: String,
+      // Threading headers
+      inReplyTo: String,
+      references: [String],
+      // Full HTML body (sanitized on the frontend before rendering)
+      htmlBody: String,
+      // Plain-text fallback
+      textBody: String,
+      hasAttachments: { type: Boolean, default: false },
+      attachments: [{
+        _id: false,
+        filename: String,
+        mimeType: String,
+        size: Number,
+        storageKey: String   // reference to storageService / GCS key
+      }]
+    }
   },
   
   // Response tracking
@@ -454,6 +491,11 @@ interactionSchema.index({ 'metadata.postId': 1 });
 interactionSchema.index({ requiresHumanResponse: 1, assignedTo: 1 });
 interactionSchema.index({ organization: 1, requiresHumanResponse: 1 });
 interactionSchema.index({ organization: 1, intentBucket: 1, platformCreatedAt: -1 });
+
+// Compound index for all analytics date-range queries (most expensive aggregations)
+interactionSchema.index({ organization: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, platform: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, sentiment: 1, platformCreatedAt: -1 });
 
 // Update response count when adding replies
 interactionSchema.pre('save', function(next) {

@@ -433,7 +433,7 @@ exports.disconnectPlatform = async (req, res, next) => {
     // Clear all cache for this organization's interactions
     // This is important because the inbox query now filters by active connections
     const cacheService = require('../services/cacheService');
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     // Optionally: Archive or hide interactions from this disconnected platform
     // For now, they'll just be filtered out by the inbox query

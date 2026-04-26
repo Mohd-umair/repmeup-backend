@@ -33,6 +33,12 @@ router.post('/linkedin', webhookController.handleLinkedInWebhook);
 router.get('/whatsapp', webhookController.verifyWhatsAppWebhook);
 router.post('/whatsapp', webhookController.handleWhatsAppWebhook);
 
+// Gmail Pub/Sub push notifications
+router.post('/gmail', webhookController.handleGmailWebhook);
+
+// Microsoft Graph (Outlook) push notifications
+router.post('/outlook', webhookController.handleOutlookWebhook);
+
 // Product payment confirmation (from any payment provider)
 router.post('/product-payment', webhookController.handleProductPaymentWebhook);
 

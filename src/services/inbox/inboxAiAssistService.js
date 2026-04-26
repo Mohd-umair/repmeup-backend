@@ -611,7 +611,7 @@ async function processAutoReplyBatch({ user, interactionIds = [], autoSend = fal
   if (mode !== 'test') {
     await organization.save();
     // Invalidate list cache so the UI shows the freshly replied rows.
-    await cacheService.delPattern(`interactions:${orgId}*`).catch((err) => {
+    await cacheService.invalidateInteractionCaches(orgId).catch((err) => {
       logger.warn('[inboxAiAssist] cache invalidation failed after auto-reply batch', {
         orgId: String(orgId),
         error: err.message
