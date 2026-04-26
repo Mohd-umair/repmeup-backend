@@ -81,8 +81,10 @@ let limiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => {
     if (rateLimitDisabled) return true;
-    if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
-    if (req.path.startsWith('/api/webhooks/')) return true;
+    // req.path inside app.use('/api/', ...) is RELATIVE to the /api/ mount point,
+    // so it starts with /posts/media/ not /api/posts/media/.
+    if (req.path === '/health' || req.path.startsWith('/posts/media/')) return true;
+    if (req.path.startsWith('/webhooks/')) return true;
     // Inbox avatar/attachment proxies (many small requests when loading inbox; all authenticated)
     if (req.path.includes('inbox/avatar/') || req.path.includes('inbox/attachment')) return true;
     return false;
@@ -193,8 +195,8 @@ const upgradeRateLimiting = () => {
       legacyHeaders: false,
       skip: (req) => {
         if (rateLimitDisabled) return true;
-        if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
-        if (req.path.startsWith('/api/webhooks/')) return true;
+        if (req.path === '/health' || req.path.startsWith('/posts/media/')) return true;
+        if (req.path.startsWith('/webhooks/')) return true;
         return false;
       },
       store: new RedisStore({
