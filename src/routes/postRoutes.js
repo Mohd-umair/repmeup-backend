@@ -78,12 +78,19 @@ router.get('/media/:filename', async (req, res) => {
     });
 
     if (!fs.existsSync(filePath)) {
+      // When the local file is absent (server restart, multi-instance, manual delete)
+      // check the Media library for an external/S3 URL to redirect to.
       const doc = await Media.findOne({ filename }).select('publicUrl').lean();
-      if (doc?.publicUrl && /^https?:\/\//i.test(String(doc.publicUrl))) {
-        return res.redirect(302, doc.publicUrl);
+      if (doc?.publicUrl) {
+        const docUrl = String(doc.publicUrl);
+        // Only redirect if it's an external URL that won't loop back to this same route.
+        const isSameRoute = docUrl.includes('/api/posts/media/') || docUrl.includes('/uploads/posts/');
+        if (/^https?:\/\//i.test(docUrl) && !isSameRoute) {
+          return res.redirect(302, docUrl);
+        }
       }
       console.error(`❌ [Media] File not found: ${filename}`);
-      return res.status(404).json({ message: 'Media file not found' });
+      return res.status(404).json({ message: 'Media file not found', filename });
     }
     
     // Get file stats for Content-Length
@@ -105,12 +112,16 @@ router.get('/media/:filename', async (req, res) => {
     };
     const contentType = contentTypeMap[ext] || 'application/octet-stream';
     
-    // Set headers for proper video/image serving
+    // Set headers for proper video/image serving.
+    // Cross-Origin-Resource-Policy must be 'cross-origin' so third-party CDNs
+    // (e.g. Meta/Instagram's image downloader) are not blocked by Helmet's
+    // default 'same-origin' value.
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Length', fileSize);
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'public, max-age=31536000'); // 1 year cache
-    res.setHeader('Access-Control-Allow-Origin', '*'); // Allow CORS
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     
     console.log(`✅ [Media] Serving ${contentType}, size: ${fileSize} bytes`);
     

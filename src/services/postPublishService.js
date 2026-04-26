@@ -30,6 +30,7 @@
 const path = require('path');
 const fs = require('fs').promises;
 const axios = require('axios');
+const sharp = require('sharp');
 
 const ScheduledPost = require('../models/ScheduledPost');
 const Media = require('../models/Media');
@@ -93,6 +94,88 @@ function getPublicMediaUrl(filePath, req) {
   return storageService.resolvePublicUrl(filePath, req);
 }
 
+/**
+ * Verify that a media URL pointing to our own /api/posts/media/ route actually
+ * has the backing file on disk. Returns a user-friendly error string when the
+ * file cannot be located, or null when everything looks fine.
+ *
+ * Called before handing the URL to third-party platform APIs (Instagram, etc.)
+ * so the user gets a clear "image not found" message rather than a cryptic
+ * "Only photo or video can be accepted as media type" from Meta.
+ */
+async function verifyLocalMediaExists(mediaUrl) {
+  if (!mediaUrl) return null;
+  const urlStr = String(mediaUrl);
+  // Only check URLs that route through our own media endpoint
+  const match = urlStr.match(/\/api\/posts\/media\/([^?#]+)/);
+  if (!match) return null;
+
+  const filename = path.basename(match[1]);
+  const uploadDir = path.join(__dirname, '../../uploads/posts');
+  const fullPath = path.join(uploadDir, filename);
+  try {
+    await fs.access(fullPath);
+    return null; // file exists — all good
+  } catch {
+    return (
+      `The image file "${filename}" could not be found on the server. ` +
+      'It may have been lost after a server restart. ' +
+      'Please regenerate the image in Content Studio and publish again.'
+    );
+  }
+}
+
+/**
+ * Convert a local PNG file to JPEG for Instagram compatibility.
+ *
+ * AI-generated PNGs can contain alpha channels, unusual ICC color profiles,
+ * or high bit-depth data that causes Instagram's CDN to reject them with
+ * error 9004 / subcode 2207052 ("Only photo or video can be accepted").
+ * Converting to a flat JPEG eliminates all of these issues.
+ *
+ * If the media URL is not a local /api/posts/media/*.png URL, or if
+ * conversion fails for any reason, the original URL is returned unchanged.
+ *
+ * @param {string} mediaUrl  - Public URL of the image (may end in .png)
+ * @param {object} req       - Express request (for building the new public URL)
+ * @returns {Promise<string>} JPEG public URL, or original URL on non-PNG / error
+ */
+async function convertPngToJpegForInstagram(mediaUrl, req) {
+  if (!mediaUrl) return mediaUrl;
+  const urlStr = String(mediaUrl);
+
+  // Only process local media files served through our own /api/posts/media/ route
+  const match = urlStr.match(/\/api\/posts\/media\/([^?#]+\.png)$/i);
+  if (!match) return mediaUrl; // not a local PNG — skip
+
+  const pngFilename = path.basename(match[1]);
+  const uploadDir = path.join(__dirname, '../../uploads/posts');
+  const pngPath = path.join(uploadDir, pngFilename);
+
+  try {
+    await fs.access(pngPath);
+  } catch {
+    return mediaUrl; // file not on disk — let the existing check handle it
+  }
+
+  const jpegFilename = pngFilename.replace(/\.png$/i, '-ig.jpg');
+  const jpegPath = path.join(uploadDir, jpegFilename);
+
+  try {
+    await sharp(pngPath)
+      .flatten({ background: { r: 255, g: 255, b: 255 } }) // remove alpha — white bg
+      .jpeg({ quality: 92, mozjpeg: true })
+      .toFile(jpegPath);
+
+    const jpegUrl = storageService.resolvePublicUrl(jpegPath, req);
+    logger.info('[Instagram] PNG → JPEG conversion', { pngFilename, jpegFilename, jpegUrl });
+    return jpegUrl;
+  } catch (err) {
+    logger.warn('[Instagram] PNG → JPEG conversion failed, using original PNG', { err: err.message });
+    return mediaUrl; // fall back gracefully
+  }
+}
+
 // ── Platform Publishers ───────────────────────────────────────────────────────
 
 /**
@@ -108,10 +191,21 @@ async function publishToInstagram(connection, post, req) {
   }
 
   if (isCarousel) {
-    const mediaUrls = mediaStoragePaths.map((storagePath, index) => ({
+    let mediaUrls = mediaStoragePaths.map((storagePath, index) => ({
       url: getPublicMediaUrl(storagePath, req),
       type: mediaTypes[index]
     }));
+    // Pre-check each carousel item and convert PNG → JPEG for image items
+    for (let i = 0; i < mediaUrls.length; i++) {
+      const missingErr = await verifyLocalMediaExists(mediaUrls[i].url);
+      if (missingErr) throw new Error(missingErr);
+      if (mediaUrls[i].type === 'image') {
+        mediaUrls[i] = {
+          ...mediaUrls[i],
+          url: await convertPngToJpegForInstagram(mediaUrls[i].url, req)
+        };
+      }
+    }
     const result = await instagramService.createCarouselPost(connection, {
       caption: content,
       mediaUrls
@@ -119,7 +213,22 @@ async function publishToInstagram(connection, post, req) {
     return { postId: result.postId, postUrl: result.postUrl };
   }
 
-  const mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
+  let mediaUrl = getPublicMediaUrl(mediaStoragePath, req);
+
+  // Pre-check: ensure the file is present before handing the URL to Meta.
+  // If the file is missing Instagram returns "Only photo or video can be
+  // accepted as media type." — a misleading error that makes the issue hard
+  // to debug.  Fail early with a clear message instead.
+  const missingErr = await verifyLocalMediaExists(mediaUrl);
+  if (missingErr) throw new Error(missingErr);
+
+  // AI-generated images arrive as PNG. Instagram's CDN can reject PNGs that
+  // have alpha channels, unusual ICC profiles, or high bit-depth. Convert to
+  // JPEG (white background, 92% quality) before publishing. This is a no-op
+  // for anything that is not a local .png served through /api/posts/media/.
+  if (mediaType === 'image') {
+    mediaUrl = await convertPngToJpegForInstagram(mediaUrl, req);
+  }
 
   switch (postType) {
     case 'story': {
