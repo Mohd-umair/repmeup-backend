@@ -72,12 +72,29 @@ exports.getInteractions = async (req, res, next) => {
       return res.status(200).json({ success: true, data: cached, cached: true });
     }
 
+    // List projection: keeps only what the inbox list view needs.
+    // - replies/$slice:-1  → only the most-recent reply (for last-message preview); avoids shipping entire reply threads
+    // - metadata.incomingMessages/$slice:-1 → same for DM history
+    // - heavy / detail-only fields excluded → internalNotes, assignmentHistory, sentimentHistory,
+    //   raw email bodies, escalationMetadata; these are loaded on-demand in getInteraction()
+    const LIST_PROJECTION = {
+      replies: { $slice: -1 },
+      'metadata.incomingMessages': { $slice: -1 },
+      'metadata.email.htmlBody': 0,
+      'metadata.email.textBody': 0,
+      'metadata.email.rawHeaders': 0,
+      'metadata.email.attachments': 0,
+      internalNotes: 0,
+      assignmentHistory: 0,
+      sentimentHistory: 0,
+      escalationMetadata: 0,
+      topics: 0
+    };
+
     // +1 so we can detect hasMore without an extra count round-trip.
-    const interactions = await Interaction.find(mongoQuery)
+    const interactions = await Interaction.find(mongoQuery, LIST_PROJECTION)
       .populate('assignedTo', 'firstName lastName email avatar')
       .populate('assignedBy', 'firstName lastName email')
-      .populate('assignmentHistory.assignedTo', 'firstName lastName email')
-      .populate('assignmentHistory.assignedBy', 'firstName lastName email')
       .populate('labels', 'name color icon')
       .populate('replies.sentBy', 'firstName lastName')
       .populate('platformConnection', 'platform isActive status')
@@ -154,7 +171,7 @@ exports.getInteraction = async (req, res, next) => {
       .populate('labels')
       .populate('replies.sentBy', 'firstName lastName avatar')
       .populate('internalNotes.addedBy', 'firstName lastName avatar')
-      .populate('platformConnection', 'platform platformUsername platformDisplayName platformProfilePicture metadata');
+      .populate('platformConnection', 'platform platformUsername platformDisplayName platformProfilePicture');
 
     if (!interaction) {
       return res.status(404).json({
@@ -202,14 +219,16 @@ exports.getInteraction = async (req, res, next) => {
     }
 
     // Fetch child interactions (replies from the platform, e.g., YouTube user replies)
-    // These are separate Interaction documents with parentId pointing to this interaction
+    // parentId index makes this a fast index scan instead of a full collection scan.
     const childInteractions = await Interaction.find({
       $or: [
         { parentId: interaction._id.toString() },
         { parentId: interaction.platformId } // Also check by platformId
       ],
       organization: req.user.organization._id
-    }).sort({ platformCreatedAt: sortDir }); // Sort by requested order
+    }).select('_id content author sentiment platform platformId platformCreatedAt')
+      .sort({ platformCreatedAt: sortDir })
+      .lean();
 
     // Convert to plain object for modification
     const interactionObj = interaction.toObject();
