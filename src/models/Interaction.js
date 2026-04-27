@@ -497,6 +497,10 @@ interactionSchema.index({ organization: 1, platformCreatedAt: -1 });
 interactionSchema.index({ organization: 1, platform: 1, platformCreatedAt: -1 });
 interactionSchema.index({ organization: 1, sentiment: 1, platformCreatedAt: -1 });
 
+// Index for child-interaction lookup (getInteraction fetches children by parentId on every chat open).
+// Without this, every chat click triggers a full collection scan.
+interactionSchema.index({ parentId: 1, organization: 1 });
+
 // Update response count when adding replies
 interactionSchema.pre('save', function(next) {
   if (this.isModified('replies')) {
