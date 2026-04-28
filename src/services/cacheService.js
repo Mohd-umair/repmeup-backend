@@ -97,14 +97,39 @@ class CacheService {
   }
 
   /**
-   * Delete keys matching pattern
+   * Delete keys matching pattern.
+   *
+   * Uses SCAN (non-blocking) + batched UNLINK to avoid two production hazards of the
+   * previous KEYS-based implementation:
+   *   1. KEYS blocks the Redis event loop for the full keyspace — a single call on a
+   *      busy server would stall every other tenant's requests.
+   *   2. DEL on a very large keylist is also O(N) synchronous; UNLINK frees memory
+   *      asynchronously on the Redis side.
+   *
+   * Safe to call on hot paths (every write).
    */
   async delPattern(pattern) {
     try {
       const redis = getRedisClient();
-      const keys = await redis.keys(pattern);
-      if (keys.length > 0) {
-        await redis.del(keys);
+      const unlink = typeof redis.unlink === 'function' ? redis.unlink.bind(redis) : redis.del.bind(redis);
+      const BATCH = 500;
+      let cursor = '0';
+      let buffer = [];
+      do {
+        // node-redis v4 scan signature: scan(cursor, { MATCH, COUNT })
+        const reply = await redis.scan(cursor, { MATCH: pattern, COUNT: 500 });
+        cursor = typeof reply === 'object' ? String(reply.cursor ?? reply[0]) : String(reply[0]);
+        const keys = Array.isArray(reply?.keys) ? reply.keys : (Array.isArray(reply) ? reply[1] : []);
+        if (keys && keys.length) {
+          buffer.push(...keys);
+          if (buffer.length >= BATCH) {
+            await unlink(buffer);
+            buffer = [];
+          }
+        }
+      } while (cursor !== '0');
+      if (buffer.length) {
+        await unlink(buffer);
       }
       return true;
     } catch (error) {
@@ -218,8 +243,28 @@ class CacheService {
   }
 
   /**
+   * Invalidate ONLY the inbox list caches (leaves analytics cache intact).
+   *
+   * Use on read-only side effects like `markRead` where the list's last-message
+   * preview might visually change but analytics aggregates are unaffected.
+   * Dumping analytics on every read-mark was the #1 cause of dashboard recompute
+   * storms after a user opened a few chats in a row.
+   */
+  async invalidateInteractionListCaches(orgId) {
+    if (orgId == null) return;
+    try {
+      await this.delPattern(`interactions:${String(orgId)}*`);
+    } catch (error) {
+      console.error('invalidateInteractionListCaches error:', error);
+    }
+  }
+
+  /**
    * After any interaction write that affects inbox lists or dashboard aggregates
    * (counts, time series, AI vs human, intent breakdown).
+   *
+   * Reserve for real mutations (reply, assign, status change). Do NOT call on
+   * read paths — see invalidateInteractionListCaches.
    */
   async invalidateInteractionCaches(orgId) {
     if (orgId == null) return;

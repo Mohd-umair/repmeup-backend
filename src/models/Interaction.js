@@ -501,6 +501,17 @@ interactionSchema.index({ organization: 1, sentiment: 1, platformCreatedAt: -1 }
 // Without this, every chat click triggers a full collection scan.
 interactionSchema.index({ parentId: 1, organization: 1 });
 
+// Covers the default inbox list sort (organization + platformCreatedAt desc) WITHOUT the
+// archived docs that we already filter out. Adding `_id` as a tie-breaker avoids the
+// "sort in memory exceeded" threshold on very busy orgs. For orgs with millions of rows
+// this turns the inbox list from a collection-scan-with-sort into an index scan.
+interactionSchema.index({ organization: 1, status: 1, platformCreatedAt: -1, _id: -1 });
+
+// Multikey index used by agent-scoped list queries (`{ 'assignmentHistory.assignedTo': userId }`).
+// Without this, every agent's first inbox load scans the whole collection picking apart
+// a large embedded array per document.
+interactionSchema.index({ 'assignmentHistory.assignedTo': 1 });
+
 // Update response count when adding replies
 interactionSchema.pre('save', function(next) {
   if (this.isModified('replies')) {

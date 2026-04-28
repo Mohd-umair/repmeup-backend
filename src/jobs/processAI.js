@@ -138,19 +138,11 @@ module.exports = async function processAI(job) {
     if (interaction.assignedBy)         aiUpdate.assignedBy         = interaction.assignedBy;
     if (interaction.assignedAt)         aiUpdate.assignedAt         = interaction.assignedAt;
     if (interaction.assignmentReason)   aiUpdate.assignmentReason   = interaction.assignmentReason;
-    if (interaction.assignmentHistory?.length) {
-      // Append any new assignment history entries added by assignToAgent()
-      await Interaction.findByIdAndUpdate(
-        interactionId,
-        {
-          $set: aiUpdate,
-          $push: { assignmentHistory: { $each: interaction.assignmentHistory } }
-        },
-        { new: false }
-      );
-    } else {
-      await Interaction.findByIdAndUpdate(interactionId, { $set: aiUpdate }, { new: false });
-    }
+    // assignToAgent() already persists assignment fields via interaction.save().
+    // Only $set the AI-derived fields here; never $push assignmentHistory — doing
+    // so would re-push the entire in-memory array (loaded at job start) and cause
+    // exponential duplication of history entries.
+    await Interaction.findByIdAndUpdate(interactionId, { $set: aiUpdate }, { new: false });
 
     cacheService.invalidateAnalytics(orgIdCtx).catch(() => {});
 

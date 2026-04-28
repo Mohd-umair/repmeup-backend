@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Interaction = require('../models/Interaction');
 const Label = require('../models/Label');
 const ResponseTemplate = require('../models/ResponseTemplate');
@@ -16,6 +17,7 @@ const replyService = require('../services/replyService');
 const inboxBulkService = require('../services/inboxBulkService');
 const inboxQueryService = require('../services/inbox/inboxQueryService');
 const inboxAiAssistService = require('../services/inbox/inboxAiAssistService');
+const { getIncomingMessagesPage } = require('../services/inbox/incomingMessagesPageService');
 
 const {
   InboxQueryError,
@@ -91,47 +93,46 @@ exports.getInteractions = async (req, res, next) => {
       topics: 0
     };
 
-    // +1 so we can detect hasMore without an extra count round-trip.
-    const interactions = await Interaction.find(mongoQuery, LIST_PROJECTION)
+    // Run find + count concurrently — count was previously the tail latency (~hundreds of ms
+    // on large orgs) and was issued only AFTER find resolved. Hint the same index via `.hint()`
+    // would be even faster, but needs a named index; keep generic until we add one.
+    const findPromise = Interaction.find(mongoQuery, LIST_PROJECTION)
       .populate('assignedTo', 'firstName lastName email avatar')
       .populate('assignedBy', 'firstName lastName email')
       .populate('labels', 'name color icon')
       .populate('replies.sentBy', 'firstName lastName')
       .populate('platformConnection', 'platform isActive status')
       .sort(effectiveSort)
-      .limit(safeLimit + 1)
+      .limit(safeLimit + 1) // +1 to detect hasMore without relying solely on total
       .skip(skip)
       .lean();
 
-    const hasMore = interactions.length > safeLimit;
-    if (hasMore) interactions.pop();
+    const countPromise = Interaction.countDocuments(mongoQuery);
 
-    // Lazy backfill: best-effort chatRef for legacy interactions (never fatal).
+    const [rawInteractions, total] = await Promise.all([findPromise, countPromise]);
+
+    const hasMore = rawInteractions.length > safeLimit;
+    const interactions = hasMore ? rawInteractions.slice(0, safeLimit) : rawInteractions;
+
+    // Defer chatRef backfill — it's a best-effort legacy fixup, not something the
+    // user is waiting for. Running it in-band made every list load pay for a write
+    // round-trip per legacy row.
     const missingChatRef = interactions.filter((i) => !i.chatRef && i.organization);
     if (missingChatRef.length > 0) {
-      await Promise.all(
-        missingChatRef.map(async (i) => {
-          try {
+      setImmediate(() => {
+        Promise.allSettled(
+          missingChatRef.map(async (i) => {
             const refData = await generateChatRef(i.organization);
             if (refData?.chatRef) {
               await Interaction.updateOne(
                 { _id: i._id, chatRef: null },
                 { $set: { chatNumber: refData.chatNumber, chatRef: refData.chatRef } }
               );
-              i.chatNumber = refData.chatNumber;
-              i.chatRef = refData.chatRef;
             }
-          } catch (err) {
-            logger.warn('[inboxController] chatRef backfill skipped', {
-              interactionId: i._id?.toString(),
-              error: err.message
-            });
-          }
-        })
-      );
+          })
+        ).catch((err) => logger.warn('[inboxController] chatRef deferred backfill error', { error: err.message }));
+      });
     }
-
-    const total = await Interaction.countDocuments(mongoQuery);
 
     const result = {
       interactions,
@@ -162,76 +163,203 @@ exports.getInteraction = async (req, res, next) => {
   try {
     const sortOrder = req.query.sortOrder === 'desc' ? 'desc' : 'asc';
     const sortDir = sortOrder === 'desc' ? -1 : 1;
+    const orgId = req.user.organization._id;
+    const interactionId = req.params.id;
 
-    const interaction = await Interaction.findById(req.params.id)
+    // Validate id early so we fail fast instead of throwing inside the aggregation match.
+    if (!mongoose.Types.ObjectId.isValid(interactionId)) {
+      return res.status(400).json({ success: false, error: 'Invalid interaction id' });
+    }
+
+    const rawLimit = parseInt(req.query.msgLimit, 10);
+    const msgLimit = Math.min(
+      Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 10, 1),
+      300
+    );
+    const msgBeforeRaw = req.query.msgBefore;
+    const msgBefore = msgBeforeRaw !== undefined && msgBeforeRaw !== null && msgBeforeRaw !== ''
+      ? Number(msgBeforeRaw)
+      : null;
+
+    // ── PROJECTION ────────────────────────────────────────────────────────────
+    // 1. Exclude heavy fields never rendered in the chat UI (analytics/escalation only).
+    // 2. For the initial page (no msgBefore) we apply **query-level $slice** on
+    //    metadata.incomingMessages. MongoDB applies $slice at BSON read time, so only the
+    //    last N messages are ever sent over the wire — the full (potentially 10k+) array
+    //    never leaves storage. This is dramatically faster than aggregation pipelines that
+    //    project the array first and slice later.
+    // 3. For older-page loads (msgBefore present) we EXCLUDE the array entirely on the
+    //    main read and fetch the slice via a bounded aggregation in parallel.
+    const baseProjection = {
+      sentimentHistory: 0,
+      escalationMetadata: 0
+    };
+    const detailProjection = msgBefore === null
+      ? { ...baseProjection, 'metadata.incomingMessages': { $slice: -msgLimit } }
+      : { ...baseProjection, 'metadata.incomingMessages': 0 };
+
+    // ── PARALLEL BATCH ────────────────────────────────────────────────────────
+    // - Main doc read (with sliced DM history when no cursor)
+    // - Total DM count (aggregation $size — O(1) on array length metadata)
+    // - Older-page slice (only when msgBefore is given)
+    // All three hit Mongo concurrently so end-to-end latency ≈ max(three), not sum(three).
+    const objectId = new mongoose.Types.ObjectId(interactionId);
+    const mainQuery = Interaction.findOne({ _id: objectId, organization: orgId }, detailProjection)
       .populate('assignedTo', 'firstName lastName email avatar')
-      .populate('assignedBy', 'firstName lastName email')
-      .populate('assignmentHistory.assignedTo', 'firstName lastName email')
-      .populate('assignmentHistory.assignedBy', 'firstName lastName email')
-      .populate('labels')
+      .populate('labels', 'name color icon')
       .populate('replies.sentBy', 'firstName lastName avatar')
-      .populate('internalNotes.addedBy', 'firstName lastName avatar')
-      .populate('platformConnection', 'platform platformUsername platformDisplayName platformProfilePicture');
-
-    if (!interaction) {
-      return res.status(404).json({
-        success: false,
-        error: 'Interaction not found'
-      });
-    }
-
-    // Check organization access
-    if (interaction.organization.toString() !== req.user.organization._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        error: 'Access denied'
-      });
-    }
-
-    // Agents can only view interactions assigned to them or previously assigned to them
-    if (req.user.role === 'agent') {
-      const isAssigned = interaction.assignedTo?.toString() === req.user._id.toString();
-      const wasPreviouslyAssigned = (interaction.assignmentHistory || []).some(
-        h => h.assignedTo?.toString() === req.user._id.toString()
-      );
-      if (!isAssigned && !wasPreviouslyAssigned) {
-        return res.status(403).json({
-          success: false,
-          error: 'Access denied'
-        });
-      }
-    }
-
-    // Only mark as read when the caller explicitly requests it (e.g. user opens a conversation).
-    // Background refreshes, polling, socket-triggered refetches and action-panel refreshes must
-    // NOT pass markRead=true so they never override a status that was manually set to 'unread'.
-    if (req.query.markRead === 'true') {
-      if (!interaction.isRead || interaction.status === 'unread') {
-        interaction.isRead = true;
-        interaction.readAt = new Date();
-        interaction.readBy = req.user._id;
-        if (interaction.status === 'unread') {
-          interaction.status = 'read';
-        }
-        await interaction.save();
-        await cacheService.invalidateInteractionCaches(req.user.organization._id);
-      }
-    }
-
-    // Fetch child interactions (replies from the platform, e.g., YouTube user replies)
-    // parentId index makes this a fast index scan instead of a full collection scan.
-    const childInteractions = await Interaction.find({
-      $or: [
-        { parentId: interaction._id.toString() },
-        { parentId: interaction.platformId } // Also check by platformId
-      ],
-      organization: req.user.organization._id
-    }).select('_id content author sentiment platform platformId platformCreatedAt')
-      .sort({ platformCreatedAt: sortDir })
+      .populate('platformConnection', 'platform platformUsername platformDisplayName platformProfilePicture')
       .lean();
 
-    // Convert to plain object for modification
-    const interactionObj = interaction.toObject();
+    const countAgg = Interaction.aggregate([
+      { $match: { _id: objectId } },
+      { $project: { _id: 0, total: { $size: { $ifNull: ['$metadata.incomingMessages', []] } } } }
+    ]);
+
+    const olderPagePromise = msgBefore !== null
+      ? getIncomingMessagesPage(Interaction, interactionId, { msgLimit, msgBefore })
+      : Promise.resolve(null);
+
+    const [interaction, countRows, olderPage] = await Promise.all([
+      mainQuery,
+      countAgg,
+      olderPagePromise
+    ]);
+
+    if (!interaction) {
+      return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+
+    // Agents can only view interactions assigned to them or previously assigned to them.
+    if (req.user.role === 'agent') {
+      const assignedToId = interaction.assignedTo?._id || interaction.assignedTo;
+      const isAssigned = assignedToId && String(assignedToId) === String(req.user._id);
+      const wasPreviouslyAssigned = (interaction.assignmentHistory || []).some((h) => {
+        const hid = h.assignedTo?._id || h.assignedTo;
+        return hid && String(hid) === String(req.user._id);
+      });
+      if (!isAssigned && !wasPreviouslyAssigned) {
+        return res.status(403).json({ success: false, error: 'Access denied' });
+      }
+    }
+
+    // Fire-and-forget markRead so the response isn't blocked on a write + cache flush.
+    if (req.query.markRead === 'true' && (!interaction.isRead || interaction.status === 'unread')) {
+      const now = new Date();
+      const wasUnread = interaction.status === 'unread';
+      interaction.isRead = true;
+      interaction.readAt = now;
+      interaction.readBy = req.user._id;
+      if (wasUnread) interaction.status = 'read';
+
+      setImmediate(() => {
+        Interaction.updateOne(
+          { _id: interaction._id },
+          {
+            $set: {
+              isRead: true,
+              readAt: now,
+              readBy: req.user._id,
+              ...(wasUnread ? { status: 'read' } : {})
+            }
+          }
+        )
+          .then(() => cacheService.invalidateInteractionListCaches(orgId))
+          .catch((err) => logger.warn('[inboxController] markRead deferred error', { error: err.message }));
+      });
+    }
+
+    // ── ASSIGNMENT HISTORY: dedupe FIRST, then batch-populate users ────────────
+    // The old code populated every assignmentHistory entry (sometimes hundreds of dupes
+    // from a legacy processAI bug), then deduped. That forced Mongoose to resolve N User
+    // refs per doc. Dedupe first → collect unique user ids → one User.find → patch.
+    const rawHistory = interaction.assignmentHistory || [];
+    const seenKeys = new Set();
+    const dedupedHistory = rawHistory.filter((h) => {
+      const key = `${String(h.assignedTo || '')}_${String(h.assignedAt ? new Date(h.assignedAt).getTime() : '')}`;
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
+      return true;
+    });
+
+    const userIdsToLoad = new Set();
+    dedupedHistory.forEach((h) => {
+      if (h.assignedTo) userIdsToLoad.add(String(h.assignedTo));
+      if (h.assignedBy) userIdsToLoad.add(String(h.assignedBy));
+    });
+    (interaction.internalNotes || []).forEach((n) => {
+      if (n.addedBy) userIdsToLoad.add(String(n.addedBy));
+    });
+    if (interaction.assignedBy) userIdsToLoad.add(String(interaction.assignedBy));
+
+    let userMap;
+    if (userIdsToLoad.size > 0) {
+      const users = await User.find(
+        { _id: { $in: Array.from(userIdsToLoad) } },
+        'firstName lastName email avatar'
+      ).lean();
+      userMap = new Map(users.map((u) => [String(u._id), u]));
+    } else {
+      userMap = new Map();
+    }
+
+    const resolveUser = (ref) => {
+      if (!ref) return ref;
+      const id = typeof ref === 'object' ? String(ref._id || ref) : String(ref);
+      return userMap.get(id) || ref;
+    };
+
+    interaction.assignmentHistory = dedupedHistory.map((h) => ({
+      ...h,
+      assignedTo: h.assignedTo ? resolveUser(h.assignedTo) : null,
+      assignedBy: h.assignedBy ? resolveUser(h.assignedBy) : null
+    }));
+    interaction.internalNotes = (interaction.internalNotes || []).map((n) => ({
+      ...n,
+      addedBy: n.addedBy ? resolveUser(n.addedBy) : null
+    }));
+    if (interaction.assignedBy) {
+      interaction.assignedBy = resolveUser(interaction.assignedBy);
+    }
+
+    // ── MESSAGES + PAGINATION META ────────────────────────────────────────────
+    const totalMessages = countRows?.[0]?.total ?? 0;
+    let incomingMessages;
+    let hasOlderMessages;
+    let oldestMessageTimestamp;
+    let returnedMessages;
+
+    if (olderPage) {
+      incomingMessages = olderPage.incomingMessages;
+      hasOlderMessages = olderPage.hasOlderMessages;
+      oldestMessageTimestamp = olderPage.oldestMessageTimestamp;
+      returnedMessages = olderPage.returnedMessages;
+    } else {
+      incomingMessages = interaction.metadata?.incomingMessages || [];
+      returnedMessages = incomingMessages.length;
+      hasOlderMessages = totalMessages > returnedMessages;
+      oldestMessageTimestamp = incomingMessages.length > 0
+        ? incomingMessages[0].timestamp ?? null
+        : null;
+    }
+
+    interaction.metadata = interaction.metadata || {};
+    interaction.metadata.incomingMessages = incomingMessages;
+
+    const interactionObj = interaction;
+
+    // ── CHILD REPLIES (from other users on the platform) ──────────────────────
+    // Uses the `{ parentId, organization }` compound index — one round-trip.
+    const childInteractions = await Interaction.find({
+      $or: [
+        { parentId: String(interactionObj._id) },
+        { parentId: interactionObj.platformId }
+      ],
+      organization: orgId
+    })
+      .select('_id content author sentiment platform platformId platformCreatedAt platformUrl')
+      .sort({ platformCreatedAt: sortDir })
+      .lean();
 
     // Hide soft-deleted app replies from thread rendering.
     interactionObj.replies = (interactionObj.replies || []).filter(
@@ -300,7 +428,13 @@ exports.getInteraction = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      data: interactionObj
+      data: interactionObj,
+      pagination: {
+        hasOlderMessages,
+        oldestMessageTimestamp,
+        totalMessages,
+        returnedMessages
+      }
     });
   } catch (error) {
     next(error);

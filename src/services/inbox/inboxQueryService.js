@@ -31,7 +31,8 @@
 const SLA_HOURS = 24;
 const SLA_THRESHOLD_MS = SLA_HOURS * 60 * 60 * 1000;
 const MAX_PAGE_SIZE = 100;
-const DEFAULT_PAGE_SIZE = 20;
+/** Default batch size for GET /api/inbox — each response returns up to this many chats per page. */
+const DEFAULT_PAGE_SIZE = 10;
 const DEFAULT_SORT_FIELD = 'platformCreatedAt';
 
 class InboxQueryError extends Error {
