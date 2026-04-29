@@ -194,15 +194,14 @@ exports.getInteraction = async (req, res, next) => {
       sentimentHistory: 0,
       escalationMetadata: 0
     };
-    const detailProjection = msgBefore === null
-      ? { ...baseProjection, 'metadata.incomingMessages': { $slice: -msgLimit } }
-      : { ...baseProjection, 'metadata.incomingMessages': 0 };
+    // Main document read: never pull `metadata.incomingMessages` over the wire here — that array is
+    // sliced + globally sorted in getIncomingMessagesPage() so we always return the **latest** N
+    // inbound messages first (append-only webhooks are ascending, but Graph sync may be newest-first).
+    const detailProjection = { ...baseProjection, 'metadata.incomingMessages': 0 };
 
     // ── PARALLEL BATCH ────────────────────────────────────────────────────────
-    // - Main doc read (with sliced DM history when no cursor)
-    // - Total DM count (aggregation $size — O(1) on array length metadata)
-    // - Older-page slice (only when msgBefore is given)
-    // All three hit Mongo concurrently so end-to-end latency ≈ max(three), not sum(three).
+    // - Main doc (no embedded DM array)
+    // - Message page: sort asc by canonical ms → tail slice (latest page) or older window via msgBefore
     const objectId = new mongoose.Types.ObjectId(interactionId);
     const mainQuery = Interaction.findOne({ _id: objectId, organization: orgId }, detailProjection)
       .populate('assignedTo', 'firstName lastName email avatar')
@@ -211,20 +210,9 @@ exports.getInteraction = async (req, res, next) => {
       .populate('platformConnection', 'platform platformUsername platformDisplayName platformProfilePicture')
       .lean();
 
-    const countAgg = Interaction.aggregate([
-      { $match: { _id: objectId } },
-      { $project: { _id: 0, total: { $size: { $ifNull: ['$metadata.incomingMessages', []] } } } }
-    ]);
+    const messagesPagePromise = getIncomingMessagesPage(Interaction, interactionId, { msgLimit, msgBefore });
 
-    const olderPagePromise = msgBefore !== null
-      ? getIncomingMessagesPage(Interaction, interactionId, { msgLimit, msgBefore })
-      : Promise.resolve(null);
-
-    const [interaction, countRows, olderPage] = await Promise.all([
-      mainQuery,
-      countAgg,
-      olderPagePromise
-    ]);
+    const [interaction, messagesPage] = await Promise.all([mainQuery, messagesPagePromise]);
 
     if (!interaction) {
       return res.status(404).json({ success: false, error: 'Interaction not found' });
@@ -323,25 +311,12 @@ exports.getInteraction = async (req, res, next) => {
     }
 
     // ── MESSAGES + PAGINATION META ────────────────────────────────────────────
-    const totalMessages = countRows?.[0]?.total ?? 0;
-    let incomingMessages;
-    let hasOlderMessages;
-    let oldestMessageTimestamp;
-    let returnedMessages;
-
-    if (olderPage) {
-      incomingMessages = olderPage.incomingMessages;
-      hasOlderMessages = olderPage.hasOlderMessages;
-      oldestMessageTimestamp = olderPage.oldestMessageTimestamp;
-      returnedMessages = olderPage.returnedMessages;
-    } else {
-      incomingMessages = interaction.metadata?.incomingMessages || [];
-      returnedMessages = incomingMessages.length;
-      hasOlderMessages = totalMessages > returnedMessages;
-      oldestMessageTimestamp = incomingMessages.length > 0
-        ? incomingMessages[0].timestamp ?? null
-        : null;
-    }
+    const totalMessages = messagesPage?.totalMessages ?? 0;
+    const incomingMessages = messagesPage?.incomingMessages || [];
+    const hasOlderMessages = !!messagesPage?.hasOlderMessages;
+    const oldestMessageTimestamp =
+      messagesPage?.oldestMessageTimestamp != null ? messagesPage.oldestMessageTimestamp : null;
+    const returnedMessages = messagesPage?.returnedMessages ?? incomingMessages.length;
 
     interaction.metadata = interaction.metadata || {};
     interaction.metadata.incomingMessages = incomingMessages;
