@@ -1,10 +1,14 @@
 /**
  * Parse CORS_ORIGIN as comma-separated list (e.g. main app + super admin panel).
  * Example: CORS_ORIGIN=http://localhost:4200,http://localhost:4201
+ *
+ * Default includes :4201 so the Angular admin panel (usually that port) can call the API locally.
  */
 function getCorsOriginList() {
   const raw =
-    process.env.CORS_ORIGIN || process.env.FRONTEND_URL || 'http://localhost:4200';
+    process.env.CORS_ORIGIN ||
+    process.env.FRONTEND_URL ||
+    'http://localhost:4200,http://localhost:4201';
   return raw
     .split(',')
     .map((s) => s.trim())

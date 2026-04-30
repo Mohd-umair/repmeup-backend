@@ -287,7 +287,10 @@ async function sendReplyToPlatform({
     }
   } catch (platformError) {
     const metaError = platformError.response?.data?.error || platformError.platformError;
-    const metaUserMsg = metaError?.error_user_msg || metaError?.message;
+    const metaUserMsg =
+      metaError?.message ||
+      metaError?.error_user_msg ||
+      platformError.message;
 
     logger.error('[replyService] Platform send error', {
       platform: interaction.platform,
