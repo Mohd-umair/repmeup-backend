@@ -1,9 +1,33 @@
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const cacheService = require('../services/cacheService');
 
 // User cache TTL: 5 minutes. Short enough that deactivation takes effect quickly.
 const USER_CACHE_TTL = 300;
+
+/**
+ * Restore ObjectId fields that were flattened to strings by JSON serialisation
+ * when the user object was stored in Redis.  Mongoose aggregation pipelines do
+ * NOT schema-cast, so a string `_id` in a `$match` stage silently matches
+ * nothing.  Restoring the types here means all downstream code (controllers,
+ * services) receives proper ObjectId values regardless of whether the user
+ * came from a DB query or a cache hit.
+ */
+function rehydrateUserIds(user) {
+  if (!user) return user;
+  if (user._id && !(user._id instanceof mongoose.Types.ObjectId)) {
+    user._id = new mongoose.Types.ObjectId(String(user._id));
+  }
+  if (user.organization) {
+    if (typeof user.organization === 'string') {
+      user.organization = new mongoose.Types.ObjectId(user.organization);
+    } else if (user.organization._id && !(user.organization._id instanceof mongoose.Types.ObjectId)) {
+      user.organization._id = new mongoose.Types.ObjectId(String(user.organization._id));
+    }
+  }
+  return user;
+}
 
 // Protect routes - verify JWT token
 exports.protect = async (req, res, next) => {
@@ -50,6 +74,9 @@ exports.protect = async (req, res, next) => {
           await cacheService.set(cacheKey, user, USER_CACHE_TTL);
         }
       }
+
+      // Restore ObjectId types lost during JSON serialisation (Redis cache hit).
+      rehydrateUserIds(user);
 
       if (!user) {
         return res.status(401).json({

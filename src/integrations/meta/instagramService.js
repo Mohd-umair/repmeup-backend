@@ -91,6 +91,17 @@ class InstagramService {
   }
 
   /**
+   * Query params merged into Meta Graph calls. Including `locale` makes
+   * `error_user_title` / `error_user_msg` follow that locale (often Arabic/Gulf
+   * when omitted, based on IG/Facebook Business asset settings). Override with
+   * META_GRAPH_LOCALE (underscore form, e.g. en_US, ar_AR).
+   */
+  _metaGraphParams(params = {}) {
+    const locale = process.env.META_GRAPH_LOCALE || 'en_US';
+    return { locale, ...params };
+  }
+
+  /**
    * Returns the correct Graph API base URL depending on how Instagram was connected.
    *
    * - Facebook Login (default):  https://graph.facebook.com/v18.0
@@ -785,9 +796,7 @@ class InstagramService {
           message: message
         },
         {
-          params: {
-            access_token: accessToken
-          }
+          params: this._metaGraphParams({ access_token: accessToken })
         }
       );
 
@@ -828,7 +837,7 @@ class InstagramService {
         return null;
       }
       const res = await axios.get(`${this.baseUrl}/me`, {
-        params: { fields: 'id', access_token: accessToken },
+        params: this._metaGraphParams({ fields: 'id', access_token: accessToken }),
         timeout: 5000
       });
       return res.data?.id || null;
@@ -866,7 +875,7 @@ class InstagramService {
         const response = await axios.post(
           `${apiBase}/${pageId}/messages`,
           body,
-          { params: { access_token: accessToken } }
+          { params: this._metaGraphParams({ access_token: accessToken }) }
         );
         return {
           success: true,
@@ -877,7 +886,7 @@ class InstagramService {
       // ── Facebook Login path (graph.facebook.com) ──
       try {
         await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
-          params: { recipient_id: recipientId, access_token: accessToken }
+          params: this._metaGraphParams({ recipient_id: recipientId, access_token: accessToken })
         });
         console.log('[Instagram] Thread control taken for recipient:', recipientId);
       } catch (ttcErr) {
@@ -886,7 +895,7 @@ class InstagramService {
 
       try {
         const meRes = await axios.get(`${apiBase}/me`, {
-          params: { fields: 'id', access_token: accessToken },
+          params: this._metaGraphParams({ fields: 'id', access_token: accessToken }),
           timeout: 3000
         });
         tokenPageId = meRes.data?.id ? String(meRes.data.id) : null;
@@ -913,7 +922,7 @@ class InstagramService {
         return axios.post(
           `${apiBase}/${pageId}/messages`,
           body,
-          { params: { access_token: accessToken } }
+          { params: this._metaGraphParams({ access_token: accessToken }) }
         );
       };
 
@@ -938,7 +947,8 @@ class InstagramService {
     } catch (error) {
       const data = error.response?.data;
       const apiError = data?.error;
-      let userMsg = apiError?.error_user_msg || apiError?.message || error.message;
+      // Prefer `message` — English (#code) developer text. `error_user_msg` follows Meta/account locale (often Arabic for MENA Pages).
+      let userMsg = apiError?.message || apiError?.error_user_msg || error.message;
       if (apiError?.code === 200 && userMsg && userMsg.includes('instagram_manage_messages')) {
         userMsg = 'Instagram messaging requires Advanced Access for instagram_manage_messages (App Review). Until approved, you can only reply to users who are Testers on your Meta app. Add the recipient as a Tester in your app’s Roles, or complete App Review for Advanced Access.';
       }
@@ -990,7 +1000,7 @@ class InstagramService {
       const response = await axios.post(
         `${apiBase}/${pageId}/messages`,
         body,
-        { params: { access_token: accessToken } }
+        { params: this._metaGraphParams({ access_token: accessToken }) }
       );
 
       return {
@@ -1041,7 +1051,7 @@ class InstagramService {
             }));
             form.append('filedata', fs.createReadStream(localFilePath));
             return axios.post(apiUrl, form, {
-              params: { access_token: accessToken },
+              params: this._metaGraphParams({ access_token: accessToken }),
               headers: form.getHeaders(),
               timeout: 30000,
               maxContentLength: 100 * 1024 * 1024
@@ -1055,7 +1065,7 @@ class InstagramService {
                 payload: { url: attachmentUrl, is_reusable: false }
               }
             }
-          }, { params: { access_token: accessToken } });
+          }, { params: this._metaGraphParams({ access_token: accessToken }) });
         };
 
         const response = await sendIgLogin();
@@ -1067,7 +1077,7 @@ class InstagramService {
 
       // ── Facebook Login path: thread control + messaging_type/tag ──
       await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
-        params: { recipient_id: recipientId, access_token: accessToken }
+        params: this._metaGraphParams({ recipient_id: recipientId, access_token: accessToken })
       }).catch(() => {});
 
       const sendRequest = async (useTag) => {
@@ -1081,7 +1091,7 @@ class InstagramService {
           }));
           form.append('filedata', fs.createReadStream(localFilePath));
           return axios.post(apiUrl, form, {
-            params: { access_token: accessToken },
+            params: this._metaGraphParams({ access_token: accessToken }),
             headers: form.getHeaders(),
             timeout: 30000,
             maxContentLength: 100 * 1024 * 1024
@@ -1100,7 +1110,7 @@ class InstagramService {
         };
         if (!useTag) delete body.tag;
         return axios.post(apiUrl, body, {
-          params: { access_token: accessToken }
+          params: this._metaGraphParams({ access_token: accessToken })
         });
       };
 
@@ -1120,7 +1130,7 @@ class InstagramService {
       return { success: true, platformResponseId: response.data?.message_id };
     } catch (error) {
       const apiError = error.response?.data?.error;
-      const msg = apiError?.error_user_msg || apiError?.message || error.message;
+      const msg = apiError?.message || apiError?.error_user_msg || error.message;
       console.error('[Instagram] sendMessageWithAttachment error:', msg);
       return { success: false, error: msg };
     }
@@ -1256,7 +1266,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to create media container');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1422,7 +1432,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to publish media');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1563,7 +1573,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to create story');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Story Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1706,7 +1716,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to create reel');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Reel Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1814,7 +1824,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to create carousel post');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type

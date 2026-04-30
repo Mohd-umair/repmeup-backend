@@ -25,8 +25,32 @@
  *     without coordinating with the UI.
  */
 
+const mongoose = require('mongoose');
 const Interaction = require('../models/Interaction');
 const ScheduledPost = require('../models/ScheduledPost');
+
+/**
+ * Always return a Mongoose ObjectId from whatever form `id` arrives in.
+ *
+ * WHY THIS EXISTS
+ * ───────────────
+ * The `protect` middleware caches `req.user` in Redis.  When the cached copy
+ * is deserialised from JSON, every ObjectId field becomes a plain *string*.
+ * Mongoose's `countDocuments()` / `findOne()` apply schema-level casting and
+ * silently coerce "string" → ObjectId, so those queries still work.
+ * Mongoose's `aggregate()` however does NOT cast — it passes the raw JS value
+ * straight to the MongoDB driver.  A `$match: { organization: "stringId" }`
+ * stage will match ZERO documents because MongoDB stores ObjectIds, not
+ * strings, so the strict comparison fails.
+ *
+ * Wrapping every organizationId used in an aggregation pipeline with this
+ * helper guarantees type safety regardless of whether the value originated
+ * from a fresh DB fetch (ObjectId) or a Redis cache hit (string).
+ */
+function toObjectId(id) {
+  if (id instanceof mongoose.Types.ObjectId) return id;
+  return new mongoose.Types.ObjectId(String(id));
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. Filter builders
@@ -47,7 +71,7 @@ const ScheduledPost = require('../models/ScheduledPost');
 function buildMatchFilter(organizationId, filters = {}) {
   const { startDate, endDate, platforms, types, sentiment, status } = filters;
   const f = {
-    organization: organizationId,
+    organization: toObjectId(organizationId),
     platformCreatedAt: { $gte: startDate, $lte: endDate }
   };
   if (platforms?.length) f.platform = { $in: platforms };
@@ -393,7 +417,7 @@ function aggregatePlatformFacet(organizationId, platform, startDate, endDate) {
   return Interaction.aggregate([
     {
       $match: {
-        organization: organizationId,
+        organization: toObjectId(organizationId),
         platform,
         platformCreatedAt: { $gte: startDate, $lte: endDate }
       }
@@ -489,7 +513,7 @@ function aggregateEngagementTimeSeries(matchFilter) {
 // ── Agent analytics ────────────────────────────────────────────────────────
 function aggregateAgentData(organizationId, startDate, endDate) {
   return Interaction.aggregate([
-    { $match: { organization: organizationId } },
+    { $match: { organization: toObjectId(organizationId) } },
     // Use the most recent of the five relevant timestamps so interactions
     // updated (assigned / replied / resolved) in the window are included.
     {
@@ -937,7 +961,7 @@ async function getAgentData(organizationId, startDate, endDate) {
  * same source data).
  */
 async function getExportAnalyticsData(organizationId, { startDate, endDate, platforms }) {
-  const matchFilter = { organization: organizationId, platformCreatedAt: { $gte: startDate, $lte: endDate } };
+  const matchFilter = { organization: toObjectId(organizationId), platformCreatedAt: { $gte: startDate, $lte: endDate } };
   if (platforms?.length) matchFilter.platform = { $in: platforms };
 
   const [platformMetrics, sentimentData, rtData] = await Promise.all([
@@ -956,16 +980,17 @@ async function getExportAnalyticsData(organizationId, { startDate, endDate, plat
 
 /** Fixed trailing-30-day AI vs human post counts. */
 async function getContentPerformanceData(organizationId, startDate = null) {
+  const orgId = toObjectId(organizationId);
   const windowStart = startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [aiCount, humanCount] = await Promise.all([
     ScheduledPost.countDocuments({
-      organization: organizationId,
+      organization: orgId,
       status: 'published',
       publishedAt: { $gte: windowStart },
       generatedBy: 'ai'
     }),
     ScheduledPost.countDocuments({
-      organization: organizationId,
+      organization: orgId,
       status: 'published',
       publishedAt: { $gte: windowStart },
       $or: [{ generatedBy: 'human' }, { generatedBy: { $exists: false } }]

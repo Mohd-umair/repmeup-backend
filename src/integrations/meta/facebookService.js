@@ -15,6 +15,12 @@ class FacebookService {
     this.baseURL = `https://graph.facebook.com/${this.apiVersion}`;
   }
 
+  /** Locale for Meta Graph (affects localized error strings). META_GRAPH_LOCALE overrides (e.g. en_US). */
+  _metaGraphParams(params = {}) {
+    const locale = process.env.META_GRAPH_LOCALE || 'en_US';
+    return { locale, ...params };
+  }
+
   /**
    * Fetch Page feed posts only (no comments). Used for Content / platform posts listing.
    * @param {Object} platformConnection - Must have accessToken, platformPageId
@@ -107,7 +113,7 @@ class FacebookService {
       return axios.post(
         `${this.baseURL}/${pageId}/messages`,
         body,
-        { params: { access_token: accessToken }, timeout: 15000 }
+        { params: this._metaGraphParams({ access_token: accessToken }), timeout: 15000 }
       );
     };
 
@@ -169,7 +175,7 @@ class FacebookService {
           }));
           form.append('filedata', fs.createReadStream(localFilePath));
           return axios.post(apiUrl, form, {
-            params: { access_token: accessToken },
+            params: this._metaGraphParams({ access_token: accessToken }),
             headers: form.getHeaders(),
             timeout: 30000,
             maxContentLength: 100 * 1024 * 1024
@@ -188,7 +194,7 @@ class FacebookService {
         };
         if (!useTag) delete body.tag;
         return axios.post(apiUrl, body, {
-          params: { access_token: accessToken }, timeout: 15000
+          params: this._metaGraphParams({ access_token: accessToken }), timeout: 15000
         });
       };
 

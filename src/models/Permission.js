@@ -45,7 +45,6 @@ const permissionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-permissionSchema.index({ code: 1 });
 permissionSchema.index({ category: 1 });
 
 permissionSchema.statics.CATEGORIES = CATEGORIES;

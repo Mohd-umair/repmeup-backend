@@ -102,7 +102,8 @@ class AuthService {
    */
   async login(email, password) {
     try {
-      const user = await User.findOne({ email })
+      const normalizedEmail = (email || '').toLowerCase().trim();
+      const user = await User.findOne({ email: normalizedEmail })
         .select('+password')
         .populate('organization')
         .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
