@@ -12,6 +12,15 @@ const platformSyncService = require('../services/platformSyncService');
 const whatsappConnectionService = require('../services/whatsappConnectionService');
 
 /**
+ * Lightweight public SPA URL so the OAuth popup can postMessage to opener and window.close().
+ */
+function buildWhatsAppOAuthCallbackUrl(frontendUrl, queryObj) {
+  const base = (frontendUrl || 'http://localhost:4200').replace(/\/$/, '');
+  const q = new URLSearchParams(queryObj).toString();
+  return `${base}/whatsapp-oauth-callback${q ? `?${q}` : ''}`;
+}
+
+/**
  * @desc    Initiate Google OAuth flow
  * @route   GET /api/platforms/google/connect
  * @access  Private
@@ -659,13 +668,17 @@ exports.handleWhatsAppCallback = async (req, res, next) => {
     if (oauthError) {
       console.error('[WhatsApp] OAuth error:', oauthError, error_description);
       return res.redirect(
-        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(error_description || oauthError)}`
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error: error_description || oauthError
+        })
       );
     }
 
     if (!code || !state) {
       return res.redirect(
-        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent('Missing code or state parameter')}`
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error: 'Missing code or state parameter'
+        })
       );
     }
 
@@ -677,7 +690,7 @@ exports.handleWhatsAppCallback = async (req, res, next) => {
       stateData = whatsappLoginAuth.verifyState(state);
     } catch (stateErr) {
       return res.redirect(
-        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(stateErr.message)}`
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, { whatsapp_error: stateErr.message })
       );
     }
 
@@ -692,9 +705,10 @@ exports.handleWhatsAppCallback = async (req, res, next) => {
 
     if (!phoneNumbers || phoneNumbers.length === 0) {
       return res.redirect(
-        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(
-          'No WhatsApp Business phone numbers found. Ensure the account has admin access to a WABA.'
-        )}`
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error:
+            'No WhatsApp Business phone numbers found. Ensure the account has admin access to a WABA.'
+        })
       );
     }
 
@@ -717,21 +731,27 @@ exports.handleWhatsAppCallback = async (req, res, next) => {
 
     if (savedConnections.length === 0) {
       return res.redirect(
-        `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(
-          'Could not save WhatsApp connection. The number may already be connected in another workspace.'
-        )}`
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error:
+            'Could not save WhatsApp connection. The number may already be connected in another workspace.'
+        })
       );
     }
 
     console.log(`✅ [WhatsApp] ${savedConnections.length} connection(s) saved for org ${organizationId}`);
     return res.redirect(
-      `${frontendUrl}/settings?tab=platforms&whatsapp_connected=true&count=${savedConnections.length}`
+      buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+        whatsapp_connected: 'true',
+        count: String(savedConnections.length)
+      })
     );
 
   } catch (error) {
     console.error('❌ [WhatsApp] Callback error:', error);
     return res.redirect(
-      `${frontendUrl}/settings?tab=platforms&whatsapp_error=${encodeURIComponent(error.message || 'WhatsApp connection failed')}`
+      buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+        whatsapp_error: error.message || 'WhatsApp connection failed'
+      })
     );
   }
 };
