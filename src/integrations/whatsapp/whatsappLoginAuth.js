@@ -15,6 +15,10 @@ const PlatformConnection = require('../../models/PlatformConnection');
  *  5. PlatformConnection is saved per phone number (per org).
  *  6. Backend subscribes the WABA to app webhooks.
  *
+ * WABA discovery (Embedded Signup): Meta documents reading WABA IDs from debug_token
+ * granular_scopes (whatsapp_business_management → target_ids), then loading phone_numbers per WABA.
+ * /me/businesses typically needs business_management; we try it after token-based discovery.
+ *
  * Auth host:     https://www.facebook.com/dialog/oauth
  * Token URL:     https://graph.facebook.com/oauth/access_token
  * Graph API:     https://graph.facebook.com/v23.0
@@ -181,72 +185,253 @@ class WhatsAppLoginAuthService {
   // ---------------------------------------------------------------------------
 
   /**
+   * WABA IDs granted to this app on the user token (Embedded Signup).
+   * @see https://developers.facebook.com/docs/whatsapp/embedded-signup/manage-accounts
+   */
+  async getWabaIdsFromDebugToken(userAccessToken) {
+    const appId = process.env.META_APP_ID;
+    const appSecret = process.env.META_APP_SECRET;
+    if (!appId || !appSecret) return [];
+
+    const { data } = await axios.get(`${this.graphURL}/debug_token`, {
+      params: {
+        input_token: userAccessToken,
+        access_token: `${appId}|${appSecret}`
+      },
+      timeout: 10000
+    });
+
+    const granular = data?.data?.granular_scopes;
+    if (!Array.isArray(granular)) return [];
+
+    const ids = [];
+    for (const g of granular) {
+      if (g.scope === 'whatsapp_business_management' && Array.isArray(g.target_ids)) {
+        ids.push(...g.target_ids.map(String));
+      }
+    }
+    return [...new Set(ids)];
+  }
+
+  /**
+   * Load display data + phone_numbers for each WABA id.
+   */
+  async expandWabasToPhoneRows(wabaIds, accessToken) {
+    const rows = [];
+
+    for (const wabaId of wabaIds) {
+      try {
+        const [wabaMeta, phonesRes] = await Promise.all([
+          axios.get(`${this.graphURL}/${wabaId}`, {
+            params: { fields: 'id,name,timezone_id', access_token: accessToken },
+            timeout: 10000
+          }),
+          axios.get(`${this.graphURL}/${wabaId}/phone_numbers`, {
+            params: {
+              fields: 'id,display_phone_number,verified_name,quality_rating,code_verification_status',
+              access_token: accessToken
+            },
+            timeout: 10000
+          })
+        ]);
+
+        const wabaName = wabaMeta.data?.name || '';
+        const phones = phonesRes.data?.data || [];
+
+        for (const phone of phones) {
+          rows.push({
+            wabaId,
+            wabaName,
+            phoneNumberId: phone.id,
+            displayPhoneNumber: phone.display_phone_number,
+            verifiedName: phone.verified_name,
+            qualityRating: phone.quality_rating,
+            codeVerificationStatus: phone.code_verification_status
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[WhatsAppLogin] Failed to expand WABA ${wabaId}:`,
+          err.response?.data?.error?.message || err.message
+        );
+      }
+    }
+
+    return rows;
+  }
+
+  /**
+   * User-assigned WABAs (Graph edge documented for BSP / WhatsApp tooling).
+   */
+  async getPhoneNumbersFromAssignedAccounts(accessToken) {
+    const assignedFields =
+      'id,name,business_id,phone_numbers{id,display_phone_number,verified_name,quality_rating,code_verification_status}';
+    const rows = [];
+    let after;
+
+    while (true) {
+      const params = {
+        fields: assignedFields,
+        limit: 100,
+        access_token: accessToken
+      };
+      if (after) params.after = after;
+
+      const response = await axios.get(`${this.graphURL}/me/assigned_whatsapp_business_accounts`, {
+        params,
+        timeout: 10000
+      });
+
+      for (const waba of response.data?.data || []) {
+        const wabaId = waba.id;
+        const wabaName = waba.name;
+        const businessId = waba.business_id;
+        const phones = waba.phone_numbers?.data || waba.phone_numbers || [];
+
+        for (const phone of phones) {
+          rows.push({
+            wabaId,
+            wabaName,
+            businessId,
+            phoneNumberId: phone.id,
+            displayPhoneNumber: phone.display_phone_number,
+            verifiedName: phone.verified_name,
+            qualityRating: phone.quality_rating,
+            codeVerificationStatus: phone.code_verification_status
+          });
+        }
+      }
+
+      const nextAfter = response.data?.paging?.cursors?.after;
+      if (!nextAfter) break;
+      after = nextAfter;
+    }
+
+    return rows;
+  }
+
+  phoneNumbersFromBusinessesEdge(responseData) {
+    const phoneNumbers = [];
+    for (const business of responseData?.data || []) {
+      for (const waba of business.whatsapp_business_accounts?.data || []) {
+        for (const phone of waba.phone_numbers?.data || []) {
+          phoneNumbers.push({
+            wabaId: waba.id,
+            wabaName: waba.name,
+            businessId: business.id,
+            businessName: business.name,
+            phoneNumberId: phone.id,
+            displayPhoneNumber: phone.display_phone_number,
+            verifiedName: phone.verified_name,
+            qualityRating: phone.quality_rating,
+            codeVerificationStatus: phone.code_verification_status
+          });
+        }
+      }
+    }
+    return phoneNumbers;
+  }
+
+  /**
    * Fetch all WABAs the user has admin access to, with their phone numbers.
    * Returns a flat list of phone number objects, each including wabaId.
    */
   async getWhatsAppAccounts(accessToken) {
+    /** @type {{ message?: string, data?: object } | null} */
+    let lastGraphError = null;
+
+    const recordErr = err => {
+      const e = err?.response?.data?.error;
+      lastGraphError = e ? { message: e.message, code: e.code, subcode: e.error_subcode } : null;
+    };
+
+    // 1) Embedded Signup — WABA IDs on the token via debug_token, then phone_numbers per WABA
     try {
-      // First try: get businesses + whatsapp_business_accounts
+      const wabaIds = await this.getWabaIdsFromDebugToken(accessToken);
+      if (wabaIds.length > 0) {
+        console.log('[WhatsAppLogin] debug_token reports', wabaIds.length, 'WABA id(s), loading phone numbers');
+        const fromDebug = await this.expandWabasToPhoneRows(wabaIds, accessToken);
+        if (fromDebug.length > 0) return fromDebug;
+        console.warn(
+          '[WhatsAppLogin] WABA IDs present on token but no phone_numbers yet — onboarding may still be completing (certificate / registration). Trying other discovery methods.'
+        );
+      }
+    } catch (err) {
+      recordErr(err);
+      console.warn('[WhatsAppLogin] debug_token discovery failed:', err.response?.data || err.message);
+    }
+
+    // 2) Assigned accounts edge (/me)
+    try {
+      const assigned = await this.getPhoneNumbersFromAssignedAccounts(accessToken);
+      if (assigned.length > 0) return assigned;
+    } catch (err) {
+      recordErr(err);
+      console.warn(
+        '[WhatsAppLogin] /me/assigned_whatsapp_business_accounts failed:',
+        err.response?.data?.error?.message || err.message
+      );
+    }
+
+    // 3) Business portfolio — usually requires business_management on the token
+    try {
       const response = await axios.get(`${this.graphURL}/me/businesses`, {
         params: {
-          fields: 'id,name,whatsapp_business_accounts{id,name,timezone_id,phone_numbers{id,display_phone_number,verified_name,quality_rating,code_verification_status}}',
+          fields:
+            'id,name,whatsapp_business_accounts{id,name,timezone_id,phone_numbers{id,display_phone_number,verified_name,quality_rating,code_verification_status}}',
           access_token: accessToken
         },
         timeout: 10000
       });
 
-      const phoneNumbers = [];
-      for (const business of (response.data.data || [])) {
-        for (const waba of (business.whatsapp_business_accounts?.data || [])) {
-          for (const phone of (waba.phone_numbers?.data || [])) {
-            phoneNumbers.push({
-              wabaId: waba.id,
-              wabaName: waba.name,
-              businessId: business.id,
-              businessName: business.name,
-              phoneNumberId: phone.id,
-              displayPhoneNumber: phone.display_phone_number,
-              verifiedName: phone.verified_name,
-              qualityRating: phone.quality_rating,
-              codeVerificationStatus: phone.code_verification_status
-            });
-          }
-        }
-      }
-
-      if (phoneNumbers.length > 0) return phoneNumbers;
+      const fromBusinesses = this.phoneNumbersFromBusinessesEdge(response.data);
+      if (fromBusinesses.length > 0) return fromBusinesses;
     } catch (err) {
-      console.warn('[WhatsAppLogin] /me/businesses failed, trying direct WABA lookup:', err.response?.data?.error?.message || err.message);
+      recordErr(err);
+      console.warn('[WhatsAppLogin] /me/businesses failed:', err.response?.data?.error?.message || err.message);
     }
 
-    // Fallback: try /me/whatsapp_business_accounts directly (some token types)
+    // 4) Legacy /me/whatsapp_business_accounts
     try {
       const response = await axios.get(`${this.graphURL}/me/whatsapp_business_accounts`, {
         params: {
-          fields: 'id,name,phone_numbers{id,display_phone_number,verified_name,quality_rating}',
+          fields:
+            'id,name,phone_numbers{id,display_phone_number,verified_name,quality_rating,code_verification_status}',
           access_token: accessToken
         },
         timeout: 10000
       });
 
       const phoneNumbers = [];
-      for (const waba of (response.data.data || [])) {
-        for (const phone of (waba.phone_numbers?.data || [])) {
+      for (const waba of response.data?.data || []) {
+        for (const phone of waba.phone_numbers?.data || []) {
           phoneNumbers.push({
             wabaId: waba.id,
             wabaName: waba.name,
             phoneNumberId: phone.id,
             displayPhoneNumber: phone.display_phone_number,
             verifiedName: phone.verified_name,
-            qualityRating: phone.quality_rating
+            qualityRating: phone.quality_rating,
+            codeVerificationStatus: phone.code_verification_status
           });
         }
       }
-      return phoneNumbers;
+      if (phoneNumbers.length > 0) return phoneNumbers;
     } catch (err) {
-      console.error('[WhatsAppLogin] WABA discovery failed:', err.response?.data || err.message);
-      throw new Error('Failed to discover WhatsApp Business Accounts. Ensure the account has admin access to a WABA.');
+      recordErr(err);
+      console.error('[WhatsAppLogin] /me/whatsapp_business_accounts failed:', err.response?.data || err.message);
     }
+
+    if (lastGraphError?.message) {
+      console.error('[WhatsAppLogin] Last Graph error detail:', lastGraphError);
+    }
+
+    throw new Error(
+      'No WhatsApp phone numbers found after Embedded Signup. Complete the Meta signup flow until your number ' +
+        'is registered for the API, reconnect, and confirm you granted WhatsApp permissions. ' +
+        'If your portfolio uses Business Manager listings only, request `business_management` on the OAuth app ' +
+        'and add it to WhatsApp Login scopes.'
+    );
   }
 
   /**
