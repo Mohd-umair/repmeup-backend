@@ -99,7 +99,8 @@ const defaultMenus = [
     group: 'settings',
     requiredRoles: ['admin', 'manager'],
     isActive: true
-  }
+  },
+
 ];
 
 async function seedMenus() {

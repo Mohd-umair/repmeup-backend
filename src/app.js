@@ -158,8 +158,9 @@ const routeMap = [
   ['/trends',         './routes/trends'],
   ['/audit-logs',     './routes/auditLog'],
   ['/tickets',        './routes/tickets'],
-  ['/contacts',       './routes/contacts'],
-  ['/email',          './routes/emailAccounts'],
+  ['/contacts',             './routes/contacts'],
+  ['/email',                './routes/emailAccounts'],
+  ['/whatsapp-templates',   './routes/whatsappTemplates'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];

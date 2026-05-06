@@ -98,6 +98,7 @@ async function resolveConnection(interaction) {
  * @param {string}  [params.attachmentUrl]    - CDN / server URL of the attachment
  * @param {string}  [params.attachmentType]   - 'image' | 'video' | 'audio' | 'file'
  * @param {string}  [params.attachmentLocalPath] - Absolute disk path (preferred over URL for Meta APIs)
+ * @param {object} [params.whatsappTemplate] - Sanitized `{ name, languageCode, components }` for template send
  *
  * @returns {Promise<{ platformResponseId: string|null, status: 'sent'|'failed', errorMessage: string|null }>}
  */
@@ -107,7 +108,8 @@ async function sendReplyToPlatform({
   replyContent,
   attachmentUrl,
   attachmentType,
-  attachmentLocalPath
+  attachmentLocalPath,
+  whatsappTemplate
 }) {
   // Guard: connection missing or inactive
   if (!connection) {
@@ -248,9 +250,37 @@ async function sendReplyToPlatform({
       // ── WhatsApp ─────────────────────────────────────────────────────────
       case 'whatsapp': {
         const whatsappService = require('../integrations/whatsapp/whatsappService');
-        const result = await whatsappService.sendTextMessage(
-          connection, interaction.author.platformId, replyContent
-        );
+        const to = interaction.author.platformId;
+
+        if (whatsappTemplate?.name) {
+          let result;
+          try {
+            result = await whatsappService.sendTemplateMessage(
+              connection,
+              to,
+              whatsappTemplate.name,
+              whatsappTemplate.languageCode || 'en_US',
+              whatsappTemplate.components || []
+            );
+          } catch (templateErr) {
+            const msg =
+              templateErr?.response?.data?.error?.message ||
+              templateErr?.response?.data?.error?.error_user_msg ||
+              templateErr?.message ||
+              'Failed to send WhatsApp template';
+            return {
+              platformResponseId: null,
+              status: 'failed',
+              errorMessage: typeof msg === 'string' ? msg : 'Failed to send WhatsApp template'
+            };
+          }
+          if (result.success && result.messageId) {
+            return { platformResponseId: result.messageId, status: 'sent', errorMessage: null };
+          }
+          return { platformResponseId: null, status: 'failed', errorMessage: 'Failed to send WhatsApp template' };
+        }
+
+        const result = await whatsappService.sendTextMessage(connection, to, replyContent);
         if (result.success && result.messageId) {
           return { platformResponseId: result.messageId, status: 'sent', errorMessage: null };
         }

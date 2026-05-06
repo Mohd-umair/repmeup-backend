@@ -83,17 +83,40 @@ exports.validateContactInquiry = (req, res, next) => {
 
 // Validate interaction reply
 exports.validateReply = (req, res, next) => {
+  const whatsappTemplateSchema = Joi.object({
+    name: Joi.string().trim().min(1).max(512).required(),
+    languageCode: Joi.string().trim().max(35).allow('', null).optional(),
+    components: Joi.array().items(Joi.object().unknown(true)).max(30).optional()
+  }).unknown(true);
+
   const schema = Joi.object({
     content: Joi.string().allow('').max(10000).optional(),
     useTemplate: Joi.boolean().optional(),
     templateId: objectId().optional(),
     templateVariables: Joi.object().optional(),
     attachmentUrl: Joi.string().uri({ scheme: ['http', 'https', 'data'] }).optional(),
-    attachmentType: Joi.string().valid('image', 'video', 'file', 'audio').optional()
-  });
+    attachmentType: Joi.string().valid('image', 'video', 'file', 'audio').optional(),
+    /** Inbox → WhatsApp Cloud API template send (sanitized in controller) */
+    whatsappTemplate: whatsappTemplateSchema.optional(),
+    /** Rich inbox preview rendered in Angular (validated + merged server-side when sending a template).
+     *  Also sent as `whatsappTemplate.inboxUiPreview` so older validators that only whitelist `whatsappTemplate` still receive it.
+     */
+    whatsappTemplatePreview: Joi.object({
+      templateName: Joi.string().trim().max(512).optional(),
+      languageCode: Joi.string().trim().max(35).allow('', null).optional(),
+      category: Joi.string().trim().max(32).allow('', null).optional(),
+      headerImageUrl: Joi.string().uri({ scheme: ['http', 'https'] }).max(2048).allow('', null).optional(),
+      headerText: Joi.string().allow('').max(4096).optional(),
+      bodyText: Joi.string().allow('').max(4096).optional(),
+      footerText: Joi.string().allow('').max(1024).optional(),
+      buttons: Joi.array().items(Joi.object().unknown(true)).max(25).optional()
+    })
+      .unknown(true)
+      .optional()
+  }).unknown(true);
 
   const { error } = schema.validate(req.body);
-  
+
   if (error) {
     return res.status(400).json({
       success: false,
@@ -103,10 +126,16 @@ exports.validateReply = (req, res, next) => {
 
   const hasContent = typeof req.body.content === 'string' && req.body.content.trim().length > 0;
   const hasAttachment = req.body.attachmentUrl && req.body.attachmentType;
-  if (!hasContent && !hasAttachment) {
+  const waTmpl = req.body.whatsappTemplate;
+  const hasWhatsappTemplate =
+    waTmpl &&
+    typeof waTmpl === 'object' &&
+    typeof waTmpl.name === 'string' &&
+    waTmpl.name.trim().length > 0;
+  if (!hasContent && !hasAttachment && !hasWhatsappTemplate) {
     return res.status(400).json({
       success: false,
-      error: 'Either content or attachment (attachmentUrl + attachmentType) is required'
+      error: 'Either message content, an attachment (attachmentUrl + attachmentType), or whatsappTemplate is required'
     });
   }
 
