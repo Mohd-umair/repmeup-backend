@@ -103,13 +103,18 @@ function resolvePagination({ page, limit }) {
  * Build the platform-connection visibility filter.
  *
  * Rules:
- *   - only platforms with at least one active/connected row are visible;
- *   - interactions whose platformConnection is missing/null (legacy) are kept;
- *   - interactions whose platformConnection is stale (not active anymore) are
- *     also kept because the user reconnected under a new row.
+ *   - Only interactions for platforms that still have at least one active
+ *     connected `PlatformConnection` row appear in the inbox.
+ *   - An interaction is visible if `platformConnection` references one of those
+ *     active connection IDs, or if `platformConnection` is missing/null (legacy
+ *     imports before the field existed).
  *
- * When there are zero active connections, returns a filter that always
- * evaluates to empty (`_id: { $in: [] }`) so no rows leak from prior orgs.
+ * Rows that still point at a **disconnected** or superseded connection (ID not
+ * in the active set) are **hidden**. That prevents conversations from a previous
+ * Instagram/Facebook account from mixing with a newly connected account for the
+ * same org.
+ *
+ * If there are zero active connections, returns `{ _id: { $in: [] } }`.
  */
 function buildVisibilityFilter(activeConnections) {
   const list = Array.isArray(activeConnections) ? activeConnections : [];
@@ -125,14 +130,7 @@ function buildVisibilityFilter(activeConnections) {
         $or: [
           { platformConnection: { $in: activeConnectionIds } },
           { platformConnection: { $exists: false } },
-          { platformConnection: null },
-          {
-            platformConnection: {
-              $exists: true,
-              $ne: null,
-              $nin: activeConnectionIds
-            }
-          }
+          { platformConnection: null }
         ]
       }
     ]

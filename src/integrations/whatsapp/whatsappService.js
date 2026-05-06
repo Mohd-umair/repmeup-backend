@@ -130,6 +130,7 @@ class WhatsAppService {
         `${this.apiURL}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
+          recipient_type: 'individual',
           to,
           type: 'template',
           template: { name: templateName, language: { code: languageCode }, components }

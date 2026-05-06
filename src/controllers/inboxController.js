@@ -483,7 +483,20 @@ exports.deleteReply = async (req, res, next) => {
 // @access  Private
 exports.replyToInteraction = async (req, res, next) => {
   try {
-    const { content, useTemplate, templateId, templateVariables, attachmentUrl, attachmentType } = req.body;
+    const {
+      content,
+      useTemplate,
+      templateId,
+      templateVariables,
+      attachmentUrl,
+      attachmentType,
+      whatsappTemplate,
+      whatsappTemplatePreview: whatsappTemplatePreviewBody
+    } = req.body;
+
+    const {
+      sanitizeWhatsAppOutboundTemplate
+    } = require('../utils/whatsappOutboundTemplate');
 
     // Resolve local disk path so Meta can receive the file directly (avoids ngrok/tunnel issues)
     let attachmentLocalPath = null;
@@ -529,6 +542,72 @@ exports.replyToInteraction = async (req, res, next) => {
       }
     }
 
+    const sanitizedWaTemplate =
+      whatsappTemplate && interaction.platform === 'whatsapp'
+        ? sanitizeWhatsAppOutboundTemplate(whatsappTemplate)
+        : null;
+
+    if (whatsappTemplate && interaction.platform !== 'whatsapp') {
+      return res.status(400).json({
+        success: false,
+        error: 'WhatsApp templates can only be used for WhatsApp conversations.'
+      });
+    }
+
+    if (whatsappTemplate && interaction.platform === 'whatsapp' && !sanitizedWaTemplate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid WhatsApp template payload. Provide template name (snake_case) and language.'
+      });
+    }
+
+    if (sanitizedWaTemplate && attachmentUrl) {
+      return res.status(400).json({
+        success: false,
+        error: 'Send either a WhatsApp template or an attachment — not both.'
+      });
+    }
+
+    let whatsappTemplatePreview = null;
+    if (sanitizedWaTemplate?.name) {
+      const WhatsAppTemplate = require('../models/WhatsAppTemplate');
+      const {
+        buildWhatsAppTemplatePreview,
+        mergeWhatsAppTemplatePreviews
+      } = require('../utils/whatsappTemplatePreview');
+      const { sanitizeWhatsAppInboundPreview } = require('../utils/sanitizeWhatsAppInboundPreview');
+      const connId =
+        interaction.platformConnection?._id?.toString?.() ||
+        interaction.platformConnection?.toString?.() ||
+        interaction.platformConnection ||
+        null;
+      let dbTemplate = null;
+      if (connId) {
+        dbTemplate = await WhatsAppTemplate.findOne({
+          organization: interaction.organization,
+          connection: connId,
+          name: sanitizedWaTemplate.name,
+          language: sanitizedWaTemplate.languageCode
+        }).lean();
+      }
+      const serverBuilt = buildWhatsAppTemplatePreview(sanitizedWaTemplate, dbTemplate);
+      const uiPreviewRaw =
+        whatsappTemplatePreviewBody ??
+        (whatsappTemplate && typeof whatsappTemplate === 'object'
+          ? whatsappTemplate.inboxUiPreview
+          : undefined);
+      const inbound = sanitizeWhatsAppInboundPreview(uiPreviewRaw, {
+        expectedName: sanitizedWaTemplate.name,
+        expectedLanguageCode: sanitizedWaTemplate.languageCode
+      });
+      whatsappTemplatePreview = mergeWhatsAppTemplatePreviews(serverBuilt, inbound);
+
+      const bodyLine = String(whatsappTemplatePreview.bodyText || '').trim();
+      replyContent =
+        bodyLine ||
+        `[WhatsApp Template] ${sanitizedWaTemplate.name} (${sanitizedWaTemplate.languageCode})`;
+    }
+
     // Resolve the correct platform connection and dispatch the send
     const connection = await replyService.resolveConnection(interaction);
     const { platformResponseId, status: replyStatus, errorMessage } = await replyService.sendReplyToPlatform({
@@ -537,12 +616,23 @@ exports.replyToInteraction = async (req, res, next) => {
       replyContent,
       attachmentUrl,
       attachmentType,
-      attachmentLocalPath
+      attachmentLocalPath,
+      whatsappTemplate: sanitizedWaTemplate
     });
 
     // Persist reply in DB
     const previousStatus = interaction.status;
-    await interaction.addReply(replyContent, req.user._id, platformResponseId, false, attachmentUrl || undefined, attachmentType || undefined);
+    await interaction.addReply(
+      replyContent,
+      req.user._id,
+      platformResponseId,
+      false,
+      attachmentUrl || undefined,
+      attachmentType || undefined,
+      undefined,
+      undefined,
+      whatsappTemplatePreview || undefined
+    );
     await interaction.populate('replies.sentBy', 'firstName lastName');
 
     if (replyStatus === 'failed') {

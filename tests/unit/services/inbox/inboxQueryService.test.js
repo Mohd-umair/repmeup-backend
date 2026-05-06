@@ -107,17 +107,14 @@ describe('inboxQueryService — pure helpers', () => {
       expect(svc.buildVisibilityFilter(null)).toEqual({ _id: { $in: [] } });
       expect(svc.buildVisibilityFilter(undefined)).toEqual({ _id: { $in: [] } });
     });
-    test('single platform → one platform in $in, 4-way $or on platformConnection', () => {
+    test('single platform → platform $in + 3-way $or on platformConnection (active or legacy only)', () => {
       const f = svc.buildVisibilityFilter([CONN_INSTA]);
       expect(f.$and[0]).toEqual({ platform: { $in: ['instagram'] } });
       const or = f.$and[1].$or;
-      expect(or).toHaveLength(4);
+      expect(or).toHaveLength(3);
       expect(or[0]).toEqual({ platformConnection: { $in: [CONN_INSTA._id] } });
       expect(or[1]).toEqual({ platformConnection: { $exists: false } });
       expect(or[2]).toEqual({ platformConnection: null });
-      expect(or[3]).toEqual({
-        platformConnection: { $exists: true, $ne: null, $nin: [CONN_INSTA._id] }
-      });
     });
     test('multiple platforms dedupes', () => {
       const dupIg = { _id: 'conn_ig_2', platform: 'instagram' };
