@@ -108,6 +108,31 @@ function formatKbAnalytics(facetRow) {
 const webScraperService = require('../services/webScraperService');
 const contentSummarizerService = require('../services/contentSummarizerService');
 const aiCreditService = require('../services/aiCreditService');
+const entitlementsService = require('../services/entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
+
+/**
+ * Helper: enforce the org-wide KB entry cap (boolean+limit feature `kb.entries.max`).
+ * Counts ARE LIVE — KB rows can be deleted, so a cached counter would drift.
+ * Throws an EntitlementError on quota exceeded; caller maps to HTTP via the
+ * shared error handler.
+ */
+async function assertKbEntryCapAvailable(organizationId) {
+  const q = await entitlementsService.quota(organizationId, FEATURE_KEYS.KB_ENTRIES_MAX);
+  if (q.isUnlimited) return;
+  // Use live count (not the bucket) — KB has no monthly reset, deletions count.
+  const KnowledgeBase = require('../models/KnowledgeBase');
+  const current = await KnowledgeBase.countDocuments({ organization: organizationId });
+  if (current >= q.limit) {
+    const err = new Error(`You've reached your knowledge base entries limit (${current}/${q.limit}). Upgrade to add more.`);
+    err.name = 'EntitlementError';
+    err.statusCode = 402;
+    err.code = 'QUOTA_EXCEEDED';
+    err.featureKey = FEATURE_KEYS.KB_ENTRIES_MAX;
+    err.meta = { limit: q.limit, used: current };
+    throw err;
+  }
+}
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -253,6 +278,9 @@ exports.getKnowledgeBaseById = async (req, res) => {
  */
 exports.createManualKnowledgeBase = async (req, res) => {
   try {
+    const orgId = req.user.organization._id || req.user.organization;
+    await assertKbEntryCapAvailable(orgId);
+
     const {
       title, content, category, tags, priority, metadata,
       trainingContext, trainingWeight, isTrainingData, isActive,
@@ -284,6 +312,15 @@ exports.createManualKnowledgeBase = async (req, res) => {
       message: 'Knowledge base entry created successfully'
     });
   } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
     console.error('Create manual knowledge base error:', error);
     res.status(500).json({
       success: false,
@@ -297,6 +334,21 @@ exports.createManualKnowledgeBase = async (req, res) => {
  * POST /api/knowledge-base/pdf
  */
 exports.createPDFKnowledgeBase = async (req, res) => {
+  try {
+    const orgId = req.user.organization._id || req.user.organization;
+    await assertKbEntryCapAvailable(orgId);
+  } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
+    return res.status(500).json({ success: false, error: 'Failed to validate plan limits' });
+  }
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -355,6 +407,10 @@ exports.createURLKnowledgeBase = async (req, res) => {
   let kbCreditsDeducted = 0;
   const kbOrgId = req.user.organization._id || req.user.organization;
   try {
+    // Plan gate: org must be allowed to use URL ingestion AND have entry capacity.
+    await entitlementsService.assert(kbOrgId, FEATURE_KEYS.KB_UPLOAD_URL);
+    await assertKbEntryCapAvailable(kbOrgId);
+
     const { url, title, category, tags, priority, focus = 'overview', targetWordCount, targetTagCount } = req.body;
 
     if (!url) {
@@ -484,8 +540,17 @@ exports.createURLKnowledgeBase = async (req, res) => {
       message: 'Knowledge base created from URL with AI summary successfully'
     });
   } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
     console.error('Create URL knowledge base error:', error);
-    
+
     if (kbCreditsDeducted > 0) {
       await aiCreditService.rollbackCredits(kbOrgId, kbCreditsDeducted, { operation: 'knowledge_base_from_url', userId: req.user?._id, reason: error.message });
     }

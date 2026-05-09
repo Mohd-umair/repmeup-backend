@@ -2,6 +2,7 @@ const authService = require('../services/authService');
 const emailService = require('../services/emailService');
 const userActivityLogService = require('../services/userActivityLogService');
 const cacheService = require('../services/cacheService');
+const User = require('../models/User');
 
 // @desc    Register user & organization
 // @route   POST /api/auth/register
@@ -24,18 +25,21 @@ exports.register = async (req, res, next) => {
     });
 
     try {
-      await emailService.sendWelcomeEmail(result.user);
-    } catch (welcomeErr) {
-      console.warn('[auth] Welcome email failed:', welcomeErr.message);
+      await emailService.sendEmailVerificationEmail(result.user, result.verificationTokenPlain);
+    } catch (verifyErr) {
+      console.warn('[auth] Verification email failed:', verifyErr.message);
     }
+
+    const userJson = result.user.toJSON ? result.user.toJSON() : result.user;
 
     res.status(201).json({
       success: true,
       data: {
-        user: result.user,
+        user: userJson,
         organization: result.organization,
-        token: result.token,
-        refreshToken: result.refreshToken
+        requiresEmailVerification: true,
+        message:
+          'Check your email for a verification link to activate your account. You can sign in after you verify.'
       }
     });
   } catch (error) {
@@ -312,6 +316,81 @@ exports.verifyLoginOtp = async (req, res, next) => {
 // @desc    Reset password using token
 // @route   POST /api/auth/reset-password
 // @access  Public
+// @desc    Verify email via token from signup link
+// @route   POST /api/auth/verify-email
+// @access  Public
+exports.verifyEmail = async (req, res, next) => {
+  try {
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Verification token is required' });
+    }
+
+    const result = await authService.verifyEmail(token);
+
+    const orgId = result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'email_verified',
+      path: '/api/auth/verify-email',
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
+
+    try {
+      const userDoc = await User.findById(result.user._id);
+      if (userDoc) await emailService.sendWelcomeEmail(userDoc);
+    } catch (welcomeErr) {
+      console.warn('[auth] Welcome email after verification failed:', welcomeErr.message);
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        user: result.user,
+        token: result.token,
+        refreshToken: result.refreshToken,
+        message: 'Email verified successfully.'
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+};
+
+// @desc    Resend signup verification email
+// @route   POST /api/auth/resend-verification
+// @access  Public
+exports.resendVerification = async (req, res, next) => {
+  try {
+    const { email } = req.body || {};
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+
+    try {
+      await authService.resendVerificationEmail(email);
+    } catch (e) {
+      if (e.message && e.message.includes('wait a minute')) {
+        return res.status(429).json({ success: false, error: e.message });
+      }
+      throw e;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        message: 'If an account needs verification, we sent a new link to that address.'
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.resetPassword = async (req, res, next) => {
   try {
     const { token, password } = req.body;

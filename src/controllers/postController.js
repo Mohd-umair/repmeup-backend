@@ -5,10 +5,26 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const storageService = require('../services/storageService');
 const aiCreditService = require('../services/aiCreditService');
+const entitlementsService = require('../services/entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const postAiGenerationService = require('../services/postAiGenerationService');
 const { PostAiGenerationError } = postAiGenerationService;
 const postPublishService = require('../services/postPublishService');
 const { PostPublishError } = postPublishService;
+
+/**
+ * Translate an EntitlementError thrown by entitlementsService into the same
+ * JSON envelope used by other controllers (so the FE error handling is uniform).
+ */
+function respondEntitlement(res, err) {
+  return res.status(err.statusCode || 402).json({
+    success: false,
+    code: err.code,
+    error: err.message,
+    featureKey: err.featureKey,
+    meta: err.meta
+  });
+}
 const auditLogController = require('./auditLogController');
 const logger = require('../config/logger');
 const multer = require('multer');
@@ -152,13 +168,35 @@ exports.generatePostWithAI = async (req, res) => {
   try {
     const { prompt, platforms, mode, postType } = req.body;
     const organizationId = req.user.organization?._id || req.user.organization;
+
+    // Plan gates: per-post platform cap + monthly post-creation credits.
+    const platformCount = Array.isArray(platforms) ? platforms.length : 1;
+    await entitlementsService.assert(
+      organizationId,
+      FEATURE_KEYS.POSTS_PLATFORMS_MAX,
+      platformCount
+    );
+    await entitlementsService.assert(
+      organizationId,
+      FEATURE_KEYS.CREDITS_POST_CREATION,
+      1
+    );
+
     const result = await postAiGenerationService.generatePostText({
       prompt, platforms, mode, postType,
       organizationId,
       userId: req.user._id
     });
+
+    // Bucket consumption is recorded AFTER a successful AI call so failed
+    // generations don't burn the credit (mirrors how aiCreditService works).
+    await entitlementsService
+      .consume(organizationId, FEATURE_KEYS.CREDITS_POST_CREATION, 1)
+      .catch((e) => logger.warn('[postAI] post-creation bucket consume failed', { err: e.message }));
+
     res.status(200).json({ success: true, data: result.data, credits: result.credits });
   } catch (err) {
+    if (err?.name === 'EntitlementError') return respondEntitlement(res, err);
     respondPostAiError(res, err, 'Failed to generate post');
   }
 };
@@ -170,14 +208,47 @@ exports.generatePostVariantsWithAI = async (req, res) => {
       includeTrend, postType, generationMode, eventTemplateId
     } = req.body;
     const organizationId = req.user.organization?._id || req.user.organization;
+
+    // Plan gates:
+    //   1. trends opt-in must be allowed if the request asks for it
+    //   2. variant count cannot exceed the per-plan ceiling
+    //   3. platform-fan-out cap applied per generation request
+    //   4. burns 1 post-creation credit per variant
+    if (includeTrend) {
+      await entitlementsService.assert(organizationId, FEATURE_KEYS.POSTS_TRENDS);
+    }
+    const requestedVariants = Math.max(1, Number(count) || 1);
+    await entitlementsService.assert(
+      organizationId,
+      FEATURE_KEYS.POSTS_AI_VARIANTS_MAX,
+      requestedVariants
+    );
+    const platformCount = Array.isArray(platforms) ? platforms.length : 1;
+    await entitlementsService.assert(
+      organizationId,
+      FEATURE_KEYS.POSTS_PLATFORMS_MAX,
+      platformCount
+    );
+    await entitlementsService.assert(
+      organizationId,
+      FEATURE_KEYS.CREDITS_POST_CREATION,
+      requestedVariants
+    );
+
     const result = await postAiGenerationService.generatePostVariants({
       topic, platforms, count, audience, intent, mood,
       includeTrend, postType, generationMode, eventTemplateId,
       organizationId,
       userId: req.user._id
     });
+
+    await entitlementsService
+      .consume(organizationId, FEATURE_KEYS.CREDITS_POST_CREATION, requestedVariants)
+      .catch((e) => logger.warn('[postAI] post-creation bucket consume failed', { err: e.message }));
+
     res.status(200).json({ success: true, data: result.data, credits: result.credits });
   } catch (err) {
+    if (err?.name === 'EntitlementError') return respondEntitlement(res, err);
     respondPostAiError(res, err, 'Failed to generate variants');
   }
 };

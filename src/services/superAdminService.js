@@ -10,7 +10,7 @@ const PlatformConnection = require('../models/PlatformConnection');
 const Subscription = require('../models/Subscription');
 
 const PLAN_ADMIN_SELECT =
-  'planId name description tier price billingCycle limits features badge badgeColor highlightColor isActive isPublic displayOrder trialDays stripePriceId stripeProductId createdAt updatedAt';
+  'planId name description tier price billingCycle limits features entitlements badge badgeColor highlightColor isActive isPublic displayOrder trialDays stripePriceId stripeProductId createdAt updatedAt';
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;

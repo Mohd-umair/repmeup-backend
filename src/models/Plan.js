@@ -45,7 +45,14 @@ const planSchema = new mongoose.Schema({
     default: 'monthly'
   },
   
-  // Plan limits
+  // ── DEPRECATED: legacy fixed-shape limits map ────────────────────────────
+  // Retained for backwards compatibility with older callers that read
+  // `subscription.limits.maxAccounts` directly. The entitlements engine
+  // prefers `entitlements` (catalog-keyed) and synthesizes this shape
+  // on read for legacy consumers. New plan keys should be added to the
+  // Feature Catalog, NOT to this sub-schema.
+  // Slated for removal one full billing cycle after the entitlements
+  // engine ships.
   limits: {
     maxAccounts: {
       type: Number,
@@ -85,12 +92,39 @@ const planSchema = new mongoose.Schema({
     }
   },
   
-  // Features (array of feature codes)
+  // ── DEPRECATED: legacy free-form feature codes ───────────────────────────
+  // Kept for backwards compatibility (older clients still read this field).
+  // New code MUST read `entitlements` and use entitlementsService instead.
   features: [{
     type: String,
-    trim: true,
-    // e.g., 'basic_posting', 'ai_responses', 'analytics', etc.
+    trim: true
   }],
+
+  /**
+   * Canonical entitlements map keyed by Feature.key.
+   *
+   * Each value:
+   *   - boolean feature: { enabled: true|false }
+   *   - limit feature:   { limit: -1|number }            // -1 = unlimited
+   *   - enum feature:    { value: 'someEnumValue' }
+   *   - list feature:    { value: ['a','b'] }
+   *   - json feature:    { value: { ...arbitrary } }
+   *
+   * Anything missing falls back to the catalog's `defaultValue` at resolve time —
+   * NOT every plan needs to specify every key.
+   */
+  entitlements: {
+    type: Map,
+    of: new mongoose.Schema(
+      {
+        enabled: { type: Boolean, default: undefined },
+        limit: { type: Number, default: undefined },
+        value: { type: mongoose.Schema.Types.Mixed, default: undefined }
+      },
+      { _id: false }
+    ),
+    default: undefined
+  },
   
   // Visual & Marketing
   badge: {
@@ -195,6 +229,31 @@ planSchema.methods.hasFeature = function(featureCode) {
 // Method to check if unlimited for a limit
 planSchema.methods.isUnlimited = function(limitType) {
   return this.limits[limitType] === -1;
+};
+
+/**
+ * Read a single entitlement entry by feature key, normalized.
+ * Returns `undefined` when the plan does not specify a value for that key —
+ * callers should fall back to the catalog default.
+ */
+planSchema.methods.getEntitlement = function(featureKey) {
+  if (!this.entitlements) return undefined;
+  if (typeof this.entitlements.get === 'function') {
+    return this.entitlements.get(featureKey);
+  }
+  return this.entitlements[featureKey];
+};
+
+/**
+ * Bulk read entitlements as a plain object — convenient for service code that
+ * resolves the full plan once and then queries many keys.
+ */
+planSchema.methods.getEntitlementsObject = function() {
+  if (!this.entitlements) return {};
+  if (typeof this.entitlements.toObject === 'function') {
+    return this.entitlements.toObject();
+  }
+  return { ...this.entitlements };
 };
 
 // Static method to get active public plans

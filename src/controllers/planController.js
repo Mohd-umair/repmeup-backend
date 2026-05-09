@@ -1,5 +1,39 @@
 const Plan = require('../models/Plan');
 const planAdminService = require('../services/planAdminService');
+const entitlementsService = require('../services/entitlementsService');
+const Subscription = require('../models/Subscription');
+const { CATALOG_BY_KEY } = require('../config/featureCatalog');
+const { emitToOrg } = require('../utils/socketEmitter');
+
+/**
+ * Sanitize an `entitlements` map sent by the admin UI:
+ *   - Drops keys not in the catalog (admins can't invent feature keys at runtime).
+ *   - Coerces numeric `limit` strings to numbers.
+ *   - Coerces boolean strings to true/false.
+ *   - Returns a plain object suitable for assigning to a Mongoose Map field.
+ */
+function sanitizeEntitlementsPayload(rawIn) {
+  if (!rawIn || typeof rawIn !== 'object') return undefined;
+  const cleaned = {};
+  for (const [key, value] of Object.entries(rawIn)) {
+    const catalogEntry = CATALOG_BY_KEY[key];
+    if (!catalogEntry || !value || typeof value !== 'object') continue;
+    const next = {};
+    if (catalogEntry.kind === 'boolean') {
+      if (value.enabled !== undefined) next.enabled = value.enabled === true || value.enabled === 'true';
+    } else if (catalogEntry.kind === 'limit') {
+      const v = value.limit ?? value.value;
+      if (v !== undefined && v !== null && v !== '') {
+        const n = Number(v);
+        if (Number.isFinite(n)) next.limit = n;
+      }
+    } else if (value.value !== undefined) {
+      next.value = value.value;
+    }
+    if (Object.keys(next).length) cleaned[key] = next;
+  }
+  return cleaned;
+}
 
 /**
  * Plan Management Controller
@@ -119,6 +153,7 @@ exports.createPlan = async (req, res, next) => {
       billingCycle,
       limits,
       features,
+      entitlements,
       badge,
       badgeColor,
       highlightColor,
@@ -148,6 +183,7 @@ exports.createPlan = async (req, res, next) => {
       billingCycle,
       limits,
       features,
+      entitlements: sanitizeEntitlementsPayload(entitlements),
       badge,
       badgeColor,
       highlightColor,
@@ -209,11 +245,33 @@ exports.updatePlan = async (req, res, next) => {
       }
     });
 
+    if (req.body.entitlements !== undefined) {
+      const cleaned = sanitizeEntitlementsPayload(req.body.entitlements) || {};
+      plan.entitlements = new Map(Object.entries(cleaned));
+      plan.markModified('entitlements');
+    }
+
     plan.updatedBy = req.user._id;
     await plan.save();
 
     // Keep org subscriptions aligned with template (limits/features/name/tier).
     const syncedSubscriptionCount = await planAdminService.syncSubscriptionsFromPlan(plan);
+
+    // Drop entitlement caches for every org on this plan AND tell their
+    // active socket sessions to refetch — keeps the FE store in lock-step
+    // with admin edits without requiring a page reload.
+    try {
+      const subs = await Subscription.find({ planId: plan.planId }).select('organization').lean();
+      await Promise.all(
+        subs.map(async (s) => {
+          const orgId = String(s.organization);
+          await entitlementsService.invalidateEntitlements(orgId);
+          emitToOrg(orgId, 'entitlements:invalidated', { reason: 'plan-update', planId: plan.planId });
+        })
+      );
+    } catch (e) {
+      console.warn('[updatePlan] cache invalidation failed (non-fatal):', e.message);
+    }
 
     res.status(200).json({
       success: true,

@@ -4,6 +4,8 @@ const axios = require('axios');
 const Organization = require('../models/Organization');
 const aiCreditService = require('../services/aiCreditService');
 const { protect } = require('../middlewares/auth');
+const { requireFeature } = require('../middlewares/requireFeature');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 
 /**
  * Trends API
@@ -41,6 +43,11 @@ const HOLIDAYS_SEED = [
   { date: '2025-03-08', name: 'International Women\'s Day', region: 'global' },
   { date: '2025-04-22', name: 'Earth Day', region: 'global' }
 ];
+
+// All trend endpoints require the Trends feature flag — Free plans must not
+// see this section in Content Studio. The frontend reads /api/entitlements to
+// hide the panel; this gate is the server-side belt-and-braces.
+router.use(requireFeature(FEATURE_KEYS.POSTS_TRENDS));
 
 // ─── Static routes ────────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
