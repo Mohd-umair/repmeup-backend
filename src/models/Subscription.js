@@ -52,7 +52,7 @@ const subscriptionSchema = new mongoose.Schema({
     }
   },
   
-  // Usage tracking
+  // Usage tracking (legacy; new code reads usageBuckets via entitlementsService)
   usage: {
     connectedAccounts: {
       type: Number,
@@ -78,6 +78,32 @@ const subscriptionSchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     }
+  },
+
+  /**
+   * Generic per-feature usage buckets keyed by Feature.key.
+   *
+   * Each entry tracks consumption against a `limit` feature. The bucketService
+   * is responsible for resetting `used` to 0 when the period rolls over.
+   *
+   *   usageBuckets: {
+   *     'credits.autoReply.monthly': { used: 23,  periodStart: 2026-05-01 },
+   *     'inbox.uniqueContacts.monthly': { used: 117, periodStart: 2026-05-01 }
+   *   }
+   *
+   * NOTE: legacy `usage.aiCreditsThisMonth` etc. are kept in sync during the
+   * migration window so older controllers still report correct numbers.
+   */
+  usageBuckets: {
+    type: Map,
+    of: new mongoose.Schema(
+      {
+        used: { type: Number, default: 0 },
+        periodStart: { type: Date, default: () => new Date() }
+      },
+      { _id: false }
+    ),
+    default: undefined
   },
   
   // Billing status
@@ -173,11 +199,21 @@ subscriptionSchema.methods.hasFeature = function(featureName) {
   return this.features.includes(featureName);
 };
 
-// Method to reset monthly usage
+// Method to reset monthly usage (legacy keys + new bucket map kept in sync).
 subscriptionSchema.methods.resetMonthlyUsage = function() {
   this.usage.postsThisMonth = 0;
   this.usage.autoRepliesThisMonth = 0;
+  this.usage.aiCreditsThisMonth = 0;
   this.usage.lastResetAt = new Date();
+
+  if (this.usageBuckets && typeof this.usageBuckets.forEach === 'function') {
+    const now = new Date();
+    this.usageBuckets.forEach((bucket, key) => {
+      this.usageBuckets.set(key, { used: 0, periodStart: now });
+    });
+    this.markModified('usageBuckets');
+  }
+
   return this.save();
 };
 

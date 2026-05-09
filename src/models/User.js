@@ -80,6 +80,10 @@ const userSchema = new mongoose.Schema({
     default: false
   },
   emailVerificationToken: String,
+  /** When the pending verification link expires */
+  emailVerificationExpires: Date,
+  /** Throttle resend-verification emails */
+  emailVerificationLastSent: Date,
   passwordResetToken: String,
   passwordResetExpires: Date,
 
@@ -182,6 +186,8 @@ userSchema.methods.toJSON = function() {
   delete user.password;
   delete user.passwordResetToken;
   delete user.emailVerificationToken;
+  delete user.emailVerificationExpires;
+  delete user.emailVerificationLastSent;
   return user;
 };
 

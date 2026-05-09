@@ -266,12 +266,19 @@ exports.getSubscription = async (req, res, next) => {
  * @desc    Get all available plans (from database)
  * @route   GET /api/subscription/plans
  * @access  Public
+ *
+ * @deprecated Duplicates `GET /api/plans` (planController.getPlans). Kept for
+ * one release for backward-compat with older clients; new callers should hit
+ * `/api/plans`. The response shape and data are identical. This handler will
+ * be removed in the next major version — see the dynamic plan + feature
+ * engine plan, "cleanup" task.
  */
 exports.getPlans = async (req, res, next) => {
   try {
+    res.set('Deprecation', 'true');
+    res.set('Link', '</api/plans>; rel="successor-version"');
+
     const plans = await Plan.getPublicPlans();
-    
-    // Transform to match frontend expectation (object with planId as keys)
     const plansObject = {};
     plans.forEach(plan => {
       plansObject[plan.planId] = {
@@ -284,10 +291,12 @@ exports.getPlans = async (req, res, next) => {
         badgeColor: plan.badgeColor
       };
     });
-    
+
     res.status(200).json({
       success: true,
-      data: plansObject
+      data: plansObject,
+      deprecated: true,
+      successor: '/api/plans'
     });
   } catch (error) {
     console.error('Get plans error:', error);

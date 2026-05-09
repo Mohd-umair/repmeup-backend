@@ -22,6 +22,8 @@
 
 const logger = require('../../config/logger');
 const aiCreditService = require('../aiCreditService');
+const entitlementsService = require('../entitlementsService');
+const { FEATURE_KEYS } = require('../../config/featureCatalog');
 const replyGenerationService = require('./replyGenerationService');
 const { runWithAiContextAndUsageId } = require('../aiRequestContext');
 const { isThreadStyleDm } = require('../../utils/interactionThreadDm');
@@ -186,6 +188,11 @@ async function deductCreditsSafely(organizationId, operation, interaction, aiApi
       },
       { aiApiUsageId }
     );
+    // Mirror into the dedicated auto-reply bucket so the per-plan quota
+    // (`credits.autoReply.monthly`) is incremented alongside the AI credit pool.
+    await entitlementsService
+      .consume(organizationId, FEATURE_KEYS.CREDITS_AUTO_REPLY, AUTO_REPLY_CREDITS)
+      .catch(() => {});
   } catch {
     // Credit deduction failure is non-fatal — usage is logged separately.
   }
@@ -201,6 +208,27 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
         eligible: false,
         reason: 'Interaction not eligible for auto-reply based on settings'
       };
+    }
+
+    // Plan-level auto-reply quota — separate from the generic AI credit pool.
+    // Free plan caps it at 100/month per spec. Limited Free plans burn this
+    // bucket FIRST so users get a clear "you've used your auto-reply allotment"
+    // error instead of the generic AI credit message.
+    try {
+      await entitlementsService.assert(organizationId, FEATURE_KEYS.CREDITS_AUTO_REPLY, AUTO_REPLY_CREDITS);
+    } catch (err) {
+      if (err?.name === 'EntitlementError') {
+        logger.warn('[Auto-Reply] Auto-reply credit quota exhausted', { organizationId, code: err.code });
+        return {
+          eligible: false,
+          reason: err.message,
+          code: err.code,
+          featureKey: err.featureKey,
+          creditsNeeded: AUTO_REPLY_CREDITS,
+          creditsRemaining: err.meta?.remaining ?? 0
+        };
+      }
+      throw err;
     }
 
     const creditCheck = await aiCreditService.checkCredits(organizationId, AUTO_REPLY_CREDITS);

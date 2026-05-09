@@ -16,6 +16,9 @@ router.post('/reset-password', authController.resetPassword);
 router.post('/send-otp', authController.sendLoginOtp);
 router.post('/verify-otp', authController.verifyLoginOtp);
 
+router.post('/verify-email', authController.verifyEmail);
+router.post('/resend-verification', authController.resendVerification);
+
 // Protected routes
 router.get('/me', protect, authController.getMe);
 router.put('/profile', protect, authController.updateProfile);

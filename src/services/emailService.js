@@ -112,6 +112,81 @@ class EmailService {
   }
 
   /**
+   * Send email-verification link after email/password registration.
+   */
+  async sendEmailVerificationEmail(user, rawToken) {
+    const baseUrl = String(process.env.FRONTEND_URL || 'http://localhost:4200').replace(/\/$/, '');
+    const verifyUrl = `${baseUrl}/auth/verify-email?token=${encodeURIComponent(rawToken)}`;
+    const expiryHours =
+      Math.round((parseInt(process.env.EMAIL_VERIFICATION_EXPIRY_MS || '', 10) || 48 * 60 * 60 * 1000) / (60 * 60 * 1000)) ||
+      48;
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+
+    const subject = `Verify your email for ${appName}`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff;padding:40px 20px;">
+          <tr>
+            <td align="center">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+                <tr>
+                  <td style="background-color:#ffffff;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
+                    <span style="font-size:28px;font-weight:900;color:#c8f135;letter-spacing:-1px;">${appName}</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:40px 36px;">
+                    <h2 style="margin:0 0 8px;font-size:22px;color:#0a0a0a;">Confirm your email</h2>
+                    <p style="margin:0 0 24px;color:#555;font-size:15px;">Hi ${user.firstName},</p>
+                    <p style="margin:0 0 28px;color:#555;font-size:15px;line-height:1.6;">
+                      Thanks for signing up. Please verify your email address to activate your account. This link expires in <strong>${expiryHours} hours</strong>.
+                    </p>
+                    <table cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td align="center">
+                          <a href="${verifyUrl}"
+                            style="display:inline-block;background-color:#c8f135;color:#0a0a0a;font-weight:700;font-size:16px;text-decoration:none;padding:14px 40px;border-radius:10px;">
+                            Verify email
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                    <p style="margin:28px 0 0;color:#888;font-size:13px;line-height:1.6;">
+                      If the button doesn't work, copy and paste this link into your browser:<br>
+                      <a href="${verifyUrl}" style="color:#c8f135;word-break:break-all;">${verifyUrl}</a>
+                    </p>
+                    <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
+                    <p style="margin:0;color:#aaa;font-size:13px;">
+                      If you didn't create an account, you can ignore this email.
+                    </p>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="background-color:#f9f9f9;padding:20px 36px;text-align:center;border-top:1px solid #eee;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">© ${new Date().getFullYear()} ${appName}. All rights reserved.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    const text = `Hi ${user.firstName},\n\nVerify your email for ${appName} by opening this link (expires in ${expiryHours} hours):\n${verifyUrl}\n\nIf you didn't sign up, ignore this email.\n`;
+
+    return this.sendEmail({
+      to: user.email,
+      subject,
+      html,
+      text
+    });
+  }
+
+  /**
    * Send welcome email (first-time signup: register, Google OAuth, or team invite with temp password).
    */
   async sendWelcomeEmail(user, tempPassword = null) {

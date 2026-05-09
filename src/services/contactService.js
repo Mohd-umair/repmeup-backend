@@ -8,6 +8,43 @@
  */
 const Contact = require('../models/Contact');
 const logger = require('../config/logger');
+const entitlementsService = require('./entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
+
+/**
+ * Increment the per-org "unique contacts this month" bucket when this contact
+ * counts as new for the current period.
+ *
+ * "New for the period" means either:
+ *   - the Contact was created in this call, OR
+ *   - the Contact's previous `lastInteractionAt` falls in a calendar month
+ *     before `now`.
+ *
+ * Failures here are NEVER fatal: contact resolution must keep working even if
+ * Redis/Mongo writes for usage tracking fail. We log and continue.
+ */
+function isLastInteractionInPriorPeriod(prev, now) {
+  if (!prev) return true;
+  const p = prev instanceof Date ? prev : new Date(prev);
+  return p.getUTCFullYear() !== now.getUTCFullYear() || p.getUTCMonth() !== now.getUTCMonth();
+}
+
+async function tickUniqueContactsBucket(organizationId, contact, prevLastInteractionAt) {
+  try {
+    const now = new Date();
+    if (!isLastInteractionInPriorPeriod(prevLastInteractionAt, now)) return;
+    await entitlementsService.consume(
+      organizationId,
+      FEATURE_KEYS.INBOX_UNIQUE_CONTACTS,
+      1
+    );
+  } catch (err) {
+    logger.warn('[contactService] uniqueContacts bucket consume failed (non-fatal)', {
+      contactId: contact?._id?.toString(),
+      err: err.message
+    });
+  }
+}
 
 // ─── Platform Normalizer ───────────────────────────────────────────────────
 /**
@@ -119,8 +156,12 @@ async function resolveContact(payload, organizationId) {
         }],
         lastInteractionAt: new Date()
       });
+      // Brand-new contact => count it toward this month's unique-contacts bucket.
+      await tickUniqueContactsBucket(orgId, contact, null);
       return contact;
     }
+
+    const prevLastInteractionAt = contact.lastInteractionAt;
 
     // ── Enrich existing contact ─────────────────────────────────────────────
 
@@ -161,6 +202,11 @@ async function resolveContact(payload, organizationId) {
     contact.updatedAt = new Date();
 
     await contact.save();
+
+    // Existing contact, but maybe first interaction this month → counts as a
+    // distinct contact for the unique-contacts bucket.
+    await tickUniqueContactsBucket(orgId, contact, prevLastInteractionAt);
+
     return contact;
 
   } catch (err) {
@@ -203,5 +249,7 @@ async function updateAIInsights(contactId, insights = {}) {
 module.exports = {
   resolveContact,
   normalizeAuthorForPlatform,
-  updateAIInsights
+  updateAIInsights,
+  // Exported for tests
+  _isLastInteractionInPriorPeriod: isLastInteractionInPriorPeriod
 };

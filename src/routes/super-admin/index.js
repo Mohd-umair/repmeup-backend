@@ -13,6 +13,7 @@ const gpController = require('../../controllers/groupPermissionController');
 const ticketController = require('../../controllers/ticketController');
 const superAdminFaqController = require('../../controllers/superAdminFaqController');
 const inspirationAdminController = require('../../controllers/inspirationAdminController');
+const featureController = require('../../controllers/featureController');
 const multer = require('multer');
 
 router.use(protect);
@@ -50,6 +51,7 @@ router.get('/tickets', ticketController.superAdminListTickets);
 router.patch('/tickets/:id/status', ticketController.superAdminUpdateStatus);
 
 router.get('/plans', superAdminController.listPlans);
+router.get('/features', featureController.listCatalog);
 router.get('/contact-inquiries', contactInquiryController.listForSuperAdmin);
 router.get('/transactions', superAdminController.listTransactions);
 router.get('/dashboard/stats', superAdminController.getDashboardStats);

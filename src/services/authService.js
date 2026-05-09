@@ -49,9 +49,10 @@ class AuthService {
   async register(userData) {
     try {
       const { email, password, firstName, lastName, organizationName } = userData;
+      const normalizedEmail = (email || '').toLowerCase().trim();
 
       // Check if user already exists
-      const existingUser = await User.findOne({ email });
+      const existingUser = await User.findOne({ email: normalizedEmail });
       if (existingUser) {
         throw new Error('User with this email already exists');
       }
@@ -67,14 +68,26 @@ class AuthService {
         }
       });
 
-      // Create user
+      const rawVerifyToken = crypto.randomBytes(32).toString('hex');
+      const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
+      const verifyExpiryMs =
+        parseInt(process.env.EMAIL_VERIFICATION_EXPIRY_MS || '', 10) || 48 * 60 * 60 * 1000;
+
+      // Create user (password hashed by pre-save hook)
       const user = await User.create({
-        email,
+        email: normalizedEmail,
         password,
         firstName,
         lastName,
         role: 'admin', // First user is always admin
-        organization: organization._id
+        organization: organization._id,
+        isEmailVerified: false,
+        emailVerificationToken: hashedVerifyToken,
+        emailVerificationExpires: new Date(Date.now() + verifyExpiryMs),
+        emailVerificationLastSent: new Date(),
+        metadata: {
+          signupSource: 'email_password'
+        }
       });
 
       // Update organization owner
@@ -82,19 +95,87 @@ class AuthService {
       organization.usage.currentUsers = 1;
       await organization.save();
 
-      // Generate tokens
-      const token = generateToken(user._id);
-      const refreshToken = generateRefreshToken(user._id);
-
+      // No JWT until email is verified — client shows "check your inbox"
       return {
         user,
         organization,
-        token,
-        refreshToken
+        verificationTokenPlain: rawVerifyToken
       };
     } catch (error) {
       throw error;
     }
+  }
+
+  /**
+   * Confirm email using the raw token from the signup link (hashed compare).
+   */
+  async verifyEmail(rawToken) {
+    if (!rawToken || typeof rawToken !== 'string') {
+      throw new Error('Verification token is required');
+    }
+
+    const hashed = crypto.createHash('sha256').update(rawToken.trim()).digest('hex');
+    const user = await User.findOne({
+      emailVerificationToken: hashed,
+      emailVerificationExpires: { $gt: Date.now() }
+    }).populate('organization');
+
+    if (!user) {
+      throw new Error('This verification link is invalid or has expired. Request a new one from the sign-in page.');
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save({ validateBeforeSave: false });
+
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    const userObj = user.toJSON();
+    const effectiveGroup = await this._resolveEffectiveGroup(user);
+    if (!userObj.group && effectiveGroup) {
+      userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+    }
+    userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
+
+    return {
+      user: userObj,
+      token,
+      refreshToken
+    };
+  }
+
+  /**
+   * Resend signup verification email. Generic success when no account / already verified.
+   */
+  async resendVerificationEmail(email) {
+    const normalizedEmail = (email || '').toLowerCase().trim();
+    if (!normalizedEmail) return;
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user || user.deletedAt || !user.isActive) return;
+
+    // OAuth-only users have no password and are already treated as verified at signup
+    if (!user.password) return;
+    if (user.isEmailVerified) return;
+
+    const minGapMs = 60 * 1000;
+    if (user.emailVerificationLastSent && Date.now() - new Date(user.emailVerificationLastSent).getTime() < minGapMs) {
+      throw new Error('Please wait a minute before requesting another verification email.');
+    }
+
+    const rawVerifyToken = crypto.randomBytes(32).toString('hex');
+    const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
+    const verifyExpiryMs =
+      parseInt(process.env.EMAIL_VERIFICATION_EXPIRY_MS || '', 10) || 48 * 60 * 60 * 1000;
+
+    user.emailVerificationToken = hashedVerifyToken;
+    user.emailVerificationExpires = new Date(Date.now() + verifyExpiryMs);
+    user.emailVerificationLastSent = new Date();
+    await user.save({ validateBeforeSave: false });
+
+    await emailService.sendEmailVerificationEmail(user, rawVerifyToken);
   }
 
   /**
@@ -123,6 +204,15 @@ class AuthService {
       const isPasswordValid = await user.comparePassword(password);
       if (!isPasswordValid) {
         throw new Error('Invalid credentials');
+      }
+
+      // Email/password signups must verify before login. Legacy accounts have no pending token.
+      const pendingEmailVerification =
+        user.isEmailVerified === false && user.emailVerificationToken;
+      if (pendingEmailVerification) {
+        throw new Error(
+          'Please verify your email before signing in. Check your inbox for the verification link, or use “Resend verification” on the sign-in page.'
+        );
       }
 
       user.lastLogin = new Date();

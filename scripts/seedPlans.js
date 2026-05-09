@@ -27,11 +27,13 @@ const defaultPlans = [
     tier: 0,
     price: 0,
     billingCycle: 'monthly',
+    // Legacy `limits` retained for backward-compat reads; the engine prefers
+    // `entitlements` below.
     limits: {
       maxAccounts: 1,
       maxUsers: 1,
-      maxPostsPerMonth: 10,
-      maxAutoRepliesPerMonth: 50,
+      maxPostsPerMonth: 50,            // capped to creation credits
+      maxAutoRepliesPerMonth: 100,
       maxAICreditsPerMonth: 100,
       maxStorageGB: 1,
       maxAPICallsPerDay: 100
@@ -42,6 +44,25 @@ const defaultPlans = [
       'manual_replies',
       'basic_analytics'
     ],
+    // Catalog-keyed entitlements per the Free-tier spec. These are the values
+    // the new entitlementsService consumes first; legacy `limits` is the
+    // back-compat fallback only.
+    entitlements: {
+      'users.max':                       { limit: 1 },
+      'credits.autoReply.monthly':       { limit: 100 },
+      'credits.postCreation.monthly':    { limit: 50 },
+      'inbox.uniqueContacts.monthly':    { limit: 200 },
+      'kb.entries.max':                  { limit: 2 },
+      'kb.upload.url':                   { enabled: false },
+      'kb.upload.pdf':                   { enabled: true },
+      'posts.platforms.maxPerPost':      { limit: 1 },
+      'posts.ai.variants.max':           { limit: 2 },
+      'posts.trends':                    { enabled: false },
+      'posts.logo':                      { enabled: false },
+      'posts.saveDraft':                 { enabled: false },
+      'inbox.bucket.chat':               { enabled: false },
+      'inbox.bucket.create':             { enabled: false }
+    },
     isActive: true,
     isPublic: true,
     displayOrder: 1

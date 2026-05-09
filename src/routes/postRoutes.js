@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middlewares/auth');
 const postController = require('../controllers/postController');
+const { requireFeature } = require('../middlewares/requireFeature');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const path = require('path');
 const fs = require('fs');
 const Media = require('../models/Media');
@@ -178,8 +180,13 @@ router.get('/video-job/:jobId', protect, postController.getVideoJobStatus);
 
 // @route   POST /api/posts/save-draft
 // @desc    Save an AI-generated variant as a draft ScheduledPost
-// @access  Private
-router.post('/save-draft', protect, postController.saveDraft);
+// @access  Private — requires `posts.saveDraft` feature on the active plan
+router.post(
+  '/save-draft',
+  protect,
+  requireFeature(FEATURE_KEYS.POSTS_SAVE_DRAFT),
+  postController.saveDraft
+);
 
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately
