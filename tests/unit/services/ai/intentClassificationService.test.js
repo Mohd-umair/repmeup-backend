@@ -262,3 +262,45 @@ describe('analyzeInteraction', () => {
     expect(r.bucketResult).toEqual({ bucketId: 'g1', method: 'default' });
   });
 });
+
+describe('resolveIntentBucketWithoutAi', () => {
+  it('keyword match wins; no LLM', () => {
+    const buckets = [
+      { _id: 'b1', name: 'Ship', keywords: ['delivery', 'ship'], isDefault: false },
+      { _id: 'g1', name: 'Gen', keywords: [], isDefault: true }
+    ];
+    expect(intent.resolveIntentBucketWithoutAi('Where is my delivery', buckets)).toEqual({
+      bucketId: 'b1',
+      method: 'keyword'
+    });
+    expect(mockChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('ignores null / invalid bucket rows', () => {
+    const buckets = [
+      null,
+      { _id: 'b1', name: 'Ship', keywords: ['delivery'], isDefault: false }
+    ];
+    expect(intent.resolveIntentBucketWithoutAi('delivery help', buckets)).toEqual({ bucketId: 'b1', method: 'keyword' });
+  });
+
+  it('uses default bucket when no keyword match', () => {
+    const buckets = [
+      { _id: 'b1', name: 'Ship', keywords: ['delivery'], isDefault: false },
+      { _id: 'g1', name: 'Gen', keywords: [], isDefault: true }
+    ];
+    expect(intent.resolveIntentBucketWithoutAi('hello there', buckets)).toEqual({
+      bucketId: 'g1',
+      method: 'default'
+    });
+    expect(mockChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('null bucketId when no default bucket exists', () => {
+    const buckets = [{ _id: 'b1', name: 'Ship', keywords: ['only'], isDefault: false }];
+    expect(intent.resolveIntentBucketWithoutAi('unmatched text', buckets)).toEqual({
+      bucketId: null,
+      method: 'default'
+    });
+  });
+});

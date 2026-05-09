@@ -10,6 +10,7 @@ const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 const { emitToOrg } = require('../utils/socketEmitter');
 const { classifyMessage, countPreviousFallbacks } = require('../utils/messageIntentClassifier');
 const { updateAIInsights } = require('../services/contactService');
+const { shouldSkipAiProcessingForSyncedInteraction } = require('../utils/syncInteractionBackfillGuard');
 
 // ─── Fallback tone rotation pool ─────────────────────────────────────────────
 // Primary message comes from fallbackSettings.message (user-configured).
@@ -176,19 +177,15 @@ async function processSingleInteraction(interactionId, organization, jobData = {
     }
 
     // Safety-net guard: never auto-reply to historical or old synced interactions.
-    // This is a second line of defence — the primary guard is in platformController.syncPlatform.
-    // It catches any edge case where a sync job slips past the controller-level check
-    // (e.g. initial OAuth sync, stale connectedAt, or future sync code paths).
-    if (interaction.source === 'sync') {
-      const SYNC_AUTO_REPLY_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+    // Primary guard is in platformSyncService.syncPlatform; this catches queued jobs
+    // or code paths that bypass that check (e.g. stale jobs, duplicate queue).
+    if (shouldSkipAiProcessingForSyncedInteraction(interaction, interaction.platformConnection)) {
       const msgDate = interaction.platformCreatedAt || interaction.createdAt;
-      const connectedAt = interaction.platformConnection?.connectedAt;
-      const isHistorical = connectedAt && msgDate < connectedAt;
-      const isTooOld = (Date.now() - new Date(msgDate).getTime()) > SYNC_AUTO_REPLY_AGE_MS;
-
-      if (isHistorical || isTooOld) {
-        return { skipped: true, reason: `Synced historical/old interaction (msgDate=${msgDate}, connectedAt=${connectedAt})` };
-      }
+      const conn = interaction.platformConnection;
+      return {
+        skipped: true,
+        reason: `Synced historical/old interaction (msgDate=${msgDate}, connectedAt=${conn?.connectedAt}, createdAt=${conn?.createdAt})`
+      };
     }
 
     const threadDm = isThreadStyleDm(interaction);

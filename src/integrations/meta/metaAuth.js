@@ -524,6 +524,7 @@ class MetaAuthService {
           type: 'user_token',
           purpose: 'page_management'
         };
+        if (!existingConnection.connectedAt) existingConnection.connectedAt = new Date();
         await existingConnection.save();
         console.log(`✅ [Meta] Updated Facebook user-level connection for: ${userInfo.name}`);
         return existingConnection;
@@ -547,7 +548,8 @@ class MetaAuthService {
         metadata: {
           type: 'user_token', // Mark this as a user-level token
           purpose: 'page_management'
-        }
+        },
+        connectedAt: new Date()
       });
 
       console.log(`✅ [Meta] Created Facebook user-level connection for: ${userInfo.name}`);
@@ -584,6 +586,7 @@ class MetaAuthService {
           if (!existingConnection.metadata) existingConnection.metadata = {};
           existingConnection.metadata.profilePicture = pagePictureUrl;
         }
+        if (!existingConnection.connectedAt) existingConnection.connectedAt = new Date();
         await existingConnection.save();
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
         return existingConnection;
@@ -622,7 +625,8 @@ class MetaAuthService {
           instagramAccountId: pageData.instagram_business_account?.id || null,
           instagramUsername: pageData.instagram_business_account?.username || null,
           profilePicture: pagePictureUrl
-        }
+        },
+        connectedAt: new Date()
       });
 
       // Increment usage counter (SOLID: Dependency Inversion - depend on service, not direct model manipulation)
@@ -751,6 +755,7 @@ class MetaAuthService {
           existingConnection.metadata.profilePicture = instagramAccount.profile_picture_url;
         }
         existingConnection.scopes = ['instagram_basic', 'instagram_manage_comments', 'instagram_manage_insights', 'instagram_content_publish', 'pages_show_list'];
+        if (!existingConnection.connectedAt) existingConnection.connectedAt = new Date();
         await existingConnection.save();
         console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
@@ -799,7 +804,8 @@ class MetaAuthService {
           facebookPageId: pageData.id,
           facebookPageName: pageData.name,
           profilePicture: instagramAccount.profile_picture_url
-        }
+        },
+        connectedAt: new Date()
       });
 
       // Increment usage counter (SOLID: Dependency Inversion)

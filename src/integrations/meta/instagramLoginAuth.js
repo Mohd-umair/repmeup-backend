@@ -3,6 +3,25 @@ const crypto = require('crypto');
 const PlatformConnection = require('../../models/PlatformConnection');
 
 /**
+ * Map Instagram Graph `account_type` to `PlatformConnection.metadata.accountType`
+ * (enum: business | personal | creator). Meta may return MEDIA_CREATOR and other
+ * strings that are not valid as-is after toLowerCase().
+ */
+function normalizeInstagramMetadataAccountType(accountTypeRaw) {
+  const s = String(accountTypeRaw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (!s) return 'business';
+  if (s === 'BUSINESS') return 'business';
+  if (s === 'PERSONAL') return 'personal';
+  if (s === 'CREATOR' || s === 'MEDIA_CREATOR' || s === 'INSTAGRAM_CREATOR') {
+    return 'creator';
+  }
+  return 'business';
+}
+
+/**
  * Instagram Login Auth Service
  * Implements "Instagram API with Instagram Login" — no Facebook account required.
  * https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login
@@ -336,7 +355,7 @@ class InstagramLoginAuthService {
       console.warn(`[InstagramLogin] user_id missing from /me response for @${userInfo.username} — falling back to ISUID. Webhooks may not match until migration is run.`);
     }
     const igUsername = userInfo.username;
-    const accountType = (userInfo.account_type || 'business').toLowerCase();
+    const accountType = normalizeInstagramMetadataAccountType(userInfo.account_type);
     const scopes = [
       'instagram_business_basic',
       'instagram_business_content_publish',
@@ -385,8 +404,10 @@ class InstagramLoginAuthService {
       existing.metadata.connectionType = 'instagram_login';
       existing.metadata.accountType = accountType;
       existing.metadata.igLoginScopedId = isuid;
+      if (!existing.connectedAt) existing.connectedAt = new Date();
       if (!existing.platformData) existing.platformData = {};
       existing.platformData.businessAccountId = globalIgId;
+      existing.platformData.accountType = accountType.toUpperCase();
       await existing.save();
       console.log(`[InstagramLogin] Updated connection for @${igUsername}`);
       await this.subscribeToWebhook(isuid, accessToken);
@@ -423,14 +444,15 @@ class InstagramLoginAuthService {
       isActive: true,
       platformData: {
         businessAccountId: globalIgId,
-        accountType: (userInfo.account_type || 'BUSINESS').toUpperCase()
+        accountType: accountType.toUpperCase()
       },
       metadata: {
         connectionType: 'instagram_login',
         accountType,
         igLoginScopedId: isuid,
         profilePicture: userInfo.profile_picture_url
-      }
+      },
+      connectedAt: new Date()
     });
 
     const platformConnectionService = require('../../services/platformConnectionService');

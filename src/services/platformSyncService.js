@@ -3,8 +3,8 @@
  *
  * Owns all orchestration logic for manually syncing a connected platform:
  *   - Routing to the correct integration service (instagram, facebook, etc.)
- *   - Post-sync sentiment analysis
- *   - AI queue + auto-reply scheduling (skips historical / old messages)
+ *   - Post-sync sentiment (skipped for sync backfill — same window as paid AI)
+ *   - AI queue + heuristic bucket for backfill; auto-reply only for live synced traffic
  *   - Inbox cache invalidation
  *
  * The controller only does: find connection → call this service → return JSON.
@@ -18,15 +18,16 @@ const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
 const whatsappService = require('../integrations/whatsapp/whatsappService');
 const Interaction = require('../models/Interaction');
+const IntentBucket = require('../models/IntentBucket');
 const { aiQueue } = require('../config/queue');
 const autoReplyScheduler = require('./autoReplyScheduler');
 const aiService = require('./aiService');
 const cacheService = require('./cacheService');
 const logger = require('../config/logger');
-
-// Messages older than this threshold are treated as historical during sync
-// and are never auto-replied to, even on a freshly connected account.
-const SYNC_AUTO_REPLY_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+const {
+  shouldSkipAiProcessingForSyncedInteraction,
+  shouldApplyHeuristicIntentBucket
+} = require('../utils/syncInteractionBackfillGuard');
 
 /**
  * Sync a platform connection and return a result summary.
@@ -37,6 +38,7 @@ const SYNC_AUTO_REPLY_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
  *   count: number,
  *   autoReplyQueued: number,
  *   sentimentAnalyzed: number,
+ *   aiSkippedBackfill: number,
  *   linkedInSyncHint?: string,
  *   error?: string          // present when the platform returns a non-fatal error message
  * }>}
@@ -59,7 +61,7 @@ async function syncPlatform(connection, organizationId) {
       result = await googleService.fetchAllReviews(connection);
       if (!result.success && result.error) {
         // Non-fatal: surface the platform error message to the caller
-        return { count: result.count || 0, autoReplyQueued: 0, sentimentAnalyzed: 0, error: result.error };
+        return { count: result.count || 0, autoReplyQueued: 0, sentimentAnalyzed: 0, aiSkippedBackfill: 0, error: result.error };
       }
       break;
 
@@ -67,7 +69,7 @@ async function syncPlatform(connection, organizationId) {
       const syncComments = connection.settings?.syncComments !== false;
       const syncDMs = connection.settings?.syncDMs !== false;
       if (!syncComments && !syncDMs) {
-        return { count: 0, autoReplyQueued: 0, sentimentAnalyzed: 0, error: 'Both comments and DMs sync are disabled for this connection' };
+        return { count: 0, autoReplyQueued: 0, sentimentAnalyzed: 0, aiSkippedBackfill: 0, error: 'Both comments and DMs sync are disabled for this connection' };
       }
       if (syncComments && syncDMs) {
         result = await instagramService.fetchAllInteractions(connection);
@@ -109,17 +111,18 @@ async function syncPlatform(connection, organizationId) {
       } catch (err) {
         logger.warn('[platformSyncService] WhatsApp health check failed (non-fatal)', { error: err.message });
       }
-      return { count: 0, autoReplyQueued: 0, sentimentAnalyzed: 0 };
+      return { count: 0, autoReplyQueued: 0, sentimentAnalyzed: 0, aiSkippedBackfill: 0 };
     }
 
     default:
-      return { count: 0, autoReplyQueued: 0, sentimentAnalyzed: 0, error: 'Platform sync not implemented' };
+      return { count: 0, autoReplyQueued: 0, sentimentAnalyzed: 0, aiSkippedBackfill: 0, error: 'Platform sync not implemented' };
   }
 
   // ── Post-sync processing ──────────────────────────────────────────────────
 
   let autoReplyQueued = 0;
   let sentimentAnalyzed = 0;
+  let aiSkippedBackfill = 0;
 
   if (result.count > 0 && result.interactions?.length > 0) {
     const platformIds = result.interactions.map(i => i.platformId);
@@ -132,9 +135,17 @@ async function syncPlatform(connection, organizationId) {
       $or: [{ replies: { $size: 0 } }, { replies: { $exists: false } }]
     });
 
-    // Sentiment analysis — run synchronously for immediate inbox filtering
+    const activeBuckets =
+      newInteractions.length > 0
+        ? await IntentBucket.find({ organization: organizationId, isActive: true })
+            .sort({ order: 1 })
+            .lean()
+        : [];
+
+    // Sentiment analysis — skip for sync backfill (same window as paid AI / auto-reply)
     for (const interaction of newInteractions) {
-      if (!interaction.sentiment && interaction.content) {
+      const skipBackfill = shouldSkipAiProcessingForSyncedInteraction(interaction, connection);
+      if (!interaction.sentiment && interaction.content && !skipBackfill) {
         try {
           const sentimentResult = aiService.fallbackSentimentAnalysis(interaction.content);
           await Interaction.updateOne(
@@ -157,25 +168,40 @@ async function syncPlatform(connection, organizationId) {
       }
     }
 
-    // AI + auto-reply queue — skip historical / old messages
+    // AI + auto-reply queue — skip historical / old synced backlog; heuristic bucket only (no credits)
     for (const interaction of newInteractions) {
       try {
         if (interaction.replies?.length > 0) continue;
 
-        await aiQueue.add(
-          { interactionId: interaction._id },
-          { attempts: 3, backoff: 2000, jobId: `ai-${interaction._id}` }
-        );
+        const skipBackfill = shouldSkipAiProcessingForSyncedInteraction(interaction, connection);
 
-        const msgDate = interaction.platformCreatedAt || interaction.createdAt;
-        const isHistorical = connection.connectedAt && msgDate < connection.connectedAt;
-        const isTooOld = (Date.now() - new Date(msgDate).getTime()) > SYNC_AUTO_REPLY_AGE_MS;
+        if (skipBackfill) {
+          aiSkippedBackfill++;
+          if (shouldApplyHeuristicIntentBucket(interaction)) {
+            const bucketRes = aiService.resolveIntentBucketWithoutAi(
+              interaction.content == null ? '' : String(interaction.content),
+              activeBuckets
+            );
+            if (bucketRes.bucketId) {
+              await Interaction.updateOne(
+                { _id: interaction._id },
+                { $set: { intentBucket: bucketRes.bucketId, bucketAssignedBy: bucketRes.method } }
+              );
+            }
+          }
+        } else {
+          await aiQueue.add(
+            { interactionId: interaction._id },
+            { attempts: 3, backoff: 2000, jobId: `ai-${interaction._id}` }
+          );
+        }
 
-        if (isHistorical || isTooOld) {
-          logger.debug('[platformSyncService] Skipping auto-reply for historical/old message', {
+        if (skipBackfill) {
+          logger.debug('[platformSyncService] Skipping paid AI & auto-reply for sync backfill', {
             interactionId: interaction._id,
-            msgDate,
-            connectedAt: connection.connectedAt
+            msgDate: interaction.platformCreatedAt || interaction.createdAt,
+            connectedAt: connection.connectedAt,
+            createdAt: connection.createdAt
           });
           continue;
         }
@@ -201,13 +227,15 @@ async function syncPlatform(connection, organizationId) {
     platform: connection.platform,
     count: result.count,
     sentimentAnalyzed,
-    autoReplyQueued
+    autoReplyQueued,
+    aiSkippedBackfill
   });
 
   return {
     count: result.count,
     autoReplyQueued,
     sentimentAnalyzed,
+    aiSkippedBackfill,
     linkedInSyncHint: result.linkedInSyncHint
   };
 }

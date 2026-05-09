@@ -10,7 +10,7 @@
  *   utils/openaiModelHelpers.js                 — pure model/field helpers
  *   services/ai/openaiClient.js                 — OpenAI HTTP wrapper + usage logging
  *   services/ai/sentimentService.js             — analyzeSentiment / fallbackSentimentAnalysis
- *   services/ai/intentClassificationService.js  — detectIntent / classifyIntoBucket / analyzeInteraction / extractTopics
+ *   services/ai/intentClassificationService.js  — detectIntent / classifyIntoBucket / analyzeInteraction / extractTopics / resolveIntentBucketWithoutAi
  *   services/ai/knowledgeBaseSearchService.js   — searchKnowledgeBase
  *   services/ai/brandContextService.js          — getBrandContext / getVisualStyleContext / getReferenceOnlyContext
  *   services/ai/postGenerationService.js        — generatePost / generatePostVariants / generateEventPost
@@ -187,6 +187,11 @@ class AIService {
   /** @see services/ai/intentClassificationService.js#analyzeInteraction */
   async analyzeInteraction(content, buckets = []) {
     return intentClassificationService.analyzeInteraction(content, buckets);
+  }
+
+  /** @see services/ai/intentClassificationService.js#resolveIntentBucketWithoutAi */
+  resolveIntentBucketWithoutAi(content, buckets = []) {
+    return intentClassificationService.resolveIntentBucketWithoutAi(content, buckets);
   }
 
   /** @see services/ai/intentClassificationService.js#extractTopics */

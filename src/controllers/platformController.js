@@ -503,7 +503,7 @@ exports.syncPlatform = async (req, res, next) => {
       });
     }
 
-    const { count, autoReplyQueued, linkedInSyncHint } = syncResult;
+    const { count, autoReplyQueued, linkedInSyncHint, aiSkippedBackfill = 0 } = syncResult;
     const message =
       count > 0
         ? `Sync completed. Found ${count} new interactions. ${autoReplyQueued} auto-replies queued.`
@@ -517,6 +517,7 @@ exports.syncPlatform = async (req, res, next) => {
       data: {
         interactionsAdded: count,
         autoRepliesQueued: autoReplyQueued,
+        aiSkippedBackfill,
         ...(linkedInSyncHint && { linkedInSyncHint })
       }
     });

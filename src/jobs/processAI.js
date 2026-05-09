@@ -11,6 +11,10 @@ const cacheService = require('../services/cacheService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const {
+  shouldSkipAiProcessingForSyncedInteraction,
+  shouldApplyHeuristicIntentBucket
+} = require('../utils/syncInteractionBackfillGuard');
 
 /**
  * Process AI analysis for an interaction
@@ -29,7 +33,8 @@ module.exports = async function processAI(job) {
 
     // Get interaction
     const interaction = await Interaction.findById(interactionId)
-      .populate('organization');
+      .populate('organization')
+      .populate({ path: 'platformConnection', select: 'connectedAt createdAt' });
 
     if (!interaction) {
       jobLogger.info('Interaction not found - skipping');
@@ -49,6 +54,30 @@ module.exports = async function processAI(job) {
     }
 
     const orgIdCtx = interaction.organization?._id || interaction.organization;
+
+    // Synced backlog: no paid analysis/credits — keyword/default bucket only (matches platformSyncService)
+    if (shouldSkipAiProcessingForSyncedInteraction(interaction, interaction.platformConnection)) {
+      jobLogger.debug('Skipping paid AI for sync backfill — heuristic bucket only', { interactionId });
+      const activeBuckets = await IntentBucket.find({ organization: orgIdCtx, isActive: true })
+        .sort({ order: 1 })
+        .lean();
+      if (shouldApplyHeuristicIntentBucket(interaction)) {
+        const bucketRes = aiService.resolveIntentBucketWithoutAi(
+          interaction.content == null ? '' : String(interaction.content),
+          activeBuckets
+        );
+        if (bucketRes.bucketId) {
+          await Interaction.findByIdAndUpdate(
+            interactionId,
+            { $set: { intentBucket: bucketRes.bucketId, bucketAssignedBy: bucketRes.method } },
+            { new: false }
+          );
+          cacheService.invalidateAnalytics(orgIdCtx).catch(() => {});
+          cacheService.invalidateInteractionCaches(orgIdCtx).catch(() => {});
+        }
+      }
+      return { skipped: true, reason: 'sync_backfill_no_paid_ai' };
+    }
 
     // Credit gate — 1 credit covers the full analysis pipeline for this interaction
     const creditCheck = await aiCreditService.checkCredits(orgIdCtx, 1);
