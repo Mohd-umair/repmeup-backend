@@ -4,7 +4,7 @@
  *   node backend/scripts/migrate-plan-entitlements.js          # dry run
  *   node backend/scripts/migrate-plan-entitlements.js --fix    # write changes
  *
- * Idempotent: a plan that already has an `entitlements` Map populated for a key
+ * Idempotent: a plan that already has `entitlements` populated for a key
  * is left untouched for that key (admin edits win).
  */
 
@@ -51,38 +51,43 @@ async function migrate() {
   let touched = 0;
 
   for (const plan of plans) {
-    const ent = plan.entitlements || new Map();
-    const before = ent.size || 0;
+    /** @type {Record<string, object>} */
+    let ent =
+      plan.entitlements && typeof plan.entitlements === 'object' && !(plan.entitlements instanceof Map)
+        ? { ...plan.entitlements }
+        : plan.entitlements instanceof Map
+          ? Object.fromEntries(plan.entitlements)
+          : {};
+    const before = Object.keys(ent).length;
 
     for (const [field, key] of Object.entries(LIMIT_FIELD_TO_KEY)) {
-      if (ent.has?.(key)) continue; // admin-set value wins
+      if (ent[key] !== undefined) continue;
       const v = plan.limits?.[field];
       if (v === undefined || v === null) continue;
-      ent.set(key, { limit: v });
+      ent[key] = { limit: v };
     }
 
     if (Array.isArray(plan.features)) {
       for (const code of plan.features) {
         const key = FEATURE_STRING_TO_KEY[code];
         if (!key) continue;
-        if (ent.has?.(key)) continue;
-        // Boolean keys store { enabled: true }; for KB_ENTRIES_MAX (a limit) we
-        // signal "any KB usage allowed" by setting an explicit unlimited.
+        if (ent[key] !== undefined) continue;
         if (key === FEATURE_KEYS.KB_ENTRIES_MAX) {
-          ent.set(key, { limit: -1 });
+          ent[key] = { limit: -1 };
         } else {
-          ent.set(key, { enabled: true });
+          ent[key] = { enabled: true };
         }
       }
     }
 
-    const added = (ent.size || 0) - before;
+    const after = Object.keys(ent).length;
+    const added = after - before;
     if (added <= 0) continue;
 
     plan.entitlements = ent;
     plan.markModified('entitlements');
     touched += 1;
-    console.log(`📦 ${plan.planId}: +${added} entitlement entries (total ${ent.size}).`);
+    console.log(`📦 ${plan.planId}: +${added} entitlement entries (total ${after}).`);
 
     if (!DRY_RUN) await plan.save();
   }

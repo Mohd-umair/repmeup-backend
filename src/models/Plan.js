@@ -101,29 +101,21 @@ const planSchema = new mongoose.Schema({
   }],
 
   /**
-   * Canonical entitlements map keyed by Feature.key.
+   * Canonical entitlements keyed by Feature.key (e.g. users.max).
+   *
+   * Stored as a plain Object (Mixed), NOT Mongoose Map — Map keys cannot contain "."
+   * and our catalog uses dotted keys exclusively.
    *
    * Each value:
    *   - boolean feature: { enabled: true|false }
-   *   - limit feature:   { limit: -1|number }            // -1 = unlimited
+   *   - limit feature:   { limit: -1|number }
    *   - enum feature:    { value: 'someEnumValue' }
    *   - list feature:    { value: ['a','b'] }
-   *   - json feature:    { value: { ...arbitrary } }
-   *
-   * Anything missing falls back to the catalog's `defaultValue` at resolve time —
-   * NOT every plan needs to specify every key.
+   *   - json feature:    { value: { ... } }
    */
   entitlements: {
-    type: Map,
-    of: new mongoose.Schema(
-      {
-        enabled: { type: Boolean, default: undefined },
-        limit: { type: Number, default: undefined },
-        value: { type: mongoose.Schema.Types.Mixed, default: undefined }
-      },
-      { _id: false }
-    ),
-    default: undefined
+    type: mongoose.Schema.Types.Mixed,
+    default: () => ({})
   },
   
   // Visual & Marketing
@@ -239,7 +231,8 @@ planSchema.methods.isUnlimited = function(limitType) {
 planSchema.methods.getEntitlement = function(featureKey) {
   if (!this.entitlements) return undefined;
   if (typeof this.entitlements.get === 'function') {
-    return this.entitlements.get(featureKey);
+    const v = this.entitlements.get(featureKey);
+    if (v !== undefined && v !== null) return v;
   }
   return this.entitlements[featureKey];
 };
@@ -251,7 +244,14 @@ planSchema.methods.getEntitlement = function(featureKey) {
 planSchema.methods.getEntitlementsObject = function() {
   if (!this.entitlements) return {};
   if (typeof this.entitlements.toObject === 'function') {
-    return this.entitlements.toObject();
+    try {
+      return this.entitlements.toObject();
+    } catch (_) {
+      // fall through
+    }
+  }
+  if (this.entitlements instanceof Map) {
+    return Object.fromEntries(this.entitlements);
   }
   return { ...this.entitlements };
 };

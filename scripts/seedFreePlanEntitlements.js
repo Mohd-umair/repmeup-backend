@@ -1,5 +1,5 @@
 /**
- * Seed / refresh the Free-plan entitlements Map without touching existing
+ * Seed / refresh the Free-plan entitlements object without touching existing
  * paid plans. Idempotent — re-running just overwrites the Free plan's
  * entitlements with the canonical values from the product spec.
  *
@@ -101,7 +101,16 @@ async function run() {
 
   console.log('\n📋 Result snapshot:');
   console.log(JSON.stringify(
-    { planId: result.planId, name: result.name, entitlements: Object.fromEntries(result.entitlements || []) },
+    {
+      planId: result.planId,
+      name: result.name,
+      entitlements:
+        result.entitlements && typeof result.entitlements === 'object' && !(result.entitlements instanceof Map)
+          ? result.entitlements
+          : result.entitlements instanceof Map
+            ? Object.fromEntries(result.entitlements)
+            : {}
+    },
     null,
     2
   ));
