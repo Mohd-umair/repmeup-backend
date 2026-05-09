@@ -10,7 +10,7 @@ const { emitToOrg } = require('../utils/socketEmitter');
  *   - Drops keys not in the catalog (admins can't invent feature keys at runtime).
  *   - Coerces numeric `limit` strings to numbers.
  *   - Coerces boolean strings to true/false.
- *   - Returns a plain object suitable for assigning to a Mongoose Map field.
+ *   - Returns a plain object for Plan.entitlements (Mixed — keys may contain ".").
  */
 function sanitizeEntitlementsPayload(rawIn) {
   if (!rawIn || typeof rawIn !== 'object') return undefined;
@@ -247,7 +247,7 @@ exports.updatePlan = async (req, res, next) => {
 
     if (req.body.entitlements !== undefined) {
       const cleaned = sanitizeEntitlementsPayload(req.body.entitlements) || {};
-      plan.entitlements = new Map(Object.entries(cleaned));
+      plan.entitlements = cleaned;
       plan.markModified('entitlements');
     }
 
