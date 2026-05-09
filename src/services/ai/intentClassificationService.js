@@ -6,7 +6,7 @@
  *   - extractTopics(content)           → 2-3 keyword topics
  *   - classifyIntoBucket(content, bs)  → keyword-first, AI-second routing into IntentBucket
  *   - analyzeInteraction(content, bs)  → ONE prompt that returns sentiment+intent+topics+bucket
- *                                         (used by the inbox processor to collapse 4 calls into 1)
+ *   - resolveIntentBucketWithoutAi    → keyword + default bucket only (no LLM)
  */
 
 const openaiClient = require('./openaiClient');
@@ -16,6 +16,36 @@ const {
 } = require('../../utils/openaiModelHelpers');
 
 const VALID_INTENTS = Object.freeze(['inquiry', 'complaint', 'praise', 'feedback', 'support']);
+
+/**
+ * Keyword routing + default bucket only. No LLM calls (sync backfill / credit-free path).
+ *
+ * @param {string} content
+ * @param {Array<{ _id: unknown, keywords?: string[], isDefault?: boolean }>} buckets
+ * @returns {{ bucketId: string|null, method: 'keyword'|'default' }}
+ */
+function resolveIntentBucketWithoutAi(content, buckets = []) {
+  const list = (buckets || []).filter((b) => b != null && b._id != null);
+  if (list.length === 0) {
+    return { bucketId: null, method: 'default' };
+  }
+
+  const lowerContent = (content || '').toLowerCase();
+  for (const bucket of list) {
+    if (!bucket.keywords || bucket.keywords.length === 0) continue;
+    for (const kw of bucket.keywords) {
+      if (kw && lowerContent.includes(String(kw).toLowerCase())) {
+        return { bucketId: bucket._id.toString(), method: 'keyword' };
+      }
+    }
+  }
+
+  const defaultBucket = list.find((b) => b.isDefault);
+  return {
+    bucketId: defaultBucket ? defaultBucket._id.toString() : null,
+    method: 'default'
+  };
+}
 
 /**
  * Coarse intent classification — returns one of:
@@ -257,5 +287,6 @@ module.exports = {
   detectIntent,
   extractTopics,
   classifyIntoBucket,
-  analyzeInteraction
+  analyzeInteraction,
+  resolveIntentBucketWithoutAi
 };

@@ -41,7 +41,8 @@ jest.mock('../../../src/services/ai/intentClassificationService', () => ({
   detectIntent: mockReturn('intent.detectIntent'),
   classifyIntoBucket: mockReturn('intent.classifyIntoBucket'),
   analyzeInteraction: mockReturn('intent.analyzeInteraction'),
-  extractTopics: mockReturn('intent.extractTopics')
+  extractTopics: mockReturn('intent.extractTopics'),
+  resolveIntentBucketWithoutAi: mockSyncReturn('intent.resolveIntentBucketWithoutAi')
 }));
 
 jest.mock('../../../src/services/ai/knowledgeBaseSearchService', () => ({
@@ -127,7 +128,7 @@ describe('aiService facade — public methods exist', () => {
     // Reply generation
     'generateResponseOpenAI', 'generateResponse', 'generateText',
     // Intent
-    'detectIntent', 'classifyIntoBucket', 'analyzeInteraction', 'extractTopics',
+    'detectIntent', 'classifyIntoBucket', 'analyzeInteraction', 'extractTopics', 'resolveIntentBucketWithoutAi',
     // Auto-reply
     'shouldQueueImmediateAutoReply', 'canAutoReply', 'generateAutoReply',
     '_normalizePlatformList', '_hasKnownSentiment'
@@ -152,6 +153,7 @@ describe('aiService facade — methods delegate to the right service', () => {
     ['detectIntent',                  ['hello'],                    'intent.detectIntent'],
     ['classifyIntoBucket',            ['hello', []],                'intent.classifyIntoBucket'],
     ['analyzeInteraction',            ['hello', []],                'intent.analyzeInteraction'],
+    ['resolveIntentBucketWithoutAi',  ['hello', []],                'intent.resolveIntentBucketWithoutAi'],
     ['extractTopics',                 ['hello'],                    'intent.extractTopics'],
     ['generatePost',                  ['p', ['ig'], 'same', 'post', 'org_1'], 'post.generatePost'],
     ['generatePostVariants',          ['p', ['ig'], {}],            'post.generatePostVariants'],
