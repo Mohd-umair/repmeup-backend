@@ -194,7 +194,17 @@ const interactionSchema = new mongoose.Schema({
   escalatedAt: Date,
   escalationType: {
     type: String,
-    enum: ['auto', 'manual', 'keyword', 'sentiment', 'reply_limit', 'ai_confidence', 'intent_routing', 'ai_unresolvable']
+    enum: [
+      'auto',
+      'manual',
+      'keyword',
+      'sentiment',
+      'reply_limit',
+      'ai_confidence',
+      'intent_routing',
+      'ai_unresolvable',
+      'ai_no_kb_fallback'
+    ]
   },
   escalationMetadata: {
     triggerKeywords: [String],

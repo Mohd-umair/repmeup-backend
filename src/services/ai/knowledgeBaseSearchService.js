@@ -63,10 +63,16 @@ async function searchKnowledgeBase(organizationId, query, limit = 5) {
     }
 
     // 2. Keyword / title regex match
+    // Strip punctuation/symbols only — do not strip \p{M} (combining marks), or scripts like
+    // Devanagari lose conjuncts when halants are removed.
     const queryWords = trimmed
-      .toLowerCase()
       .split(/\s+/)
-      .map((w) => w.replace(/[^\w]/g, ''))
+      .map((w) =>
+        w
+          .normalize('NFC')
+          .replace(/[\p{P}\p{S}]+/gu, '')
+          .toLowerCase()
+      )
       .filter((w) => w.length >= 2)
       .slice(0, 12);
 
