@@ -69,17 +69,22 @@ const SMALL_TALK_PATTERNS = [
  * Criteria:
  *  - More than 60% of characters are non-alphanumeric (excluding spaces), OR
  *  - No token (word) of at least 2 chars found in the text (after stripping emoji/punctuation), AND text is short
+ *
+ * Uses Unicode property escapes (\p{L} = any letter, \p{N} = any number) so that
+ * non-Latin scripts (Devanagari/Hindi, Arabic, CJK, Cyrillic, etc.) are treated as
+ * valid alphanumeric characters and are never mis-classified as gibberish.
  */
 function isGibberish(text) {
   const stripped = text.replace(/\s+/g, ' ').trim();
   if (stripped.length === 0) return true;
 
-  const nonAlpha = (stripped.match(/[^a-zA-Z0-9\u00C0-\u024F\u0600-\u06FF\s]/g) || []).length;
+  // Count characters that are NOT a Unicode letter, digit, or whitespace
+  const nonAlpha = (stripped.match(/[^\p{L}\p{N}\s]/gu) || []).length;
   const ratio = nonAlpha / stripped.length;
   if (ratio > 0.6) return true;
 
-  // No real words (≥2 chars) at all and short text
-  const words = stripped.split(/\s+/).filter(w => w.replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, '').length >= 2);
+  // No real words (≥2 letter/digit chars) at all and short text
+  const words = stripped.split(/\s+/).filter(w => w.replace(/[^\p{L}\p{N}]/gu, '').length >= 2);
   if (words.length === 0 && stripped.length < 15) return true;
 
   return false;
