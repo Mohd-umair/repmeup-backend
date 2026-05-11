@@ -12,6 +12,7 @@
  */
 
 const axios = require('axios');
+const FormData = require('form-data');
 const aiApiUsageService = require('../aiApiUsageService');
 const logger = require('../../config/logger');
 const { getAiRequestContext } = require('../aiRequestContext');
@@ -22,6 +23,27 @@ const {
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_TRANSCRIPTION_URL = 'https://api.openai.com/v1/audio/transcriptions';
+
+/** Map common audio mime types to an appropriate file extension for the Whisper upload. */
+function mimeToExtension(mimeType) {
+  const map = {
+    'audio/ogg': 'ogg',
+    'audio/ogg; codecs=opus': 'ogg',
+    'audio/mpeg': 'mp3',
+    'audio/mp4': 'mp4',
+    'audio/mp4a-latm': 'm4a',
+    'audio/webm': 'webm',
+    'audio/webm; codecs=opus': 'webm',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/flac': 'flac',
+    'audio/x-m4a': 'm4a',
+    'audio/aac': 'mp4',
+  };
+  const base = (mimeType || '').split(';')[0].trim().toLowerCase();
+  return map[base] || map[mimeType] || 'ogg';
+}
 
 class OpenAIClient {
   constructor() {
@@ -130,6 +152,37 @@ class OpenAIClient {
       totalTokens: Number(usage.total_tokens) || 0,
       metadata: { prompt: prompt ? String(prompt).substring(0, 3000) : '' }
     });
+  }
+
+  /**
+   * Transcribe an audio buffer using OpenAI Whisper (whisper-1).
+   *
+   * @param {Buffer} audioBuffer  - Raw audio binary
+   * @param {string} mimeType     - MIME type of the audio (e.g. 'audio/ogg', 'audio/mpeg')
+   * @returns {Promise<string>}   - Transcription text
+   */
+  async transcribeAudio(audioBuffer, mimeType) {
+    if (!this.apiKey || !this.apiKey.trim()) {
+      throw new Error('OPENAI_API_KEY is not configured — cannot transcribe audio');
+    }
+    const ext = mimeToExtension(mimeType);
+    const form = new FormData();
+    form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
+    form.append('model', 'whisper-1');
+
+    const response = await axios.post(OPENAI_TRANSCRIPTION_URL, form, {
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        ...form.getHeaders()
+      },
+      timeout: 60000
+    });
+
+    const text = response.data?.text;
+    if (typeof text !== 'string') {
+      throw new Error('Whisper API returned no transcription text');
+    }
+    return text.trim();
   }
 
   /** Record video generation usage. Non-blocking. */

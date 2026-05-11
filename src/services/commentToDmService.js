@@ -248,8 +248,23 @@ async function processCommentForProduct(interaction, organizationId) {
     });
 
     try {
-      await instagramService.replyToComment(interaction.platformId, publicStub, accessToken, connType);
-      svcLogger.info('[commentToDm] Posted public comment stub', { commentId: interaction.platformId, stub: publicStub });
+      const stubResult = await instagramService.replyToComment(
+        interaction.platformId,
+        publicStub,
+        accessToken,
+        connType
+      );
+      if (stubResult?.success) {
+        svcLogger.info('[commentToDm] Posted public comment stub', {
+          commentId: interaction.platformId,
+          stub: publicStub
+        });
+      } else {
+        svcLogger.warn('[commentToDm] Public comment stub not posted — continuing to DM', {
+          commentId: interaction.platformId,
+          error: stubResult?.error || 'unknown'
+        });
+      }
     } catch (stubErr) {
       // Non-fatal — still send DM even if public reply fails (e.g. comment deleted, permissions)
       svcLogger.warn('[commentToDm] Failed to post public comment stub — continuing to DM', {

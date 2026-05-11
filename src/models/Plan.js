@@ -34,6 +34,7 @@ const planSchema = new mongoose.Schema({
   },
   
   // Pricing
+  // Amount in INR (whole rupees) for display and business logic. Use `priceInr` (paise) for Razorpay.
   price: {
     type: mongoose.Schema.Types.Mixed, // Can be Number or String ('custom')
     required: true,
@@ -206,11 +207,15 @@ planSchema.index({ tier: 1 });
 planSchema.index({ isActive: 1, isPublic: 1 });
 planSchema.index({ displayOrder: 1 });
 
-// Virtual for formatted price
+// Virtual for formatted price (display currency: INR)
 planSchema.virtual('formattedPrice').get(function() {
   if (this.price === 0) return 'Free';
   if (this.price === 'custom') return 'Custom';
-  return `$${this.price}/${this.billingCycle === 'monthly' ? 'mo' : this.billingCycle === 'yearly' ? 'yr' : 'period'}`;
+  if (typeof this.price === 'number') {
+    const suffix = this.billingCycle === 'monthly' ? 'mo' : this.billingCycle === 'yearly' ? 'yr' : 'period';
+    return `₹${this.price.toLocaleString('en-IN')}/${suffix}`;
+  }
+  return String(this.price);
 });
 
 // Method to check if feature is included

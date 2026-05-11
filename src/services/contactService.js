@@ -185,7 +185,7 @@ async function resolveContact(payload, organizationId) {
         c => c.platform === platform && String(c.platformUserId) === String(platformUserId)
       );
       if (ch) {
-        if (avatarUrl && !ch.avatarUrl) ch.avatarUrl = avatarUrl;
+        if (avatarUrl) ch.avatarUrl = avatarUrl;
         if (username && !ch.username) ch.username = username;
         if (name && !ch.name) ch.name = name;
       }

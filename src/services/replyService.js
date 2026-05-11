@@ -193,8 +193,22 @@ async function sendReplyToPlatform({
             );
           }
         } else {
+          const commentText =
+            replyContent == null || replyContent === undefined
+              ? ''
+              : String(replyContent).trim();
+          if (!commentText) {
+            const hasAttachment = !!(attachmentUrl && attachmentType);
+            return {
+              platformResponseId: null,
+              status: 'failed',
+              errorMessage: hasAttachment
+                ? 'Instagram public comment replies need text. File or media attachments are not supported on comment replies through this API—add a message, or use DM if messaging is available.'
+                : 'Instagram comment replies cannot be empty. Enter a message and try again.'
+            };
+          }
           result = await instagramService.replyToComment(
-            interaction.platformId, replyContent, connection.accessToken, connType
+            interaction.platformId, commentText, connection.accessToken, connType
           );
         }
 

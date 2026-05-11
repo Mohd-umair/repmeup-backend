@@ -35,6 +35,9 @@ function createUploadStorage() {
 }
 
 const fileFilter = (req, file, cb) => {
+  if ((file.mimetype === '' || !file.mimetype) && /\.pdf$/i.test(file.originalname || '')) {
+    file.mimetype = 'application/pdf';
+  }
   const allowedMimeTypes = [
     'image/jpeg',
     'image/jpg',
@@ -51,13 +54,17 @@ const fileFilter = (req, file, cb) => {
     'audio/wav',
     'audio/webm',
     'audio/x-m4a',
-    'audio/aac'
+    'audio/aac',
+    'application/pdf'
   ];
 
   if (allowedMimeTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only images, videos, and audio are allowed.'), false);
+    cb(
+      new Error('Invalid file type. Only images, videos, audio, and PDF documents are allowed.'),
+      false
+    );
   }
 };
 

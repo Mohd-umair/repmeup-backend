@@ -482,6 +482,7 @@ exports.deleteReply = async (req, res, next) => {
 // @route   POST /api/inbox/:id/reply
 // @access  Private
 exports.replyToInteraction = async (req, res, next) => {
+  let instagramPdfCleanup = [];
   try {
     const {
       content,
@@ -608,6 +609,31 @@ exports.replyToInteraction = async (req, res, next) => {
         `[WhatsApp Template] ${sanitizedWaTemplate.name} (${sanitizedWaTemplate.languageCode})`;
     }
 
+    if (
+      interaction.platform === 'instagram' &&
+      interaction.type === 'dm' &&
+      attachmentType === 'file' &&
+      (attachmentUrl || attachmentLocalPath)
+    ) {
+      const { prepareInstagramDmPdfAttachment } = require('../utils/instagramDmPdfAttachment');
+      try {
+        const prep = await prepareInstagramDmPdfAttachment({
+          attachmentUrl,
+          attachmentLocalPath
+        });
+        attachmentLocalPath = prep.localPath;
+        instagramPdfCleanup = prep.cleanupPaths;
+      } catch (prepErr) {
+        logger.warn('[replyToInteraction] Instagram PDF preparation failed', {
+          error: prepErr.message
+        });
+        return res.status(400).json({
+          success: false,
+          error: prepErr.message || 'Could not prepare PDF for Instagram DM.'
+        });
+      }
+    }
+
     // Resolve the correct platform connection and dispatch the send
     const connection = await replyService.resolveConnection(interaction);
     const { platformResponseId, status: replyStatus, errorMessage } = await replyService.sendReplyToPlatform({
@@ -677,6 +703,15 @@ exports.replyToInteraction = async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  } finally {
+    if (instagramPdfCleanup.length > 0) {
+      try {
+        const { cleanupTempFiles } = require('../utils/instagramDmPdfAttachment');
+        await cleanupTempFiles(instagramPdfCleanup);
+      } catch (cleanErr) {
+        logger.warn('[replyToInteraction] Instagram PDF temp cleanup', { error: cleanErr.message });
+      }
+    }
   }
 };
 
@@ -1573,7 +1608,7 @@ exports.getAuthorAvatar = async (req, res, next) => {
     const token = connection.accessToken;
     const apiVersion = 'v18.0';
 
-    if (platform.toLowerCase() === 'instagram') {
+    if (platformKey === 'instagram') {
       // For Instagram, try to get profile picture via Facebook Graph API
       // Note: Instagram user profile pics via graph.instagram.com require different permissions
       // and only work for users who've used Instagram Login, not commenters/messengers
@@ -1602,7 +1637,7 @@ exports.getAuthorAvatar = async (req, res, next) => {
       }
     }
 
-    if (platform.toLowerCase() === 'facebook') {
+    if (platformKey === 'facebook') {
       try {
         const picUrl = `https://graph.facebook.com/${apiVersion}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`;
         const imgRes = await axios.get(picUrl, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 8000, validateStatus: s => s === 200 });

@@ -11,7 +11,7 @@
     "seed:plans": "node scripts/seedPlans.js",
     "seed:features": "node scripts/seedFeatures.js",
     "seed:free-plan": "node scripts/seedFreePlanEntitlements.js",
-    "migrate:plan-entitlements": "node scripts/migrate-plan-entitlements.js",
+    "migrate:plans-inr": "node scripts/migratePlanPricesToInr.js",
     "setup:razorpay-plans": "node scripts/setup-razorpay-plans.js",
     "create-super-admin": "node scripts/createSuperAdmin.js",
     "test": "jest --coverage",

@@ -11,6 +11,7 @@ const postAiGenerationService = require('../services/postAiGenerationService');
 const { PostAiGenerationError } = postAiGenerationService;
 const postPublishService = require('../services/postPublishService');
 const { PostPublishError } = postPublishService;
+const { assertScheduledForMinLead } = require('../utils/scheduleMinLead');
 
 /**
  * Translate an EntitlementError thrown by entitlementsService into the same
@@ -437,7 +438,13 @@ exports.publishPost = async (req, res) => {
       };
 
       if (req.user.role === 'agent') {
-        if (scheduledFor) postData.scheduledFor = new Date(scheduledFor);
+        if (scheduledFor) {
+          const lead = assertScheduledForMinLead(scheduledFor);
+          if (!lead.ok) {
+            return res.status(400).json({ message: lead.message });
+          }
+          postData.scheduledFor = new Date(scheduledFor);
+        }
         postData.status = 'pending_approval';
         const pendingPost = await ScheduledPost.create(postData);
         notifyAdminsOfPendingPost(organizationId, pendingPost, req.user.name || req.user.email || 'An agent');
@@ -449,6 +456,10 @@ exports.publishPost = async (req, res) => {
       }
 
       if (scheduledFor) {
+        const lead = assertScheduledForMinLead(scheduledFor);
+        if (!lead.ok) {
+          return res.status(400).json({ message: lead.message });
+        }
         postData.scheduledFor = new Date(scheduledFor);
         postData.status = 'scheduled';
         const scheduledPost = await ScheduledPost.create(postData);
@@ -508,6 +519,11 @@ exports.schedulePost = async (req, res) => {
 
       if (!platform || !content || !scheduledFor) {
         return res.status(400).json({ message: 'Platform, content, and scheduledFor are required' });
+      }
+
+      const scheduleLeadCheck = assertScheduledForMinLead(scheduledFor);
+      if (!scheduleLeadCheck.ok) {
+        return res.status(400).json({ message: scheduleLeadCheck.message });
       }
 
       let query = {
@@ -782,6 +798,10 @@ exports.approvePost = async (req, res) => {
       : (post.scheduledFor ? new Date(post.scheduledFor) : null);
 
     if (effectiveScheduledFor && effectiveScheduledFor > new Date()) {
+      const lead = assertScheduledForMinLead(effectiveScheduledFor);
+      if (!lead.ok) {
+        return res.status(400).json({ success: false, message: lead.message });
+      }
       post.scheduledFor = effectiveScheduledFor;
       post.status = 'scheduled';
       await post.save();
@@ -1346,6 +1366,10 @@ exports.reschedulePost = async (req, res) => {
     if (!scheduledFor) {
       return res.status(400).json({ success: false, message: 'scheduledFor is required' });
     }
+    const lead = assertScheduledForMinLead(scheduledFor);
+    if (!lead.ok) {
+      return res.status(400).json({ success: false, message: lead.message });
+    }
     const post = await ScheduledPost.findOneAndUpdate(
       { _id: req.params.id, organization: organizationId, status: 'scheduled' },
       { $set: { scheduledFor: new Date(scheduledFor) } },
@@ -1501,6 +1525,11 @@ exports.scheduleDraft = async (req, res) => {
 
     if (!scheduledFor) {
       return res.status(400).json({ success: false, message: 'scheduledFor is required' });
+    }
+
+    const draftLead = assertScheduledForMinLead(scheduledFor);
+    if (!draftLead.ok) {
+      return res.status(400).json({ success: false, message: draftLead.message });
     }
 
     const draft = await ScheduledPost.findOne({

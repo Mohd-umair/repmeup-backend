@@ -29,7 +29,11 @@ exports.uploadMedia = async (req, res) => {
     // Determine media type
     let mediaType = 'video';
     if (file.mimetype.startsWith('image/')) mediaType = 'image';
-    else if (file.mimetype.startsWith('audio/') || file.mimetype === 'audio/mpeg' || file.mimetype === 'audio/mp3') mediaType = 'audio';
+    else if (file.mimetype.startsWith('audio/') || file.mimetype === 'audio/mpeg' || file.mimetype === 'audio/mp3') {
+      mediaType = 'audio';
+    } else if (file.mimetype === 'application/pdf') {
+      mediaType = 'file';
+    }
 
     let filename = file.filename;
     let filePath;
