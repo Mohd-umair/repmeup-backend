@@ -72,7 +72,8 @@ const defaultPlans = [
     name: 'Starter',
     description: 'Great for small teams and growing businesses',
     tier: 1,
-    price: 29,
+    price: 2499,
+    priceInr: 249900,
     billingCycle: 'monthly',
     limits: {
       maxAccounts: 3,
@@ -101,7 +102,8 @@ const defaultPlans = [
     name: 'Pro',
     description: 'Perfect for professionals and agencies managing multiple clients',
     tier: 2,
-    price: 79,
+    price: 6599,
+    priceInr: 659900,
     billingCycle: 'monthly',
     limits: {
       maxAccounts: 10,
@@ -136,7 +138,8 @@ const defaultPlans = [
     name: 'Business',
     description: 'For large teams and businesses with advanced needs',
     tier: 3,
-    price: 199,
+    price: 16499,
+    priceInr: 1649900,
     billingCycle: 'monthly',
     limits: {
       maxAccounts: 50,
@@ -230,9 +233,9 @@ async function seedPlans() {
     
     console.log('📋 Plans created:');
     plans.forEach(plan => {
-      const priceDisplay = plan.price === 0 ? 'Free' : 
-                          plan.price === 'custom' ? 'Custom' : 
-                          `$${plan.price}/mo`;
+      const priceDisplay = plan.price === 0 ? 'Free' :
+                          plan.price === 'custom' ? 'Custom' :
+                          `₹${Number(plan.price).toLocaleString('en-IN')}/mo`;
       console.log(`   - ${plan.name.padEnd(12)} (${plan.planId.padEnd(10)}) - ${priceDisplay.padEnd(12)} - Tier ${plan.tier}`);
       console.log(`     Limits: ${plan.limits.maxAccounts === -1 ? '∞' : plan.limits.maxAccounts} accounts, ${plan.limits.maxUsers === -1 ? '∞' : plan.limits.maxUsers} users`);
       console.log(`     Features: ${plan.features.length} features`);

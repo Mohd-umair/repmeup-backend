@@ -5,7 +5,7 @@ const Organization = require('../models/Organization');
 const { resolveEscalationAssignmentUsers } = require('../services/autoAssignmentPoolService');
 const { runWithAiContext } = require('../services/aiRequestContext');
 const aiService = require('../services/aiService');
-const aiCreditService = require('../services/aiCreditService');
+const audioTranscriptionService = require('../services/ai/audioTranscriptionService');
 const emailService = require('../services/emailService');
 const cacheService = require('../services/cacheService');
 const logger = require('../config/logger');
@@ -79,11 +79,24 @@ module.exports = async function processAI(job) {
       return { skipped: true, reason: 'sync_backfill_no_paid_ai' };
     }
 
-    // Credit gate — 1 credit covers the full analysis pipeline for this interaction
-    const creditCheck = await aiCreditService.checkCredits(orgIdCtx, 1);
-    if (!creditCheck.allowed) {
-      jobLogger.warn('Skipping AI analysis — insufficient credits', { orgId: String(orgIdCtx) });
-      return { skipped: true, reason: 'No AI credits' };
+    // Step 0: Transcribe voice note (if audio content)
+    if (audioTranscriptionService.isAudioInteraction(interaction)) {
+      try {
+        const transcript = await audioTranscriptionService.transcribeInteractionAudio(interaction);
+        if (transcript && transcript.trim()) {
+          interaction.content = transcript;
+          // Persist so processAutoReply reads the transcript, not the placeholder
+          await Interaction.findByIdAndUpdate(interactionId, {
+            $set: { content: transcript, contentType: 'text' }
+          });
+          jobLogger.info('Voice note transcribed', { interactionId, preview: transcript.slice(0, 80) });
+        }
+      } catch (transcribeErr) {
+        jobLogger.warn('Voice note transcription failed — proceeding with placeholder', {
+          interactionId,
+          error: transcribeErr.message
+        });
+      }
     }
 
     // Steps 1-3: Combined single AI call — sentiment + intent + topics + bucket classification
@@ -136,17 +149,6 @@ module.exports = async function processAI(job) {
     // Step 6: Check for negative spike (3+ negative comments on same post)
     if (interaction.type === 'comment' && interaction.sentiment === 'negative') {
       await checkNegativeSpike(interaction);
-    }
-
-    // Deduct 1 credit for the analysis pipeline (analyzeInteraction only)
-    try {
-      await aiCreditService.deductCredits(
-        orgIdCtx,
-        1,
-        { operation: 'processAI_analysis', userId: interaction.assignedTo || orgIdCtx }
-      );
-    } catch (creditErr) {
-      jobLogger.warn('Credit deduction failed (non-fatal)', { error: creditErr.message });
     }
 
     // Persist only the AI-derived fields using a targeted $set update.

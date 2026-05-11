@@ -788,12 +788,31 @@ class InstagramService {
    * @param {string|null} [connectionType=null] - 'instagram_login' or null (Facebook Login default)
    */
   async replyToComment(commentId, message, accessToken, connectionType = null) {
+    const cid =
+      commentId == null || commentId === undefined ? '' : String(commentId).trim();
+    const text =
+      message == null || message === undefined ? '' : String(message).trim();
+
+    if (!cid) {
+      return {
+        success: false,
+        error: 'Missing Instagram comment id for reply.'
+      };
+    }
+    if (!text) {
+      return {
+        success: false,
+        error:
+          'Instagram comment replies require a non-empty text message. Add text and try again.'
+      };
+    }
+
     const apiBase = this._getApiBase(connectionType);
     try {
       const response = await axios.post(
-        `${apiBase}/${commentId}/replies`,
+        `${apiBase}/${cid}/replies`,
         {
-          message: message
+          message: text
         },
         {
           params: this._metaGraphParams({ access_token: accessToken })
@@ -1018,6 +1037,31 @@ class InstagramService {
   }
 
   /**
+   * User-facing copy for Instagram Send API attachment failures.
+   */
+  _mapInstagramAttachmentSendError(apiError, fallbackMessage) {
+    const raw = apiError?.message || apiError?.error_user_msg || fallbackMessage || '';
+    const msg = String(raw);
+    const lower = msg.toLowerCase();
+    if (
+      lower.includes('unsupported') ||
+      lower.includes('invalid attachment') ||
+      lower.includes('cannot be fetched') ||
+      lower.includes('could not be downloaded') ||
+      lower.includes('media download') ||
+      lower.includes('failed to fetch media')
+    ) {
+      return (
+        'Instagram could not use this attachment. Try a PDF under 25MB that is not password-protected, sent from your media library. If it still fails, paste a public HTTPS link to the PDF in the message text instead.'
+      );
+    }
+    if (lower.includes('too large') || lower.includes('file size') || String(apiError?.code) === '413') {
+      return 'Attachment is too large for Instagram direct messages.';
+    }
+    return msg || 'Failed to send attachment to Instagram.';
+  }
+
+  /**
    * Send an attachment (image, video, or file) to an Instagram DM recipient.
    * @param {string} [localFilePath] - If provided, uploads the file directly via
    *   multipart form-data instead of passing a URL for the platform to download.
@@ -1033,8 +1077,26 @@ class InstagramService {
     const apiBase = this._getApiBase(connectionType);
     const isIgLogin = connectionType === 'instagram_login';
     const fs = require('fs');
+    const pathLib = require('path');
     const FormData = require('form-data');
     const useDirectUpload = localFilePath && fs.existsSync(localFilePath);
+
+    const appendFiledataField = (form, absolutePath) => {
+      if (attachmentType === 'file') {
+        const base = pathLib.basename(absolutePath) || 'document.pdf';
+        const filename = /\.pdf$/i.test(base) ? base : `${base.replace(/\.[^/.]+$/, '') || 'document'}.pdf`;
+        form.append('filedata', fs.createReadStream(absolutePath), {
+          filename,
+          contentType: 'application/pdf'
+        });
+      } else {
+        form.append('filedata', fs.createReadStream(absolutePath));
+      }
+    };
+
+    if (attachmentType === 'file' && !useDirectUpload) {
+      console.warn('[Instagram] Sending file attachment via URL (multipart preferred). Meta may fail if the URL is not public HTTPS.');
+    }
 
     try {
       const apiUrl = `${apiBase}/${pageId}/messages`;
@@ -1049,7 +1111,7 @@ class InstagramService {
             form.append('message', JSON.stringify({
               attachment: { type: platformType, payload: { is_reusable: false } }
             }));
-            form.append('filedata', fs.createReadStream(localFilePath));
+            appendFiledataField(form, localFilePath);
             return axios.post(apiUrl, form, {
               params: this._metaGraphParams({ access_token: accessToken }),
               headers: form.getHeaders(),
@@ -1089,7 +1151,7 @@ class InstagramService {
           form.append('message', JSON.stringify({
             attachment: { type: platformType, payload: { is_reusable: false } }
           }));
-          form.append('filedata', fs.createReadStream(localFilePath));
+          appendFiledataField(form, localFilePath);
           return axios.post(apiUrl, form, {
             params: this._metaGraphParams({ access_token: accessToken }),
             headers: form.getHeaders(),
@@ -1130,9 +1192,9 @@ class InstagramService {
       return { success: true, platformResponseId: response.data?.message_id };
     } catch (error) {
       const apiError = error.response?.data?.error;
-      const msg = apiError?.message || apiError?.error_user_msg || error.message;
-      console.error('[Instagram] sendMessageWithAttachment error:', msg);
-      return { success: false, error: msg };
+      const friendly = this._mapInstagramAttachmentSendError(apiError, error.message);
+      console.error('[Instagram] sendMessageWithAttachment error:', apiError?.message || error.message);
+      return { success: false, error: friendly };
     }
   }
 

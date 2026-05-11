@@ -9,7 +9,7 @@
  *
  * Safe to re-run — skips plans that already have a razorpayPlanId.
  *
- * USD → INR mapping (edit these to match your actual pricing):
+ * INR pricing (edit amounts to match Plan.price in rupees × 100 = paise):
  *   starter  $29  → ₹2499  (249900 paise)
  *   pro      $79  → ₹6599  (659900 paise)
  *   business $199 → ₹16499 (1649900 paise)

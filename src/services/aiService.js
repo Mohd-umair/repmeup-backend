@@ -214,6 +214,11 @@ class AIService {
     return autoReplyService.generateAutoReply(interaction, organizationId, organizationSettings);
   }
 
+  /** @see services/ai/openaiClient.js#transcribeAudio */
+  async transcribeAudio(audioBuffer, mimeType) {
+    return openaiClient.transcribeAudio(audioBuffer, mimeType);
+  }
+
   // ── Backward-compat shims for the old private helpers ────────────────────
   _normalizePlatformList(list) {
     return autoReplyService._internal.normalizePlatformList(list);
