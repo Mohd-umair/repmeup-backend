@@ -649,18 +649,20 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       return { skipped: true, reason: 'ai_detected_closing' };
     }
 
-    // ─── LAYER 2.5: No relevant KB info — fallback instead of generic AI answer ──
-    // Trigger when fallback is enabled AND either:
-    //   a) no KB was used at all, OR
-    //   b) only generic fallback KB entries were injected (no direct text/keyword matches)
+    // ─── LAYER 2.5: No KB context in prompt — fallback instead of generic AI answer ──
+    // Trigger when fallback is enabled AND there were zero KB entries injected into the reply prompt.
+    // Do not treat top-priority "fallback" slices as irrelevant: they are still real org KB (e.g. company
+    // overview). Multilingual customers often miss text/keyword matches on English-only KB, but the
+    // model was still grounded on those entries — sending the AI reply is correct.
     // EXCEPTION: Small talk (hi, hello) must always get an AI reply — never fallback.
     const fallbackCfg = organization.autoReplySettings?.fallbackSettings;
-    const hasNoRelevantKB = !autoReply.response.usedKnowledgeBase || autoReply.response.knowledgeBaseFallback;
+    const kbCount = autoReply.response.knowledgeBaseCount || 0;
+    const hasNoRelevantKB = kbCount === 0;
     if (fallbackCfg?.enabled && hasNoRelevantKB && !isSmallTalk) {
-      logger.info('[Auto-reply] Layer 2.5: AI has no relevant KB info — sending fallback instead of generic reply', {
+      logger.info('[Auto-reply] Layer 2.5: AI had no knowledge base context in prompt — sending fallback instead of generic reply', {
         interactionId: interactionForReply._id?.toString(),
         usedKnowledgeBase: !!autoReply.response.usedKnowledgeBase,
-        knowledgeBaseCount: autoReply.response.knowledgeBaseCount || 0,
+        knowledgeBaseCount: kbCount,
         knowledgeBaseFallback: !!autoReply.response.knowledgeBaseFallback
       });
 

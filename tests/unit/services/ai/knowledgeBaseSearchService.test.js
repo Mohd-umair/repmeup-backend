@@ -121,6 +121,18 @@ describe('stage 2 keyword branch', () => {
     expect(filter.$or[1].title.$options).toBe('i');
   });
 
+  it('preserves non-Latin script tokens for keyword matching (e.g. Devanagari)', async () => {
+    pushResult([]);
+    const keywordHits = [{ _id: 'kb-hi', title: 'Company' }];
+    pushResult(keywordHits);
+
+    await searchKnowledgeBase('org_1', 'नमस्ते दुनिया', 5);
+
+    const filter = findCalls[1];
+    expect(filter.$or[0].keywords.$in).toEqual(['नमस्ते', 'दुनिया']);
+    expect(filter.$or[1].title.$regex).toBe('नमस्ते|दुनिया');
+  });
+
   it('strips non-word chars and filters tokens < 2 chars', async () => {
     pushResult([]); // text search empty
     pushResult([{ _id: 'kb' }]);
