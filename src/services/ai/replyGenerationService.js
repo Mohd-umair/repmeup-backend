@@ -19,6 +19,7 @@
 const logger = require('../../config/logger');
 const openaiClient = require('./openaiClient');
 const knowledgeBaseSearchService = require('./knowledgeBaseSearchService');
+const { buildRecentConversationTranscript } = require('../../utils/inboxConversationTranscript');
 const {
   normalizeOpenAIModelId,
   openAIChatCompletionMaxTokensField,
@@ -132,11 +133,25 @@ async function buildBucketContext(interaction, organizationId) {
   }
 }
 
-function buildBaseGuidelines(bucketContext, kbContext) {
+function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '') {
+  const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
+  const continuity = transcript
+    ? `
+
+CONVERSATION CONTINUITY (threaded inbox):
+- You are continuing an ongoing conversation — not answering a single isolated message in a vacuum.
+- Use the recent messages below for context: reference prior points briefly when it helps, avoid repeating full greetings or the same opening the business already used, and do not contradict earlier business replies in this thread.
+- Prioritize resolving the customer's *latest* intent (see the user prompt) while staying consistent with the thread.
+- Match the customer's language and tone when appropriate.
+
+Recent thread (last messages, chronological):
+${transcript}`
+    : '';
+
   return `IMPORTANT GUIDELINES:
 - Be polite, empathetic, and professional
-- Keep responses concise and clear (2-4 sentences)
-- Use a friendly and conversational tone
+- Keep responses concise and clear (2-4 sentences) unless the thread clearly needs more detail
+- Use a friendly, conversational tone — sound like a person texting, not a FAQ robot
 - Address the customer's concern directly
 - If knowledge base content is provided, ground your answer in that content and prioritize those facts over generic wording
 - Never say placeholders like "[List of services]"; provide real items from the knowledge base
@@ -144,6 +159,7 @@ function buildBaseGuidelines(bucketContext, kbContext) {
 - If you don't have enough information, acknowledge it professionally
 - Do not make promises you can't keep
 - Match the tone to the platform (casual for social media, professional for reviews)
+${continuity}
 ${bucketContext ? `\n${bucketContext}` : ''}
 ${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}`;
 }
@@ -186,7 +202,7 @@ function rethrowOpenAIReplyError(error) {
  * it can fully resolve the query. Returns parsed JSON or the raw text on
  * parse failure.
  */
-async function callSelfAssessment(interaction, baseGuidelines) {
+async function callSelfAssessment(interaction, baseGuidelines, conversationTranscript) {
   const selfAssessSystemPrompt = `You are a professional customer service AI. Assess if you can fully resolve this query WITHOUT: private account data, real-time system data, or internal tools.
 
 ${baseGuidelines}
@@ -196,6 +212,11 @@ Reply with JSON only (no markdown):
 
 Rules: greeting/small talk → messageType small_talk, resolvable true, confidence 1.0. Unclear query → attempt a clarifying question (low confidence). Cannot resolve → resolvable false.`;
 
+  const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
+  const userContent = transcript
+    ? `Recent conversation:\n${transcript}\n\nLatest customer message (prioritize replying to this): "${interaction.content}"\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`
+    : `Message: "${interaction.content}"\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`;
+
   const response = await openaiClient.chatCompletion(
     {
       model: openaiClient.chatModel,
@@ -203,7 +224,7 @@ Rules: greeting/small talk → messageType small_talk, resolvable true, confiden
         { role: 'system', content: selfAssessSystemPrompt },
         {
           role: 'user',
-          content: `Message: "${interaction.content}"\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`
+          content: userContent
         }
       ],
       ...openAIChatCompletionTemperatureField(openaiClient.chatModel, SELF_ASSESS_TEMPERATURE),
@@ -262,12 +283,13 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
 
     const kbContext = buildKbContext(relevantKB);
     const bucketContext = await buildBucketContext(interaction, organizationId);
-    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext);
+    const conversationTranscript = buildRecentConversationTranscript(interaction);
+    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript);
 
     if (withSelfAssessment) {
       // NOTE: Layer 0 (messageIntentClassifier) already filters out 'closing' and 'gibberish'
       // messages before this AI call is made. Only 'small_talk' and 'business' messages reach here.
-      const { raw, parsed } = await callSelfAssessment(interaction, baseGuidelines);
+      const { raw, parsed } = await callSelfAssessment(interaction, baseGuidelines, conversationTranscript);
 
       if (parsed && typeof parsed.reply === 'string') {
         const resolvable = parsed.resolvable !== false;
@@ -306,6 +328,10 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
       };
     }
 
+    const stdUserContent = (conversationTranscript && conversationTranscript.trim())
+      ? `Recent conversation:\n${conversationTranscript}\n\nLatest customer message:\n"${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
+      : `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`;
+
     // Standard mode (no self-assessment)
     const systemPrompt = `You are a professional customer service representative. 
 Your task is to generate a helpful, friendly, and professional response to customer inquiries.
@@ -321,7 +347,7 @@ Generate a response that addresses the customer's message appropriately.`;
           { role: 'system', content: systemPrompt },
           {
             role: 'user',
-            content: `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
+            content: stdUserContent
           }
         ],
         ...openAIChatCompletionTemperatureField(openaiClient.chatModel, STANDARD_REPLY_TEMPERATURE),
