@@ -296,6 +296,36 @@ const organizationSchema = new mongoose.Schema({
     }
   },
 
+  // Instagram: top-level comment → private DM with Follow button (generic template)
+  commentFollowInviteSettings: {
+    enabled: { type: Boolean, default: false },
+    /** Generic template element title (max 80 in API — trim server-side) */
+    title: {
+      type: String,
+      default: 'Thanks for your comment!'
+    },
+    subtitle: {
+      type: String,
+      default: 'Tap below to follow us for more updates.'
+    },
+    imageUrl: { type: String, default: '' },
+    buttonTitle: { type: String, default: 'Follow us' },
+    /** Full URL; if empty, derived as https://www.instagram.com/{username}/ from connected IG account */
+    buttonUrl: { type: String, default: '' },
+    /** Optional public comment reply; supports {{username}} */
+    publicReplyTemplate: {
+      type: String,
+      default: ''
+    },
+    postPublicReply: { type: Boolean, default: false },
+    deduplicateDms: { type: Boolean, default: true },
+    maxDmsPerDay: { type: Number, default: 50, min: 1, max: 10000 },
+    dmsSentToday: { type: Number, default: 0 },
+    dmsSentResetDate: { type: Date },
+    /** If a product Comment-to-DM was sent for this comment, skip follow-invite */
+    skipIfProductDmSent: { type: Boolean, default: true }
+  },
+
   // Human agent escalation settings
   escalationSettings: {
     enabled: {

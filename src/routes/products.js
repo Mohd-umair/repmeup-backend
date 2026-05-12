@@ -18,6 +18,8 @@ router.post('/import/url', productController.importFromUrl);
 // Comment-to-DM settings
 router.get('/settings/comment-to-dm', productController.getCommentToDmSettings);
 router.put('/settings/comment-to-dm', productController.updateCommentToDmSettings);
+router.get('/settings/comment-follow-invite', productController.getCommentFollowInviteSettings);
+router.put('/settings/comment-follow-invite', productController.updateCommentFollowInviteSettings);
 
 // Resolve Instagram post shortcode → numeric media ID
 router.get('/resolve-post', productController.resolvePostId);

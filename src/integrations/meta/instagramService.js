@@ -1037,6 +1037,54 @@ class InstagramService {
   }
 
   /**
+   * Private reply to an Instagram comment with a Generic Template (e.g. Follow web_url button).
+   * Same window rules as sendPrivateReply (7 days, comment_id recipient).
+   *
+   * @param {string} commentId
+   * @param {object} element - output of buildFollowInviteGenericElement()
+   * @param {string} accessToken
+   * @param {string} pageId
+   * @param {string|null} [connectionType=null]
+   */
+  async sendPrivateReplyGenericTemplate(commentId, element, accessToken, pageId, connectionType = null) {
+    const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
+    const body = {
+      recipient: { comment_id: String(commentId) },
+      message: {
+        attachment: {
+          type: 'template',
+          payload: {
+            template_type: 'generic',
+            elements: [element]
+          }
+        }
+      }
+    };
+    if (!isIgLogin) {
+      body.messaging_type = 'RESPONSE';
+    }
+    try {
+      const response = await axios.post(
+        `${apiBase}/${pageId}/messages`,
+        body,
+        { params: this._metaGraphParams({ access_token: accessToken }) }
+      );
+      return {
+        success: true,
+        platformResponseId: response.data.message_id
+      };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const userMsg = apiError?.message || error.message;
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
+    }
+  }
+
+  /**
    * User-facing copy for Instagram Send API attachment failures.
    */
   _mapInstagramAttachmentSendError(apiError, fallbackMessage) {

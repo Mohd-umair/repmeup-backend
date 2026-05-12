@@ -96,12 +96,18 @@ module.exports = async function processWebhook(job) {
         });
       }
 
-      // Comment-to-DM selling flow: fire-and-forget (errors are caught inside the service)
+      // Comment-to-DM selling flow, then follow-invite (avoid racing ProductOrder check)
       if (interaction.platform === 'instagram' && interaction.type === 'comment') {
         const commentToDmService = require('../services/commentToDmService');
-        commentToDmService.processCommentForProduct(interaction, organizationId).catch(err => {
-          jobLogger.warn('commentToDmService fire-and-forget error', { err: err?.message });
-        });
+        const commentFollowInviteService = require('../services/commentFollowInviteService');
+        (async () => {
+          try {
+            await commentToDmService.processCommentForProduct(interaction, organizationId);
+            await commentFollowInviteService.processCommentFollowInvite(interaction, organizationId);
+          } catch (err) {
+            jobLogger.warn('comment automation chain error', { err: err?.message });
+          }
+        })();
       }
 
       // Per-comment / per-message interactions: skip if we already answered that item.

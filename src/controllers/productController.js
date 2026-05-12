@@ -18,6 +18,20 @@ const DEFAULT_COMMENT_TO_DM_SETTINGS = {
   defaultProductId: null
 };
 
+const DEFAULT_COMMENT_FOLLOW_INVITE_SETTINGS = {
+  enabled: false,
+  title: 'Thanks for your comment!',
+  subtitle: 'Tap below to follow us for more updates.',
+  imageUrl: '',
+  buttonTitle: 'Follow us',
+  buttonUrl: '',
+  publicReplyTemplate: '',
+  postPublicReply: false,
+  deduplicateDms: true,
+  maxDmsPerDay: 50,
+  skipIfProductDmSent: true
+};
+
 // ─────────────────────────────────────────────
 // LIST
 // ─────────────────────────────────────────────
@@ -330,6 +344,73 @@ exports.updateCommentToDmSettings = async (req, res, next) => {
     if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
 
     const merged = { ...DEFAULT_COMMENT_TO_DM_SETTINGS, ...(org.commentToDmSettings || {}) };
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// GET / UPDATE COMMENT → FOLLOW INVITE (Instagram)
+// ─────────────────────────────────────────────
+
+exports.getCommentFollowInviteSettings = async (req, res, next) => {
+  try {
+    const org = await Organization.findById(req.user.organization._id)
+      .select('commentFollowInviteSettings')
+      .lean();
+
+    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+
+    const merged = {
+      ...DEFAULT_COMMENT_FOLLOW_INVITE_SETTINGS,
+      ...(org.commentFollowInviteSettings || {})
+    };
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.updateCommentFollowInviteSettings = async (req, res, next) => {
+  try {
+    const allowed = [
+      'enabled',
+      'title',
+      'subtitle',
+      'imageUrl',
+      'buttonTitle',
+      'buttonUrl',
+      'publicReplyTemplate',
+      'postPublicReply',
+      'deduplicateDms',
+      'maxDmsPerDay',
+      'skipIfProductDmSent'
+    ];
+    const update = {};
+    allowed.forEach((f) => {
+      if (req.body[f] !== undefined) update[`commentFollowInviteSettings.${f}`] = req.body[f];
+    });
+
+    if (req.body.maxDmsPerDay != null) {
+      const n = Number(req.body.maxDmsPerDay);
+      if (!Number.isFinite(n) || n < 1 || n > 10000) {
+        return res.status(400).json({ success: false, error: 'maxDmsPerDay must be between 1 and 10000' });
+      }
+    }
+
+    const org = await Organization.findByIdAndUpdate(
+      req.user.organization._id,
+      { $set: update },
+      { new: true, select: 'commentFollowInviteSettings' }
+    );
+
+    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+
+    const merged = {
+      ...DEFAULT_COMMENT_FOLLOW_INVITE_SETTINGS,
+      ...(org.commentFollowInviteSettings || {})
+    };
     res.json({ success: true, data: merged });
   } catch (err) {
     next(err);
