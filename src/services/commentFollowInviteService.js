@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS = {
   postPublicReply: false,
   deduplicateDms: true,
   maxDmsPerDay: 50,
-  skipIfProductDmSent: true
+  skipIfProductDmSent: false
 };
 
 /**
@@ -77,10 +77,12 @@ async function processCommentFollowInvite(interaction, organizationId) {
       }
     }
 
-    const postId = interaction.metadata?.postId;
+    const postId = interaction.metadata?.postId || null;
     if (!postId) {
-      svcLogger.warn('[commentFollowInvite] Skipping — no metadata.postId', { interactionId });
-      return;
+      svcLogger.info(
+        '[commentFollowInvite] metadata.postId missing — dedup will use commentId only',
+        { interactionId }
+      );
     }
 
     const commenterId = interaction.author?.platformId;
@@ -90,11 +92,21 @@ async function processCommentFollowInvite(interaction, organizationId) {
     }
 
     if (settings.deduplicateDms) {
-      const dup = await CommentFollowInviteLog.exists({
-        organization: organizationId,
-        instagramUserId: String(commenterId),
-        instagramPostId: String(postId)
-      });
+      let dupQuery;
+      if (postId) {
+        dupQuery = {
+          organization: organizationId,
+          instagramUserId: String(commenterId),
+          instagramPostId: String(postId)
+        };
+      } else {
+        // No postId available: fall back to per-comment dedup (idempotent log already checked above)
+        dupQuery = {
+          organization: organizationId,
+          commentInteractionId: interaction._id
+        };
+      }
+      const dup = await CommentFollowInviteLog.exists(dupQuery);
       if (dup) {
         svcLogger.info('[commentFollowInvite] Skipping — dedupe: invite already sent for user+post', {
           commenterId,
@@ -155,12 +167,20 @@ async function processCommentFollowInvite(interaction, organizationId) {
 
     let buttonUrl = (settings.buttonUrl && String(settings.buttonUrl).trim()) || '';
     if (!buttonUrl) {
-      buttonUrl = normalizeHttpsProfileUrl(connection.platformUsername) || '';
+      // Try several places where the IG username can live depending on how the connection was created
+      const candidateUsername =
+        connection.platformUsername ||
+        connection.platformData?.username ||
+        connection.platformData?.ig_username ||
+        connection.platformData?.name;
+      buttonUrl = normalizeHttpsProfileUrl(candidateUsername) || '';
     }
     if (!buttonUrl) {
-      svcLogger.warn('[commentFollowInvite] Skipping — no buttonUrl and no platformUsername on connection', {
-        organizationId
-      });
+      svcLogger.warn(
+        '[commentFollowInvite] Skipping — no buttonUrl configured and no Instagram username found on connection. ' +
+          'Set "Follow URL" in Catalog → Automation → Comment → Follow invite settings.',
+        { organizationId }
+      );
       return;
     }
 
@@ -233,7 +253,7 @@ async function processCommentFollowInvite(interaction, organizationId) {
       await CommentFollowInviteLog.create({
         organization: organizationId,
         instagramUserId: String(commenterId),
-        instagramPostId: String(postId),
+        instagramPostId: postId ? String(postId) : null,
         commentInteractionId: interaction._id,
         dmMethod
       });

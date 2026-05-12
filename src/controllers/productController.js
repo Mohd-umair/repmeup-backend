@@ -29,7 +29,7 @@ const DEFAULT_COMMENT_FOLLOW_INVITE_SETTINGS = {
   postPublicReply: false,
   deduplicateDms: true,
   maxDmsPerDay: 50,
-  skipIfProductDmSent: true
+  skipIfProductDmSent: false
 };
 
 // ─────────────────────────────────────────────

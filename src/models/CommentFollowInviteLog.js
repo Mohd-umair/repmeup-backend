@@ -14,7 +14,8 @@ const commentFollowInviteLogSchema = new mongoose.Schema(
       index: true
     },
     instagramUserId: { type: String, required: true, index: true },
-    instagramPostId: { type: String, required: true, index: true },
+    /** Null when the webhook payload did not include comment.media.id */
+    instagramPostId: { type: String, default: null, index: true },
     commentInteractionId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Interaction',
