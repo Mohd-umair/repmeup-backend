@@ -13,6 +13,17 @@ const { emitToOrg } = require('../utils/socketEmitter');
 
 const ctrlLogger = logger.createChild({ module: 'voiceIvrController' });
 
+/** Twilio sends E.164; DB may differ slightly — try a few normalized forms */
+function phoneNumberLookupCandidates(raw) {
+  if (!raw) return [];
+  const t = String(raw).trim();
+  const set = new Set([t]);
+  const digits = t.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) set.add(`+${digits}`);
+  if (digits.length === 10 && !t.startsWith('+')) set.add(`+1${digits}`);
+  return [...set];
+}
+
 function twimlResponse(res, innerXml) {
   return res
     .type('text/xml')
@@ -60,7 +71,11 @@ exports.incomingCallWebhook = async (req, res, next) => {
 
     // Find the phone number to resolve the org + assigned agent
     const candidate = direction === 'inbound' ? to : from;
-    const phoneNumber = await PhoneNumber.findOne({ number: candidate, isActive: true })
+    const matchCandidates = phoneNumberLookupCandidates(candidate);
+    const phoneNumber = await PhoneNumber.findOne({
+      number: { $in: matchCandidates },
+      isActive: true
+    })
       .populate('assignedAgent')
       .lean();
 
@@ -73,7 +88,7 @@ exports.incomingCallWebhook = async (req, res, next) => {
     }
 
     if (!agent || !organizationId) {
-      ctrlLogger.warn('[voice/webhook] No agent for call', { callSid, candidate });
+      ctrlLogger.warn('[voice/webhook] No agent for call', { callSid, candidate, matchCandidates });
       return twimlResponse(res, '<Say>This number is not configured. Goodbye.</Say><Hangup/>');
     }
 
@@ -299,6 +314,67 @@ exports.purchasePhoneNumber = async (req, res, next) => {
     res.status(201).json({ success: true, data: doc });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+};
+
+/** Link a number already on the org's Twilio account (e.g. trial number) into Mongo + refresh webhooks. */
+exports.registerExistingPhoneNumber = async (req, res, next) => {
+  try {
+    const { twilioSid, assignedAgent, friendlyName } = req.body || {};
+    if (!twilioSid || !String(twilioSid).trim().startsWith('PN')) {
+      return res.status(400).json({
+        success: false,
+        error: 'twilioSid is required (Incoming Phone Number SID, starts with PN)'
+      });
+    }
+
+    const sid = String(twilioSid).trim();
+    const existing = await PhoneNumber.findOne({ twilioSid: sid }).lean();
+    if (existing) {
+      return res.status(409).json({ success: false, error: 'This number is already registered' });
+    }
+
+    if (assignedAgent) {
+      const agentOk = await VoiceAgent.exists({
+        _id: assignedAgent,
+        organization: req.user.organization._id
+      });
+      if (!agentOk) {
+        return res.status(400).json({ success: false, error: 'assignedAgent not found for this organization' });
+      }
+    }
+
+    const { client } = await twilioService.getClient(req.user.organization._id);
+    let incoming;
+    try {
+      incoming = await client.incomingPhoneNumbers(sid).fetch();
+    } catch (e) {
+      return res.status(404).json({
+        success: false,
+        error: 'Number not found on this Twilio account. Check SID and telephony credentials.'
+      });
+    }
+
+    await twilioService.updateNumberWebhooks(req.user.organization._id, sid).catch(() => null);
+
+    const doc = await PhoneNumber.create({
+      organization: req.user.organization._id,
+      twilioSid: incoming.sid,
+      number: incoming.phoneNumber,
+      friendlyName: friendlyName || incoming.friendlyName || incoming.phoneNumber,
+      assignedAgent: assignedAgent || null,
+      capabilities: {
+        voice: !!incoming.capabilities?.voice,
+        sms: !!incoming.capabilities?.SMS
+      },
+      isActive: true
+    });
+    res.status(201).json({ success: true, data: doc });
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ success: false, error: 'Number or SID already exists' });
+    }
+    next(err);
   }
 };
 

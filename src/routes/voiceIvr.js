@@ -21,6 +21,7 @@ router.delete('/credentials', controller.deleteCredentials);
 // Phone numbers
 router.get('/phone-numbers', controller.listPhoneNumbers);
 router.post('/phone-numbers/search', controller.searchAvailableNumbers);
+router.post('/phone-numbers/register-existing', controller.registerExistingPhoneNumber);
 router.post('/phone-numbers/purchase', controller.purchasePhoneNumber);
 router.put('/phone-numbers/:id', controller.updatePhoneNumber);
 router.delete('/phone-numbers/:id', controller.releasePhoneNumber);
