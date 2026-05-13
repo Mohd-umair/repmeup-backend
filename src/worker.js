@@ -10,7 +10,8 @@ const {
   emailWebhookQueue,
   imapPollingQueue,
   gmailWatchRenewalQueue,
-  outlookRenewalQueue
+  outlookRenewalQueue,
+  voiceCallQueue
 } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
@@ -21,6 +22,7 @@ const processEmailWebhook = require('./jobs/processEmailWebhook');
 const processImapPolling = require('./jobs/processImapPolling');
 const renewGmailWatches = require('./jobs/renewGmailWatches');
 const renewOutlookSubscriptions = require('./jobs/renewOutlookSubscriptions');
+const processVoiceCall = require('./jobs/processVoiceCall');
 const logger = require('./config/logger');
 
 // Concurrency from env
@@ -30,6 +32,7 @@ const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
 const BRAND_ANALYSIS_CONCURRENCY = parseInt(process.env.BRAND_ANALYSIS_CONCURRENCY) || 2;
 const EMAIL_WEBHOOK_CONCURRENCY = parseInt(process.env.EMAIL_WEBHOOK_CONCURRENCY) || 5;
 const IMAP_POLL_CONCURRENCY = parseInt(process.env.IMAP_POLL_CONCURRENCY) || 3;
+const VOICE_CALL_CONCURRENCY = parseInt(process.env.VOICE_CALL_CONCURRENCY) || 4;
 
 async function startWorker() {
   try {
@@ -144,13 +147,21 @@ async function startWorker() {
     }
     logger.info('[Worker] outlook-subscription-renewal processor started (every 2 days)');
 
+    // Voice IVR post-call worker (summarize, CRM upsert, WA follow-up, analytics rollup)
+    voiceCallQueue.process(VOICE_CALL_CONCURRENCY, async (job) => {
+      logger.debug('[Worker:voice-call] picked up job', { jobId: job.id });
+      return await processVoiceCall(job);
+    });
+    logger.info('[Worker] voice-call processor started', { concurrency: VOICE_CALL_CONCURRENCY });
+
     logger.info('✨ Worker started successfully', {
       webhook: WEBHOOK_CONCURRENCY,
       ai: AI_CONCURRENCY,
       autoReply: AUTOREPLY_CONCURRENCY,
       brandAnalysis: BRAND_ANALYSIS_CONCURRENCY,
       emailWebhook: EMAIL_WEBHOOK_CONCURRENCY,
-      imapPoll: IMAP_POLL_CONCURRENCY
+      imapPoll: IMAP_POLL_CONCURRENCY,
+      voiceCall: VOICE_CALL_CONCURRENCY
     });
 
     const shutdown = async (signal) => {
@@ -165,7 +176,8 @@ async function startWorker() {
           emailWebhookQueue.close(),
           imapPollingQueue.close(),
           gmailWatchRenewalQueue.close(),
-          outlookRenewalQueue.close()
+          outlookRenewalQueue.close(),
+          voiceCallQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

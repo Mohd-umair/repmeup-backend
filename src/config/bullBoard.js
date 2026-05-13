@@ -9,7 +9,8 @@ const {
   scheduledPublishQueue,
   brandAnalysisQueue,
   syncQueue,
-  notificationQueue
+  notificationQueue,
+  voiceCallQueue
 } = require('./queue');
 
 const serverAdapter = new ExpressAdapter();
@@ -24,6 +25,7 @@ createBullBoard({
     new BullAdapter(autoReplyQueue),
     new BullAdapter(scheduledPublishQueue),
     new BullAdapter(brandAnalysisQueue),
+    new BullAdapter(voiceCallQueue),
     new BullAdapter(syncQueue),         // dormant — see docs/queues.md
     new BullAdapter(notificationQueue)  // dormant — see docs/queues.md
   ],

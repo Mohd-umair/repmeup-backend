@@ -28,6 +28,7 @@ const emailWebhookQueue = new Queue('email-webhook', queueOptions);
 const imapPollingQueue = new Queue('imap-polling', queueOptions);
 const gmailWatchRenewalQueue = new Queue('gmail-watch-renewal', queueOptions);
 const outlookRenewalQueue = new Queue('outlook-subscription-renewal', queueOptions);
+const voiceCallQueue = new Queue('voice-call', queueOptions);
 
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
@@ -61,7 +62,8 @@ const queues = [
   emailWebhookQueue,
   imapPollingQueue,
   gmailWatchRenewalQueue,
-  outlookRenewalQueue
+  outlookRenewalQueue,
+  voiceCallQueue
 ];
 
 queues.forEach(queue => {
@@ -103,5 +105,6 @@ module.exports = {
   imapPollingQueue,
   gmailWatchRenewalQueue,
   outlookRenewalQueue,
+  voiceCallQueue,
   queueConfig
 };
