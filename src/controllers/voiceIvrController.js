@@ -13,6 +13,12 @@ const { emitToOrg } = require('../utils/socketEmitter');
 
 const ctrlLogger = logger.createChild({ module: 'voiceIvrController' });
 
+function twimlResponse(res, innerXml) {
+  return res
+    .type('text/xml')
+    .send(`<?xml version="1.0" encoding="UTF-8"?><Response>${innerXml}</Response>`);
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function sanitizeCredential(doc) {
@@ -47,7 +53,10 @@ exports.incomingCallWebhook = async (req, res, next) => {
     const to = body.To;
     const direction = body.Direction === 'outbound-api' ? 'outbound' : 'inbound';
 
-    if (!callSid) return res.status(400).send('Missing CallSid');
+    if (!callSid) {
+      ctrlLogger.warn('[voice/webhook] Missing CallSid on incoming');
+      return twimlResponse(res, '<Say>Invalid call request.</Say><Hangup/>');
+    }
 
     // Find the phone number to resolve the org + assigned agent
     const candidate = direction === 'inbound' ? to : from;
@@ -65,9 +74,7 @@ exports.incomingCallWebhook = async (req, res, next) => {
 
     if (!agent || !organizationId) {
       ctrlLogger.warn('[voice/webhook] No agent for call', { callSid, candidate });
-      return res
-        .type('text/xml')
-        .send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>This number is not configured. Goodbye.</Say><Hangup/></Response>');
+      return twimlResponse(res, '<Say>This number is not configured. Goodbye.</Say><Hangup/>');
     }
 
     // Verify Twilio signature if we can (BYOW or subaccount token)
@@ -75,8 +82,11 @@ exports.incomingCallWebhook = async (req, res, next) => {
     if (authToken && process.env.NODE_ENV === 'production') {
       const ok = twilioService.validateWebhookSignature(req, authToken);
       if (!ok) {
-        ctrlLogger.warn('[voice/webhook] Invalid Twilio signature', { callSid });
-        return res.status(403).send('Forbidden');
+        ctrlLogger.warn('[voice/webhook] Invalid Twilio signature — check Auth Token, proxy X-Forwarded-Proto/Host', {
+          callSid
+        });
+        // Must return TwiML; plain 403 causes Twilio 12100 Document parse failure
+        return twimlResponse(res, '<Say>Voice security check failed. Update telephony credentials or proxy headers.</Say><Hangup/>');
       }
     }
 
@@ -114,9 +124,7 @@ exports.incomingCallWebhook = async (req, res, next) => {
     res.type('text/xml').send(twiml);
   } catch (err) {
     ctrlLogger.error('[voice/webhook] incoming error', { error: err.message, stack: err.stack });
-    res
-      .type('text/xml')
-      .send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, something went wrong.</Say><Hangup/></Response>');
+    twimlResponse(res, '<Say>Sorry, something went wrong.</Say><Hangup/>');
   }
 };
 
