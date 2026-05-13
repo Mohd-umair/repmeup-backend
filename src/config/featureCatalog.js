@@ -53,7 +53,10 @@ const FEATURE_KEYS = Object.freeze({
   // ── Automation / analytics / agents ───────────────────────────────────────
   AUTO_REPLY_ENABLED: 'automation.autoReply.enabled',
   ANALYTICS_ADVANCED: 'analytics.advanced',
-  AGENTS_ENABLED: 'agents.enabled'
+  AGENTS_ENABLED: 'agents.enabled',
+
+  // ── Voice IVR ─────────────────────────────────────────────────────────────
+  VOICE_IVR_ENABLED: 'voice.ivr.enabled'
 });
 
 /**
@@ -286,6 +289,17 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     sortOrder: 20
+  },
+
+  // ── Voice IVR ─────────────────────────────────────────────────────────────
+  {
+    key: FEATURE_KEYS.VOICE_IVR_ENABLED,
+    label: 'AI Voice IVR',
+    description: 'AI phone calling, voice agents, and call analytics for automation teams.',
+    category: 'automation',
+    kind: 'boolean',
+    defaultValue: true,
+    sortOrder: 30
   }
 ];
 

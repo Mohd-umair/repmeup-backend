@@ -19,6 +19,10 @@ process.on('uncaughtException', (err) => {
 // Create HTTP server
 const server = http.createServer(app);
 
+// Attach the Voice IVR WebSocket gateway at /voice/stream (Twilio Media Streams)
+const voiceGatewayService = require('./services/voiceGatewayService');
+voiceGatewayService.attach(server);
+
 // Initialize Socket.IO
 const io = socketIO(server, {
   cors: {

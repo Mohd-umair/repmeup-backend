@@ -82,6 +82,17 @@ const defaultMenus = [
     isActive: true
   },
   {
+    label: 'Voice IVR',
+    icon: 'fas fa-phone-alt',
+    route: '/app/voice-ivr',
+    order: 8,
+    group: 'management',
+    requiredRoles: ['admin', 'manager'],
+    requiresFeature: 'voice_ivr',
+    isActive: true,
+    description: 'AI phone calling, voice agents, call logs, analytics'
+  },
+  {
     label: 'Plans',
     icon: '💎',
     route: '/app/plans',

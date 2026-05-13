@@ -85,6 +85,8 @@ let limiter = rateLimit({
     // so it starts with /posts/media/ not /api/posts/media/.
     if (req.path === '/health' || req.path.startsWith('/posts/media/')) return true;
     if (req.path.startsWith('/webhooks/')) return true;
+    // Voice IVR webhooks (Twilio retries aggressively; rate-limiting here would break calls)
+    if (req.path.startsWith('/voice/webhooks/')) return true;
     // Inbox avatar/attachment proxies (many small requests when loading inbox; all authenticated)
     if (req.path.includes('inbox/avatar/') || req.path.includes('inbox/attachment')) return true;
     return false;
@@ -162,6 +164,7 @@ const routeMap = [
   ['/contacts',             './routes/contacts'],
   ['/email',                './routes/emailAccounts'],
   ['/whatsapp-templates',   './routes/whatsappTemplates'],
+  ['/voice',                './routes/voiceIvr'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];
@@ -199,6 +202,7 @@ const upgradeRateLimiting = () => {
         if (rateLimitDisabled) return true;
         if (req.path === '/health' || req.path.startsWith('/posts/media/')) return true;
         if (req.path.startsWith('/webhooks/')) return true;
+        if (req.path.startsWith('/voice/webhooks/')) return true;
         return false;
       },
       store: new RedisStore({
