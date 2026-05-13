@@ -163,27 +163,91 @@ function resolvePublicBaseUrl(credential) {
   return String(process.env.PUBLIC_API_BASE_URL || '').replace(/\/$/, '');
 }
 
-/**
- * Search numbers available to purchase.
- * @param {string} organizationId
- * @param {object} options { country='US', areaCode?, contains?, limit=20 }
- */
-async function searchAvailableNumbers(organizationId, { country = 'US', areaCode, contains, limit = 20 } = {}) {
-  const limitNum = Math.min(30, Math.max(1, parseInt(limit, 10) || 20));
-  const { client } = await getClient(organizationId);
-  const params = { limit: limitNum, voiceEnabled: true };
-  if (areaCode) params.areaCode = areaCode;
-  if (contains) params.contains = contains;
-  const list = await client.availablePhoneNumbers(country).local.list(params);
-  return list.map((n) => ({
+/** Twilio returns 404 when that geography has no inventory for that number class (Local vs National vs Mobile, etc.). */
+function isAvailableNumberTypeNotFound(err) {
+  const status = Number(err?.status ?? err?.statusCode ?? err?.response?.status);
+  if (status === 404) return true;
+  const code = err?.code;
+  if (code === 20404 || Number(code) === 20404) return true;
+  const msg = String(err?.message || err?.body?.message || '');
+  if (/AvailablePhoneNumbers\//i.test(msg) && /not\s*found|404|was not found/i.test(msg)) return true;
+  return false;
+}
+
+function mapAvailableNumberRow(n, numberType) {
+  return {
     phoneNumber: n.phoneNumber,
     friendlyName: n.friendlyName,
     locality: n.locality,
     region: n.region,
     postalCode: n.postalCode,
     isoCountry: n.isoCountry,
-    capabilities: n.capabilities
-  }));
+    capabilities: n.capabilities,
+    numberType
+  };
+}
+
+/**
+ * Search numbers available to purchase.
+ * Tries Local → National → Mobile → Toll-free (many countries omit Local or use National for fixed-line).
+ * @param {string} organizationId
+ * @param {object} options { country='US', areaCode?, contains?, limit=20 }
+ */
+async function searchAvailableNumbers(organizationId, { country = 'US', areaCode, contains, limit = 20 } = {}) {
+  const limitNum = Math.min(30, Math.max(1, parseInt(limit, 10) || 20));
+  const { client } = await getClient(organizationId);
+  const iso = String(country || 'US').toUpperCase();
+
+  const baseParams = { limit: limitNum, voiceEnabled: true };
+  if (contains) baseParams.contains = contains;
+
+  const withOptionalAreaCode = (params) => {
+    const p = { ...params };
+    if (areaCode) p.areaCode = areaCode;
+    return p;
+  };
+
+  const apn = client.availablePhoneNumbers(iso);
+
+  const buildAttempts = (paramsBase) => [
+    { type: 'local', run: () => apn.local.list(withOptionalAreaCode(paramsBase)) },
+    { type: 'national', run: () => apn.national.list(withOptionalAreaCode(paramsBase)) },
+    { type: 'mobile', run: () => apn.mobile.list(withOptionalAreaCode(paramsBase)) },
+    { type: 'tollFree', run: () => apn.tollFree.list({ ...paramsBase }) }
+  ];
+
+  const runPasses = async (paramsBase) => {
+    for (const { type, run } of buildAttempts(paramsBase)) {
+      try {
+        const list = await run();
+        if (Array.isArray(list) && list.length > 0) {
+          return list.map((n) => mapAvailableNumberRow(n, type));
+        }
+      } catch (err) {
+        if (isAvailableNumberTypeNotFound(err)) {
+          svcLogger.debug('[twilio] No inventory for number class, trying next', {
+            country: iso,
+            type,
+            message: err?.message
+          });
+          continue;
+        }
+        throw err;
+      }
+    }
+    return null;
+  };
+
+  let results = await runPasses(baseParams);
+  if (!results) {
+    const loose = { limit: limitNum };
+    if (contains) loose.contains = contains;
+    results = await runPasses(loose);
+    if (results) {
+      results = results.filter((r) => r.capabilities?.voice !== false);
+    }
+  }
+  return results || [];
 }
 
 /**
