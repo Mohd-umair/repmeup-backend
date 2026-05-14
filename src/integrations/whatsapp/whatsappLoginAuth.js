@@ -19,10 +19,16 @@ const PlatformConnection = require('../../models/PlatformConnection');
  * granular_scopes (whatsapp_business_management → target_ids), then loading phone_numbers per WABA.
  * /me/businesses typically needs business_management; we try it after token-based discovery.
  *
- * Auth host:     https://www.facebook.com/dialog/oauth
+ * Auth host:     https://www.facebook.com/dialog/oauth (or /v{version}/dialog/oauth)
  * Token URL:     https://graph.facebook.com/oauth/access_token
  * Graph API:     https://graph.facebook.com/v23.0
  * Scopes:        whatsapp_business_management, whatsapp_business_messaging
+ *
+ * Embedded Signup configuration (App Dashboard → WhatsApp → Embedded Signup):
+ *   META_WHATSAPP_CONFIG_ID  Same numeric id as `config_id` in Meta’s onboarding URL, e.g.
+ *   https://business.facebook.com/messaging/whatsapp/onboard/?app_id=…&config_id=…
+ *   Facebook Login must pass `config_id` so users get that onboarding experience; the redirect
+ *   still returns `code` to WHATSAPP_CALLBACK_URL for server-side exchange.
  */
 class WhatsAppLoginAuthService {
   constructor() {
@@ -101,6 +107,10 @@ class WhatsAppLoginAuthService {
     const appId = process.env.META_APP_ID;
     if (!appId) throw new Error('META_APP_ID is not configured.');
 
+    const configId =
+      process.env.META_WHATSAPP_CONFIG_ID ||
+      process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID;
+
     const state = this.generateState(userId, organizationId);
     const redirectUri = this.getRedirectURI();
 
@@ -112,12 +122,30 @@ class WhatsAppLoginAuthService {
         'whatsapp_business_messaging'
       ].join(','),
       response_type: 'code',
-      state,
-      // Embedded Signup extras — configure your solution in the Meta App Dashboard
-      // extras: JSON.stringify({ setup: {} })
+      state
     });
 
-    return `${this.authURL}?${params.toString()}`;
+    if (configId) {
+      params.set('config_id', String(configId).trim());
+    }
+
+    const dialogVersion =
+      process.env.META_WHATSAPP_OAUTH_DIALOG_VERSION ||
+      process.env.FACEBOOK_OAUTH_DIALOG_VERSION;
+    const trimmedVer = dialogVersion ? String(dialogVersion).trim() : '';
+    const versionPath =
+      trimmedVer && !/^\d+\.\d+/.test(trimmedVer)
+        ? trimmedVer.startsWith('v')
+          ? trimmedVer
+          : `v${trimmedVer}`
+        : trimmedVer
+          ? `v${trimmedVer}`
+          : '';
+    const dialogBase = versionPath
+      ? `https://www.facebook.com/${versionPath}/dialog/oauth`
+      : this.authURL;
+
+    return `${dialogBase}?${params.toString()}`;
   }
 
   // ---------------------------------------------------------------------------

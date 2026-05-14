@@ -41,6 +41,16 @@ FACEBOOK_APP_SECRET=your_meta_app_secret  # Same as META_APP_SECRET, used for da
 META_REDIRECT_URI=http://localhost:3000/api/platforms/meta/callback
 META_WEBHOOK_VERIFY_TOKEN=your_webhook_verify_token
 
+# WhatsApp Embedded Signup (“Connect WhatsApp” in the app)
+# Public OAuth redirect Meta calls after the user finishes onboarding (must match Meta App > Facebook Login > Valid OAuth Redirect URIs)
+# Example: https://api.yourdomain.com/api/platforms/whatsapp/callback
+WHATSAPP_CALLBACK_URL=
+# Configuration ID from Meta App Dashboard → WhatsApp → Embedded Signup (same as config_id in:
+# https://business.facebook.com/messaging/whatsapp/onboard/?app_id=…&config_id=…)
+META_WHATSAPP_CONFIG_ID=
+# Optional: versioned Login dialog, e.g. v23.0 → https://www.facebook.com/v23.0/dialog/oauth
+# META_WHATSAPP_OAUTH_DIALOG_VERSION=v23.0
+
 # WhatsApp Business API
 WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
 WHATSAPP_BUSINESS_ACCOUNT_ID=your_business_account_id
