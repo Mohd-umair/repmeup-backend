@@ -170,6 +170,123 @@ async function sendPaymentLink(instagramUserId, product, orderToken, conn) {
   );
 }
 
+// ── Postback (CTA button tap) handler ────────────────────────────────────────
+
+/**
+ * Parses a CTA postback payload formatted as `SALES:<action>:<orderToken>`.
+ * Returns { action, orderToken } or null if the payload is malformed.
+ */
+function parsePostbackPayload(payload) {
+  if (typeof payload !== 'string') return null;
+  if (!payload.startsWith('SALES:')) return null;
+  const parts = payload.split(':');
+  if (parts.length < 3) return null;
+  const action = (parts[1] || '').toLowerCase().trim();
+  const orderToken = parts.slice(2).join(':').trim();
+  if (!action || !orderToken) return null;
+  return { action, orderToken };
+}
+
+/**
+ * Called from instagramWebhookService when a user taps a postback CTA button.
+ * The payload was generated in commentToDmService as `SALES:<action>:<orderToken>`.
+ *
+ * Recognized actions: 'details' | 'payment' | 'hesitant'
+ * Free-form actions are echoed back to the user as text.
+ *
+ * @param {object} args
+ * @param {string} args.instagramUserId  IG-scoped sender id (event.sender.id)
+ * @param {string} args.organizationId
+ * @param {string} args.payload          Raw postback payload
+ * @param {string} [args.title]          Button title (for free-form fallback)
+ * @param {string} [args.platformConnectionId]
+ */
+async function handlePostback({ instagramUserId, organizationId, payload, title, platformConnectionId }) {
+  try {
+    if (!instagramUserId || !organizationId || !payload) return;
+
+    const parsed = parsePostbackPayload(payload);
+    if (!parsed) {
+      svcLogger.debug('[salesConversation] Postback payload not recognized — ignoring', { payload });
+      return;
+    }
+    const { action, orderToken } = parsed;
+
+    // Look up the ProductOrder by orderToken (set when the CTA card was sent).
+    const order = await ProductOrder.findOne({
+      organization: organizationId,
+      orderToken
+    }).populate({ path: 'product', model: Product });
+
+    if (!order || !order.product) {
+      svcLogger.warn('[salesConversation] Postback received but no ProductOrder found', { orderToken, action });
+      return;
+    }
+
+    // Resolve a working IG connection
+    const conn = await resolveIgConnection(organizationId, platformConnectionId);
+    if (!conn) {
+      svcLogger.warn('[salesConversation] No active Instagram connection for postback', { organizationId });
+      return;
+    }
+
+    // Locate (or create) the sales state row so the typed-intent flow can keep going
+    let state = await SalesConversationState.findOne({
+      organization: organizationId,
+      instagramUserId,
+      postId: order.instagramPostId
+    });
+
+    if (action === 'details') {
+      await sendProductDetails(instagramUserId, order.product, conn);
+      if (state) {
+        state.stage = 'details_sent';
+        state.lastStageAt = new Date();
+        await state.save();
+      }
+      svcLogger.info('[salesConversation] Postback action handled: details', { instagramUserId, orderToken });
+      return;
+    }
+
+    if (action === 'payment') {
+      await sendPaymentLink(instagramUserId, order.product, order.orderToken, conn);
+      if (state) {
+        state.stage = 'payment_link_sent';
+        state.lastStageAt = new Date();
+        await state.save();
+      }
+      svcLogger.info('[salesConversation] Postback action handled: payment', { instagramUserId, orderToken });
+      return;
+    }
+
+    if (action === 'hesitant') {
+      const org = await Organization.findById(organizationId).select('salesFlowSettings').lean();
+      const captureMsg = org?.salesFlowSettings?.whatsappCaptureMessage
+        || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
+      await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
+      if (state) {
+        state.stage = 'whatsapp_requested';
+        state.lastStageAt = new Date();
+        await state.save();
+      }
+      svcLogger.info('[salesConversation] Postback action handled: hesitant', { instagramUserId, orderToken });
+      return;
+    }
+
+    // Free-form action — echo the button title so the user gets some response
+    const echo = title ? `You tapped "${title}". Reply with "details" for product info or "buy" to order. 🛍️` : null;
+    if (echo) {
+      await instagramService.sendMessage(instagramUserId, echo, conn.accessToken, conn.pageId, false, conn.connType);
+      svcLogger.info('[salesConversation] Postback action unrecognized — echoed title', { action, title });
+    } else {
+      svcLogger.info('[salesConversation] Postback action unrecognized and no title', { action });
+    }
+  } catch (err) {
+    // Non-fatal: never break the webhook pipeline
+    svcLogger.error('[salesConversation] handlePostback unhandled error', { error: err.message, stack: err.stack });
+  }
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 /**
@@ -362,4 +479,4 @@ async function handleInboundDm(interaction, organizationId) {
   }
 }
 
-module.exports = { handleInboundDm, isHesitant, wantsDetails, wantsPayment, extractPhone };
+module.exports = { handleInboundDm, handlePostback, isHesitant, wantsDetails, wantsPayment, extractPhone };

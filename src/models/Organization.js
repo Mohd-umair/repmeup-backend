@@ -348,13 +348,26 @@ const organizationSchema = new mongoose.Schema({
      */
     ctaButtons: {
       type: [{
-        label: { type: String, trim: true, maxlength: 20 },
-        url:   { type: String, trim: true }
+        label:   { type: String, trim: true, maxlength: 20 },
+        /**
+         * Button type:
+         *  - 'postback' (default): tapping triggers a webhook; bot replies with a canned action
+         *  - 'web_url': tapping opens the configured URL in a browser
+         */
+        type:    { type: String, enum: ['postback', 'web_url'], default: 'postback' },
+        /**
+         * Postback action when type === 'postback'.
+         * Recognized values: 'details' | 'payment' | 'hesitant'
+         * Free-form values are echoed back as text replies.
+         */
+        payload: { type: String, trim: true, maxlength: 64 },
+        /** URL when type === 'web_url' (must be https://) */
+        url:     { type: String, trim: true }
       }],
       default: [
-        { label: 'Product Details', url: '' },
-        { label: 'Pay Now',         url: '' },
-        { label: 'View Catalog',    url: '' }
+        { label: 'Product Details', type: 'postback', payload: 'details' },
+        { label: 'Pay Now',         type: 'postback', payload: 'payment' },
+        { label: 'Maybe later',     type: 'postback', payload: 'hesitant' }
       ]
     },
 

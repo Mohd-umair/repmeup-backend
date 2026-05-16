@@ -306,7 +306,7 @@ async function processCommentForProduct(interaction, organizationId) {
       });
     }
 
-    // ── 8. Load salesFlowSettings and determine DM strategy ──────────
+    // ── 8. Load salesFlowSettings ─────────────────────────────────────
     // salesFlowSettings is loaded alongside commentToDmSettings here (orgDoc
     // was already fetched for the daily-rate-limit check, line ~194).
     const sfSettings = orgDoc.salesFlowSettings || {};
@@ -325,119 +325,83 @@ async function processCommentForProduct(interaction, organizationId) {
       useSalesFlow
     });
 
-    // ── 10. Send DM (Generic Template CTA or plain text) ──────────────
-    let dmSendMethod = 'private_reply';
+    // ── 10. Build CTA buttons (postback or web_url) ──────────────────
+    // Always send a CTA-only DM. We never send the legacy product details template
+    // — price and full product info are revealed only after the user taps a button
+    // or replies via the postback / typed-intent flow.
+    const MAX_LABEL = 20;
+    const MAX_TITLE = 80;
+    const rawButtons = Array.isArray(sfSettings.ctaButtons) ? sfSettings.ctaButtons : [];
+    const buttons = [];
 
-    if (useSalesFlow) {
-      // Build Generic Template element from the ctaButtons array (max 3, Instagram limit)
-      const MAX_BTN = 20;
-      const rawButtons = Array.isArray(sfSettings.ctaButtons) ? sfSettings.ctaButtons : [];
-      const buttons = [];
+    for (const btn of rawButtons) {
+      if (buttons.length >= 3) break; // Instagram Generic Template hard limit
+      const label = String(btn.label || '').trim();
+      if (!label) continue;
+      const type = btn.type === 'web_url' ? 'web_url' : 'postback';
 
-      for (const btn of rawButtons) {
-        if (buttons.length >= 3) break;
-        const label = String(btn.label || '').trim();
+      if (type === 'web_url') {
         let url = String(btn.url || '').replace(/\{\{orderToken\}\}/g, orderToken).trim();
-        // Fallback: if Pay Now URL is empty use payment URL with token
+        // Convenience: empty Pay Now URL falls back to product paymentUrl with token
         if (!url && /pay/i.test(label) && paymentUrlWithToken) url = paymentUrlWithToken;
-        if (!label || !url) continue;
-        if (!/^https:\/\//i.test(url)) continue; // Meta requires https
-        buttons.push({ type: 'web_url', url, title: label.slice(0, MAX_BTN) });
-      }
-
-      // Need at least one valid button to use Generic Template
-      if (buttons.length > 0) {
-        const MAX_80 = 80;
-        const element = {
-          title: String(sfSettings.ctaTitle || `🛍️ ${product.name}`).slice(0, MAX_80),
-          buttons
-        };
-        const subtitle = String(
-          sfSettings.ctaSubtitle || 'Tap a button below to explore 👇'
-        ).slice(0, MAX_80);
-        if (subtitle) element.subtitle = subtitle;
-        const imgUrl = String(sfSettings.ctaImageUrl || product.imageUrl || '').trim();
-        if (imgUrl && /^https:\/\//i.test(imgUrl)) element.image_url = imgUrl;
-
-        try {
-          await instagramService.sendPrivateReplyGenericTemplate(
-            interaction.platformId, element, accessToken, pageId, connType
-          );
-        } catch (gtErr) {
-          svcLogger.warn('[commentToDm] sendPrivateReplyGenericTemplate failed — falling back to text DM', {
-            commentId: interaction.platformId, error: gtErr.message
-          });
-          dmSendMethod = 'text_fallback';
-          const dmText = buildTemplate(
-            settings.dmTemplate ||
-              'Hi {{username}}! 👋 Thanks for your interest.\n\n🛍️ *{{product_name}}*\n💵 Price: {{currency}} {{price}}\n\n👉 Order here: {{payment_url}}\n\nFeel free to DM us if you have any questions! 😊',
-            {
-              username: commenterUsername || 'there',
-              product_name: product.name,
-              description: product.description || '',
-              price: String(product.price),
-              currency: product.currency || 'AED',
-              sizes: product.sizes?.join(', ') || 'N/A',
-              colors: product.colors?.join(', ') || 'N/A',
-              payment_url: paymentUrlWithToken || product.paymentUrl || '(link coming soon)'
-            }
-          );
-          await instagramService.sendMessage(String(commenterId), dmText, accessToken, pageId, false, connType);
-        }
+        if (!/^https:\/\//i.test(url)) continue;
+        buttons.push({ type: 'web_url', url, title: label.slice(0, MAX_LABEL) });
       } else {
-        // No valid https buttons configured — fall through to plain text DM
-        svcLogger.warn('[commentToDm] salesFlowSettings enabled but no valid CTA buttons configured — sending text DM', { organizationId });
-        dmSendMethod = 'text_no_buttons';
-        const dmText = buildTemplate(
-          settings.dmTemplate ||
-            'Hi {{username}}! 👋 Thanks for your interest.\n\n🛍️ *{{product_name}}*\n💵 Price: {{currency}} {{price}}\n\n👉 Order here: {{payment_url}}\n\nFeel free to DM us if you have any questions! 😊',
-          {
-            username: commenterUsername || 'there',
-            product_name: product.name,
-            description: product.description || '',
-            price: String(product.price),
-            currency: product.currency || 'AED',
-            sizes: product.sizes?.join(', ') || 'N/A',
-            colors: product.colors?.join(', ') || 'N/A',
-            payment_url: paymentUrlWithToken || product.paymentUrl || '(link coming soon)'
-          }
+        const payload = String(btn.payload || '').trim() || label.toLowerCase();
+        // Embed orderToken in the payload so the postback handler can correlate
+        // the click back to the exact ProductOrder/SalesConversationState row.
+        buttons.push({
+          type: 'postback',
+          title: label.slice(0, MAX_LABEL),
+          payload: `SALES:${payload}:${orderToken}`
+        });
+      }
+    }
+
+    let dmSendMethod = 'cta_template';
+
+    if (buttons.length > 0) {
+      const element = {
+        title: String(sfSettings.ctaTitle || `🛍️ ${product.name}`).slice(0, MAX_TITLE),
+        buttons
+      };
+      const subtitle = String(sfSettings.ctaSubtitle || 'Tap a button below to continue 👇').slice(0, MAX_TITLE);
+      if (subtitle) element.subtitle = subtitle;
+      const imgUrl = String(sfSettings.ctaImageUrl || product.imageUrl || '').trim();
+      if (imgUrl && /^https:\/\//i.test(imgUrl)) element.image_url = imgUrl;
+
+      try {
+        await instagramService.sendPrivateReplyGenericTemplate(
+          interaction.platformId, element, accessToken, pageId, connType
         );
+      } catch (gtErr) {
+        // Generic Template failed — fall back to a SHORT teaser text. We deliberately
+        // do NOT reveal price or product details here; the user will get them after
+        // they reply (handled by salesConversationService).
+        svcLogger.warn('[commentToDm] sendPrivateReplyGenericTemplate failed — falling back to short teaser DM', {
+          commentId: interaction.platformId, error: gtErr.message
+        });
+        dmSendMethod = 'cta_text_fallback';
+        const teaser = `Hi${commenterUsername ? ' @' + commenterUsername : ''}! 👋 Thanks for your interest.\n\nReply with "details" for more info, or "buy" to order. 🛍️`;
         try {
-          await instagramService.sendPrivateReply(interaction.platformId, dmText, accessToken, pageId, connType);
+          await instagramService.sendPrivateReply(interaction.platformId, teaser, accessToken, pageId, connType);
         } catch (prErr) {
-          svcLogger.warn('[commentToDm] sendPrivateReply failed — falling back to sendMessage', {
-            commentId: interaction.platformId, error: prErr.message
-          });
-          await instagramService.sendMessage(String(commenterId), dmText, accessToken, pageId, false, connType);
+          await instagramService.sendMessage(String(commenterId), teaser, accessToken, pageId, false, connType);
         }
       }
     } else {
-      // ── Legacy plain-text DM path ──────────────────────────────────
-      const dmText = buildTemplate(
-        settings.dmTemplate ||
-          'Hi {{username}}! 👋 Thanks for your interest.\n\n🛍️ *{{product_name}}*\n💵 Price: {{currency}} {{price}}\n\n👉 Order here: {{payment_url}}\n\nFeel free to DM us if you have any questions! 😊',
-        {
-          username: commenterUsername || 'there',
-          product_name: product.name,
-          description: product.description || '',
-          price: String(product.price),
-          currency: product.currency || 'AED',
-          sizes: product.sizes?.join(', ') || 'N/A',
-          colors: product.colors?.join(', ') || 'N/A',
-          payment_url: paymentUrlWithToken || product.paymentUrl || '(link coming soon)'
-        }
-      );
-
+      // No valid buttons configured — send a minimal teaser so the user can reply
+      // and trigger the typed-intent flow. Still no price / product template.
+      svcLogger.warn('[commentToDm] No valid CTA buttons configured — sending short teaser DM', { organizationId });
+      dmSendMethod = 'cta_text_no_buttons';
+      const teaser = `Hi${commenterUsername ? ' @' + commenterUsername : ''}! 👋 Thanks for your interest.\n\nReply with "details" for more info, or "buy" to order. 🛍️`;
       try {
-        await instagramService.sendPrivateReply(interaction.platformId, dmText, accessToken, pageId, connType);
-      } catch (privateReplyErr) {
+        await instagramService.sendPrivateReply(interaction.platformId, teaser, accessToken, pageId, connType);
+      } catch (prErr) {
         svcLogger.warn('[commentToDm] sendPrivateReply failed — falling back to sendMessage', {
-          commentId: interaction.platformId,
-          commenterId,
-          error: privateReplyErr.message
+          commentId: interaction.platformId, error: prErr.message
         });
-        dmSendMethod = 'send_message_fallback';
-        await instagramService.sendMessage(String(commenterId), dmText, accessToken, pageId, false, connType);
+        await instagramService.sendMessage(String(commenterId), teaser, accessToken, pageId, false, connType);
       }
     }
 
@@ -454,28 +418,29 @@ async function processCommentForProduct(interaction, organizationId) {
       status: 'dm_sent'
     });
 
-    // ── 12. Record sales conversation state (if sales flow is enabled) ─
-    if (useSalesFlow) {
-      try {
-        await SalesConversationState.findOneAndUpdate(
-          { organization: organizationId, instagramUserId: String(commenterId), postId: String(postId) },
-          {
-            $set: {
-              productOrderId: productOrder._id,
-              stage: 'initial_cta_sent',
-              lastStageAt: new Date(),
-              whatsappNumber: null
-            }
-          },
-          { upsert: true, new: true }
-        );
-        svcLogger.info('[commentToDm] SalesConversationState upserted', {
-          commenterId, postId, stage: 'initial_cta_sent'
-        });
-      } catch (stateErr) {
-        // Non-fatal: DM was already sent; log and continue
-        svcLogger.warn('[commentToDm] Failed to upsert SalesConversationState', { error: stateErr.message });
-      }
+    // ── 12. Record sales conversation state ───────────────────────────
+    // Always upsert state so both postback clicks and typed replies have a row
+    // to advance. The state machine is invariant to salesFlowSettings.enabled —
+    // that flag now only controls hesitancy detection on typed replies.
+    try {
+      await SalesConversationState.findOneAndUpdate(
+        { organization: organizationId, instagramUserId: String(commenterId), postId: String(postId) },
+        {
+          $set: {
+            productOrderId: productOrder._id,
+            stage: 'initial_cta_sent',
+            lastStageAt: new Date(),
+            whatsappNumber: null
+          }
+        },
+        { upsert: true, new: true }
+      );
+      svcLogger.info('[commentToDm] SalesConversationState upserted', {
+        commenterId, postId, stage: 'initial_cta_sent'
+      });
+    } catch (stateErr) {
+      // Non-fatal: DM was already sent; log and continue
+      svcLogger.warn('[commentToDm] Failed to upsert SalesConversationState', { error: stateErr.message });
     }
 
     // ── 13. Increment daily counter ───────────────────────────────────
