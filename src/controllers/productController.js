@@ -373,6 +373,73 @@ exports.resolvePostId = async (req, res, next) => {
   }
 };
 
+// ─────────────────────────────────────────────
+// LIST INSTAGRAM MEDIA (for post picker in product wizard step 2)
+// ─────────────────────────────────────────────
+/**
+ * Fetches the last N media items from the connected Instagram account so the
+ * user can pick posts from a visual grid rather than manually pasting URLs.
+ *
+ * Returns an array of: { id, shortcode, mediaType, thumbnailUrl, mediaUrl, caption, timestamp }
+ */
+exports.getInstagramMedia = async (req, res, next) => {
+  try {
+    const orgId = req.user.organization._id;
+    const limit = Math.min(Number(req.query.limit) || 24, 50);
+
+    const conn = await PlatformConnection.findOne({
+      organization: orgId,
+      platform: 'instagram',
+      isActive: true,
+      status: { $in: ['connected', 'available'] }
+    }).sort({ updatedAt: -1 }).select('accessToken platformUserId metadata').lean();
+
+    if (!conn?.accessToken) {
+      return res.status(400).json({ success: false, error: 'No active Instagram connection found. Connect Instagram in Settings → Integrations.' });
+    }
+
+    const apiUserId = conn.metadata?.igLoginScopedId || conn.platformUserId;
+    if (!apiUserId) {
+      return res.status(400).json({ success: false, error: 'Could not determine Instagram user ID for this connection.' });
+    }
+
+    const resp = await axios.get(
+      `https://graph.facebook.com/v18.0/${apiUserId}/media`,
+      {
+        params: {
+          fields: 'id,shortcode,media_type,thumbnail_url,media_url,caption,timestamp',
+          limit,
+          access_token: conn.accessToken
+        },
+        timeout: 10000
+      }
+    );
+
+    const raw = resp.data?.data || [];
+    const media = raw.map(m => ({
+      id:           m.id,
+      shortcode:    m.shortcode || null,
+      mediaType:    m.media_type,
+      thumbnailUrl: m.thumbnail_url || m.media_url || null,
+      mediaUrl:     m.media_url || null,
+      caption:      (m.caption || '').slice(0, 120),
+      timestamp:    m.timestamp
+    }));
+
+    res.json({ success: true, data: media });
+  } catch (err) {
+    const apiErr = err.response?.data?.error;
+    if (apiErr) {
+      return res.status(400).json({
+        success: false,
+        error: `Instagram API error: ${apiErr.message || apiErr.code}`,
+        details: apiErr
+      });
+    }
+    next(err);
+  }
+};
+
 exports.unlinkPost = async (req, res, next) => {
   try {
     // Accept postId from body (POST /unlink) or params (DELETE /:postId legacy)
