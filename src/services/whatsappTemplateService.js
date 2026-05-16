@@ -9,7 +9,8 @@
  *
  * All methods accept `organizationId` (for DB scoping) and a resolved
  * `PlatformConnection` document whose `accessToken` and
- * `platformData.businessAccountId` are used for Graph calls.
+ * `platformData.wabaId` or `platformData.businessAccountId` (WhatsApp Business
+ * Account ID — not the phone number ID) are used for Graph calls.
  */
 
 const path = require('path');
@@ -27,8 +28,12 @@ function _token(connection) {
 }
 
 function _wabaId(connection) {
+  const pd = connection?.platformData || {};
+  // Embedded Signup stores WABA on wabaId; env/direct flow often uses businessAccountId.
+  // Never use phoneNumberId here — message_templates is only on the WABA object.
   return (
-    connection?.platformData?.businessAccountId ||
+    pd.wabaId ||
+    pd.businessAccountId ||
     process.env.WHATSAPP_BUSINESS_ACCOUNT_ID
   );
 }
@@ -337,6 +342,19 @@ async function listTemplates(organizationId, connectionId = null, filters = {}) 
   const connection = await _resolveConnection(organizationId, connectionId);
   const wabaId = _wabaId(connection);
 
+  if (!wabaId) {
+    logger.error('[TemplateService] Cannot list templates: missing WABA id on connection', {
+      connectionId: String(connection._id),
+      platformDataKeys: Object.keys(connection.platformData || {})
+    });
+    const err = new Error(
+      'WhatsApp Business Account ID is missing for this connection. Reconnect WhatsApp (Embedded Signup) or set WHATSAPP_BUSINESS_ACCOUNT_ID for env-based setup.'
+    );
+    err.statusCode = 400;
+    err.code = 'MISSING_WABA_ID';
+    throw err;
+  }
+
   // Fetch from Meta
   let metaTemplates = [];
   try {
@@ -353,7 +371,19 @@ async function listTemplates(organizationId, connectionId = null, filters = {}) 
     metaTemplates = response.data?.data || [];
   } catch (error) {
     const parsed = _parseMetaError(error);
-    logger.error('[TemplateService] Meta list templates error', parsed);
+    logger.error('[TemplateService] Meta list templates error', {
+      ...parsed,
+      wabaIdUsed: wabaId,
+      connectionWabaId: connection.platformData?.wabaId,
+      connectionBusinessAccountId: connection.platformData?.businessAccountId,
+      phoneNumberId: connection.platformData?.phoneNumberId,
+      ...(parsed.metaSubcode === 33
+        ? {
+            hint:
+              'Graph object id may be wrong (use WABA id from platformData.wabaId, not phone number id) or token lacks whatsapp_business_management.'
+          }
+        : {})
+    });
     // Fall back to DB list if Meta unavailable
     const dbTemplates = await WhatsAppTemplate.find({
       organization: organizationId,
@@ -366,7 +396,7 @@ async function listTemplates(organizationId, connectionId = null, filters = {}) 
   }
 
   // Sync status back to DB in background (fire-and-forget)
-  _syncMetaTemplatesToDb(metaTemplates, organizationId, connection._id, wabaId, userId => userId).catch(() => {});
+  _syncMetaTemplatesToDb(metaTemplates, organizationId, connection._id, wabaId).catch(() => {});
 
   return { source: 'meta', templates: metaTemplates };
 }
