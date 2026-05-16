@@ -328,6 +328,56 @@ const organizationSchema = new mongoose.Schema({
     filterSalesIntent: { type: Boolean, default: true }
   },
 
+  // Instagram: sales-intent comment → multi-turn DM with CTA buttons + WhatsApp retargeting
+  salesFlowSettings: {
+    /** Master toggle — off by default until CTA URLs are configured */
+    enabled: { type: Boolean, default: false },
+
+    // ── Generic Template card copy ─────────────────────────────────────────
+    /** Card headline (max 80 chars per Meta limit) */
+    ctaTitle: { type: String, default: 'Check this out! 🛍️' },
+    /** Card subheading (max 80 chars per Meta limit) */
+    ctaSubtitle: { type: String, default: 'Tap a button below for more details.' },
+    /** Optional card image (must be https://) */
+    ctaImageUrl: { type: String, default: '' },
+
+    // ── CTA buttons array (web_url type, max 3 per Instagram Generic Template limit) ──
+    /**
+     * Each entry: { label: String (max 20), url: String (https://, supports {{orderToken}}) }
+     * Max 3 items enforced in the controller and on the frontend.
+     */
+    ctaButtons: {
+      type: [{
+        label: { type: String, trim: true, maxlength: 20 },
+        url:   { type: String, trim: true }
+      }],
+      default: [
+        { label: 'Product Details', url: '' },
+        { label: 'Pay Now',         url: '' },
+        { label: 'View Catalog',    url: '' }
+      ]
+    },
+
+    // ── Hesitancy detection ────────────────────────────────────────────────
+    /** Case-insensitive keywords in a DM reply that signal purchase hesitancy */
+    hesitancyKeywords: {
+      type: [String],
+      default: ['no', 'nahi', 'not interested', 'later', 'abhi nahi', 'nope', 'not now', 'maybe later']
+    },
+
+    // ── WhatsApp retargeting capture ────────────────────────────────────────
+    /** DM message sent when hesitancy is detected, asking for WhatsApp number */
+    whatsappCaptureMessage: {
+      type: String,
+      default: 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊'
+    },
+    /** Confirmation DM sent after a phone number is captured */
+    whatsappCaptureConfirmation: {
+      type: String,
+      default: 'Thank you! We\'ll contact you on WhatsApp soon. 🙏'
+    }
+  },
+
   // Human agent escalation settings
   escalationSettings: {
     enabled: {

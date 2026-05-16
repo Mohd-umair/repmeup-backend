@@ -369,6 +369,13 @@ async function handleInstagramMessage(payload, organizationId) {
         });
       }
 
+      // ── Sales conversation: handle multi-turn DM funnel (non-blocking) ──
+      if (interaction && !sharePostEcho) {
+        const salesConvSvc = require('../salesConversationService');
+        salesConvSvc.handleInboundDm(interaction.toObject ? interaction.toObject() : interaction, organizationId)
+          .catch(err => logger.warn('[instagramWebhookService] salesConversationService error (non-fatal)', { error: err.message }));
+      }
+
       return interaction;
     }
 

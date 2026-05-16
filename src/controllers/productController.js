@@ -32,6 +32,21 @@ const DEFAULT_COMMENT_FOLLOW_INVITE_SETTINGS = {
   skipIfProductDmSent: false
 };
 
+const DEFAULT_SALES_FLOW_SETTINGS = {
+  enabled: false,
+  ctaTitle: 'Check this out! 🛍️',
+  ctaSubtitle: 'Tap a button below for more details.',
+  ctaImageUrl: '',
+  ctaButtons: [
+    { label: 'Product Details', url: '' },
+    { label: 'Pay Now',         url: '' },
+    { label: 'View Catalog',    url: '' }
+  ],
+  hesitancyKeywords: ['no', 'nahi', 'not interested', 'later', 'abhi nahi', 'nope', 'not now', 'maybe later'],
+  whatsappCaptureMessage: "No problem! Would you like us to reach you on WhatsApp? Just share your number and we'll be in touch. 😊",
+  whatsappCaptureConfirmation: "Thank you! We'll contact you on WhatsApp soon. 🙏"
+};
+
 // ─────────────────────────────────────────────
 // LIST
 // ─────────────────────────────────────────────
@@ -413,6 +428,83 @@ exports.updateCommentFollowInviteSettings = async (req, res, next) => {
       ...DEFAULT_COMMENT_FOLLOW_INVITE_SETTINGS,
       ...(org.commentFollowInviteSettings || {})
     };
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// SALES FLOW SETTINGS (Instagram Comment → CTA DM + WhatsApp retargeting)
+// ─────────────────────────────────────────────
+
+exports.getSalesFlowSettings = async (req, res, next) => {
+  try {
+    const org = await Organization.findById(req.user.organization._id)
+      .select('salesFlowSettings')
+      .lean();
+
+    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+
+    const merged = { ...DEFAULT_SALES_FLOW_SETTINGS, ...(org.salesFlowSettings || {}) };
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.updateSalesFlowSettings = async (req, res, next) => {
+  try {
+    const allowed = [
+      'enabled',
+      'ctaTitle',
+      'ctaSubtitle',
+      'ctaImageUrl',
+      'ctaButtons',
+      'hesitancyKeywords',
+      'whatsappCaptureMessage',
+      'whatsappCaptureConfirmation'
+    ];
+
+    const update = {};
+    allowed.forEach((f) => {
+      if (req.body[f] !== undefined) update[`salesFlowSettings.${f}`] = req.body[f];
+    });
+
+    // Validate ctaButtons array (max 3, each entry must have label and url)
+    if (req.body.ctaButtons !== undefined) {
+      if (!Array.isArray(req.body.ctaButtons)) {
+        return res.status(400).json({ success: false, error: 'ctaButtons must be an array' });
+      }
+      if (req.body.ctaButtons.length > 3) {
+        return res.status(400).json({ success: false, error: 'Instagram Generic Template supports a maximum of 3 CTA buttons' });
+      }
+      for (const btn of req.body.ctaButtons) {
+        if (!btn || typeof btn.label !== 'string' || !btn.label.trim()) {
+          return res.status(400).json({ success: false, error: 'Each CTA button must have a non-empty label' });
+        }
+        if (String(btn.label).length > 20) {
+          return res.status(400).json({ success: false, error: `Button label "${btn.label}" exceeds the 20-character Instagram limit` });
+        }
+      }
+    }
+
+    // Validate hesitancyKeywords is an array of strings
+    if (req.body.hesitancyKeywords !== undefined) {
+      if (!Array.isArray(req.body.hesitancyKeywords)) {
+        return res.status(400).json({ success: false, error: 'hesitancyKeywords must be an array' });
+      }
+    }
+
+    const org = await Organization.findByIdAndUpdate(
+      req.user.organization._id,
+      { $set: update },
+      { new: true, select: 'salesFlowSettings' }
+    );
+
+    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+
+    const merged = { ...DEFAULT_SALES_FLOW_SETTINGS, ...(org.salesFlowSettings || {}) };
     res.json({ success: true, data: merged });
   } catch (err) {
     next(err);
