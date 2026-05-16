@@ -176,6 +176,95 @@ exports.deleteProduct = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
+// PER-PRODUCT DM CONFIG
+// ─────────────────────────────────────────────
+
+exports.getProductDmConfig = async (req, res, next) => {
+  try {
+    const product = await Product.findOne(
+      { _id: req.params.id, organization: req.user.organization._id },
+      { dmConfig: 1 }
+    ).lean();
+    if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+    res.json({ success: true, data: product.dmConfig || {} });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const ALLOWED_BUTTON_TYPES = ['postback', 'web_url'];
+const ALLOWED_PAYLOADS     = ['details', 'payment', 'hesitant'];
+
+exports.updateProductDmConfig = async (req, res, next) => {
+  try {
+    const {
+      ctaTitle, ctaSubtitle, ctaImageUrl,
+      ctaButtons,
+      triggerKeywords, publicReplyTemplate,
+      hesitancyKeywords,
+      whatsappCaptureMessage, whatsappCaptureConfirmation
+    } = req.body;
+
+    // ── Validate ctaButtons if provided ───────────────────────────────
+    if (ctaButtons !== undefined) {
+      if (!Array.isArray(ctaButtons)) {
+        return res.status(400).json({ success: false, error: 'ctaButtons must be an array' });
+      }
+      if (ctaButtons.length > 3) {
+        return res.status(400).json({ success: false, error: 'Instagram Generic Template supports a maximum of 3 CTA buttons' });
+      }
+      for (const btn of ctaButtons) {
+        if (!btn || typeof btn.label !== 'string' || !btn.label.trim()) {
+          return res.status(400).json({ success: false, error: 'Each CTA button must have a non-empty label' });
+        }
+        if (btn.label.length > 20) {
+          return res.status(400).json({ success: false, error: `Button label "${btn.label}" exceeds the 20-character limit` });
+        }
+        const type = btn.type || 'postback';
+        if (!ALLOWED_BUTTON_TYPES.includes(type)) {
+          return res.status(400).json({ success: false, error: `Invalid button type "${type}"` });
+        }
+        btn.type = type;
+        if (type === 'web_url') {
+          if (!/^https:\/\//i.test(String(btn.url || ''))) {
+            return res.status(400).json({ success: false, error: `Button "${btn.label}" of type web_url must have an https:// URL` });
+          }
+        } else {
+          const payload = String(btn.payload || '').trim();
+          if (!payload) {
+            return res.status(400).json({ success: false, error: `Button "${btn.label}" of type postback must have a payload` });
+          }
+          btn.payload = ALLOWED_PAYLOADS.includes(payload.toLowerCase()) ? payload.toLowerCase() : payload.slice(0, 64);
+        }
+      }
+    }
+
+    // ── Build the $set path ────────────────────────────────────────────
+    const dmConfig = {};
+    if (ctaTitle             !== undefined) dmConfig.ctaTitle             = ctaTitle;
+    if (ctaSubtitle          !== undefined) dmConfig.ctaSubtitle          = ctaSubtitle;
+    if (ctaImageUrl          !== undefined) dmConfig.ctaImageUrl          = ctaImageUrl;
+    if (ctaButtons           !== undefined) dmConfig.ctaButtons           = ctaButtons;
+    if (triggerKeywords      !== undefined) dmConfig.triggerKeywords      = triggerKeywords;
+    if (publicReplyTemplate  !== undefined) dmConfig.publicReplyTemplate  = publicReplyTemplate;
+    if (hesitancyKeywords    !== undefined) dmConfig.hesitancyKeywords    = hesitancyKeywords;
+    if (whatsappCaptureMessage       !== undefined) dmConfig.whatsappCaptureMessage       = whatsappCaptureMessage;
+    if (whatsappCaptureConfirmation  !== undefined) dmConfig.whatsappCaptureConfirmation  = whatsappCaptureConfirmation;
+
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, organization: req.user.organization._id },
+      { $set: { dmConfig } },
+      { new: true, select: 'dmConfig' }
+    ).lean();
+
+    if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+    res.json({ success: true, data: product.dmConfig || {} });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
 // LINK / UNLINK INSTAGRAM POST
 // ─────────────────────────────────────────────
 
