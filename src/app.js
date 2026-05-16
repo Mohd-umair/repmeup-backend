@@ -49,7 +49,9 @@ app.use(
   express.json({
     limit: '10mb',
     verify: (req, res, buf) => {
-      if (req.originalUrl && req.originalUrl.startsWith('/api/webhooks/whatsapp')) {
+      const path = req.originalUrl || req.url || '';
+      // Mounted at /api/webhooks/whatsapp and /api/v1/webhooks/whatsapp
+      if (path.includes('/webhooks/whatsapp')) {
         req.rawBody = buf;
       }
     }
