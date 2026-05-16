@@ -385,7 +385,9 @@ exports.updateCommentFollowInviteSettings = async (req, res, next) => {
       'postPublicReply',
       'deduplicateDms',
       'maxDmsPerDay',
-      'skipIfProductDmSent'
+      'skipIfProductDmSent',
+      'filterNegativeSentiment',
+      'filterSalesIntent'
     ];
     const update = {};
     allowed.forEach((f) => {
