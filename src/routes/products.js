@@ -39,6 +39,10 @@ router.post('/', productController.createProduct);
 router.put('/:id', productController.updateProduct);
 router.delete('/:id', productController.deleteProduct);
 
+// ── Per-product DM configuration ────────────────────────────────────────────
+router.get('/:id/dm-config', productController.getProductDmConfig);
+router.put('/:id/dm-config', productController.updateProductDmConfig);
+
 // ── Post-product mapping ────────────────────────────────────────────────────
 router.post('/:id/posts', productController.linkPost);
 router.post('/:id/posts/unlink', productController.unlinkPost);   // body: { postId } — safe for full-URL postIds

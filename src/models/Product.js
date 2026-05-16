@@ -89,6 +89,38 @@ const productSchema = new mongoose.Schema({
     trim: true
   }],
 
+  /**
+   * Per-product Comment-to-DM configuration.
+   * Every field is optional — if omitted the field inherits from
+   * org.salesFlowSettings (global defaults).  Presence of ctaButtons[]
+   * takes full precedence over the org array (no partial merge on buttons).
+   */
+  dmConfig: {
+    ctaTitle:    { type: String, trim: true },
+    ctaSubtitle: { type: String, trim: true },
+    ctaImageUrl: { type: String, trim: true },
+
+    ctaButtons: [{
+      label:   { type: String, trim: true, maxlength: 20 },
+      type:    { type: String, enum: ['postback', 'web_url'], default: 'postback' },
+      payload: { type: String, trim: true, maxlength: 64 },
+      url:     { type: String, trim: true }
+    }],
+
+    /** Override the org-level trigger keywords for this product */
+    triggerKeywords: [String],
+
+    /** Override the public comment reply stub */
+    publicReplyTemplate: { type: String, trim: true },
+
+    /** Override hesitancy keywords for WhatsApp-capture flow */
+    hesitancyKeywords: [String],
+
+    /** Override WhatsApp-capture request / confirmation messages */
+    whatsappCaptureMessage:      { type: String, trim: true },
+    whatsappCaptureConfirmation: { type: String, trim: true }
+  },
+
   isActive: {
     type: Boolean,
     default: true,

@@ -116,6 +116,21 @@ async function loadProductFromState(state) {
   return { product: order.product, orderToken: order.orderToken };
 }
 
+/**
+ * Merges product.dmConfig over the org-level salesFlowSettings.
+ * Product fields always win; org settings are the fallback.
+ * Returns a flat effective-config object used for hesitancy keywords and messages.
+ */
+function effectiveConfig(product, orgSettings) {
+  const pdc = product?.dmConfig || {};
+  const sf  = orgSettings || {};
+  return {
+    hesitancyKeywords:           (pdc.hesitancyKeywords?.length   ? pdc.hesitancyKeywords   : sf.hesitancyKeywords)   || [],
+    whatsappCaptureMessage:      pdc.whatsappCaptureMessage      || sf.whatsappCaptureMessage      || '',
+    whatsappCaptureConfirmation: pdc.whatsappCaptureConfirmation || sf.whatsappCaptureConfirmation || '',
+  };
+}
+
 // ── DM send helpers ──────────────────────────────────────────────────────────
 
 /**
@@ -261,7 +276,8 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
 
     if (action === 'hesitant') {
       const org = await Organization.findById(organizationId).select('salesFlowSettings').lean();
-      const captureMsg = org?.salesFlowSettings?.whatsappCaptureMessage
+      const cfg = effectiveConfig(order.product, org?.salesFlowSettings);
+      const captureMsg = cfg.whatsappCaptureMessage
         || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
       await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
       if (state) {
@@ -354,16 +370,21 @@ async function handleInboundDm(interaction, organizationId) {
 
     // ── 4. Stage-specific logic ────────────────────────────────────────
 
+    // Load product early so we can apply per-product overrides to hesitancy
+    // keywords / WhatsApp messages. This is a single DB call that is re-used
+    // across all stages that might need product data anyway.
+    const productData = await loadProductFromState(state);
+    const cfg = effectiveConfig(productData?.product, settings);
+
     // ── Stage: initial_cta_sent ────────────────────────────────────────
     if (state.stage === 'initial_cta_sent') {
       const payIntent = wantsPayment(replyText);
       const detailIntent = wantsDetails(replyText);
-      const hesitant = isHesitant(replyText, settings.hesitancyKeywords);
+      const hesitant = isHesitant(replyText, cfg.hesitancyKeywords);
 
       if (payIntent) {
-        const data = await loadProductFromState(state);
-        if (data) {
-          await sendPaymentLink(instagramUserId, data.product, data.orderToken, conn);
+        if (productData) {
+          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn);
           state.stage = 'payment_link_sent';
           state.lastStageAt = new Date();
           await state.save();
@@ -375,9 +396,8 @@ async function handleInboundDm(interaction, organizationId) {
       }
 
       if (detailIntent) {
-        const data = await loadProductFromState(state);
-        if (data) {
-          await sendProductDetails(instagramUserId, data.product, conn);
+        if (productData) {
+          await sendProductDetails(instagramUserId, productData.product, conn);
           state.stage = 'details_sent';
           state.lastStageAt = new Date();
           await state.save();
@@ -389,7 +409,7 @@ async function handleInboundDm(interaction, organizationId) {
       }
 
       if (hesitant) {
-        const captureMsg = settings.whatsappCaptureMessage
+        const captureMsg = cfg.whatsappCaptureMessage
           || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
         await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
         state.stage = 'whatsapp_requested';
@@ -406,12 +426,11 @@ async function handleInboundDm(interaction, organizationId) {
     // ── Stage: details_sent ────────────────────────────────────────────
     if (state.stage === 'details_sent') {
       const payIntent = wantsPayment(replyText);
-      const hesitant = isHesitant(replyText, settings.hesitancyKeywords);
+      const hesitant = isHesitant(replyText, cfg.hesitancyKeywords);
 
       if (payIntent) {
-        const data = await loadProductFromState(state);
-        if (data) {
-          await sendPaymentLink(instagramUserId, data.product, data.orderToken, conn);
+        if (productData) {
+          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn);
           state.stage = 'payment_link_sent';
           state.lastStageAt = new Date();
           await state.save();
@@ -421,7 +440,7 @@ async function handleInboundDm(interaction, organizationId) {
       }
 
       if (hesitant) {
-        const captureMsg = settings.whatsappCaptureMessage
+        const captureMsg = cfg.whatsappCaptureMessage
           || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
         await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
         state.stage = 'whatsapp_requested';
@@ -437,10 +456,10 @@ async function handleInboundDm(interaction, organizationId) {
 
     // ── Stage: payment_link_sent ───────────────────────────────────────
     if (state.stage === 'payment_link_sent') {
-      const hesitant = isHesitant(replyText, settings.hesitancyKeywords);
+      const hesitant = isHesitant(replyText, cfg.hesitancyKeywords);
 
       if (hesitant) {
-        const captureMsg = settings.whatsappCaptureMessage
+        const captureMsg = cfg.whatsappCaptureMessage
           || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
         await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
         state.stage = 'whatsapp_requested';
@@ -458,7 +477,7 @@ async function handleInboundDm(interaction, organizationId) {
       const phone = extractPhone(replyText);
 
       if (phone) {
-        const confirmMsg = settings.whatsappCaptureConfirmation
+        const confirmMsg = cfg.whatsappCaptureConfirmation
           || 'Thank you! We\'ll contact you on WhatsApp soon. 🙏';
         await instagramService.sendMessage(instagramUserId, confirmMsg, conn.accessToken, conn.pageId, false, conn.connType);
         state.stage = 'whatsapp_captured';

@@ -194,17 +194,40 @@ async function processCommentForProduct(interaction, organizationId) {
 
     const product = products[0];
 
+    // ── Per-product config: merge product.dmConfig over org salesFlowSettings ──
+    // product.dmConfig fields win; org salesFlowSettings are the fallback default.
+    // We do this here so both the public-reply stub and the CTA build can use it.
+    const pdc = product.dmConfig || {};
+    // sfSettings is populated at step 8 below; we capture a forward-reference now
+    // so we can build the effective config once sfSettings is available.
+    // Defer the merge to step 8 where sfSettings is loaded.
+
     svcLogger.info('[commentToDm] Product resolved', {
       interactionId,
       postId,
       productId: product._id,
-      productName: product.name
+      productName: product.name,
+      hasPerProductDmConfig: !!(pdc.ctaButtons?.length || pdc.ctaTitle || pdc.triggerKeywords?.length)
     });
 
     const commenterId = interaction.author?.platformId;
     if (!commenterId) {
       svcLogger.warn('[commentToDm] Skipping — comment has no author.platformId (cannot DM)', { interactionId });
       return;
+    }
+
+    // ── 3b. Per-product trigger keyword override ───────────────────────
+    // If the matched product has its own triggerKeywords, the comment must
+    // also match those (acts as an AND filter on top of the global check).
+    if (pdc.triggerKeywords?.length) {
+      const productKws = pdc.triggerKeywords.map(k => k.toLowerCase().trim()).filter(Boolean);
+      const productMatched = productKws.some(kw => commentText.includes(kw));
+      if (!productMatched) {
+        svcLogger.info('[commentToDm] Skipping — comment did not match per-product triggerKeywords', {
+          productId: product._id, productKws, commentText: commentText.substring(0, 60)
+        });
+        return;
+      }
     }
 
     // ── 4. Deduplication ───────────────────────────────────────────────
@@ -306,10 +329,24 @@ async function processCommentForProduct(interaction, organizationId) {
       });
     }
 
-    // ── 8. Load salesFlowSettings ─────────────────────────────────────
-    // salesFlowSettings is loaded alongside commentToDmSettings here (orgDoc
-    // was already fetched for the daily-rate-limit check, line ~194).
+    // ── 8. Build effective DM config (product overrides org defaults) ──
+    // salesFlowSettings were loaded alongside commentToDmSettings (orgDoc at ~step 5).
     const sfSettings = orgDoc.salesFlowSettings || {};
+
+    /**
+     * Effective config = per-product dmConfig fields (if set) over org salesFlowSettings.
+     * ctaButtons: product array takes full priority (no partial merge) so the product
+     * can have a completely different set of buttons.
+     */
+    const effectiveDmConfig = {
+      ctaTitle:    pdc.ctaTitle    || sfSettings.ctaTitle    || '',
+      ctaSubtitle: pdc.ctaSubtitle || sfSettings.ctaSubtitle || '',
+      ctaImageUrl: pdc.ctaImageUrl || sfSettings.ctaImageUrl || '',
+      ctaButtons:  (pdc.ctaButtons?.length ? pdc.ctaButtons : sfSettings.ctaButtons) || [],
+      hesitancyKeywords:           (pdc.hesitancyKeywords?.length   ? pdc.hesitancyKeywords   : sfSettings.hesitancyKeywords)   || [],
+      whatsappCaptureMessage:      pdc.whatsappCaptureMessage      || sfSettings.whatsappCaptureMessage      || '',
+      whatsappCaptureConfirmation: pdc.whatsappCaptureConfirmation || sfSettings.whatsappCaptureConfirmation || '',
+    };
     const useSalesFlow = sfSettings.enabled === true;
 
     // ── 9. Build order token and payment URL ──────────────────────────
@@ -326,12 +363,11 @@ async function processCommentForProduct(interaction, organizationId) {
     });
 
     // ── 10. Build CTA buttons (postback or web_url) ──────────────────
-    // Always send a CTA-only DM. We never send the legacy product details template
-    // — price and full product info are revealed only after the user taps a button
-    // or replies via the postback / typed-intent flow.
+    // Always send a CTA-only DM. Price / product details are revealed only after
+    // the user taps a button or replies via the postback / typed-intent flow.
     const MAX_LABEL = 20;
     const MAX_TITLE = 80;
-    const rawButtons = Array.isArray(sfSettings.ctaButtons) ? sfSettings.ctaButtons : [];
+    const rawButtons = Array.isArray(effectiveDmConfig.ctaButtons) ? effectiveDmConfig.ctaButtons : [];
     const buttons = [];
 
     for (const btn of rawButtons) {
@@ -362,12 +398,12 @@ async function processCommentForProduct(interaction, organizationId) {
 
     if (buttons.length > 0) {
       const element = {
-        title: String(sfSettings.ctaTitle || `🛍️ ${product.name}`).slice(0, MAX_TITLE),
+        title: String(effectiveDmConfig.ctaTitle || `🛍️ ${product.name}`).slice(0, MAX_TITLE),
         buttons
       };
-      const subtitle = String(sfSettings.ctaSubtitle || 'Tap a button below to continue 👇').slice(0, MAX_TITLE);
+      const subtitle = String(effectiveDmConfig.ctaSubtitle || 'Tap a button below to continue 👇').slice(0, MAX_TITLE);
       if (subtitle) element.subtitle = subtitle;
-      const imgUrl = String(sfSettings.ctaImageUrl || product.imageUrl || '').trim();
+      const imgUrl = String(effectiveDmConfig.ctaImageUrl || product.imageUrl || '').trim();
       if (imgUrl && /^https:\/\//i.test(imgUrl)) element.image_url = imgUrl;
 
       try {
