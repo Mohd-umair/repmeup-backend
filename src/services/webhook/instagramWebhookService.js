@@ -216,6 +216,34 @@ async function handleInstagramMessage(payload, organizationId) {
     }
 
     for (const event of allMessageEvents) {
+      // ── Postback events (CTA button taps) ─────────────────────────────
+      // When a user taps a postback button on a Generic Template DM, Meta sends
+      // an event shape with `postback` instead of `message`. We route it to the
+      // sales conversation service which sends the appropriate canned reply.
+      if (event.postback && !event.message) {
+        const senderId = String(event.sender?.id || '');
+        const payload = String(event.postback.payload || '');
+        const title = String(event.postback.title || '');
+        logger.info('[instagramWebhookService] Postback received', {
+          senderId, payload, title
+        });
+        if (senderId && payload) {
+          try {
+            const salesConvSvc = require('../salesConversationService');
+            await salesConvSvc.handlePostback({
+              instagramUserId: senderId,
+              organizationId,
+              payload,
+              title,
+              platformConnectionId
+            });
+          } catch (pbErr) {
+            logger.warn('[instagramWebhookService] handlePostback error (non-fatal)', { error: pbErr.message });
+          }
+        }
+        continue;
+      }
+
       const message = event.message;
       if (!message) continue;
       if (message.is_deleted || message.is_unsupported) {

@@ -38,9 +38,9 @@ const DEFAULT_SALES_FLOW_SETTINGS = {
   ctaSubtitle: 'Tap a button below for more details.',
   ctaImageUrl: '',
   ctaButtons: [
-    { label: 'Product Details', url: '' },
-    { label: 'Pay Now',         url: '' },
-    { label: 'View Catalog',    url: '' }
+    { label: 'Product Details', type: 'postback', payload: 'details' },
+    { label: 'Pay Now',         type: 'postback', payload: 'payment' },
+    { label: 'Maybe later',     type: 'postback', payload: 'hesitant' }
   ],
   hesitancyKeywords: ['no', 'nahi', 'not interested', 'later', 'abhi nahi', 'nope', 'not now', 'maybe later'],
   whatsappCaptureMessage: "No problem! Would you like us to reach you on WhatsApp? Just share your number and we'll be in touch. 😊",
@@ -560,7 +560,7 @@ exports.updateSalesFlowSettings = async (req, res, next) => {
       if (req.body[f] !== undefined) update[`salesFlowSettings.${f}`] = req.body[f];
     });
 
-    // Validate ctaButtons array (max 3, each entry must have label and url)
+    // Validate ctaButtons array (max 3 — Instagram Generic Template limit)
     if (req.body.ctaButtons !== undefined) {
       if (!Array.isArray(req.body.ctaButtons)) {
         return res.status(400).json({ success: false, error: 'ctaButtons must be an array' });
@@ -568,12 +568,36 @@ exports.updateSalesFlowSettings = async (req, res, next) => {
       if (req.body.ctaButtons.length > 3) {
         return res.status(400).json({ success: false, error: 'Instagram Generic Template supports a maximum of 3 CTA buttons' });
       }
+      const ALLOWED_TYPES = ['postback', 'web_url'];
+      const ALLOWED_PAYLOADS = ['details', 'payment', 'hesitant'];
       for (const btn of req.body.ctaButtons) {
         if (!btn || typeof btn.label !== 'string' || !btn.label.trim()) {
           return res.status(400).json({ success: false, error: 'Each CTA button must have a non-empty label' });
         }
         if (String(btn.label).length > 20) {
           return res.status(400).json({ success: false, error: `Button label "${btn.label}" exceeds the 20-character Instagram limit` });
+        }
+
+        const type = btn.type || 'postback';
+        if (!ALLOWED_TYPES.includes(type)) {
+          return res.status(400).json({ success: false, error: `Button type "${type}" is invalid. Use one of: ${ALLOWED_TYPES.join(', ')}` });
+        }
+        btn.type = type;
+
+        if (type === 'web_url') {
+          const url = String(btn.url || '').trim();
+          if (!/^https:\/\//i.test(url)) {
+            return res.status(400).json({ success: false, error: `Button "${btn.label}" of type web_url must have a URL starting with https://` });
+          }
+        } else {
+          // postback — payload required; canonicalize known actions to lowercase
+          const payload = String(btn.payload || '').trim();
+          if (!payload) {
+            return res.status(400).json({ success: false, error: `Button "${btn.label}" of type postback must have an action payload` });
+          }
+          // Recognized payloads are normalized; free-form payloads are echoed as text
+          const lower = payload.toLowerCase();
+          btn.payload = ALLOWED_PAYLOADS.includes(lower) ? lower : payload.slice(0, 64);
         }
       }
     }
