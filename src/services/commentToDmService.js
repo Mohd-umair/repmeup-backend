@@ -99,14 +99,20 @@ async function processCommentForProduct(interaction, organizationId) {
     // shortcode from the Instagram Graph API and retry the lookup.
     if (!products.length && /^\d+$/.test(String(postId))) {
       try {
-        const conn = await PlatformConnection.findOne({
-          organization: organizationId,
-          platform: 'instagram',
-          status: 'connected'
-        }).select('accessToken').lean();
+        // Prefer the connection that was used to receive this webhook (already on the interaction)
+        // so we use the same valid token without an extra DB query.
+        let conn = interaction.platformConnection
+          ? await PlatformConnection.findById(interaction.platformConnection)
+              .select('accessToken').lean()
+          : await PlatformConnection.findOne({
+              organization: organizationId,
+              platform: 'instagram',
+              isActive: true,
+              status: { $in: ['connected', 'available'] }
+            }).select('accessToken').lean();
 
         if (!conn?.accessToken) {
-          svcLogger.warn('[commentToDm] Shortcode fallback skipped — no connected Instagram account found for org', { organizationId });
+          svcLogger.warn('[commentToDm] Shortcode fallback skipped — no active Instagram connection found for org', { organizationId });
         } else {
           const resp = await axios.get(`https://graph.facebook.com/v18.0/${postId}`, {
             params: { fields: 'shortcode', access_token: conn.accessToken },
@@ -134,7 +140,19 @@ async function processCommentForProduct(interaction, organizationId) {
           }
         }
       } catch (resolveErr) {
-        svcLogger.warn('[commentToDm] Could not resolve numeric postId to shortcode', { postId, err: resolveErr.message });
+        const isTokenError = resolveErr.response?.data?.error?.code === 190 ||
+          String(resolveErr.message).toLowerCase().includes('token') ||
+          resolveErr.response?.status === 400;
+
+        if (isTokenError) {
+          svcLogger.warn(
+            '[commentToDm] Shortcode resolution failed — Instagram access token is expired or invalid. ' +
+            'Reconnect the Instagram account in Settings → Integrations to fix this.',
+            { postId, err: resolveErr.message }
+          );
+        } else {
+          svcLogger.warn('[commentToDm] Could not resolve numeric postId to shortcode', { postId, err: resolveErr.message });
+        }
       }
     }
 

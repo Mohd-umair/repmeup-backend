@@ -26,6 +26,9 @@ router.put('/settings/sales-flow', productController.updateSalesFlowSettings);
 // Resolve Instagram post shortcode → numeric media ID
 router.get('/resolve-post', productController.resolvePostId);
 
+// Backfill numeric media IDs for all products that only have shortcodes stored
+router.post('/backfill-post-ids', productController.backfillPostNumericIds);
+
 // Posts by Instagram post ID
 router.get('/by-post/:postId', productController.getProductsByPost);
 

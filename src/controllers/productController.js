@@ -205,7 +205,8 @@ async function resolvePostIds(orgId, rawInput) {
   const conn = await PlatformConnection.findOne({
     organization: orgId,
     platform: 'instagram',
-    status: 'connected'
+    isActive: true,
+    status: { $in: ['connected', 'available'] }
   }).select('accessToken platformUserId').lean();
 
   if (!conn?.accessToken || !conn?.platformUserId) return null;
@@ -313,6 +314,78 @@ exports.getProductsByPost = async (req, res, next) => {
     }).lean();
 
     res.json({ success: true, data: products });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// BACKFILL NUMERIC POST IDS
+// POST /products/backfill-post-ids
+// Re-resolves all shortcode-only instagramPostIds to also store numeric IDs.
+// Safe to run multiple times (uses $addToSet). Useful after reconnecting Instagram.
+// ─────────────────────────────────────────────
+
+exports.backfillPostNumericIds = async (req, res, next) => {
+  try {
+    const orgId = req.user.organization._id;
+
+    const conn = await PlatformConnection.findOne({
+      organization: orgId,
+      platform: 'instagram',
+      isActive: true,
+      status: { $in: ['connected', 'available'] }
+    }).select('accessToken platformUserId').lean();
+
+    if (!conn?.accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'No active Instagram connection found. Please reconnect Instagram in Settings → Integrations first.'
+      });
+    }
+
+    const products = await Product.find({
+      organization: orgId,
+      isActive: true,
+      instagramPostIds: { $exists: true, $ne: [] }
+    }).select('_id name instagramPostIds').lean();
+
+    let resolved = 0;
+    let skipped = 0;
+    let failed = 0;
+    const details = [];
+
+    for (const product of products) {
+      const shortcodes = (product.instagramPostIds || []).filter(id => !/^\d+$/.test(String(id)));
+
+      for (const shortcode of shortcodes) {
+        try {
+          const result = await instagramService.resolveShortcodeToMediaId(
+            conn.platformUserId, conn.accessToken, shortcode
+          );
+          if (result?.numericId) {
+            await Product.updateOne(
+              { _id: product._id },
+              { $addToSet: { instagramPostIds: String(result.numericId) } }
+            );
+            resolved++;
+            details.push({ product: product.name, shortcode, numericId: result.numericId });
+          } else {
+            skipped++;
+          }
+        } catch (err) {
+          failed++;
+          logger.warn('[backfillPostNumericIds] Could not resolve shortcode', {
+            shortcode, productId: product._id, err: err.message
+          });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: { resolved, skipped, failed, details }
+    });
   } catch (err) {
     next(err);
   }
