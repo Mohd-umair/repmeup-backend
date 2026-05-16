@@ -54,6 +54,7 @@ async function processCommentFollowInvite(interaction, organizationId) {
     const settings = { ...DEFAULT_SETTINGS, ...(org?.commentFollowInviteSettings || {}) };
 
     if (!settings.enabled) {
+      svcLogger.debug('[commentFollowInvite] Skipping — feature not enabled for this org', { organizationId });
       return;
     }
 
