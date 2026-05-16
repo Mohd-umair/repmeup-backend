@@ -25,7 +25,9 @@ const DEFAULT_SETTINGS = {
   postPublicReply: false,
   deduplicateDms: true,
   maxDmsPerDay: 50,
-  skipIfProductDmSent: false
+  skipIfProductDmSent: false,
+  filterNegativeSentiment: true,
+  filterSalesIntent: true
 };
 
 /**
@@ -52,6 +54,19 @@ async function processCommentFollowInvite(interaction, organizationId) {
     const settings = { ...DEFAULT_SETTINGS, ...(org?.commentFollowInviteSettings || {}) };
 
     if (!settings.enabled) {
+      return;
+    }
+
+    // Sentiment filter: skip negative comments (populated by processAI before this runs)
+    const SALES_INTENTS = new Set(['inquiry', 'purchase_intent', 'sales']);
+    if (settings.filterNegativeSentiment && interaction.sentiment === 'negative') {
+      svcLogger.debug('[commentFollowInvite] Skipping — negative sentiment', { interactionId });
+      return;
+    }
+    if (settings.filterSalesIntent && interaction.intent && SALES_INTENTS.has(interaction.intent)) {
+      svcLogger.debug('[commentFollowInvite] Skipping — sales-related intent', {
+        interactionId, intent: interaction.intent
+      });
       return;
     }
 
@@ -106,9 +121,10 @@ async function processCommentFollowInvite(interaction, organizationId) {
           commentInteractionId: interaction._id
         };
       }
-      const dup = await CommentFollowInviteLog.exists(dupQuery);
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const dup = await CommentFollowInviteLog.exists({ ...dupQuery, createdAt: { $gte: oneDayAgo } });
       if (dup) {
-        svcLogger.info('[commentFollowInvite] Skipping — dedupe: invite already sent for user+post', {
+        svcLogger.info('[commentFollowInvite] Skipping — dedupe: invite already sent for user+post within 24h', {
           commenterId,
           postId
         });

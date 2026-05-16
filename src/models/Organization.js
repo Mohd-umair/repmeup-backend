@@ -323,7 +323,9 @@ const organizationSchema = new mongoose.Schema({
     dmsSentToday: { type: Number, default: 0 },
     dmsSentResetDate: { type: Date },
     /** If a product Comment-to-DM was sent for this comment, skip follow-invite */
-    skipIfProductDmSent: { type: Boolean, default: true }
+    skipIfProductDmSent: { type: Boolean, default: true },
+    filterNegativeSentiment: { type: Boolean, default: true },
+    filterSalesIntent: { type: Boolean, default: true }
   },
 
   // Human agent escalation settings

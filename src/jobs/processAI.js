@@ -177,6 +177,15 @@ module.exports = async function processAI(job) {
 
     cacheService.invalidateAnalytics(orgIdCtx).catch(() => {});
 
+    // Trigger follow-invite DM after AI is done so sentiment + intent are available for filtering
+    if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+      const commentFollowInviteService = require('../services/commentFollowInviteService');
+      const orgId = orgIdCtx || interaction.organization?.toString();
+      commentFollowInviteService.processCommentFollowInvite(interaction, orgId).catch(err => {
+        jobLogger.warn('commentFollowInvite error (non-fatal)', { error: err.message });
+      });
+    }
+
     jobLogger.info('AI processing completed', { interactionId });
 
     return {

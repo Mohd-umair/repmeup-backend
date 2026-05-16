@@ -96,14 +96,12 @@ module.exports = async function processWebhook(job) {
         });
       }
 
-      // Comment-to-DM selling flow, then follow-invite (avoid racing ProductOrder check)
+      // Comment-to-DM selling flow only (follow-invite moved to processAI.js so sentiment is available)
       if (interaction.platform === 'instagram' && interaction.type === 'comment') {
         const commentToDmService = require('../services/commentToDmService');
-        const commentFollowInviteService = require('../services/commentFollowInviteService');
         (async () => {
           try {
             await commentToDmService.processCommentForProduct(interaction, organizationId);
-            await commentFollowInviteService.processCommentFollowInvite(interaction, organizationId);
           } catch (err) {
             jobLogger.warn('comment automation chain error', { err: err?.message });
           }
