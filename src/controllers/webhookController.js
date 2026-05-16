@@ -784,18 +784,28 @@ exports.handleWhatsAppWebhook = async (req, res) => {
   logger.info('[WhatsApp Webhook] Received event');
 
   const signature = req.headers['x-hub-signature-256'];
-  if (signature && process.env.META_APP_SECRET) {
+  const appSecret = process.env.META_APP_SECRET || process.env.FACEBOOK_APP_SECRET;
+  if (signature && appSecret) {
     const crypto = require('crypto');
-    const expected = 'sha256=' + crypto
-      .createHmac('sha256', process.env.META_APP_SECRET)
-      .update(JSON.stringify(req.body))
-      .digest('hex');
+    const raw =
+      req.rawBody && Buffer.isBuffer(req.rawBody)
+        ? req.rawBody
+        : Buffer.from(JSON.stringify(req.body ?? {}));
+    if (!req.rawBody) {
+      logger.warn(
+        '[WhatsApp Webhook] req.rawBody missing — signature may fail. Ensure POST /api/webhooks/whatsapp uses express.json verify (see app.js).'
+      );
+    }
+    const expected =
+      'sha256=' + crypto.createHmac('sha256', appSecret).update(raw).digest('hex');
     if (signature !== expected) {
       logger.error('[WhatsApp Webhook] Invalid signature', { expected, received: signature });
       return res.sendStatus(403);
     }
   } else {
-    logger.warn('[WhatsApp Webhook] Signature verification skipped (no signature or META_APP_SECRET)');
+    logger.warn(
+      '[WhatsApp Webhook] Signature verification skipped (no signature or META_APP_SECRET / FACEBOOK_APP_SECRET)'
+    );
   }
 
   // ACK immediately so Meta does not retry while we do async work.
