@@ -242,7 +242,12 @@ async function processWhatsAppWebhook(payload) {
     if (!entry.changes || entry.changes.length === 0) continue;
 
     for (const change of entry.changes) {
-      if (change.field !== 'messages') continue;
+      if (change.field !== 'messages') {
+        logger.debug('[WhatsApp Webhook] Skipping change (handler only processes field=messages)', {
+          field: change.field
+        });
+        continue;
+      }
 
       const value = change.value || {};
 
@@ -291,21 +296,31 @@ async function processWhatsAppWebhook(payload) {
  * Exported internally only for test visibility; stable API is processWhatsAppWebhook.
  */
 async function _lookupWhatsAppConnection(phoneNumberId) {
+  if (phoneNumberId == null || phoneNumberId === '') {
+    logger.warn('[WhatsApp Webhook] lookup called with empty phone_number_id');
+    return null;
+  }
+
+  const pid = String(phoneNumberId).trim();
+
   const connection = await PlatformConnection.findOne({
     platform: 'whatsapp',
-    'platformData.phoneNumberId': phoneNumberId,
-    isActive: true
+    isActive: true,
+    $or: [{ 'platformData.phoneNumberId': pid }, { platformUserId: pid }]
   }).populate('organization');
 
   if (connection) {
     logger.info('[WhatsApp Webhook] Matched connection', {
-      phoneNumberId,
+      phoneNumberId: pid,
       verifiedName: connection.platformData?.verifiedName
     });
     return connection;
   }
 
-  logger.warn('[WhatsApp Webhook] No active connection found', { phoneNumberId });
+  logger.warn('[WhatsApp Webhook] No active connection found for phone_number_id', {
+    phoneNumberId: pid,
+    hint: 'DB should set platformData.phoneNumberId or platformUserId (same as Meta phone number id) from Embedded Signup.'
+  });
 
   // Diagnostic snapshot — helps when multiple tenants share the same business number
   // and someone's toggled isActive off. Kept at debug so it doesn't spam production.

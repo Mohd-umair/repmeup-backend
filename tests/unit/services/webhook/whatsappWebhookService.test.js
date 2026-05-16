@@ -141,11 +141,16 @@ describe('processWhatsAppWebhook', () => {
       }]
     });
 
-    expect(PlatformConnection.findOne).toHaveBeenCalledWith(expect.objectContaining({
-      platform: 'whatsapp',
-      'platformData.phoneNumberId': '111',
-      isActive: true
-    }));
+    expect(PlatformConnection.findOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: 'whatsapp',
+        isActive: true,
+        $or: [
+          { 'platformData.phoneNumberId': '111' },
+          { platformUserId: '111' }
+        ]
+      })
+    );
     expect(whatsappService.processWebhookMessage).not.toHaveBeenCalled();
     spy.mockRestore();
   });

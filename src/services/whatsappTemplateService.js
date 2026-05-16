@@ -123,6 +123,16 @@ async function _recoverWabaIdIfNeeded(connection, wabaId, parsedError) {
   } catch (e) {
     logger.warn('[TemplateService] Could not persist WABA id correction', { message: e.message });
   }
+  try {
+    await whatsappLoginAuth.subscribeToWebhook(discovered, _token(connection));
+    logger.info('[TemplateService] Subscribed app to WABA webhooks after WABA id correction', {
+      wabaId: discovered
+    });
+  } catch (e) {
+    logger.warn('[TemplateService] Webhook subscribe after WABA correction failed', {
+      message: e.message
+    });
+  }
   return discovered;
 }
 
