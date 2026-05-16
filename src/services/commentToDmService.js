@@ -353,7 +353,7 @@ async function processCommentForProduct(interaction, organizationId) {
           buttons
         };
         const subtitle = String(
-          sfSettings.ctaSubtitle || `${product.currency || ''} ${product.price || ''} — tap to order!`.trim()
+          sfSettings.ctaSubtitle || 'Tap a button below to explore 👇'
         ).slice(0, MAX_80);
         if (subtitle) element.subtitle = subtitle;
         const imgUrl = String(sfSettings.ctaImageUrl || product.imageUrl || '').trim();
