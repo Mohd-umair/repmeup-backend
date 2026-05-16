@@ -43,13 +43,15 @@ const salesConversationStateSchema = new mongoose.Schema({
   /**
    * Sales funnel stage:
    *  initial_cta_sent   — CTA Generic Template DM was sent; waiting for user reply
+   *  details_sent       — Bot sent product details (price, sizes, etc.); waiting for next reply
+   *  payment_link_sent  — Bot sent payment link; waiting for next reply
    *  whatsapp_requested — Hesitancy detected; bot asked for WhatsApp number
    *  whatsapp_captured  — User shared a WhatsApp number; retargeting data saved
    *  dropped            — Conversation ended with no capture (manual or timeout)
    */
   stage: {
     type: String,
-    enum: ['initial_cta_sent', 'whatsapp_requested', 'whatsapp_captured', 'dropped'],
+    enum: ['initial_cta_sent', 'details_sent', 'payment_link_sent', 'whatsapp_requested', 'whatsapp_captured', 'dropped'],
     default: 'initial_cta_sent'
   },
 
