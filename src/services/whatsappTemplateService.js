@@ -18,6 +18,7 @@ const axios = require('axios');
 const WhatsAppTemplate = require('../models/WhatsAppTemplate');
 const PlatformConnection = require('../models/PlatformConnection');
 const logger = require('../config/logger');
+const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
 
 const GRAPH_BASE = 'https://graph.facebook.com/v23.0';
 
@@ -68,6 +69,74 @@ function _parseMetaError(error) {
     metaSubcode: d?.error_subcode,
     message: d?.message || error.message || 'Meta API error'
   };
+}
+
+/** Meta error 100 / subcode 33: wrong object id for this token (often WABA vs phone id). */
+function _isWabaObjectNotAccessible(parsed) {
+  return parsed.metaCode === 100 && parsed.metaSubcode === 33;
+}
+
+async function _persistWabaCanonical(connectionLean, wabaId) {
+  if (!connectionLean?._id || !wabaId) return;
+  await PlatformConnection.updateOne(
+    { _id: connectionLean._id },
+    {
+      $set: {
+        'platformData.wabaId': String(wabaId),
+        'platformData.businessAccountId': String(wabaId)
+      }
+    }
+  );
+}
+
+/**
+ * Discover canonical WABA id from token (debug_token) + phone_numbers match.
+ */
+async function _discoverWabaFromPhone(connection) {
+  const token = _token(connection);
+  const phoneNumberId =
+    connection?.platformData?.phoneNumberId || connection?.platformUserId;
+  if (!token || !phoneNumberId) return null;
+  return whatsappLoginAuth.resolveWabaIdForPhoneNumber(token, phoneNumberId);
+}
+
+/**
+ * If Graph says the WABA id is invalid, try token+phone discovery, persist, return new id.
+ * @returns {Promise<string|null>} updated WABA id or null
+ */
+async function _recoverWabaIdIfNeeded(connection, wabaId, parsedError) {
+  if (!_isWabaObjectNotAccessible(parsedError)) return null;
+  const phoneNumberId =
+    connection?.platformData?.phoneNumberId || connection?.platformUserId;
+  if (!phoneNumberId || !_token(connection)) return null;
+
+  const discovered = await _discoverWabaFromPhone(connection);
+  if (!discovered || String(discovered) === String(wabaId)) return null;
+
+  logger.warn('[TemplateService] Correcting WABA id via Meta debug_token + phone_numbers', {
+    previousWabaId: wabaId,
+    discoveredWabaId: discovered,
+    phoneNumberId: String(phoneNumberId)
+  });
+  try {
+    await _persistWabaCanonical(connection, discovered);
+  } catch (e) {
+    logger.warn('[TemplateService] Could not persist WABA id correction', { message: e.message });
+  }
+  return discovered;
+}
+
+async function _fetchMessageTemplatesFromMeta(connection, wabaId, filters = {}) {
+  const params = new URLSearchParams({
+    fields: 'id,name,status,category,language,quality_score,components,parameter_format,rejected_reason',
+    limit: '100'
+  });
+  if (filters.category) params.append('category', filters.category);
+  const response = await axios.get(
+    `${GRAPH_BASE}/${wabaId}/message_templates?${params.toString()}`,
+    { headers: _authHeaders(connection) }
+  );
+  return response.data?.data || [];
 }
 
 /**
@@ -148,7 +217,7 @@ async function uploadHeaderExampleAsset(organizationId, connectionId, file) {
       file_name: origName,
       file_length: String(file_length),
       file_type: metaFileType,
-      access_token: token
+      access_token: _token(connection)
     });
 
     const r1 = await axios.post(
@@ -282,7 +351,7 @@ async function createTemplate(organizationId, userId, connectionId, payload) {
 
   // 2. Resolve WhatsApp connection
   const connection = await _resolveConnection(organizationId, connectionId);
-  const wabaId = _wabaId(connection);
+  let wabaId = _wabaId(connection);
 
   if (!wabaId) {
     const err = new Error('WhatsApp Business Account ID is not configured for this connection.');
@@ -299,7 +368,7 @@ async function createTemplate(organizationId, userId, connectionId, payload) {
     components
   };
 
-  // 4. Call Meta API
+  // 4. Call Meta API (recover WABA id on 100/33)
   let metaResponse;
   try {
     const response = await axios.post(
@@ -310,11 +379,31 @@ async function createTemplate(organizationId, userId, connectionId, payload) {
     metaResponse = response.data;
   } catch (error) {
     const parsed = _parseMetaError(error);
-    logger.error('[TemplateService] Meta create template error', parsed);
-    const err = new Error(parsed.message);
-    err.statusCode = parsed.statusCode;
-    err.metaCode = parsed.metaCode;
-    throw err;
+    const recovered = await _recoverWabaIdIfNeeded(connection, wabaId, parsed);
+    if (recovered) {
+      wabaId = recovered;
+      try {
+        const response = await axios.post(
+          `${GRAPH_BASE}/${wabaId}/message_templates`,
+          metaPayload,
+          { headers: _authHeaders(connection) }
+        );
+        metaResponse = response.data;
+      } catch (err2) {
+        const parsed2 = _parseMetaError(err2);
+        logger.error('[TemplateService] Meta create template error', parsed2);
+        const err = new Error(parsed2.message);
+        err.statusCode = parsed2.statusCode;
+        err.metaCode = parsed2.metaCode;
+        throw err;
+      }
+    } else {
+      logger.error('[TemplateService] Meta create template error', parsed);
+      const err = new Error(parsed.message);
+      err.statusCode = parsed.statusCode;
+      err.metaCode = parsed.metaCode;
+      throw err;
+    }
   }
 
   // 5. Persist in DB
@@ -340,7 +429,7 @@ async function createTemplate(organizationId, userId, connectionId, payload) {
  */
 async function listTemplates(organizationId, connectionId = null, filters = {}) {
   const connection = await _resolveConnection(organizationId, connectionId);
-  const wabaId = _wabaId(connection);
+  let wabaId = _wabaId(connection);
 
   if (!wabaId) {
     logger.error('[TemplateService] Cannot list templates: missing WABA id on connection', {
@@ -355,36 +444,46 @@ async function listTemplates(organizationId, connectionId = null, filters = {}) 
     throw err;
   }
 
-  // Fetch from Meta
   let metaTemplates = [];
-  try {
-    const params = new URLSearchParams({
-      fields: 'id,name,status,category,language,quality_score,components,parameter_format,rejected_reason',
-      limit: '100'
-    });
-    if (filters.category) params.append('category', filters.category);
+  let fetchedFromMeta = false;
 
-    const response = await axios.get(
-      `${GRAPH_BASE}/${wabaId}/message_templates?${params.toString()}`,
-      { headers: _authHeaders(connection) }
-    );
-    metaTemplates = response.data?.data || [];
+  try {
+    metaTemplates = await _fetchMessageTemplatesFromMeta(connection, wabaId, filters);
+    fetchedFromMeta = true;
   } catch (error) {
     const parsed = _parseMetaError(error);
-    logger.error('[TemplateService] Meta list templates error', {
-      ...parsed,
-      wabaIdUsed: wabaId,
-      connectionWabaId: connection.platformData?.wabaId,
-      connectionBusinessAccountId: connection.platformData?.businessAccountId,
-      phoneNumberId: connection.platformData?.phoneNumberId,
-      ...(parsed.metaSubcode === 33
-        ? {
-            hint:
-              'Graph object id may be wrong (use WABA id from platformData.wabaId, not phone number id) or token lacks whatsapp_business_management.'
-          }
-        : {})
-    });
-    // Fall back to DB list if Meta unavailable
+    const recovered = await _recoverWabaIdIfNeeded(connection, wabaId, parsed);
+    if (recovered) {
+      wabaId = recovered;
+      try {
+        metaTemplates = await _fetchMessageTemplatesFromMeta(connection, wabaId, filters);
+        fetchedFromMeta = true;
+      } catch (err2) {
+        const p2 = _parseMetaError(err2);
+        logger.error('[TemplateService] Meta list templates error (after WABA recovery)', {
+          ...p2,
+          wabaIdUsed: wabaId,
+          phoneNumberId: connection.platformData?.phoneNumberId
+        });
+      }
+    } else {
+      logger.error('[TemplateService] Meta list templates error', {
+        ...parsed,
+        wabaIdUsed: wabaId,
+        connectionWabaId: connection.platformData?.wabaId,
+        connectionBusinessAccountId: connection.platformData?.businessAccountId,
+        phoneNumberId: connection.platformData?.phoneNumberId,
+        ...(parsed.metaSubcode === 33
+          ? {
+              hint:
+                'If Embedded Signup, ensure token has whatsapp_business_management; wrong WABA id is auto-corrected when phone number id is on the connection.'
+            }
+          : {})
+      });
+    }
+  }
+
+  if (!fetchedFromMeta) {
     const dbTemplates = await WhatsAppTemplate.find({
       organization: organizationId,
       connection: connection._id,
@@ -395,7 +494,6 @@ async function listTemplates(organizationId, connectionId = null, filters = {}) 
     return { source: 'db_fallback', templates: dbTemplates };
   }
 
-  // Sync status back to DB in background (fire-and-forget)
   _syncMetaTemplatesToDb(metaTemplates, organizationId, connection._id, wabaId).catch(() => {});
 
   return { source: 'meta', templates: metaTemplates };
@@ -426,21 +524,37 @@ async function getTemplate(organizationId, connectionId, metaTemplateId) {
  */
 async function deleteTemplate(organizationId, connectionId, metaTemplateId, templateName) {
   const connection = await _resolveConnection(organizationId, connectionId);
-  const wabaId = _wabaId(connection);
+  let wabaId = _wabaId(connection);
 
-  try {
-    await axios.delete(
-      `${GRAPH_BASE}/${wabaId}/message_templates?hsm_id=${metaTemplateId}&name=${encodeURIComponent(templateName)}`,
+  const doDelete = async (id) =>
+    axios.delete(
+      `${GRAPH_BASE}/${id}/message_templates?hsm_id=${metaTemplateId}&name=${encodeURIComponent(templateName)}`,
       { headers: _authHeaders(connection) }
     );
+
+  try {
+    await doDelete(wabaId);
   } catch (error) {
-    const parsed = _parseMetaError(error);
-    // 100 = object does not exist — still remove from DB
-    if (parsed.metaCode !== 100) {
+    let parsed = _parseMetaError(error);
+    const recovered = await _recoverWabaIdIfNeeded(connection, wabaId, parsed);
+    if (recovered) {
+      wabaId = recovered;
+      try {
+        await doDelete(wabaId);
+      } catch (err2) {
+        parsed = _parseMetaError(err2);
+        if (parsed.metaCode !== 100) {
+          const err = new Error(parsed.message);
+          err.statusCode = parsed.statusCode;
+          throw err;
+        }
+      }
+    } else if (parsed.metaCode !== 100) {
       const err = new Error(parsed.message);
       err.statusCode = parsed.statusCode;
       throw err;
     }
+    // 100 = template or waba object does not exist — still soft-delete locally
   }
 
   await WhatsAppTemplate.findOneAndUpdate(

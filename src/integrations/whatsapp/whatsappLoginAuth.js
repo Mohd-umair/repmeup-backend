@@ -636,6 +636,28 @@ class WhatsAppLoginAuthService {
     await this.subscribeToWebhook(wabaId, accessToken);
     return connection;
   }
+
+  /**
+   * Resolve the WABA id that owns this phone number using the user/access token.
+   * Fixes stale/wrong platformData.wabaId (e.g. env ID confused with phone id) when
+   * debug_token exposes whatsapp_business_management target WABAs.
+   */
+  async resolveWabaIdForPhoneNumber(accessToken, phoneNumberId) {
+    if (!accessToken || !phoneNumberId) return null;
+    try {
+      const wabaIds = await this.getWabaIdsFromDebugToken(accessToken);
+      if (!wabaIds.length) return null;
+      const rows = await this.expandWabasToPhoneRows(wabaIds, accessToken);
+      const hit = rows.find((r) => String(r.phoneNumberId) === String(phoneNumberId));
+      return hit?.wabaId ? String(hit.wabaId) : null;
+    } catch (err) {
+      console.warn(
+        '[WhatsAppLogin] resolveWabaIdForPhoneNumber failed:',
+        err.response?.data?.error?.message || err.message
+      );
+      return null;
+    }
+  }
 }
 
 module.exports = new WhatsAppLoginAuthService();

@@ -44,8 +44,17 @@ app.use(cors({
 // Razorpay webhook — MUST be registered before express.json() to receive raw Buffer for HMAC verification
 app.use('/api/razorpay', require('./routes/razorpay'));
 
-// Body parser (applied after Razorpay webhook so its raw middleware is not overridden)
-app.use(express.json());
+// Body parser — capture raw JSON for Meta WhatsApp webhook signature (HMAC over exact bytes)
+app.use(
+  express.json({
+    limit: '10mb',
+    verify: (req, res, buf) => {
+      if (req.originalUrl && req.originalUrl.startsWith('/api/webhooks/whatsapp')) {
+        req.rawBody = buf;
+      }
+    }
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
 // Request logger middleware (adds req.log and requestId)
