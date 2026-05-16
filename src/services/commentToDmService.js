@@ -99,21 +99,32 @@ async function processCommentForProduct(interaction, organizationId) {
     // shortcode from the Instagram Graph API and retry the lookup.
     if (!products.length && /^\d+$/.test(String(postId))) {
       try {
-        // Prefer the connection that was used to receive this webhook (already on the interaction)
-        // so we use the same valid token without an extra DB query.
+        // Prefer the connection that was used to receive this webhook.
+        // Also include metadata so we can use the ISUID for Instagram Login connections —
+        // IGAA tokens are valid ONLY for /{ISUID}/... endpoints, not /{globalIgId}/...
         let conn = interaction.platformConnection
           ? await PlatformConnection.findById(interaction.platformConnection)
-              .select('accessToken').lean()
-          : await PlatformConnection.findOne({
-              organization: organizationId,
-              platform: 'instagram',
-              isActive: true,
-              status: { $in: ['connected', 'available'] }
-            }).select('accessToken').lean();
+              .select('accessToken metadata').lean()
+          : null;
+
+        // If the interaction's connection has an expired/invalid token, or wasn't set,
+        // fall back to the most recently updated (freshest) active connection.
+        if (!conn?.accessToken) {
+          conn = await PlatformConnection.findOne({
+            organization: organizationId,
+            platform: 'instagram',
+            isActive: true,
+            status: { $in: ['connected', 'available'] }
+          }).sort({ updatedAt: -1 }).select('accessToken metadata').lean();
+        }
 
         if (!conn?.accessToken) {
           svcLogger.warn('[commentToDm] Shortcode fallback skipped — no active Instagram connection found for org', { organizationId });
         } else {
+          // For Instagram Login (IGAA tokens), the media endpoint requires the ISUID,
+          // not the global IG business account ID stored in platformUserId.
+          const isuid = conn.metadata?.igLoginScopedId;
+          // Use GET /{mediaId}?fields=shortcode — this only needs a valid token, no user ID in path
           const resp = await axios.get(`https://graph.facebook.com/v18.0/${postId}`, {
             params: { fields: 'shortcode', access_token: conn.accessToken },
             timeout: 5000
@@ -122,14 +133,14 @@ async function processCommentForProduct(interaction, organizationId) {
           if (!shortcode) {
             svcLogger.warn('[commentToDm] Instagram Graph API returned no shortcode for postId', { postId, response: resp.data });
           } else {
-            svcLogger.info('[commentToDm] Resolved numeric postId to shortcode — retrying product lookup', { postId, shortcode });
+            svcLogger.info('[commentToDm] Resolved numeric postId to shortcode — retrying product lookup', { postId, shortcode, isuid: isuid || 'n/a' });
             products = await Product.find({
               organization: organizationId,
               instagramPostIds: shortcode,
               isActive: true
             }).lean();
 
-            // Also backfill the numeric ID into the product so future lookups are instant
+            // Backfill the numeric ID into the product so future lookups are instant (no API call needed)
             if (products.length) {
               await Product.updateMany(
                 { _id: { $in: products.map(p => p._id) } },
@@ -140,15 +151,18 @@ async function processCommentForProduct(interaction, organizationId) {
           }
         }
       } catch (resolveErr) {
-        const isTokenError = resolveErr.response?.data?.error?.code === 190 ||
-          String(resolveErr.message).toLowerCase().includes('token') ||
+        const errCode = resolveErr.response?.data?.error?.code;
+        const errMsg = String(resolveErr.message || '');
+        const isTokenError = errCode === 190 ||
+          errMsg.toLowerCase().includes('token') ||
+          errMsg.toLowerCase().includes('oauth') ||
           resolveErr.response?.status === 400;
 
         if (isTokenError) {
           svcLogger.warn(
             '[commentToDm] Shortcode resolution failed — Instagram access token is expired or invalid. ' +
-            'Reconnect the Instagram account in Settings → Integrations to fix this.',
-            { postId, err: resolveErr.message }
+            'Reconnect the Instagram account in Settings → Integrations, then click "Fix now" in Catalog → Automation to backfill post IDs.',
+            { postId, errCode, err: resolveErr.message }
           );
         } else {
           svcLogger.warn('[commentToDm] Could not resolve numeric postId to shortcode', { postId, err: resolveErr.message });

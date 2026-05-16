@@ -34,7 +34,7 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId, accessToken
         platform: 'instagram',
         status: 'connected',
         isActive: true
-      }).select('accessToken');
+      }).sort({ updatedAt: -1 }).select('accessToken');
       token = connection?.accessToken;
     } catch (e) {
       logger.warn('[instagramWebhookService] fetchInstagramAuthorProfile: connection lookup failed', { error: e.message });
@@ -177,7 +177,7 @@ async function handleInstagramMessage(payload, organizationId) {
         platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) },
         status: { $in: ['connected', 'available'] },
         isActive: true
-      }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
+      }).sort({ updatedAt: -1 }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
 
       if (!conn) {
         conn = await PlatformConnection.findOne({
@@ -189,7 +189,7 @@ async function handleInstagramMessage(payload, organizationId) {
           ],
           status: { $in: ['connected', 'available'] },
           isActive: true
-        }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
+        }).sort({ updatedAt: -1 }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
       }
 
       if (conn) {
