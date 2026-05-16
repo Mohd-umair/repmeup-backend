@@ -207,11 +207,16 @@ async function resolvePostIds(orgId, rawInput) {
     platform: 'instagram',
     isActive: true,
     status: { $in: ['connected', 'available'] }
-  }).select('accessToken platformUserId').lean();
+  }).sort({ updatedAt: -1 }).select('accessToken platformUserId metadata').lean();
 
-  if (!conn?.accessToken || !conn?.platformUserId) return null;
+  if (!conn?.accessToken) return null;
 
-  return instagramService.resolveShortcodeToMediaId(conn.platformUserId, conn.accessToken, shortcode);
+  // IGAA tokens (Instagram Login) are valid only for the ISUID (igLoginScopedId),
+  // not the global IG business account ID stored in platformUserId.
+  const apiUserId = conn.metadata?.igLoginScopedId || conn.platformUserId;
+  if (!apiUserId) return null;
+
+  return instagramService.resolveShortcodeToMediaId(apiUserId, conn.accessToken, shortcode);
 }
 
 exports.linkPost = async (req, res, next) => {
@@ -330,17 +335,28 @@ exports.backfillPostNumericIds = async (req, res, next) => {
   try {
     const orgId = req.user.organization._id;
 
+    // Sort by updatedAt desc so the most recently reconnected (freshest token) is used first.
     const conn = await PlatformConnection.findOne({
       organization: orgId,
       platform: 'instagram',
       isActive: true,
       status: { $in: ['connected', 'available'] }
-    }).select('accessToken platformUserId').lean();
+    }).sort({ updatedAt: -1 }).select('accessToken platformUserId metadata').lean();
 
     if (!conn?.accessToken) {
       return res.status(400).json({
         success: false,
         error: 'No active Instagram connection found. Please reconnect Instagram in Settings → Integrations first.'
+      });
+    }
+
+    // IGAA tokens (Instagram Login) must be used with the ISUID (igLoginScopedId),
+    // NOT the global Instagram business account ID (platformUserId).
+    const apiUserId = conn.metadata?.igLoginScopedId || conn.platformUserId;
+    if (!apiUserId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Instagram connection is missing the user ID required for API calls. Please reconnect.'
       });
     }
 
@@ -361,7 +377,7 @@ exports.backfillPostNumericIds = async (req, res, next) => {
       for (const shortcode of shortcodes) {
         try {
           const result = await instagramService.resolveShortcodeToMediaId(
-            conn.platformUserId, conn.accessToken, shortcode
+            apiUserId, conn.accessToken, shortcode
           );
           if (result?.numericId) {
             await Product.updateOne(
