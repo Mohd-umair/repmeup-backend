@@ -392,28 +392,45 @@ exports.getInstagramMedia = async (req, res, next) => {
       platform: 'instagram',
       isActive: true,
       status: { $in: ['connected', 'available'] }
-    }).sort({ updatedAt: -1 }).select('accessToken platformUserId metadata').lean();
+    }).sort({ updatedAt: -1 }).select('accessToken platformUserId platformData metadata').lean();
 
     if (!conn?.accessToken) {
-      return res.status(400).json({ success: false, error: 'No active Instagram connection found. Connect Instagram in Settings → Integrations.' });
+      return res.status(400).json({
+        success: false,
+        error: 'No active Instagram connection found. Connect Instagram in Settings → Integrations.'
+      });
     }
 
-    const apiUserId = conn.metadata?.igLoginScopedId || conn.platformUserId;
-    if (!apiUserId) {
-      return res.status(400).json({ success: false, error: 'Could not determine Instagram user ID for this connection.' });
+    // Delegate to instagramService which already knows:
+    //   - Instagram Login (IGAA token) → graph.instagram.com/vXX/me/media
+    //   - Facebook Login (EAA token)   → graph.facebook.com/vXX/{businessAccountId}/media
+    //
+    // Previously we always called graph.facebook.com/me/media — that fails for
+    // Instagram Login tokens because the correct host is graph.instagram.com.
+    const connType    = instagramService._connectionType(conn);
+    const apiBase     = instagramService._getApiBase(connType);
+    const isIgLogin   = connType === 'instagram_login';
+    const businessId  = instagramService._getBusinessAccountId(conn);
+
+    const mediaEndpoint = isIgLogin
+      ? `${apiBase}/me/media`
+      : `${apiBase}/${businessId}/media`;
+
+    if (!isIgLogin && !businessId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Could not determine Instagram Business Account ID for this connection.'
+      });
     }
 
-    const resp = await axios.get(
-      `https://graph.facebook.com/v18.0/${apiUserId}/media`,
-      {
-        params: {
-          fields: 'id,shortcode,media_type,thumbnail_url,media_url,caption,timestamp',
-          limit,
-          access_token: conn.accessToken
-        },
-        timeout: 10000
-      }
-    );
+    const resp = await axios.get(mediaEndpoint, {
+      params: {
+        fields: 'id,shortcode,media_type,thumbnail_url,media_url,caption,timestamp',
+        limit,
+        access_token: conn.accessToken
+      },
+      timeout: 10000
+    });
 
     const raw = resp.data?.data || [];
     const media = raw.map(m => ({
