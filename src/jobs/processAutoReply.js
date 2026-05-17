@@ -1157,8 +1157,37 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
       const googleService = require('../integrations/google/googleService');
       // TODO: Implement Google Business reply
       logger.debug('Google Business reply not yet implemented');
+    } else if (interaction.platform === 'whatsapp') {
+      const whatsappService = require('../integrations/whatsapp/whatsappService');
+      // WhatsApp interactions use a thread model: author.platformId is the sender's WA ID (phone)
+      // The thread platformId is dm_<phoneNumberId>_<senderId>; extract senderId from it.
+      const recipientPhone =
+        interaction.author?.platformId ||
+        interaction.metadata?.senderId ||
+        (interaction.platformId?.startsWith('dm_')
+          ? interaction.platformId.split('_')[2]
+          : null);
+
+      if (!recipientPhone) {
+        logger.warn('[Auto-reply] WhatsApp reply skipped — no recipient phone in interaction', {
+          interactionId: interaction._id?.toString(),
+          platformId: interaction.platformId
+        });
+      } else {
+        try {
+          const result = await whatsappService.sendTextMessage(connection, recipientPhone, content);
+          if (result?.success && result?.messageId) {
+            platformResponseId = result.messageId;
+            replyStatus = 'sent';
+          }
+        } catch (waErr) {
+          logger.error('[Auto-reply] WhatsApp sendTextMessage failed', {
+            interactionId: interaction._id?.toString(),
+            error: waErr.message
+          });
+        }
+      }
     }
-    // Add other platforms here
 
     if (replyStatus === 'sent') {
       // Find a user to attribute the auto-reply to.

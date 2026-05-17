@@ -130,7 +130,7 @@ const organizationSchema = new mongoose.Schema({
     },
     enabledPlatforms: {
       type: [String],
-      default: ['youtube', 'instagram', 'facebook', 'google']
+      default: ['youtube', 'instagram', 'facebook', 'google', 'linkedin', 'whatsapp']
     },
     enabledTypes: {
       type: [String],

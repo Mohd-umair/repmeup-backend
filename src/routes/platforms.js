@@ -63,6 +63,8 @@ router.post('/whatsapp/connect', checkConnectionLimit, platformController.connec
 router.post('/whatsapp/connect-direct', checkConnectionLimit, platformController.connectWhatsApp);
 router.delete('/whatsapp/disconnect', platformController.disconnectWhatsApp);
 router.get('/whatsapp/status', platformController.getWhatsAppStatus);
+// Manually register a Pending phone number for Cloud API (moves status → Active)
+router.post('/whatsapp/register-phone', platformController.registerWhatsAppPhone);
 
 // Platform management
 router.get('/', attachConnectionLimits, platformController.getPlatformConnections);
