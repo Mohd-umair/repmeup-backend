@@ -305,8 +305,11 @@ const interactionSchema = new mongoose.Schema({
       mid: String,
       text: String,
       timestamp: Number,
-      attachmentUrl: String,  // e.g. Facebook Messenger image payload URL
-      attachmentType: String  // e.g. 'image', 'video'
+      type: String,
+      /** WhatsApp Cloud API media id — required to fetch binary via Graph */
+      mediaId: String,
+      attachmentUrl: String,  // e.g. Facebook Messenger CDN URL or app proxy URL
+      attachmentType: String  // e.g. 'image', 'video', 'audio', 'document'
     }],
     lastMid: String,
     instagramAccountId: String,

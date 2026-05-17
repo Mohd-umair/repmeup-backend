@@ -418,7 +418,9 @@ async function processIncomingMessage(change, connection, rawPayload) {
   const msgExtra = {};
   if (md.mediaId) {
     msgExtra.mediaId = md.mediaId;
-    msgExtra.attachmentType = md.mediaType;
+    const rawType = md.mediaType || 'file';
+    msgExtra.attachmentType =
+      rawType === 'document' ? 'file' : rawType === 'sticker' ? 'image' : rawType;
   }
 
   const { interaction: savedInteraction, skipped } = await upsertWhatsAppThread({
