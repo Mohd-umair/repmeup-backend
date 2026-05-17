@@ -301,15 +301,18 @@ const interactionSchema = new mongoose.Schema({
     mediaCaption: String,     // Instagram/Facebook media caption (first 200 chars)
     
     // For Instagram/Facebook DM thread: history of incoming messages (chat-style)
+    // NOTE: `type` must use `{ type: String }` — bare `type: String` makes Mongoose treat
+    // the whole element as SchemaString ([String]), which breaks $push of message objects.
     incomingMessages: [{
       mid: String,
       text: String,
-      timestamp: Number,
-      type: String,
+      timestamp: Date,
+      type: { type: String },
       /** WhatsApp Cloud API media id — required to fetch binary via Graph */
       mediaId: String,
       attachmentUrl: String,  // e.g. Facebook Messenger CDN URL or app proxy URL
-      attachmentType: String  // e.g. 'image', 'video', 'audio', 'document'
+      attachmentType: String,  // e.g. 'image', 'video', 'audio', 'document'
+      igPostMediaId: String
     }],
     lastMid: String,
     instagramAccountId: String,
