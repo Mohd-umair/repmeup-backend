@@ -29,7 +29,8 @@ jest.mock('../../../../src/models/Interaction', () => ({
 
 jest.mock('../../../../src/models/PlatformConnection', () => ({
   findOne: jest.fn(),
-  find: jest.fn()
+  find: jest.fn(),
+  findById: jest.fn()
 }));
 
 jest.mock('../../../../src/utils/chatRefHelper', () => ({
@@ -86,6 +87,7 @@ beforeEach(() => {
 
   PlatformConnection.findOne.mockReset();
   PlatformConnection.find.mockReset().mockReturnValue(chainable([]));
+  PlatformConnection.findById.mockReset().mockImplementation(() => chainable(null));
 
   emitToOrg.mockReset();
   whatsappService.processWebhookMessage.mockReset();

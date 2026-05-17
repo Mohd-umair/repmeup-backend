@@ -1569,6 +1569,76 @@ exports.getAttachment = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    WhatsApp inbound media (image/audio/video/document) — proxy with Cloud API token
+ * @route   GET /api/inbox/whatsapp-media?interactionId=...&mid=...
+ * @access  Private
+ */
+exports.getWhatsAppMedia = async (req, res, next) => {
+  try {
+    const { interactionId, mid } = req.query;
+    if (!interactionId || !mid) {
+      return res.status(400).json({ success: false, error: 'interactionId and mid required' });
+    }
+    const orgId = req.user.organization._id;
+    const whatsappService = require('../integrations/whatsapp/whatsappService');
+
+    const interaction = await Interaction.findOne({
+      _id: interactionId,
+      organization: orgId,
+      platform: 'whatsapp',
+      type: 'dm'
+    })
+      .select('metadata.incomingMessages platformConnection')
+      .lean();
+
+    if (!interaction?.metadata?.incomingMessages?.length) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+    const msg = interaction.metadata.incomingMessages.find((m) => m.mid === mid);
+    if (!msg?.mediaId) {
+      return res.status(404).json({ success: false, error: 'Media not found on message' });
+    }
+
+    if (!interaction.platformConnection) {
+      return res.status(404).json({ success: false, error: 'Platform connection missing' });
+    }
+
+    const connection = await PlatformConnection.findOne({
+      _id: interaction.platformConnection,
+      organization: orgId,
+      platform: 'whatsapp',
+      isActive: true,
+      status: 'connected'
+    }).lean();
+
+    if (!connection?.accessToken) {
+      return res.status(404).json({ success: false, error: 'WhatsApp connection not found' });
+    }
+
+    const mediaInfo = await whatsappService.getMediaUrl(connection, msg.mediaId);
+    if (!mediaInfo?.success || !mediaInfo.url) {
+      return res.status(502).json({ success: false, error: 'Could not resolve media URL' });
+    }
+
+    const download = await whatsappService.downloadMedia(connection, mediaInfo.url);
+    const contentType =
+      download.contentType ||
+      mediaInfo.mimeType ||
+      'application/octet-stream';
+
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.send(Buffer.from(download.data));
+  } catch (error) {
+    if (error.response?.status === 404 || error.response?.status === 403) {
+      return res.status(404).json({ success: false, error: 'Media not available' });
+    }
+    logger.error('[inboxController] getWhatsAppMedia error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to load WhatsApp media' });
+  }
+};
+
 // @desc    Get author avatar (profile picture) - proxy for Instagram/Facebook to avoid CORS
 // @route   GET /api/inbox/avatar/:platform/:userId
 // @access  Private

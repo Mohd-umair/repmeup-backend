@@ -44,8 +44,10 @@ router.get(
 // Get author avatar (must be before /:id) — proxy for Facebook/Instagram so img loads with token
 router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
 
-// Get Facebook DM attachment image (must be before /:id) — proxy with page token
+// Get Facebook DM attachment (FB/IG) — must be before /:id
 router.get('/attachment', inboxController.getAttachment);
+// WhatsApp incoming media (image/audio/video) — proxy with WABA token
+router.get('/whatsapp-media', inboxController.getWhatsAppMedia);
 
 // Get single interaction
 router.get('/:id', inboxController.getInteraction);
