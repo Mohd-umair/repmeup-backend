@@ -264,6 +264,9 @@ async function sendReplyToPlatform({
       // ── WhatsApp ─────────────────────────────────────────────────────────
       case 'whatsapp': {
         const whatsappService = require('../integrations/whatsapp/whatsappService');
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
         const to = interaction.author.platformId;
 
         if (whatsappTemplate?.name) {
@@ -294,9 +297,99 @@ async function sendReplyToPlatform({
           return { platformResponseId: null, status: 'failed', errorMessage: 'Failed to send WhatsApp template' };
         }
 
-        const result = await whatsappService.sendTextMessage(connection, to, replyContent);
-        if (result.success && result.messageId) {
-          return { platformResponseId: result.messageId, status: 'sent', errorMessage: null };
+        const hasMedia =
+          attachmentType &&
+          ['image', 'video', 'audio', 'file'].includes(attachmentType) &&
+          !!(attachmentLocalPath || attachmentUrl);
+
+        if (hasMedia) {
+          const waCaptionRequired = ['image', 'video', 'file'].includes(attachmentType);
+          const captionRaw = replyContent == null || replyContent === undefined ? '' : String(replyContent).trim();
+          const looksLikePlaceholder = /^\[(image|video|audio|file|attachment)\]$/i.test(captionRaw);
+          if (waCaptionRequired && (!captionRaw || looksLikePlaceholder)) {
+            return {
+              platformResponseId: null,
+              status: 'failed',
+              errorMessage:
+                'WhatsApp requires a message to send with images, videos, or files. Enter text in the message field and try again.'
+            };
+          }
+
+          const waUploadType = attachmentType === 'file' ? 'document' : attachmentType;
+          let localPath = attachmentLocalPath && fs.existsSync(attachmentLocalPath) ? attachmentLocalPath : null;
+          let tempDownloadPath = null;
+
+          try {
+            if (!localPath && attachmentUrl && /^https?:\/\//i.test(String(attachmentUrl))) {
+              const axios = require('axios');
+              let pathname = 'file';
+              try {
+                pathname = path.basename(new URL(String(attachmentUrl)).pathname) || 'file';
+              } catch (_e) {
+                pathname = path.basename(String(attachmentUrl).split('?')[0]) || 'file';
+              }
+              tempDownloadPath = path.join(
+                os.tmpdir(),
+                `wa-up-${Date.now()}-${pathname.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+              );
+              const res = await axios.get(String(attachmentUrl), {
+                responseType: 'arraybuffer',
+                timeout: 120000,
+                maxContentLength: 100 * 1024 * 1024
+              });
+              fs.writeFileSync(tempDownloadPath, Buffer.from(res.data));
+              localPath = tempDownloadPath;
+            }
+
+            if (!localPath || !fs.existsSync(localPath)) {
+              return {
+                platformResponseId: null,
+                status: 'failed',
+                errorMessage:
+                  'Could not read the attachment for WhatsApp. Ensure the file uploaded correctly and try again.'
+              };
+            }
+
+            const mediaId = await whatsappService.uploadMedia(connection, localPath, waUploadType);
+            const captionForSend = ['image', 'video', 'document'].includes(waUploadType) ? captionRaw : '';
+            const docFilename =
+              waUploadType === 'document' ? path.basename(localPath) || 'document' : null;
+
+            const mediaResult = await whatsappService.sendMediaMessage(
+              connection,
+              to,
+              waUploadType,
+              mediaId,
+              captionForSend,
+              docFilename
+            );
+            if (mediaResult.success && mediaResult.messageId) {
+              return { platformResponseId: mediaResult.messageId, status: 'sent', errorMessage: null };
+            }
+            return { platformResponseId: null, status: 'failed', errorMessage: 'Failed to send WhatsApp media' };
+          } finally {
+            if (tempDownloadPath && fs.existsSync(tempDownloadPath)) {
+              try {
+                fs.unlinkSync(tempDownloadPath);
+              } catch (_u) {
+                /* ignore */
+              }
+            }
+          }
+        }
+
+        const body = replyContent == null || replyContent === undefined ? '' : String(replyContent).trim();
+        if (!body) {
+          return {
+            platformResponseId: null,
+            status: 'failed',
+            errorMessage: 'Message text cannot be empty for WhatsApp.'
+          };
+        }
+
+        const textResult = await whatsappService.sendTextMessage(connection, to, body);
+        if (textResult.success && textResult.messageId) {
+          return { platformResponseId: textResult.messageId, status: 'sent', errorMessage: null };
         }
         return { platformResponseId: null, status: 'failed', errorMessage: 'Failed to send WhatsApp message' };
       }

@@ -147,27 +147,70 @@ class WhatsAppService {
   }
 
   /**
-   * Send a media message (image, video, document, audio).
+   * Upload media binary to WhatsApp Cloud API (required before sending image/document/video/audio).
    * @param {Object} connection
-   * @param {string} to
-   * @param {string} mediaType  'image' | 'video' | 'document' | 'audio'
-   * @param {string} mediaId    Media ID (upload via /media endpoint first)
-   * @param {string} caption    Optional caption
+   * @param {string} filePath     Absolute path to the file on disk
+   * @param {string} waType       'image' | 'video' | 'audio' | 'document'
+   * @returns {Promise<string>}   Graph media id
    */
-  async sendMediaMessage(connection, to, mediaType, mediaId, caption = '') {
+  async uploadMedia(connection, filePath, waType) {
+    const FormData = require('form-data');
+    const fs = require('fs');
+    const phoneNumberId = this._phoneNumberId(connection);
+    const token = this._accessToken(connection);
+    if (!phoneNumberId || !token) {
+      throw new Error('WhatsApp credentials not configured');
+    }
+    if (!fs.existsSync(filePath)) {
+      throw new Error('WhatsApp media upload: file not found');
+    }
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', waType);
+    form.append('file', fs.createReadStream(filePath));
+
+    try {
+      const response = await axios.post(`${this.apiURL}/${phoneNumberId}/media`, form, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...form.getHeaders()
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 120000
+      });
+      const id = response.data?.id;
+      if (!id) {
+        throw new Error(response.data?.error?.message || 'WhatsApp media upload returned no id');
+      }
+      return id;
+    } catch (error) {
+      console.error('[WhatsApp] Media upload failed-', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to upload media to WhatsApp');
+    }
+  }
+
+  /**
+   * @param {string} [documentFilename] Required for type `document` (customer-visible filename)
+   */
+  async sendMediaMessage(connection, to, mediaType, mediaId, caption = '', documentFilename = null) {
     const phoneNumberId = this._phoneNumberId(connection);
     try {
+      const mediaPayload = { id: mediaId };
+      if (mediaType === 'document' && documentFilename) {
+        mediaPayload.filename = documentFilename;
+      }
+      if (caption && ['image', 'video', 'document'].includes(mediaType)) {
+        mediaPayload.caption = caption;
+      }
+
       const messageData = {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
         to,
         type: mediaType,
-        [mediaType]: { id: mediaId }
+        [mediaType]: mediaPayload
       };
-
-      if (caption && ['image', 'video', 'document'].includes(mediaType)) {
-        messageData[mediaType].caption = caption;
-      }
 
       const response = await axios.post(
         `${this.apiURL}/${phoneNumberId}/messages`,

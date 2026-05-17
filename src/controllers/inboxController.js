@@ -634,6 +634,25 @@ exports.replyToInteraction = async (req, res, next) => {
       }
     }
 
+    if (
+      interaction.platform === 'whatsapp' &&
+      !sanitizedWaTemplate?.name &&
+      attachmentUrl &&
+      attachmentType &&
+      ['image', 'video', 'file'].includes(attachmentType)
+    ) {
+      const trimmed =
+        replyContent == null || replyContent === undefined ? '' : String(replyContent).trim();
+      const placeholderOnly = /^\[(image|video|audio|file|attachment)\]$/i.test(trimmed);
+      if (!trimmed || placeholderOnly) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'WhatsApp requires a message to send with images, videos, or files. Enter text in the message field and try again.'
+        });
+      }
+    }
+
     // Resolve the correct platform connection and dispatch the send
     const connection = await replyService.resolveConnection(interaction);
     const { platformResponseId, status: replyStatus, errorMessage } = await replyService.sendReplyToPlatform({
