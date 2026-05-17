@@ -108,6 +108,7 @@ async function syncPlatform(connection, organizationId) {
           connection.lastSyncAt = new Date();
           await connection.save();
         }
+        await whatsappService.applyProfilePictureToConnection(connection).catch(() => {});
       } catch (err) {
         logger.warn('[platformSyncService] WhatsApp health check failed (non-fatal)', { error: err.message });
       }

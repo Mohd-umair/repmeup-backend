@@ -71,6 +71,18 @@ async function upsertWhatsAppThread({
 }) {
   const threadPlatformId = `dm_${String(phoneNumberId)}_${String(senderId)}`;
 
+  let waBusinessAvatarUrl = null;
+  if (connectionId) {
+    const conn = await PlatformConnection.findById(connectionId)
+      .select('platformProfilePicture metadata.profilePicture platformData.businessProfile')
+      .lean();
+    waBusinessAvatarUrl =
+      conn?.platformProfilePicture ||
+      conn?.metadata?.profilePicture ||
+      conn?.platformData?.businessProfile?.profile_picture_url ||
+      null;
+  }
+
   // platformId is unique PER ORG, not globally. All queries must scope by organizationId
   // so two tenants sharing the same WhatsApp Business number cannot collide.
   const existing = await Interaction
@@ -102,6 +114,7 @@ async function upsertWhatsAppThread({
     isRead: false,
     'metadata.lastMid': mid,
     'metadata.phoneNumberId': String(phoneNumberId),
+    ...(waBusinessAvatarUrl ? { 'metadata.whatsappBusinessAvatarUrl': waBusinessAvatarUrl } : {}),
     ...extraSet
   };
 

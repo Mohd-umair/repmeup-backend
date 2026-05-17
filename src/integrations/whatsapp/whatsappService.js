@@ -1,4 +1,5 @@
 const axios = require('axios');
+const Interaction = require('../../models/Interaction');
 
 /**
  * WhatsApp Business Cloud API Service
@@ -404,11 +405,69 @@ class WhatsAppService {
           timeout: 10000
         }
       );
-      return { success: true, profile: response.data.data?.[0] || {} };
+      const body = response.data || {};
+      let profile = {};
+      if (Array.isArray(body.data)) profile = body.data[0] || {};
+      else if (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) profile = body.data;
+      else if (typeof body.profile_picture_url === 'string') profile = body;
+      return { success: true, profile };
     } catch (error) {
       console.error('[WhatsApp] Failed to get business profile:', error.response?.data || error.message);
       return { success: false, profile: {} };
     }
+  }
+
+  /**
+   * Fetch WhatsApp Business profile from Meta and persist profile picture + profile
+   * on the PlatformConnection (for Settings → Platforms and inbox badges).
+   * @param {import('mongoose').Document} connection  PlatformConnection mongoose doc
+   * @returns {Promise<boolean>} true if a profile_picture_url was saved
+   */
+  async applyProfilePictureToConnection(connection) {
+    if (!connection || !this._accessToken(connection) || !this._phoneNumberId(connection)) {
+      return false;
+    }
+    const { success, profile } = await this.getBusinessProfile(connection);
+    if (!success || !profile) return false;
+
+    const url = profile.profile_picture_url || null;
+    if (!connection.platformData) connection.platformData = {};
+    connection.platformData.businessProfile = {
+      ...(connection.platformData.businessProfile || {}),
+      ...profile
+    };
+    connection.markModified('platformData');
+
+    if (url) {
+      connection.platformProfilePicture = url;
+      if (!connection.metadata) connection.metadata = {};
+      connection.metadata.profilePicture = url;
+      connection.markModified('metadata');
+    }
+
+    if (typeof connection.save === 'function') {
+      await connection.save();
+    }
+
+    const orgId = connection.organization;
+    const connId = connection._id;
+    const threadPic =
+      url ||
+      connection.platformProfilePicture ||
+      connection.metadata?.profilePicture ||
+      null;
+    if (orgId && connId && threadPic) {
+      try {
+        await Interaction.updateMany(
+          { organization: orgId, platform: 'whatsapp', platformConnection: connId },
+          { $set: { 'metadata.whatsappBusinessAvatarUrl': threadPic } }
+        );
+      } catch (e) {
+        console.warn('[WhatsApp] Could not backfill thread avatar metadata:', e.message);
+      }
+    }
+
+    return !!url;
   }
 
   /**
