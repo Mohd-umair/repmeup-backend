@@ -1,6 +1,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const PlatformConnection = require('../../models/PlatformConnection');
+const whatsappService = require('./whatsappService');
 
 /**
  * WhatsApp Business Embedded Signup Auth Service
@@ -632,6 +633,9 @@ class WhatsAppLoginAuthService {
       console.log(`[WhatsAppLogin] Updated connection for ${displayPhoneNumber}`);
       await this.registerPhoneNumber(phoneNumberId, accessToken);
       await this.subscribeToWebhook(wabaId, accessToken);
+      await whatsappService.applyProfilePictureToConnection(existing).catch((e) =>
+        console.warn('[WhatsAppLogin] applyProfilePictureToConnection:', e.message)
+      );
       return existing;
     }
 
@@ -679,6 +683,9 @@ class WhatsAppLoginAuthService {
     console.log(`[WhatsAppLogin] Connection saved for ${displayPhoneNumber}`);
     await this.registerPhoneNumber(phoneNumberId, accessToken);
     await this.subscribeToWebhook(wabaId, accessToken);
+    await whatsappService.applyProfilePictureToConnection(connection).catch((e) =>
+      console.warn('[WhatsAppLogin] applyProfilePictureToConnection:', e.message)
+    );
     return connection;
   }
 

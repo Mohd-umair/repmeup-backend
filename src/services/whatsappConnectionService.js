@@ -66,12 +66,15 @@ async function connectDirect(organizationId, createdBy) {
     platformData: { phoneNumberId },
     platformUserId: phoneNumberId
   });
+  const profilePic =
+    profileResult.profile?.profile_picture_url || null;
 
   const connection = await PlatformConnection.create({
     organization: organizationId,
     platform: 'whatsapp',
     platformUserId: phoneNumberId,
     platformDisplayName: verificationResult.verifiedName,
+    platformProfilePicture: profilePic || undefined,
     accessToken,
     createdBy,
     platformData: {
@@ -84,7 +87,10 @@ async function connectDirect(organizationId, createdBy) {
       codeVerificationStatus: verificationResult.codeVerificationStatus,
       businessProfile: profileResult.profile
     },
-    metadata: { connectionType: 'whatsapp_direct_env' },
+    metadata: {
+      connectionType: 'whatsapp_direct_env',
+      profilePicture: profilePic || undefined
+    },
     status: 'connected',
     isActive: true
   });

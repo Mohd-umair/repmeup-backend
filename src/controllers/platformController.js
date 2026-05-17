@@ -286,15 +286,27 @@ exports.getPlatformConnections = async (req, res, next) => {
 };
 
 /**
- * @desc    Refresh profile pictures for existing Meta (Facebook/Instagram) connections
- *          Uses current Meta API data to backfill platformProfilePicture / metadata.profilePicture
+ * @desc    Refresh profile pictures for Meta (Facebook/Instagram/WhatsApp Business)
  * @route   POST /api/platforms/refresh-profile-pictures
  * @access  Private
  */
 exports.refreshProfilePictures = async (req, res, next) => {
   try {
     const metaAuth = require('../integrations/meta/metaAuth');
+    const whatsappService = require('../integrations/whatsapp/whatsappService');
     const organizationId = req.user.organization._id || req.user.organization;
+
+    let updated = 0;
+
+    const waConnections = await PlatformConnection.find({
+      organization: organizationId,
+      platform: 'whatsapp',
+      isActive: true
+    });
+    for (const wa of waConnections) {
+      const changed = await whatsappService.applyProfilePictureToConnection(wa);
+      if (changed) updated++;
+    }
 
     const userConnection = await PlatformConnection.findOne({
       organization: organizationId,
@@ -302,15 +314,19 @@ exports.refreshProfilePictures = async (req, res, next) => {
       'metadata.type': 'user_token',
       isActive: true
     }).select('accessToken');
+
     if (!userConnection?.accessToken) {
-      return res.status(400).json({
-        success: false,
-        error: 'No Facebook user connection found. Connect a Facebook account first.'
+      return res.status(200).json({
+        success: true,
+        message:
+          updated > 0
+            ? `Refreshed profile pictures for ${updated} connection(s)`
+            : 'No Facebook user token for Pages/Instagram. WhatsApp Business photos were refreshed if a connection exists.',
+        updated
       });
     }
 
     const pages = await metaAuth.getUserPages(userConnection.accessToken);
-    let updated = 0;
     for (const page of pages) {
       const pagePictureUrl = page.picture?.data?.url || (typeof page.picture === 'string' ? page.picture : null) || null;
       const fbConn = await PlatformConnection.findOne({
@@ -858,6 +874,12 @@ exports.registerWhatsAppPhone = async (req, res, next) => {
       process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
     if (wabaId) {
       await whatsappLoginAuth.subscribeToWebhook(wabaId, accessToken);
+    }
+
+    const whatsappService = require('../integrations/whatsapp/whatsappService');
+    const fullConn = await PlatformConnection.findById(conn._id);
+    if (fullConn) {
+      await whatsappService.applyProfilePictureToConnection(fullConn).catch(() => {});
     }
 
     return res.status(200).json({
