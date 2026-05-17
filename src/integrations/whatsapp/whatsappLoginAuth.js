@@ -486,6 +486,49 @@ class WhatsAppLoginAuthService {
   // ---------------------------------------------------------------------------
 
   /**
+   * Register a phone number for WhatsApp Cloud API.
+   *
+   * This MUST be called after Embedded Signup OTP to move the number from
+   * "Pending" to "Active". Without it the number can never receive messages.
+   *
+   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/phone-numbers#register-phone
+   *
+   * @param {string} phoneNumberId  - Meta phone number ID (platformUserId / platformData.phoneNumberId)
+   * @param {string} accessToken    - Long-lived user or system-user token
+   * @param {string} [pin='000000'] - 6-digit registration PIN (can be arbitrary; stored by Meta)
+   * @returns {Promise<boolean>}    - true if registered / already registered
+   */
+  async registerPhoneNumber(phoneNumberId, accessToken, pin = '000000') {
+    try {
+      const resp = await axios.post(
+        `${this.graphURL}/${phoneNumberId}/register`,
+        { messaging_product: 'whatsapp', pin },
+        {
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          timeout: 15000
+        }
+      );
+      if (resp.data?.success) {
+        console.log(`[WhatsAppLogin] Phone ${phoneNumberId} registered successfully`);
+        return true;
+      }
+      console.warn(`[WhatsAppLogin] Register phone unexpected response for ${phoneNumberId}:`, resp.data);
+      return false;
+    } catch (err) {
+      const d = err.response?.data?.error;
+      const msg = d?.message || err.message;
+      const code = d?.code;
+      // Code 80007 = already registered — treat as success
+      if (code === 80007 || msg?.includes('already registered')) {
+        console.log(`[WhatsAppLogin] Phone ${phoneNumberId} is already registered — skipping`);
+        return true;
+      }
+      console.warn(`[WhatsAppLogin] Could not register phone ${phoneNumberId}: ${msg}`);
+      return false;
+    }
+  }
+
+  /**
    * Subscribe the WABA to webhook delivery for the Meta app.
    * Uses the user token (or system user token if available).
    */
@@ -587,6 +630,7 @@ class WhatsAppLoginAuthService {
       existing.metadata.connectionType = 'whatsapp_embedded_signup';
       await existing.save();
       console.log(`[WhatsAppLogin] Updated connection for ${displayPhoneNumber}`);
+      await this.registerPhoneNumber(phoneNumberId, accessToken);
       await this.subscribeToWebhook(wabaId, accessToken);
       return existing;
     }
@@ -633,6 +677,7 @@ class WhatsAppLoginAuthService {
     await platformConnectionService.incrementConnectionCount(organizationId);
 
     console.log(`[WhatsAppLogin] Connection saved for ${displayPhoneNumber}`);
+    await this.registerPhoneNumber(phoneNumberId, accessToken);
     await this.subscribeToWebhook(wabaId, accessToken);
     return connection;
   }

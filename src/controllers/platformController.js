@@ -814,3 +814,63 @@ exports.getWhatsAppStatus = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    Register an existing Pending WhatsApp phone number for Cloud API.
+ *          Calls POST /{phoneNumberId}/register which moves it from Pending → Active.
+ * @route   POST /api/platforms/whatsapp/register-phone
+ * @access  Private (org admin)
+ */
+exports.registerWhatsAppPhone = async (req, res, next) => {
+  try {
+    const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+    const PlatformConnection = require('../models/PlatformConnection');
+
+    const { connectionId } = req.body;
+    const query = {
+      organization: req.user.organization._id,
+      platform: 'whatsapp',
+      isActive: true
+    };
+    if (connectionId) query._id = connectionId;
+
+    const conn = await PlatformConnection.findOne(query).lean();
+    if (!conn) {
+      return res.status(400).json({ success: false, error: 'No active WhatsApp connection found.' });
+    }
+
+    const phoneNumberId =
+      conn.platformData?.phoneNumberId || conn.platformUserId;
+    const accessToken = conn.accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
+
+    if (!phoneNumberId || !accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number id or access token missing on connection.'
+      });
+    }
+
+    const ok = await whatsappLoginAuth.registerPhoneNumber(phoneNumberId, accessToken);
+
+    // Also (re)subscribe the WABA to webhooks
+    const wabaId =
+      conn.platformData?.wabaId ||
+      conn.platformData?.businessAccountId ||
+      process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+    if (wabaId) {
+      await whatsappLoginAuth.subscribeToWebhook(wabaId, accessToken);
+    }
+
+    return res.status(200).json({
+      success: true,
+      registered: ok,
+      phoneNumberId,
+      wabaId: wabaId || null,
+      message: ok
+        ? 'Phone number registered. Status should change to Active within a few minutes.'
+        : 'Registration call made but Meta returned an unexpected response — check logs.'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
