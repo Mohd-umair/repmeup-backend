@@ -133,7 +133,37 @@ async function buildBucketContext(interaction, organizationId) {
   }
 }
 
-function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '') {
+/** Preset tone instructions for org AI Auto-Reply (Automation Hub). */
+const AUTO_REPLY_TONE_PRESETS = {
+  growth:
+    'AUTO-REPLY TONE (Growth): Sound upbeat and conversion-aware — proactive suggestions, clear next steps, light promotional framing where helpful. Stay authentic; avoid hype or spammy language.',
+  balanced:
+    'AUTO-REPLY TONE (Balanced): Friendly, helpful, and natural — default professional customer-care voice. Clear and concise.',
+  safe:
+    'AUTO-REPLY TONE (Safe): Conservative and neutral — de-escalate, avoid strong opinions or edgy humour, prioritize factual clarity and trust.'
+};
+
+/**
+ * Build an extra guideline block from Organization.autoReplySettings (auto-reply path only).
+ * @param {string} [tone]
+ * @param {string} [customText]
+ * @returns {string}
+ */
+function buildAutoReplyToneAddon(tone, customText) {
+  const key = (tone || 'balanced').toLowerCase();
+  if (key === 'custom') {
+    const t = String(customText || '')
+      .trim()
+      .slice(0, 800);
+    if (!t) {
+      return 'AUTO-REPLY TONE (Custom): The organization chose a custom tone but left instructions empty — use a professional, friendly customer-service voice.';
+    }
+    return `AUTO-REPLY TONE (Custom — follow strictly; this overrides generic tone hints):\n${t}`;
+  }
+  return AUTO_REPLY_TONE_PRESETS[key] || AUTO_REPLY_TONE_PRESETS.balanced;
+}
+
+function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '', autoReplyToneAddon = '') {
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
   const continuity = transcript
     ? `
@@ -161,7 +191,8 @@ ${transcript}`
 - Match the tone to the platform (casual for social media, professional for reviews)
 ${continuity}
 ${bucketContext ? `\n${bucketContext}` : ''}
-${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}`;
+${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
+${autoReplyToneAddon ? `\n\n${autoReplyToneAddon}` : ''}`;
 }
 
 /**
@@ -284,7 +315,13 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
     const kbContext = buildKbContext(relevantKB);
     const bucketContext = await buildBucketContext(interaction, organizationId);
     const conversationTranscript = buildRecentConversationTranscript(interaction);
-    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript);
+    const arTone = options.autoReplyTone;
+    const arToneCustom = options.autoReplyToneCustom;
+    const toneAddon =
+      arTone !== undefined && arTone !== null && String(arTone).length > 0
+        ? buildAutoReplyToneAddon(arTone, arToneCustom)
+        : '';
+    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript, toneAddon);
 
     if (withSelfAssessment) {
       // NOTE: Layer 0 (messageIntentClassifier) already filters out 'closing' and 'gibberish'

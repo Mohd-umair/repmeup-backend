@@ -29,10 +29,13 @@ function buildGroupedMenuTree(accessibleMenus) {
     return { ...parent, children: kids };
   });
 
-  const groupedMenus = { main: [], management: [], settings: [] };
+  const groupedMenus = { main: [], management: [], settings: [], automation: [] };
   enriched.forEach((menu) => {
     if (groupedMenus[menu.group]) {
       groupedMenus[menu.group].push(menu);
+    } else {
+      // Unknown group: fall back to main so it's still visible
+      groupedMenus.main.push(menu);
     }
   });
   return groupedMenus;

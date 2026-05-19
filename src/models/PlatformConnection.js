@@ -50,6 +50,7 @@ const platformConnectionSchema = new mongoose.Schema({
     phoneNumber: String,
     displayPhoneNumber: String,
     businessAccountId: String,
+    catalogId: String,        // Meta Commerce Catalog ID linked to this WABA phone number
     
     // For LinkedIn
     organizationId: String,

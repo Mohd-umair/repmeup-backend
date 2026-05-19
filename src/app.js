@@ -175,7 +175,11 @@ const routeMap = [
   ['/contacts',             './routes/contacts'],
   ['/email',                './routes/emailAccounts'],
   ['/whatsapp-templates',   './routes/whatsappTemplates'],
+  ['/whatsapp-catalog',     './routes/whatsappCatalog'],
   ['/voice',                './routes/voiceIvr'],
+  ['/automation',           './routes/automation'],
+  ['/retargeting',          './routes/retargeting'],
+  ['/whatsapp-flows',       './routes/whatsappFlows'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];

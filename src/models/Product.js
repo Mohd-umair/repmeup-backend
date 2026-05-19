@@ -130,6 +130,22 @@ const productSchema = new mongoose.Schema({
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
+  },
+
+  /**
+   * WhatsApp Commerce Catalog sync state.
+   * catalogItemId — Meta's product item id returned after a successful sync.
+   * syncStatus    — tracks per-item sync state so the UI can show badges.
+   */
+  whatsapp: {
+    catalogItemId: String,
+    syncStatus: {
+      type: String,
+      enum: ['synced', 'pending', 'failed', 'not_synced'],
+      default: 'not_synced'
+    },
+    syncedAt: Date,
+    syncError: String
   }
 }, {
   timestamps: true
@@ -138,6 +154,7 @@ const productSchema = new mongoose.Schema({
 productSchema.index({ organization: 1, isActive: 1 });
 productSchema.index({ organization: 1, instagramPostIds: 1 });
 productSchema.index({ organization: 1, sku: 1 }, { unique: true, partialFilterExpression: { sku: { $exists: true, $type: 'string' } } });
+productSchema.index({ organization: 1, 'whatsapp.syncStatus': 1 });
 
 /** Returns the effective price after discount */
 productSchema.virtual('effectivePrice').get(function () {

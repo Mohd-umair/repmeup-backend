@@ -243,6 +243,11 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
       };
     }
 
+    const arSettings =
+      organizationSettings.autoReplySettings ||
+      organizationSettings?.toObject?.()?.autoReplySettings ||
+      {};
+
     // Layer 2: LLM also returns a `resolvable` flag for human-routing decisions.
     const { result: response, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
@@ -250,9 +255,12 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
         userId: interaction.assignedTo || undefined,
         feature: 'inbox.auto_reply'
       },
-      () => replyGenerationService.generateResponseOpenAI(
-        interaction, organizationId, null, { withSelfAssessment: true }
-      )
+      () =>
+        replyGenerationService.generateResponseOpenAI(interaction, organizationId, null, {
+          withSelfAssessment: true,
+          autoReplyTone: arSettings.tone || 'balanced',
+          autoReplyToneCustom: arSettings.toneCustomText || ''
+        })
     );
 
     if (!response) {

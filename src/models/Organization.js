@@ -200,6 +200,30 @@ const organizationSchema = new mongoose.Schema({
     },
     lastScheduledRun: Date, // Track last scheduled run time
 
+    // AI Reply style/tone
+    tone: {
+      type: String,
+      enum: ['growth', 'balanced', 'safe', 'custom'],
+      default: 'balanced'
+    },
+    /** When tone === 'custom', appended to auto-reply system prompts (max length enforced in app layer). */
+    toneCustomText: {
+      type: String,
+      default: '',
+      maxlength: 800
+    },
+
+    // Quiet hours — AI will not auto-reply during this window
+    quietHours: {
+      enabled: { type: Boolean, default: false },
+      start: { type: String, default: '22:00' },
+      end: { type: String, default: '08:00' },
+      timezone: { type: String, default: 'Asia/Kolkata' }
+    },
+
+    // Keywords that suppress auto-reply (e.g. competitor names, blacklisted words)
+    skipNegativeKeywords: { type: [String], default: [] },
+
     // Fallback settings — triggered when AI cannot respond for any reason
     fallbackSettings: {
       enabled: {
@@ -491,6 +515,35 @@ const organizationSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
     }],
+    // Structured trigger, routing, notification settings (Automation Hub)
+    triggers: {
+      lowConfidence: { type: Boolean, default: true },
+      negativeSentiment: { type: Boolean, default: true },
+      complexRequests: { type: Boolean, default: false },
+      repeatedMessages: { type: Boolean, default: false },
+      keywords: { type: [String], default: [] },
+      outsideBusinessHours: { type: Boolean, default: false }
+    },
+    routing: {
+      strategy: {
+        type: String,
+        enum: ['round_robin', 'specific_team', 'skill_based', 'custom'],
+        default: 'round_robin'
+      },
+      teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      fallbackOption: {
+        type: String,
+        enum: ['queue', 'auto_resolve', 'notify_email'],
+        default: 'queue'
+      },
+      slaMinutes: { type: Number, default: 60 }
+    },
+    notifications: {
+      notifyAgents: { type: Boolean, default: true },
+      notifyCustomer: { type: Boolean, default: true },
+      addInternalNote: { type: Boolean, default: false },
+      slaBreachAlert: { type: Boolean, default: true }
+    },
     // Business hours (for escalation timing)
     businessHours: {
       enabled: {
