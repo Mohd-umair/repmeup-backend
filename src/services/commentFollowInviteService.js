@@ -202,6 +202,11 @@ async function processCommentFollowInvite(interaction, organizationId) {
     }
 
     const commenterUsername = interaction.author?.username || '';
+    const dmVars = {
+      username: commenterUsername ? `@${commenterUsername}` : 'there'
+    };
+    const dmTitle = buildTemplate(String(settings.title || ''), dmVars).trim();
+    const dmSubtitle = buildTemplate(String(settings.subtitle || ''), dmVars).trim();
 
     if (settings.postPublicReply && (settings.publicReplyTemplate || '').trim()) {
       const safePublic = String(settings.publicReplyTemplate)
@@ -228,8 +233,8 @@ async function processCommentFollowInvite(interaction, organizationId) {
     }
 
     const element = buildFollowInviteGenericElement({
-      title: settings.title,
-      subtitle: settings.subtitle,
+      title: dmTitle,
+      subtitle: dmSubtitle,
       imageUrl: settings.imageUrl,
       buttonTitle: settings.buttonTitle,
       buttonUrl
@@ -251,8 +256,8 @@ async function processCommentFollowInvite(interaction, organizationId) {
       });
       dmMethod = 'text_fallback';
       const textBody = [
-        String(settings.title || '').trim(),
-        String(settings.subtitle || '').trim(),
+        dmTitle,
+        dmSubtitle,
         `${String(settings.buttonTitle || 'Follow').trim()}: ${buttonUrl}`
       ]
         .filter(Boolean)
