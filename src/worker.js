@@ -11,7 +11,8 @@ const {
   imapPollingQueue,
   gmailWatchRenewalQueue,
   outlookRenewalQueue,
-  voiceCallQueue
+  voiceCallQueue,
+  campaignSendQueue
 } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
@@ -23,6 +24,7 @@ const processImapPolling = require('./jobs/processImapPolling');
 const renewGmailWatches = require('./jobs/renewGmailWatches');
 const renewOutlookSubscriptions = require('./jobs/renewOutlookSubscriptions');
 const processVoiceCall = require('./jobs/processVoiceCall');
+const processCampaign = require('./jobs/processCampaign');
 const logger = require('./config/logger');
 
 // Concurrency from env
@@ -154,6 +156,26 @@ async function startWorker() {
     });
     logger.info('[Worker] voice-call processor started', { concurrency: VOICE_CALL_CONCURRENCY });
 
+    // WhatsApp campaign broadcast sender (5 concurrent, rate-limited to 60/sec by queue limiter)
+    campaignSendQueue.process(5, async (job) => {
+      logger.debug('[Worker:campaign-send] picked up job', { jobId: job.id, campaignId: job.data?.campaignId });
+      return await processCampaign(job);
+    });
+    // Schedule poller: every 30 seconds — picks up campaigns whose scheduledAt has passed
+    const campaignRepeatableJobs = await campaignSendQueue.getRepeatableJobs();
+    const campaignScheduleExists = campaignRepeatableJobs.some(j => j.id && j.id.includes('campaign-schedule-poller'));
+    if (!campaignScheduleExists) {
+      await campaignSendQueue.add({ type: 'schedule-poller' }, {
+        repeat: { every: 30000 },
+        jobId: 'campaign-schedule-poller',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] campaign-schedule-poller repeat job registered (every 30s)');
+    } else {
+      logger.info('[Worker] campaign-schedule-poller repeat job already exists — skipping registration');
+    }
+    logger.info('[Worker] campaign-send processor started');
+
     logger.info('✨ Worker started successfully', {
       webhook: WEBHOOK_CONCURRENCY,
       ai: AI_CONCURRENCY,
@@ -177,7 +199,8 @@ async function startWorker() {
           imapPollingQueue.close(),
           gmailWatchRenewalQueue.close(),
           outlookRenewalQueue.close(),
-          voiceCallQueue.close()
+          voiceCallQueue.close(),
+          campaignSendQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

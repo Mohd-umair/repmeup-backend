@@ -504,9 +504,25 @@ async function listTemplates(organizationId, connectionId = null, filters = {}) 
     return { source: 'db_fallback', templates: dbTemplates };
   }
 
-  _syncMetaTemplatesToDb(metaTemplates, organizationId, connection._id, wabaId).catch(() => {});
+  // Persist Meta rows first so each template has a Mongo _id for campaign.templateRef.
+  await _syncMetaTemplatesToDb(metaTemplates, organizationId, connection._id, wabaId);
 
-  return { source: 'meta', templates: metaTemplates };
+  const metaIds = metaTemplates.map(t => t.id).filter(Boolean);
+  const dbDocs = await WhatsAppTemplate.find({
+    organization: organizationId,
+    connection: connection._id,
+    metaTemplateId: { $in: metaIds.map(String) },
+    isArchived: false
+  }).lean();
+  const byMetaId = new Map(dbDocs.map(d => [String(d.metaTemplateId), d]));
+
+  const templates = metaTemplates.map(t => {
+    const db = t.id ? byMetaId.get(String(t.id)) : null;
+    if (!db) return { ...t };
+    return { ...t, _id: db._id };
+  });
+
+  return { source: 'meta', templates };
 }
 
 /**
@@ -594,15 +610,12 @@ async function _syncMetaTemplatesToDb(metaTemplates, organizationId, connectionI
         },
         $setOnInsert: {
           organization: organizationId,
-          connection: connectionId,
           name: t.name,
           category: t.category,
           language: t.language,
           parameter_format: t.parameter_format || 'POSITIONAL',
           components: t.components || [],
-          metaTemplateId: t.id,
-          createdBy: null,
-          wabaId
+          metaTemplateId: t.id
         }
       },
       upsert: true

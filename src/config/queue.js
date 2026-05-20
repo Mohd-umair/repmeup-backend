@@ -30,6 +30,12 @@ const gmailWatchRenewalQueue = new Queue('gmail-watch-renewal', queueOptions);
 const outlookRenewalQueue = new Queue('outlook-subscription-renewal', queueOptions);
 const voiceCallQueue = new Queue('voice-call', queueOptions);
 
+// WhatsApp campaign broadcast — rate-limited to 60 sends/sec (safe for Meta standard tier)
+const campaignSendQueue = new Queue('campaign-send', {
+  ...queueOptions,
+  limiter: { max: 60, duration: 1000 }
+});
+
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
 // Kept in place so existing Bull Board dashboards and imports keep working.
@@ -63,7 +69,8 @@ const queues = [
   imapPollingQueue,
   gmailWatchRenewalQueue,
   outlookRenewalQueue,
-  voiceCallQueue
+  voiceCallQueue,
+  campaignSendQueue
 ];
 
 queues.forEach(queue => {
@@ -106,5 +113,6 @@ module.exports = {
   gmailWatchRenewalQueue,
   outlookRenewalQueue,
   voiceCallQueue,
+  campaignSendQueue,
   queueConfig
 };
