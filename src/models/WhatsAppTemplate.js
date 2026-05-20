@@ -148,10 +148,12 @@ const whatsappTemplateSchema = new mongoose.Schema(
     metaStatusUpdatedAt: { type: Date },
 
     // ── Housekeeping ─────────────────────────────────────────────────────────
+    // Optional when the row is created by Meta list sync (no UI "create" user).
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true
+      required: false,
+      default: undefined
     },
 
     // Soft delete (archival)

@@ -180,6 +180,8 @@ const routeMap = [
   ['/automation',           './routes/automation'],
   ['/retargeting',          './routes/retargeting'],
   ['/whatsapp-flows',       './routes/whatsappFlows'],
+  ['/campaigns',            './routes/campaigns'],
+  ['/reports/number',       './routes/numberReports'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];
