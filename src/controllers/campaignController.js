@@ -136,6 +136,24 @@ exports.clearRecipients = async (req, res) => {
   }
 };
 
+// GET /campaigns/:id/recipients/report
+exports.getRecipientsReport = async (req, res) => {
+  try {
+    const { page = 1, limit = 50, reportStatus, search } = req.query;
+    const result = await service.getRecipientsReport({
+      orgId: req.user.organization._id,
+      campaignId: req.params.id,
+      page: parseInt(page, 10),
+      limit: Math.min(parseInt(limit, 10) || 50, 200),
+      reportStatus: reportStatus || undefined,
+      search: search || undefined
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
 // GET /campaigns/:id/recipients
 exports.getRecipients = async (req, res) => {
   try {

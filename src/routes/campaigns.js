@@ -15,6 +15,7 @@ router.put('/:id', protect, ctrl.updateCampaign);
 router.delete('/:id', protect, ctrl.deleteCampaign);
 
 // Recipients
+router.get('/:id/recipients/report', protect, ctrl.getRecipientsReport);
 router.post('/:id/recipients',   protect, ctrl.addRecipients);
 router.delete('/:id/recipients', protect, ctrl.clearRecipients);
 router.get('/:id/recipients',    protect, ctrl.getRecipients);
