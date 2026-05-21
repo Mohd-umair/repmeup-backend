@@ -537,7 +537,7 @@ class WhatsAppLoginAuthService {
     try {
       const response = await axios.post(
         `${this.graphURL}/${wabaId}/subscribed_apps`,
-        {},
+        { subscribed_fields: 'messages' },
         {
           params: { access_token: accessToken },
           timeout: 10000

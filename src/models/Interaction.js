@@ -410,6 +410,14 @@ const interactionSchema = new mongoose.Schema({
     confidence: { type: Number, default: null },
     messageType: { type: String, default: null },
 
+    /** WhatsApp Cloud API delivery lifecycle (mirrors Meta status webhook values) */
+    deliveryStatus: {
+      type: String,
+      enum: ['sent', 'delivered', 'read', 'failed'],
+      default: undefined
+    },
+    deliveryStatusAt: { type: Date, default: undefined },
+
     /** Rich preview for outbound WhatsApp Cloud API templates (inbox display) */
     whatsappTemplatePreview: { type: mongoose.Schema.Types.Mixed, default: undefined }
   }],
