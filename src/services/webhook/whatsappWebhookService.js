@@ -269,24 +269,23 @@ async function processWhatsAppWebhook(payload) {
         const phoneNumberId = value.metadata?.phone_number_id;
         if (!phoneNumberId) {
           logger.warn('[WhatsApp Webhook] Message change missing phone_number_id', { value });
-          continue;
+        } else {
+          const connection = await _lookupWhatsAppConnection(phoneNumberId);
+          if (connection) {
+            try {
+              await processIncomingMessage(change, connection, payload);
+            } catch (msgErr) {
+              logger.error('[WhatsApp Webhook] processIncomingMessage failed', {
+                error: msgErr.message,
+                stack: msgErr.stack
+              });
+            }
+          }
         }
-
-        const connection = await _lookupWhatsAppConnection(phoneNumberId);
-        if (!connection) continue;
-
-        try {
-          await processIncomingMessage(change, connection, payload);
-        } catch (msgErr) {
-          logger.error('[WhatsApp Webhook] processIncomingMessage failed', {
-            error: msgErr.message,
-            stack: msgErr.stack
-          });
-        }
-        continue;
       }
 
-      // Delivery-status path
+      // Delivery-status path — always evaluated so statuses are never skipped
+      // even when messages and statuses arrive in the same change object
       if (value.statuses && value.statuses.length > 0) {
         for (const status of value.statuses) {
           try {
