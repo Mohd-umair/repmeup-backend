@@ -106,16 +106,62 @@ exports.deleteCampaign = async (req, res) => {
 };
 
 // POST /campaigns/:id/recipients
+// Body: { rawText, mapping?, defaultParams? }
+//   - When `mapping` is provided OR the template has variables, recipients are inserted
+//     with per-recipient `templateParams` built from the CSV column → slot map.
+//   - Otherwise the simpler phone[,name] path is used (backward-compatible).
 exports.addRecipients = async (req, res) => {
   try {
-    const { rawText } = req.body;
-    if (!rawText || !rawText.trim()) {
+    const { rawText, mapping, defaultParams } = req.body;
+    if (!rawText || !String(rawText).trim()) {
       return res.status(400).json({ success: false, error: 'rawText is required' });
     }
-    const result = await service.addRecipients({
+    const orgId = req.user.organization._id;
+    const campaignId = req.params.id;
+
+    if (mapping && typeof mapping === 'object') {
+      const result = await service.addRecipientsWithMapping({
+        orgId,
+        campaignId,
+        rawText,
+        mapping,
+        defaultParams
+      });
+      return res.json({ success: true, ...result });
+    }
+    const result = await service.addRecipients({ orgId, campaignId, rawText });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+// POST /campaigns/:id/recipients/csv/preview
+// Returns headers + sample rows + suggested column → slot mapping
+exports.previewRecipientCsv = async (req, res) => {
+  try {
+    const { rawText } = req.body;
+    if (!rawText || !String(rawText).trim()) {
+      return res.status(400).json({ success: false, error: 'rawText is required' });
+    }
+    const result = await service.previewRecipientCsv({
       orgId: req.user.organization._id,
       campaignId: req.params.id,
       rawText
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+// GET /campaigns/:id/template-slots
+// Returns the slot descriptor used by the editor to render dynamic inputs.
+exports.getTemplateSlots = async (req, res) => {
+  try {
+    const result = await service.getTemplateSlotsForCampaign({
+      orgId: req.user.organization._id,
+      campaignId: req.params.id
     });
     res.json({ success: true, ...result });
   } catch (err) {
@@ -172,13 +218,13 @@ exports.getRecipients = async (req, res) => {
 };
 
 // POST /campaigns/:id/launch
+// Note: `templateComponents` from the body is ignored — per-recipient components
+// are now built at send time using the campaign's template snapshot + media + per-recipient params.
 exports.launchCampaign = async (req, res) => {
   try {
-    const { templateComponents } = req.body;
     const campaign = await service.launchCampaign({
       orgId: req.user.organization._id,
-      campaignId: req.params.id,
-      templateComponents: templateComponents || []
+      campaignId: req.params.id
     });
     res.json({ success: true, campaign });
   } catch (err) {
@@ -239,9 +285,12 @@ exports.getCampaignStats = async (req, res) => {
 };
 
 // POST /campaigns/:id/test
+// Body: { testPhone, testParams? }
+//   - `testParams` is an optional slotKey → value map used to fill template variables.
+//     When omitted, the most recent real recipient's params are used (or template examples).
 exports.sendTestMessage = async (req, res) => {
   try {
-    const { testPhone, templateComponents } = req.body;
+    const { testPhone, testParams } = req.body;
     if (!testPhone) {
       return res.status(400).json({ success: false, error: 'testPhone is required' });
     }
@@ -249,7 +298,7 @@ exports.sendTestMessage = async (req, res) => {
       orgId: req.user.organization._id,
       campaignId: req.params.id,
       testPhone,
-      templateComponents: templateComponents || []
+      testParams: testParams && typeof testParams === 'object' ? testParams : null
     });
     res.json({ success: true, result });
   } catch (err) {

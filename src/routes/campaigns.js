@@ -14,8 +14,12 @@ router.get('/:id', protect, ctrl.getCampaign);
 router.put('/:id', protect, ctrl.updateCampaign);
 router.delete('/:id', protect, ctrl.deleteCampaign);
 
+// Template introspection (drives the dynamic-param editor UI)
+router.get('/:id/template-slots', protect, ctrl.getTemplateSlots);
+
 // Recipients
 router.get('/:id/recipients/report', protect, ctrl.getRecipientsReport);
+router.post('/:id/recipients/csv/preview', protect, ctrl.previewRecipientCsv);
 router.post('/:id/recipients',   protect, ctrl.addRecipients);
 router.delete('/:id/recipients', protect, ctrl.clearRecipients);
 router.get('/:id/recipients',    protect, ctrl.getRecipients);

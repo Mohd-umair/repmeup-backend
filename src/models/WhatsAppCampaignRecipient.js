@@ -32,6 +32,19 @@ const whatsappCampaignRecipientSchema = new mongoose.Schema(
     // Optional display name parsed from CSV header column
     recipientName: { type: String, trim: true, maxlength: 100 },
 
+    /**
+     * Per-recipient parameter values used to build the Cloud-API `components`
+     * array at send time. Keys are slot identifiers:
+     *
+     *   header.text.{idx|name}     header TEXT variables (positional/named)
+     *   body.{idx|name}            body variables
+     *   button.url.{i}.{idx}       URL button variables (button index i, var idx)
+     *
+     * Values are always strings; the campaign builder substitutes them
+     * into the template at runtime.
+     */
+    templateParams: { type: mongoose.Schema.Types.Mixed, default: undefined },
+
     /** API send outcome: pending → sent | failed */
     status: {
       type: String,

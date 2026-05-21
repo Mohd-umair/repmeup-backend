@@ -13,6 +13,16 @@ const templateSnapshotSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
     languageCode: { type: String, default: 'en' },
+    // Frozen full template definition (uppercase Meta shape) so the worker
+    // can build per-recipient Cloud-API components without re-fetching the template.
+    definition: { type: mongoose.Schema.Types.Mixed },
+    parameterFormat: {
+      type: String,
+      enum: ['POSITIONAL', 'NAMED'],
+      default: 'POSITIONAL'
+    },
+    // Deprecated single-shot Cloud-API components.
+    // Retained for older campaigns; new campaigns build per-recipient at send time.
     components: { type: mongoose.Schema.Types.Mixed, default: [] }
   },
   { _id: false }
@@ -24,6 +34,41 @@ const statsSchema = new mongoose.Schema(
     sent:    { type: Number, default: 0 },
     failed:  { type: Number, default: 0 },
     pending: { type: Number, default: 0 }
+  },
+  { _id: false }
+);
+
+/**
+ * Campaign-level header media for IMAGE / VIDEO / DOCUMENT templates.
+ * The same media is sent to every recipient; per-recipient media via CSV
+ * column mapping is a possible future extension.
+ */
+const headerMediaSchema = new mongoose.Schema(
+  {
+    kind: { type: String, enum: ['IMAGE', 'VIDEO', 'DOCUMENT'] },
+    url:  { type: String, maxlength: 2048 },
+    filename: { type: String, maxlength: 256 },
+    mediaLibraryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Media' }
+  },
+  { _id: false }
+);
+
+/** Campaign-level header location (sent to all recipients) for LOCATION templates. */
+const headerLocationSchema = new mongoose.Schema(
+  {
+    latitude:  { type: Number },
+    longitude: { type: Number },
+    name:    { type: String, maxlength: 200 },
+    address: { type: String, maxlength: 500 }
+  },
+  { _id: false }
+);
+
+/** One dynamic URL button: {index, value} maps to button at that position. */
+const urlButtonParamSchema = new mongoose.Schema(
+  {
+    index: { type: Number, required: true, min: 0, max: 9 },
+    value: { type: String, default: '', maxlength: 500 }
   },
   { _id: false }
 );
@@ -59,6 +104,28 @@ const whatsappCampaignSchema = new mongoose.Schema(
 
     // Snapshot of the template fields used at launch time — immutable after send
     templateSnapshot: templateSnapshotSchema,
+
+    // ── Campaign-level Cloud-API parameter sources ─────────────────────────
+    // Media header (one file for the whole campaign)
+    headerMedia: { type: headerMediaSchema, default: undefined },
+
+    // Location header (one location for the whole campaign)
+    headerLocation: { type: headerLocationSchema, default: undefined },
+
+    // Dynamic URL button values (positional, by button index)
+    urlButtonParams: { type: [urlButtonParamSchema], default: [] },
+
+    /**
+     * Saved CSV → template-variable mapping for the most recent recipient import.
+     * Example:
+     *   {
+     *     phoneColumn: 'phone',
+     *     nameColumn: 'first_name',
+     *     slots: { 'body.1': 'first_name', 'header.1': 'salutation' }
+     *   }
+     * Useful for reproducing or re-importing recipients.
+     */
+    variableMapping: { type: mongoose.Schema.Types.Mixed, default: undefined },
 
     status: {
       type: String,
