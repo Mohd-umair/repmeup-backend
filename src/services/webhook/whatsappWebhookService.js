@@ -453,7 +453,7 @@ async function processIncomingMessage(change, connection, rawPayload) {
 
   // Track campaign recipient reply (most recent send to this number)
   try {
-    const campaignService = require('../services/campaignService');
+    const campaignService = require('../campaignService');
     await campaignService.markRecipientReplied({
       orgId: organizationId,
       phone: senderId
@@ -539,7 +539,7 @@ async function processStatusUpdate(status) {
   if (!status?.id) return;
   logger.info('[WhatsApp] Status update', { id: status.id, status: status.status });
 
-  const campaignService = require('../services/campaignService');
+  const campaignService = require('../campaignService');
   const errorDetail =
     status.errors?.[0]?.title ||
     status.errors?.[0]?.message ||
