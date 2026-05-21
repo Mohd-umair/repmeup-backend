@@ -32,19 +32,38 @@ const whatsappCampaignRecipientSchema = new mongoose.Schema(
     // Optional display name parsed from CSV header column
     recipientName: { type: String, trim: true, maxlength: 100 },
 
+    /** API send outcome: pending → sent | failed */
     status: {
       type: String,
       enum: ['pending', 'sent', 'failed'],
       default: 'pending'
     },
 
-    // Meta message ID returned on success
-    messageId: { type: String },
+    /**
+     * Meta delivery lifecycle from webhooks: sent → delivered → read | failed
+     * (mirrors WhatsApp Cloud API status events)
+     */
+    deliveryStatus: {
+      type: String,
+      enum: ['pending', 'sent', 'delivered', 'read', 'failed'],
+      default: 'pending'
+    },
 
-    // WhatsApp error message on failure
+    deliveryStatusAt: { type: Date },
+
+    /** Meta webhook failure detail (when deliveryStatus === 'failed') */
+    deliveryError: { type: String, maxlength: 500 },
+
+    // Meta message ID returned on success
+    messageId: { type: String, index: true, sparse: true },
+
+    // WhatsApp error message on API send failure
     errorMessage: { type: String, maxlength: 500 },
 
-    sentAt: { type: Date }
+    sentAt: { type: Date },
+
+    /** Set when the customer sends an inbound message after this campaign send */
+    repliedAt: { type: Date }
   },
   { timestamps: true }
 );

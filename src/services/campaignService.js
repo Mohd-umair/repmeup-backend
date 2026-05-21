@@ -51,6 +51,105 @@ async function resolveWhatsAppTemplateRef(orgId, connectionId, templateRef) {
   return byMeta?._id;
 }
 
+/** Meta delivery progression rank — never downgrade except to failed */
+const DELIVERY_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, failed: -1 };
+
+/**
+ * Unified report label for a recipient row (processed on backend for consistent UI).
+ */
+function computeRecipientReportStatus(r) {
+  if (!r) return 'pending';
+  if (r.status === 'pending') return 'pending';
+  if (r.status === 'failed') return 'failed';
+  if (r.deliveryStatus === 'failed') return 'failed';
+  if (r.repliedAt) return 'replied';
+  if (r.deliveryStatus === 'read') return 'read';
+  if (r.deliveryStatus === 'delivered') return 'delivered';
+  if (r.status === 'sent') return 'sent';
+  return 'pending';
+}
+
+function buildReportStatusQuery(reportStatus) {
+  if (!reportStatus) return null;
+  switch (reportStatus) {
+    case 'pending':
+      return { status: 'pending' };
+    case 'failed':
+      return { $or: [{ status: 'failed' }, { deliveryStatus: 'failed' }] };
+    case 'sent':
+      return {
+        status: 'sent',
+        deliveryStatus: { $in: ['pending', 'sent'] },
+        repliedAt: { $exists: false }
+      };
+    case 'delivered':
+      return { status: 'sent', deliveryStatus: 'delivered', repliedAt: { $exists: false } };
+    case 'read':
+      return { status: 'sent', deliveryStatus: 'read', repliedAt: { $exists: false } };
+    case 'replied':
+      return { repliedAt: { $exists: true, $ne: null } };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Apply WhatsApp Cloud API delivery status webhook to the matching campaign recipient.
+ */
+async function applyRecipientDeliveryStatus(messageId, newStatus, timestamp, errorDetail) {
+  if (!messageId || !newStatus) return;
+
+  const doc = await WhatsAppCampaignRecipient.findOne({ messageId }).select('deliveryStatus').lean();
+  if (!doc) return;
+
+  const at = timestamp ? new Date(parseInt(timestamp, 10) * 1000) : new Date();
+
+  if (newStatus === 'failed') {
+    await WhatsAppCampaignRecipient.updateOne(
+      { messageId },
+      {
+        $set: {
+          deliveryStatus: 'failed',
+          deliveryStatusAt: at,
+          ...(errorDetail ? { deliveryError: String(errorDetail).substring(0, 500) } : {})
+        }
+      }
+    );
+    return;
+  }
+
+  const current = doc.deliveryStatus || 'pending';
+  const currentRank = DELIVERY_RANK[current] ?? 0;
+  const newRank = DELIVERY_RANK[newStatus] ?? 0;
+  if (newRank <= currentRank) return;
+
+  await WhatsAppCampaignRecipient.updateOne(
+    { messageId },
+    { $set: { deliveryStatus: newStatus, deliveryStatusAt: at } }
+  );
+}
+
+/**
+ * Mark the most recent sent campaign message to this phone as replied (inbound webhook).
+ */
+async function markRecipientReplied({ orgId, phone }) {
+  if (!orgId || !phone) return;
+
+  const normalized = normalizePhone(phone) || String(phone).replace(/\D/g, '');
+  if (!normalized) return;
+
+  await WhatsAppCampaignRecipient.findOneAndUpdate(
+    {
+      organization: orgId,
+      phone: normalized,
+      status: 'sent',
+      repliedAt: { $exists: false }
+    },
+    { $set: { repliedAt: new Date() } },
+    { sort: { sentAt: -1 } }
+  );
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -296,6 +395,110 @@ async function getRecipients({ orgId, campaignId, page = 1, limit = 50, status }
   return { recipients, total, page, limit };
 }
 
+/**
+ * Paginated recipient report with delivery/read/reply summary for a campaign.
+ */
+async function getRecipientsReport({
+  orgId,
+  campaignId,
+  page = 1,
+  limit = 50,
+  reportStatus,
+  search
+}) {
+  const campaign = await WhatsAppCampaign.findOne({ _id: campaignId, organization: orgId })
+    .select('_id name stats')
+    .lean();
+  if (!campaign) {
+    const err = new Error('Campaign not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const campaignOid = new mongoose.Types.ObjectId(campaignId);
+  const orgOid = new mongoose.Types.ObjectId(orgId);
+  const baseMatch = { campaign: campaignOid, organization: orgOid };
+
+  const statusFilter = buildReportStatusQuery(reportStatus);
+  const listQuery = { ...baseMatch };
+  if (statusFilter) Object.assign(listQuery, statusFilter);
+  if (search && String(search).trim()) {
+    const term = String(search).trim().replace(/\D/g, '');
+    if (term) listQuery.phone = { $regex: term };
+  }
+
+  const skip = (page - 1) * limit;
+
+  const [
+    summaryTotal,
+    summaryPending,
+    summaryFailed,
+    summarySent,
+    summaryDelivered,
+    summaryRead,
+    summaryReplied,
+    recipients,
+    total
+  ] = await Promise.all([
+    WhatsAppCampaignRecipient.countDocuments(baseMatch),
+    WhatsAppCampaignRecipient.countDocuments({ ...baseMatch, status: 'pending' }),
+    WhatsAppCampaignRecipient.countDocuments({
+      ...baseMatch,
+      $or: [{ status: 'failed' }, { deliveryStatus: 'failed' }]
+    }),
+    WhatsAppCampaignRecipient.countDocuments({
+      ...baseMatch,
+      status: 'sent',
+      deliveryStatus: { $in: ['pending', 'sent'] },
+      repliedAt: { $exists: false }
+    }),
+    WhatsAppCampaignRecipient.countDocuments({
+      ...baseMatch,
+      status: 'sent',
+      deliveryStatus: 'delivered',
+      repliedAt: { $exists: false }
+    }),
+    WhatsAppCampaignRecipient.countDocuments({
+      ...baseMatch,
+      status: 'sent',
+      deliveryStatus: 'read',
+      repliedAt: { $exists: false }
+    }),
+    WhatsAppCampaignRecipient.countDocuments({
+      ...baseMatch,
+      repliedAt: { $exists: true, $ne: null }
+    }),
+    WhatsAppCampaignRecipient.find(listQuery)
+      .sort({ createdAt: 1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    WhatsAppCampaignRecipient.countDocuments(listQuery)
+  ]);
+
+  const enriched = recipients.map(r => ({
+    ...r,
+    reportStatus: computeRecipientReportStatus(r)
+  }));
+
+  return {
+    campaign: { _id: campaign._id, name: campaign.name, stats: campaign.stats },
+    summary: {
+      total: summaryTotal,
+      pending: summaryPending,
+      failed: summaryFailed,
+      sent: summarySent,
+      delivered: summaryDelivered,
+      read: summaryRead,
+      replied: summaryReplied
+    },
+    recipients: enriched,
+    total,
+    page,
+    limit
+  };
+}
+
 async function clearRecipients({ orgId, campaignId }) {
   const campaign = await WhatsAppCampaign.findOne({ _id: campaignId, organization: orgId });
   if (!campaign) {
@@ -531,11 +734,15 @@ module.exports = {
   deleteCampaign,
   addRecipients,
   getRecipients,
+  getRecipientsReport,
   clearRecipients,
   launchCampaign,
   pauseCampaign,
   resumeCampaign,
   cancelCampaign,
   getCampaignStats,
-  sendTestMessage
+  sendTestMessage,
+  applyRecipientDeliveryStatus,
+  markRecipientReplied,
+  computeRecipientReportStatus
 };

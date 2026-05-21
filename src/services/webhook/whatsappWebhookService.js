@@ -452,6 +452,17 @@ async function processIncomingMessage(change, connection, rawPayload) {
     senderId
   });
 
+  // Track campaign recipient reply (most recent send to this number)
+  try {
+    const campaignService = require('../services/campaignService');
+    await campaignService.markRecipientReplied({
+      orgId: organizationId,
+      phone: senderId
+    });
+  } catch (replyTrackErr) {
+    logger.debug('[WhatsApp] Campaign reply tracking skipped', { error: replyTrackErr.message });
+  }
+
   // ── Sentiment (atomic $set — avoids VersionError with AI worker races) ──
   if (savedInteraction.content) {
     try {
@@ -528,12 +539,28 @@ async function processIncomingMessage(change, connection, rawPayload) {
 async function processStatusUpdate(status) {
   if (!status?.id) return;
   logger.info('[WhatsApp] Status update', { id: status.id, status: status.status });
+
+  const campaignService = require('../services/campaignService');
+  const errorDetail =
+    status.errors?.[0]?.title ||
+    status.errors?.[0]?.message ||
+    status.errors?.[0]?.error_data?.details ||
+    null;
+
+  await campaignService.applyRecipientDeliveryStatus(
+    status.id,
+    status.status,
+    status.timestamp,
+    errorDetail
+  );
+
+  // Update delivery on outbound reply in thread (match by wamid on replies[])
   await Interaction.updateOne(
-    { platformId: status.id, platform: 'whatsapp' },
+    { platform: 'whatsapp', 'replies.platformResponseId': status.id },
     {
       $set: {
-        'metadata.deliveryStatus': status.status,
-        'metadata.statusTimestamp': new Date(parseInt(status.timestamp, 10) * 1000)
+        'replies.$.deliveryStatus': status.status,
+        'replies.$.deliveryStatusAt': new Date(parseInt(status.timestamp, 10) * 1000)
       }
     }
   );
