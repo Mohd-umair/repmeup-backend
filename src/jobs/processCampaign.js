@@ -19,6 +19,7 @@ const WhatsAppTemplate = require('../models/WhatsAppTemplate');
 const whatsappService = require('../integrations/whatsapp/whatsappService');
 const { generateChatRef } = require('../utils/chatRefHelper');
 const { buildWhatsAppTemplatePreview } = require('../utils/whatsappTemplatePreview');
+const { buildRecipientComponents } = require('../utils/whatsappCampaignBuilder');
 const { campaignSendQueue, queueConfig } = require('../config/queue');
 const logger = require('../config/logger');
 
@@ -192,7 +193,7 @@ async function runCampaignSend(campaignId) {
     return { failed: true, reason: 'connection_not_found' };
   }
 
-  const { name: templateName, languageCode, components } = campaign.templateSnapshot || {};
+  const { name: templateName, languageCode } = campaign.templateSnapshot || {};
   if (!templateName) {
     await WhatsAppCampaign.findByIdAndUpdate(campaignId, {
       $set: { status: 'failed', finishedAt: new Date() }
@@ -212,10 +213,17 @@ async function runCampaignSend(campaignId) {
   // Human-readable label for the campaign message in the inbox thread
   const templateLabel = `[Campaign] ${campaign.name} — template: ${templateName}`;
 
-  // Load the WhatsApp template doc once so the preview builder can use its component definitions
-  const dbTemplate = campaign.templateRef
-    ? await WhatsAppTemplate.findById(campaign.templateRef).lean().catch(() => null)
-    : null;
+  /*
+   * Prefer the frozen template snapshot taken at launch time (so a template that
+   * was later edited or deleted in Meta can still be sent).
+   * Fall back to live DB lookup only when the snapshot is missing.definition
+   * (older campaigns created before this field existed).
+   */
+  const dbTemplate =
+    campaign.templateSnapshot?.definition ||
+    (campaign.templateRef
+      ? await WhatsAppTemplate.findById(campaign.templateRef).lean().catch(() => null)
+      : null);
 
   let sentCount = 0;
   let failedCount = 0;
@@ -233,7 +241,7 @@ async function runCampaignSend(campaignId) {
       campaign: campaignId,
       status: 'pending'
     })
-      .select('_id phone recipientName')
+      .select('_id phone recipientName templateParams')
       .limit(BATCH_SIZE)
       .lean();
 
@@ -244,12 +252,18 @@ async function runCampaignSend(campaignId) {
 
     for (const recipient of batch) {
       try {
+        // Build per-recipient Cloud-API components from the template definition,
+        // campaign-level media/location/url-button params, and per-recipient text vars.
+        const components = dbTemplate
+          ? buildRecipientComponents(dbTemplate, campaign, recipient)
+          : [];
+
         const result = await whatsappService.sendTemplateMessage(
           connection,
           recipient.phone,
           templateName,
           languageCode || 'en',
-          components || []
+          components
         );
 
         await WhatsAppCampaignRecipient.findByIdAndUpdate(recipient._id, {
@@ -277,7 +291,7 @@ async function runCampaignSend(campaignId) {
             templateLabel,
             templateName,
             languageCode,
-            components,
+            components, // per-recipient components built above
             dbTemplate,
             campaignId,
             campaignName: campaign.name
