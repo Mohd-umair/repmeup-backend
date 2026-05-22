@@ -650,8 +650,8 @@ class InstagramService {
           }
           const profile = profileCache.get(authorId);
           let authorName = profile?.name || otherParticipant?.username || 'Unknown User';
-          let avatarUrl = profile?.profile_pic || profile?.profile_picture_url;
-          if (!avatarUrl) avatarUrl = `${apiBase}/${authorId}/picture?type=normal`;
+          let avatarUrl = profile?.profile_pic || profile?.profile_picture_url || undefined;
+          // Do not store Graph redirect URLs — browser cannot load them; inbox uses API proxy instead.
 
           const interaction = {
             organization: platformConnection.organization,

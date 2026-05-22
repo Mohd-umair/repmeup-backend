@@ -11,6 +11,15 @@ const logger = require('../config/logger');
 const entitlementsService = require('./entitlementsService');
 const { FEATURE_KEYS } = require('../config/featureCatalog');
 
+/** Meta Graph `/picture` URLs need a token — store null and let the inbox proxy resolve. */
+function sanitizeAvatarUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes('graph.facebook.com') && trimmed.includes('/picture')) return null;
+  return trimmed;
+}
+
 /**
  * Increment the per-org "unique contacts this month" bucket when this contact
  * counts as new for the current period.
@@ -64,7 +73,7 @@ function normalizeAuthorForPlatform(platform, author = {}, rawData = {}) {
     email: author.email || null,
     username: author.username || null,
     name: author.name || author.username || null,
-    avatarUrl: author.avatarUrl || null,
+    avatarUrl: sanitizeAvatarUrl(author.avatarUrl || author.profilePicture) || null,
     rawData
   };
 
@@ -108,7 +117,8 @@ function normalizeAuthorForPlatform(platform, author = {}, rawData = {}) {
  * @returns {Promise<Contact>}
  */
 async function resolveContact(payload, organizationId) {
-  const { platform, platformUserId, phone, email, username, name, avatarUrl, rawData } = payload;
+  const { platform, platformUserId, phone, email, username, name, avatarUrl: rawAvatarUrl, rawData } = payload;
+  const avatarUrl = sanitizeAvatarUrl(rawAvatarUrl);
 
   if (!platformUserId || !platform) {
     // Not enough identity info — skip silently
@@ -185,7 +195,8 @@ async function resolveContact(payload, organizationId) {
         c => c.platform === platform && String(c.platformUserId) === String(platformUserId)
       );
       if (ch) {
-        if (avatarUrl) ch.avatarUrl = avatarUrl;
+        const safeAvatar = sanitizeAvatarUrl(avatarUrl);
+        if (safeAvatar) ch.avatarUrl = safeAvatar;
         if (username && !ch.username) ch.username = username;
         if (name && !ch.name) ch.name = name;
       }

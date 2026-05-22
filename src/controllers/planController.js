@@ -162,7 +162,9 @@ exports.createPlan = async (req, res, next) => {
       displayOrder,
       stripePriceId,
       stripeProductId,
-      trialDays
+      trialDays,
+      razorpayPlanId,
+      priceInr
     } = req.body;
 
     // Check if plan with same planId already exists
@@ -193,6 +195,8 @@ exports.createPlan = async (req, res, next) => {
       stripePriceId,
       stripeProductId,
       trialDays,
+      razorpayPlanId: razorpayPlanId || undefined,
+      priceInr: priceInr !== undefined ? Number(priceInr) : undefined,
       createdBy: req.user._id
     });
 
@@ -236,7 +240,7 @@ exports.updatePlan = async (req, res, next) => {
       'name', 'description', 'tier', 'price', 'billingCycle',
       'limits', 'features', 'badge', 'badgeColor', 'highlightColor',
       'isActive', 'isPublic', 'displayOrder', 'stripePriceId',
-      'stripeProductId', 'trialDays'
+      'stripeProductId', 'trialDays', 'razorpayPlanId', 'priceInr'
     ];
 
     allowedFields.forEach(field => {
