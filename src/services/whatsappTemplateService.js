@@ -320,6 +320,24 @@ function validateTemplatePayload({ name, category, language, components = [], pa
     errors.push('Footer text must be 60 characters or fewer.');
   }
 
+  // Header TEXT length and variables (Meta: max 60 chars, max 1 variable)
+  const header = components.find(c => c.type === 'HEADER');
+  if (header?.format === 'TEXT' && header.text) {
+    if (header.text.length > 60) {
+      errors.push('Header text must be 60 characters or fewer.');
+    }
+    const isNamed = parameter_format === 'NAMED';
+    const varCount = isNamed
+      ? (header.text.match(/\{\{([a-z0-9_]+)\}\}/gi) || []).length
+      : (header.text.match(/\{\{\d+\}\}/g) || []).length;
+    if (varCount > 1) {
+      errors.push('Text headers support only one variable.');
+    }
+    if (varCount > 0 && !header.example) {
+      errors.push('Header text with variables requires an example (header_text or header_text_named_params).');
+    }
+  }
+
   // Button count
   const buttonsComp = components.find(c => c.type === 'BUTTONS');
   if (buttonsComp?.buttons?.length > 10) {

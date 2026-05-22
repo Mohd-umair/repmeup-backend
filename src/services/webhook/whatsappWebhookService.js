@@ -31,7 +31,33 @@ const Interaction = require('../../models/Interaction');
 const PlatformConnection = require('../../models/PlatformConnection');
 const { generateChatRef } = require('../../utils/chatRefHelper');
 const { emitToOrg } = require('../../utils/socketEmitter');
+const { resolveContact, normalizeAuthorForPlatform } = require('../contactService');
 const logger = require('../../config/logger');
+
+/**
+ * Find or create a unified Contact for an inbound WhatsApp sender and link it
+ * on the Interaction thread. Non-fatal — never blocks message delivery.
+ */
+async function _resolveAndLinkContact({ interaction, author, organizationId, rawContact = {} }) {
+  if (!interaction?._id || !author?.platformId) return null;
+
+  try {
+    const contactPayload = normalizeAuthorForPlatform('whatsapp', author, rawContact);
+    const contact = await resolveContact(contactPayload, organizationId);
+    if (contact) {
+      await Interaction.findByIdAndUpdate(interaction._id, { contact: contact._id });
+      if (typeof interaction.set === 'function') {
+        interaction.set('contact', contact._id);
+      } else {
+        interaction.contact = contact._id;
+      }
+    }
+    return contact;
+  } catch (err) {
+    logger.warn('[WhatsApp] Contact resolution failed (non-fatal)', { error: err.message });
+    return null;
+  }
+}
 
 /**
  * Upsert a WhatsApp conversation thread and append one inbound message.
@@ -216,6 +242,14 @@ async function handleWhatsAppMessage(payload, organizationId) {
       });
 
       if (skipped) return null;
+
+      await _resolveAndLinkContact({
+        interaction,
+        author: mergedAuthor,
+        organizationId,
+        rawContact: value.contacts?.[0] || {}
+      });
+
       return interaction;
     }
 
@@ -451,6 +485,14 @@ async function processIncomingMessage(change, connection, rawPayload) {
     senderId
   });
 
+  // Resolve unified Contact (phone → contacts list) — same as other webhook platforms.
+  await _resolveAndLinkContact({
+    interaction: savedInteraction,
+    author: mergedAuthor,
+    organizationId,
+    rawContact: md.contact || value.contacts?.[0] || {}
+  });
+
   // Track campaign recipient reply (most recent send to this number)
   try {
     const campaignService = require('../campaignService');
@@ -552,6 +594,19 @@ async function processStatusUpdate(status) {
     status.timestamp,
     errorDetail
   );
+
+  if (status.status === 'failed') {
+    // Drop failed campaign deliveries from inbox — only successfully sent messages belong there.
+    await Interaction.updateOne(
+      {
+        platform: 'whatsapp',
+        'replies.platformResponseId': status.id,
+        'replies.whatsappTemplatePreview.campaignId': { $exists: true, $ne: null }
+      },
+      { $pull: { replies: { platformResponseId: status.id } } }
+    );
+    return;
+  }
 
   // Update delivery on outbound reply in thread (match by wamid on replies[])
   await Interaction.updateOne(

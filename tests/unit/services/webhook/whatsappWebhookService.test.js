@@ -23,6 +23,7 @@ function chainable(finalValue) {
 jest.mock('../../../../src/models/Interaction', () => ({
   findOne: jest.fn(),
   findOneAndUpdate: jest.fn().mockResolvedValue(undefined),
+  findByIdAndUpdate: jest.fn().mockResolvedValue(undefined),
   updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
   find: jest.fn()
 }));
@@ -69,6 +70,23 @@ jest.mock('../../../../src/config/queue', () => ({
   aiQueue: { add: jest.fn().mockResolvedValue({ id: 'job-1' }) }
 }));
 
+jest.mock('../../../../src/services/contactService', () => ({
+  resolveContact: jest.fn().mockResolvedValue({ _id: 'contact-1' }),
+  normalizeAuthorForPlatform: jest.fn((platform, author, rawData) => ({
+    platform,
+    platformUserId: author.platformId,
+    phone: author.platformId,
+    username: author.username,
+    name: author.name,
+    rawData
+  }))
+}));
+
+jest.mock('../../../../src/services/campaignService', () => ({
+  markRecipientReplied: jest.fn().mockResolvedValue(undefined),
+  applyRecipientDeliveryStatus: jest.fn().mockResolvedValue(undefined)
+}));
+
 const Interaction = require('../../../../src/models/Interaction');
 const PlatformConnection = require('../../../../src/models/PlatformConnection');
 const { emitToOrg } = require('../../../../src/utils/socketEmitter');
@@ -76,6 +94,7 @@ const whatsappService = require('../../../../src/integrations/whatsapp/whatsappS
 const aiService = require('../../../../src/services/aiService');
 const autoReplyScheduler = require('../../../../src/services/autoReplyScheduler');
 const { aiQueue } = require('../../../../src/config/queue');
+const contactService = require('../../../../src/services/contactService');
 
 const svc = require('../../../../src/services/webhook/whatsappWebhookService');
 
@@ -83,6 +102,7 @@ beforeEach(() => {
   Interaction.findOne.mockReset();
   Interaction.findOneAndUpdate.mockReset().mockResolvedValue(undefined);
   Interaction.updateOne.mockReset().mockResolvedValue({ modifiedCount: 1 });
+  Interaction.findByIdAndUpdate.mockReset().mockResolvedValue(undefined);
   Interaction.find.mockReset();
 
   PlatformConnection.findOne.mockReset();
@@ -95,6 +115,8 @@ beforeEach(() => {
   aiService.fallbackSentimentAnalysis.mockClear();
   autoReplyScheduler.queueImmediateAutoReply.mockReset().mockResolvedValue(true);
   aiQueue.add.mockReset().mockResolvedValue({ id: 'job-1' });
+  contactService.resolveContact.mockReset().mockResolvedValue({ _id: 'contact-1' });
+  contactService.normalizeAuthorForPlatform.mockClear();
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -349,6 +371,23 @@ describe('processIncomingMessage — side-effect isolation', () => {
     aiQueue.add.mockRejectedValueOnce(new Error('redis dead'));
 
     await expect(svc.processIncomingMessage(change, connection, payload)).resolves.toBeUndefined();
+  });
+
+  test('creates/links Contact for inbound WhatsApp sender', async () => {
+    primeSuccessPath();
+
+    await svc.processIncomingMessage(change, connection, payload);
+
+    expect(contactService.normalizeAuthorForPlatform).toHaveBeenCalledWith(
+      'whatsapp',
+      expect.objectContaining({ platformId: '919999999999' }),
+      expect.any(Object)
+    );
+    expect(contactService.resolveContact).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: 'whatsapp', platformUserId: '919999999999' }),
+      'org-1'
+    );
+    expect(Interaction.findByIdAndUpdate).toHaveBeenCalledWith('int-1', { contact: 'contact-1' });
   });
 
   test('mergedAuthor prefers new values, falls back to previously stored author', async () => {

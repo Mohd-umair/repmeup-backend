@@ -18,6 +18,7 @@ const inboxBulkService = require('../services/inboxBulkService');
 const inboxQueryService = require('../services/inbox/inboxQueryService');
 const inboxAiAssistService = require('../services/inbox/inboxAiAssistService');
 const { getIncomingMessagesPage } = require('../services/inbox/incomingMessagesPageService');
+const { filterInboxReplies, isCampaignOnlyFailedThread } = require('../utils/campaignInboxFilter');
 
 const {
   InboxQueryError,
@@ -112,7 +113,8 @@ exports.getInteractions = async (req, res, next) => {
     const [rawInteractions, total] = await Promise.all([findPromise, countPromise]);
 
     const hasMore = rawInteractions.length > safeLimit;
-    const interactions = hasMore ? rawInteractions.slice(0, safeLimit) : rawInteractions;
+    let interactions = hasMore ? rawInteractions.slice(0, safeLimit) : rawInteractions;
+    interactions = interactions.filter((row) => !isCampaignOnlyFailedThread(row));
 
     // Defer chatRef backfill — it's a best-effort legacy fixup, not something the
     // user is waiting for. Running it in-band made every list load pay for a write
@@ -336,10 +338,8 @@ exports.getInteraction = async (req, res, next) => {
       .sort({ platformCreatedAt: sortDir })
       .lean();
 
-    // Hide soft-deleted app replies from thread rendering.
-    interactionObj.replies = (interactionObj.replies || []).filter(
-      (reply) => reply.status !== 'deleted'
-    );
+    // Hide soft-deleted app replies and failed campaign sends from thread rendering.
+    interactionObj.replies = filterInboxReplies(interactionObj.replies || []);
 
     // Get all platformResponseIds from app replies to filter out our own replies
     const appReplyPlatformIds = new Set(
