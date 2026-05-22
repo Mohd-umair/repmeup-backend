@@ -435,7 +435,8 @@ async function processIncomingMessage(change, connection, rawPayload) {
   const mergedAuthor = {
     platformId: senderId,
     name: md.contact?.name || prevAuthor.name || senderId,
-    username: md.contact?.wa_id || prevAuthor.username || senderId
+    username: md.contact?.wa_id || prevAuthor.username || senderId,
+    avatarUrl: prevAuthor.avatarUrl || prevAuthor.profilePicture || undefined
   };
 
   const extraSet = { contentType: md.mediaType || 'text' };

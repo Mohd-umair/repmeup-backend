@@ -69,6 +69,18 @@ exports.createSubscription = async (req, res, next) => {
       });
     }
 
+    // Detect test-mode plan IDs when running with live keys
+    const isLiveKey = (process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_');
+    const isTestPlanId = plan.razorpayPlanId.startsWith('plan_') &&
+      !plan.razorpayPlanId.startsWith('plan_Live') && isLiveKey;
+    if (isLiveKey && plan.razorpayPlanId && !plan.razorpayPlanId.includes('live') && !plan.razorpayPlanId.includes('Live')) {
+      // Razorpay live plans IDs are not prefixed specially, so we query to validate
+      // but we can warn in logs for ops visibility
+      logger.warn('[Razorpay] Live key in use — ensure razorpayPlanId is a LIVE plan ID, not a test one', {
+        razorpayPlanId: plan.razorpayPlanId
+      });
+    }
+
     const subscription = await Subscription.findOne({
       organization: req.user.organization._id
     });
@@ -90,9 +102,10 @@ exports.createSubscription = async (req, res, next) => {
           cancel_at_cycle_end: false
         });
       } catch (err) {
+        const cancelDesc = err?.error?.description || err?.message;
         logger.warn('[Razorpay] Could not cancel previous subscription', {
           id: subscription.razorpaySubscriptionId,
-          error: err.message
+          error: cancelDesc
         });
       }
     }
@@ -154,7 +167,29 @@ exports.createSubscription = async (req, res, next) => {
       }
     });
   } catch (error) {
-    logger.error('[Razorpay] createSubscription error', { error: error.message });
+    // Razorpay SDK wraps errors as { statusCode, error: { description, code, ... } }
+    // — not a standard Error. Extract the real description so logs are useful.
+    const rzpDesc = error?.error?.description || error?.error?.code || error?.message;
+    const rzpCode = error?.error?.code;
+    const rzpStatus = error?.statusCode;
+
+    logger.error('[Razorpay] createSubscription error', {
+      description: rzpDesc,
+      code: rzpCode,
+      statusCode: rzpStatus,
+      razorpayPlanId: req.body?.planId
+    });
+
+    // Surface a human-readable error to the client instead of a generic 500
+    if (rzpDesc) {
+      return res.status(rzpStatus || 400).json({
+        success: false,
+        error: rzpDesc.includes('plan id')
+          ? `Razorpay plan not found. Please update your plan configuration with the correct live Razorpay Plan ID. (${rzpDesc})`
+          : rzpDesc
+      });
+    }
+
     next(error);
   }
 };

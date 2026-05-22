@@ -1664,110 +1664,125 @@ exports.getWhatsAppMedia = async (req, res, next) => {
 exports.getAuthorAvatar = async (req, res, next) => {
   try {
     const { platform, userId } = req.params;
-    const pageId = req.query.pageId; // optional; for Facebook, pick the connection for this page
+    const pageId = req.query.pageId;
     if (!platform || !userId) {
       return res.status(400).json({ success: false, error: 'platform and userId required' });
     }
     const orgId = req.user.organization._id;
     const platformKey = platform.toLowerCase();
+    const API_VER = 'v18.0';
+    const GRAPH = `https://graph.facebook.com/${API_VER}`;
 
-    // For Facebook, prefer the connection that owns the page (when pageId provided or single connection).
-    let connection;
-    if (platformKey === 'facebook') {
-      const filter = {
+    // ── Helper: fetch image bytes from a URL and stream to client ──────────
+    async function streamImage(url) {
+      const r = await axios.get(url, {
+        responseType: 'arraybuffer',
+        maxRedirects: 5,
+        timeout: 8000,
+        validateStatus: s => s === 200
+      });
+      res.set('Content-Type', r.headers['content-type'] || 'image/jpeg');
+      res.set('Cache-Control', 'private, max-age=3600');
+      res.send(Buffer.from(r.data));
+    }
+
+    // ── Helper: resolve best EAA token for Instagram IGSID lookups ─────────
+    // EAA = Facebook Page token (facebook_login or facebook platform connections).
+    // IGAA = Instagram Login token — CANNOT look up other users' profiles.
+    async function resolveEaaToken() {
+      // 1. Instagram connection connected via Facebook Login (EAA token)
+      const igFbConn = await PlatformConnection.findOne({
         organization: orgId,
-        platform: 'facebook',
-        isActive: true,
-        status: 'connected'
-      };
-      if (pageId) filter.platformPageId = { $in: [String(pageId), pageId] };
-      connection = await PlatformConnection.findOne(filter).select('accessToken').lean();
-    } else {
-      connection = await PlatformConnection.findOne({
-        organization: orgId,
-        platform: platformKey,
+        platform: 'instagram',
+        'metadata.connectionType': 'facebook_login',
         isActive: true,
         status: 'connected'
       }).select('accessToken').lean();
-    }
-
-    if (!connection || !connection.accessToken) {
-      return res.status(404).json({ success: false, error: 'Platform connection not found' });
-    }
-    const token = connection.accessToken;
-    const apiVersion = 'v18.0';
-
-    if (platformKey === 'instagram') {
-      // For Instagram, try to get profile picture via Facebook Graph API
-      // Note: Instagram user profile pics via graph.instagram.com require different permissions
-      // and only work for users who've used Instagram Login, not commenters/messengers
-      try {
-        // Try Facebook Graph API endpoint (works for some Instagram user IDs)
-        const picUrl = `https://graph.facebook.com/${apiVersion}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`;
-        const imgRes = await axios.get(picUrl, { 
-          responseType: 'arraybuffer', 
-          maxRedirects: 5, 
-          timeout: 8000,
-          validateStatus: (status) => status === 200
-        });
-        
-        res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
-        res.set('Cache-Control', 'private, max-age=3600');
-        res.send(Buffer.from(imgRes.data));
-        return;
-      } catch (apiError) {
-        // If API fails, return a default Instagram avatar placeholder
-        // This is common when the user ID can't be accessed via Graph API
-        return res.status(404).json({ 
-          success: false, 
-          error: 'Avatar not available',
-          useDefault: true 
-        });
+      if (igFbConn?.accessToken && !igFbConn.accessToken.startsWith('IGAA')) {
+        return igFbConn.accessToken;
       }
+      // 2. Facebook Page connection (always EAA)
+      const fbFilter = { organization: orgId, platform: 'facebook', isActive: true, status: 'connected' };
+      if (pageId) fbFilter.platformPageId = { $in: [String(pageId), pageId] };
+      const fbConn = await PlatformConnection.findOne(fbFilter).select('accessToken').lean();
+      if (fbConn?.accessToken) return fbConn.accessToken;
+      return null;
     }
 
-    if (platformKey === 'facebook') {
+    // ── Instagram ──────────────────────────────────────────────────────────
+    // Instagram customer IGSIDs can only be queried with an EAA (Facebook Login) token.
+    // IGAA (Direct Login) tokens block access to other users' profiles by Meta policy.
+    if (platformKey === 'instagram') {
+      const token = await resolveEaaToken();
+      if (!token) {
+        // No EAA token available — Instagram Direct Login cannot fetch customer profiles
+        return res.status(404).json({ success: false, error: 'No EAA token available for Instagram', useDefault: true });
+      }
+
+      // Step 1: resolve the CDN URL via fields=profile_pic (avoids /picture silhouette redirect)
       try {
-        const picUrl = `https://graph.facebook.com/${apiVersion}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`;
-        const imgRes = await axios.get(picUrl, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 8000, validateStatus: s => s === 200 });
-        res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
-        res.set('Cache-Control', 'private, max-age=3600');
-        res.send(Buffer.from(imgRes.data));
+        const profileRes = await axios.get(`${GRAPH}/${userId}`, {
+          params: { fields: 'profile_pic', access_token: token },
+          timeout: 8000
+        });
+        const cdnUrl = profileRes.data?.profile_pic;
+        if (cdnUrl && cdnUrl.startsWith('http')) {
+          await streamImage(cdnUrl);
+          return;
+        }
+      } catch (_) { /* fall through */ }
+
+      // Step 2: fallback — /picture redirect endpoint
+      try {
+        await streamImage(`${GRAPH}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`);
+        return;
+      } catch (_) { /* fall through */ }
+
+      return res.status(404).json({ success: false, error: 'Avatar not available', useDefault: true });
+    }
+
+    // ── Facebook ───────────────────────────────────────────────────────────
+    if (platformKey === 'facebook') {
+      const filter = { organization: orgId, platform: 'facebook', isActive: true, status: 'connected' };
+      if (pageId) filter.platformPageId = { $in: [String(pageId), pageId] };
+      const conn = await PlatformConnection.findOne(filter).select('accessToken').lean();
+      if (!conn?.accessToken) {
+        return res.status(404).json({ success: false, error: 'Platform connection not found' });
+      }
+      const token = conn.accessToken;
+
+      // Use picture{url} to get the resolved CDN URL without following a redirect silhouette
+      try {
+        const profileRes = await axios.get(`${GRAPH}/${userId}`, {
+          params: { fields: 'picture.type(normal){url,is_silhouette}', access_token: token },
+          timeout: 8000
+        });
+        const pic = profileRes.data?.picture?.data;
+        if (pic && !pic.is_silhouette && pic.url) {
+          await streamImage(pic.url);
+          return;
+        }
+        // Silhouette = no real profile picture → 404 so frontend shows initials
+        if (pic?.is_silhouette) {
+          return res.status(404).json({ success: false, error: 'No profile picture', useDefault: true });
+        }
+      } catch (_) { /* fall through to /picture endpoint */ }
+
+      // Fallback: /picture redirect
+      try {
+        await streamImage(`${GRAPH}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`);
+        return;
       } catch (fbErr) {
-        // 403 = user privacy / page-token can't access; 404 = user not found. Both are expected.
         return res.status(404).json({ success: false, error: 'Avatar not available', useDefault: true });
       }
-      return;
     }
 
     return res.status(400).json({ success: false, error: 'Unsupported platform' });
   } catch (error) {
-    // Handle avatar fetch errors gracefully
-    if (error.response?.status === 404) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Avatar not found',
-        useDefault: true 
-      });
-    }
-    
-    if (error.response?.status === 400) {
-      // 400 errors are common for Instagram user IDs that can't be accessed
-      // Return 404 with useDefault flag instead of logging as error
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Avatar not available',
-        useDefault: true 
-      });
-    }
-    
-    // 403/404/400 are expected (privacy settings, user not accessible) — suppress to avoid log spam.
-    // Only log truly unexpected errors.
     const status = error.response?.status;
     if (error.code !== 'ECONNABORTED' && status !== 400 && status !== 403 && status !== 404) {
       logger.error('[inboxController] getAuthorAvatar error', { error: error.message });
     }
-    
     res.status(404).json({ 
       success: false, 
       error: 'Avatar not available',
