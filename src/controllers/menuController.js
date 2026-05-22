@@ -12,6 +12,8 @@ function menuIdStr(id) {
  * Build grouped menus: top-level only, with nested `children` from parentId (already permission-filtered).
  */
 function buildGroupedMenuTree(accessibleMenus) {
+  const idSet = new Set(accessibleMenus.map((m) => menuIdStr(m._id)));
+
   const byParent = new Map();
   accessibleMenus.forEach((m) => {
     if (!m.parentId) return;
@@ -21,7 +23,13 @@ function buildGroupedMenuTree(accessibleMenus) {
   });
   byParent.forEach((arr) => arr.sort((a, b) => (a.order || 0) - (b.order || 0)));
 
-  const topLevel = accessibleMenus.filter((m) => !m.parentId);
+  // Items whose parentId points to a missing/inactive parent are orphaned — promote to top-level
+  // so they still appear in the sidebar (e.g. Catalog with a deleted parent).
+  const topLevel = accessibleMenus.filter((m) => {
+    if (!m.parentId) return true;
+    return !idSet.has(menuIdStr(m.parentId));
+  });
+  topLevel.sort((a, b) => (a.order || 0) - (b.order || 0));
 
   const enriched = topLevel.map((parent) => {
     const kids = byParent.get(menuIdStr(parent._id)) || [];
