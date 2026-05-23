@@ -206,15 +206,18 @@ exports.updateCatalogSettings = async (req, res, next) => {
     try {
       metaResult = await whatsappCatalogService.updateCommerceSettings(connection, trimmedCatalogId);
     } catch (metaErr) {
-      // Only hard-fail if commerce settings POST itself failed
       logger.warn('[whatsappCatalogController] updateCommerceSettings failed', {
         error: metaErr.message,
-        catalogId: trimmedCatalogId
+        catalogId: trimmedCatalogId,
+        metaCode: metaErr.metaCode
       });
+      const isInvalidId = metaErr.isInvalidCatalogId || metaErr.metaCode === 100;
       return res.status(422).json({
         success: false,
         error: metaErr.message || 'Meta rejected this request.',
-        hint: 'Ensure your WhatsApp connection is active and try again.'
+        hint: isInvalidId
+          ? 'Open Meta Commerce Manager → Catalogs → select your catalog → Settings. Copy the numeric Catalog ID from there.'
+          : 'Ensure your WhatsApp connection is active and try again.'
       });
     }
 
