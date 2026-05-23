@@ -113,17 +113,27 @@ exports.getCatalogSettings = async (req, res, next) => {
       Product.countDocuments({ organization: orgId, isActive: true, 'whatsapp.syncStatus': { $in: ['not_synced', 'pending'] } })
     ]);
 
-    // Live Meta commerce settings — source of truth for whether catalog is actually linked
+    let storedId = catalogId ? String(catalogId).trim() : null;
+
+    // Live Meta link — WABA product_catalogs (commerce settings does NOT return catalog_id)
     let metaSettings = null;
     let metaCatalogId = null;
+    let wabaCatalogIds = [];
     try {
-      metaSettings = await whatsappCatalogService.getCommerceSettings(connection);
-      metaCatalogId = metaSettings.catalogId ? String(metaSettings.catalogId) : null;
+      [metaSettings, wabaCatalogIds] = await Promise.all([
+        whatsappCatalogService.getCommerceSettings(connection),
+        whatsappCatalogService.getWabaCatalogIds(connection)
+      ]);
+      if (storedId && wabaCatalogIds.includes(storedId)) {
+        metaCatalogId = storedId;
+      } else if (wabaCatalogIds.length === 1) {
+        metaCatalogId = wabaCatalogIds[0];
+      } else if (wabaCatalogIds.length > 1 && storedId) {
+        metaCatalogId = wabaCatalogIds.includes(storedId) ? storedId : null;
+      }
     } catch (_e) {
       // non-fatal — still return local settings
     }
-
-    let storedId = catalogId ? String(catalogId).trim() : null;
 
     // Heal stale/truncated locally stored IDs when Meta reports a different linked catalog
     if (metaCatalogId && storedId && metaCatalogId !== storedId) {
@@ -170,6 +180,7 @@ exports.getCatalogSettings = async (req, res, next) => {
         displayPhoneNumber: connection.platformData?.displayPhoneNumber || null,
         isCatalogVisible: isVerifiedLink ? (metaSettings?.isCatalogVisible ?? false) : false,
         isCartEnabled: isVerifiedLink ? (metaSettings?.isCartEnabled ?? false) : false,
+        wabaCatalogIds,
         syncedCount,
         failedCount,
         notSyncedCount
@@ -226,35 +237,36 @@ exports.updateCatalogSettings = async (req, res, next) => {
       });
     }
 
-    // Confirm link — POST response, then GET with retries (Meta read-back can lag)
-    let linkedCatalogId =
-      metaResult.settings?.catalogId ? String(metaResult.settings.catalogId) : null;
+    // Verify via WABA product_catalogs — the API Meta documents for catalog linkage
+    let linkedCatalogId = metaResult.settings?.catalogId
+      ? String(metaResult.settings.catalogId)
+      : null;
 
     if (!linkedCatalogId) {
       try {
         linkedCatalogId = await whatsappCatalogService.readLinkedCatalogId(connection);
       } catch (readErr) {
-        logger.warn('[whatsappCatalogController] Could not read Meta catalog link after save', {
+        logger.warn('[whatsappCatalogController] Could not read WABA catalog link after save', {
           error: readErr.message
         });
       }
     }
 
-    // POST succeeded — trust requested ID if read-back is empty (common with Cloud API tokens)
-    if (!linkedCatalogId) {
-      linkedCatalogId = trimmedCatalogId;
-      logger.info('[whatsappCatalogController] Commerce settings POST ok; using requested catalogId', {
-        catalogId: trimmedCatalogId
+    const wabaIds = await whatsappCatalogService.getWabaCatalogIds(connection);
+    const verifiedOnWaba = wabaIds.includes(trimmedCatalogId);
+
+    if (!verifiedOnWaba) {
+      return res.status(422).json({
+        success: false,
+        error: 'This catalog is not linked to your WhatsApp Business Account yet.',
+        hint:
+          'Open WhatsApp Manager → your number → Account tools → Catalog → connect catalog ' +
+          trimmedCatalogId +
+          '. Ensure the catalog belongs to the same Meta Business as RepmeupWa, then click Save again.'
       });
     }
 
-    if (linkedCatalogId !== trimmedCatalogId) {
-      return res.status(422).json({
-        success: false,
-        error: `Meta linked a different catalog (${linkedCatalogId}) than the ID you entered.`,
-        hint: 'Use the Catalog ID shown in Commerce Manager → your catalog → Settings, then save again.'
-      });
-    }
+    linkedCatalogId = trimmedCatalogId;
 
     connection.platformData = connection.platformData || {};
     connection.platformData.catalogId = linkedCatalogId;
