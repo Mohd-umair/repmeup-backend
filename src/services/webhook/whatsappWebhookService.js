@@ -35,6 +35,95 @@ const { resolveContact, normalizeAuthorForPlatform } = require('../contactServic
 const logger = require('../../config/logger');
 
 /**
+ * Handle a WhatsApp native-cart order message (type === 'order').
+ *
+ * Meta sends this when a customer places a native WhatsApp cart order.
+ * We create a CommerceOrder, link the Interaction thread, and emit a socket
+ * event so the inbox agent sees the new order immediately.
+ *
+ * Non-fatal — a failure here must never block normal message processing.
+ */
+async function _handleOrderMessage({ message, connection, organizationId, savedInteraction }) {
+  try {
+    const CommerceOrder = require('../../models/CommerceOrder');
+    const Product = require('../../models/Product');
+
+    const order = message.order || {};
+    const catalog_id = order.catalog_id;
+    const product_items = order.product_items || [];
+
+    if (!product_items.length) {
+      logger.warn('[WhatsApp] Order message has no product_items', { messageId: message.id });
+      return null;
+    }
+
+    // Resolve products from our DB by retailer_id (sku or product._id string)
+    const retailerIds = product_items.map((i) => i.retailer_id).filter(Boolean);
+    const dbProducts = await Product.find({
+      organization: organizationId,
+      isActive: true,
+      $or: [
+        { sku: { $in: retailerIds } },
+        { _id: { $in: retailerIds.filter((id) => /^[a-f\d]{24}$/i.test(id)) } }
+      ]
+    }).lean();
+
+    const productByRetailerId = {};
+    dbProducts.forEach((p) => {
+      if (p.sku) productByRetailerId[p.sku] = p;
+      productByRetailerId[p._id.toString()] = p;
+    });
+
+    const lineItems = product_items.map((item) => {
+      const dbProduct = productByRetailerId[item.retailer_id];
+      return {
+        product: dbProduct?._id,
+        retailerId: item.retailer_id,
+        name: dbProduct?.name || item.retailer_id,
+        qty: item.quantity || 1,
+        unitPrice: item.item_price ? item.item_price / 100 : dbProduct?.price,
+        currency: item.currency || dbProduct?.currency || 'AED'
+      };
+    }).filter((li) => li.product || li.retailerId);
+
+    const totalAmount = lineItems.reduce((sum, li) => sum + ((li.unitPrice || 0) * li.qty), 0);
+
+    const buyerPhone = String(message.from);
+
+    const commerceOrder = await CommerceOrder.create({
+      organization: organizationId,
+      channel: 'whatsapp',
+      status: 'cart_started',
+      lineItems,
+      totalAmount: +totalAmount.toFixed(2),
+      currency: lineItems[0]?.currency || 'AED',
+      whatsappMessageId: message.id,
+      metaOrderId: catalog_id ? `${catalog_id}_${message.id}` : undefined,
+      buyerPhone,
+      sourceInteraction: savedInteraction?._id
+    });
+
+    logger.info('[WhatsApp] CommerceOrder created from native cart', {
+      orderId: commerceOrder._id.toString(),
+      lineItems: lineItems.length,
+      total: totalAmount,
+      organizationId
+    });
+
+    // Notify inbox agent via socket
+    emitToOrg(organizationId, 'commerce_order_created', {
+      order: commerceOrder.toObject(),
+      interactionId: savedInteraction?._id?.toString()
+    });
+
+    return commerceOrder;
+  } catch (err) {
+    logger.error('[WhatsApp] _handleOrderMessage failed (non-fatal)', { error: err.message });
+    return null;
+  }
+}
+
+/**
  * Find or create a unified Contact for an inbound WhatsApp sender and link it
  * on the Interaction thread. Non-fatal — never blocks message delivery.
  */
@@ -494,6 +583,43 @@ async function processIncomingMessage(change, connection, rawPayload) {
     rawContact: md.contact || value.contacts?.[0] || {}
   });
 
+  // Phase 2: Autonomous commerce agent (opt-in per org, confidence-gated)
+  try {
+    const { tryAutonomousCommerceAction } = require('../ai/commerceAgentService');
+    await tryAutonomousCommerceAction({
+      organizationId,
+      senderId,
+      text: md.content || '',
+      connection,
+      interaction: savedInteraction
+    });
+  } catch (agentErr) {
+    logger.debug('[WhatsApp] Commerce agent check failed (non-fatal)', { error: agentErr.message });
+  }
+
+  // WA keyword automation: auto-send product_list when message matches catalog keywords
+  try {
+    await _checkWaKeywordAutomation({
+      textContent: md.content,
+      connection,
+      organizationId,
+      senderId
+    });
+  } catch (kwErr) {
+    logger.debug('[WhatsApp] Keyword automation check failed (non-fatal)', { error: kwErr.message });
+  }
+
+  // Handle native WhatsApp cart order (type === 'order')
+  if (md.type === 'order' || md.rawMessage?.type === 'order') {
+    const rawMsg = md.rawMessage || (value?.messages?.[0]) || {};
+    await _handleOrderMessage({
+      message: rawMsg,
+      connection,
+      organizationId,
+      savedInteraction
+    });
+  }
+
   // Track campaign recipient reply (most recent send to this number)
   try {
     const campaignService = require('../campaignService');
@@ -621,6 +747,63 @@ async function processStatusUpdate(status) {
   );
 }
 
+/**
+ * Check whether the inbound message matches the org's WA keyword automation list.
+ * If yes, send a product_list reply automatically.
+ * Non-fatal — never blocks message persistence.
+ */
+async function _checkWaKeywordAutomation({ textContent, connection, organizationId, senderId }) {
+  if (!textContent) return;
+
+  const Organization = require('../../models/Organization');
+  const org = await Organization.findById(organizationId)
+    .select('waKeywordAutomation')
+    .lean();
+
+  const kwa = org?.waKeywordAutomation;
+  if (!kwa?.enabled || !kwa.keywords?.length) return;
+
+  const lower = textContent.toLowerCase().trim();
+  const matched = kwa.keywords.some((kw) => lower.includes(String(kw).toLowerCase().trim()));
+  if (!matched) return;
+
+  // Load active products for this org
+  const Product = require('../../models/Product');
+  const products = await Product.find({ organization: organizationId, isActive: true })
+    .select('name sku _id')
+    .sort({ createdAt: -1 })
+    .limit(kwa.maxProducts || 10)
+    .lean();
+
+  if (!products.length) return;
+
+  const catalogId = connection.platformData?.catalogId || connection.metadata?.catalogId;
+  if (!catalogId) return;
+
+  const whatsappCatalogService = require('../../integrations/whatsapp/whatsappCatalogService');
+
+  // Build sections array — single section with all products
+  const sections = [{
+    title: kwa.headerText || 'Our Products',
+    product_items: products.map((p) => ({ product_retailer_id: p.sku || p._id.toString() }))
+  }];
+
+  await whatsappCatalogService.sendProductListMessage(
+    connection,
+    senderId,
+    catalogId,
+    sections,
+    kwa.headerText || 'Our Products',
+    kwa.bodyText || 'Here are our available products!'
+  );
+
+  logger.info('[WhatsApp] Keyword automation product_list sent', {
+    organizationId,
+    senderId,
+    keyword: lower.substring(0, 30)
+  });
+}
+
 module.exports = {
   // Orchestrators (controller calls these)
   processWhatsAppWebhook,
@@ -629,5 +812,8 @@ module.exports = {
   // DB kernel (used by both HTTP and BullMQ paths)
   upsertWhatsAppThread,
   // Queue / legacy path
-  handleWhatsAppMessage
+  handleWhatsAppMessage,
+  // Exported for tests
+  _handleOrderMessage,
+  _checkWaKeywordAutomation
 };

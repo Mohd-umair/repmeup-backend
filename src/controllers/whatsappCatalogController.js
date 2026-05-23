@@ -49,6 +49,24 @@ function _requireCatalogId(catalogId, res) {
   return true;
 }
 
+/**
+ * Verify catalog exists and token can access it before attempting product sync.
+ */
+async function _assertCatalogReady(connection, catalogId, res) {
+  if (!_requireCatalogId(catalogId, res)) return false;
+
+  const check = await whatsappCatalogService.verifyCatalogAccess(connection, catalogId);
+  if (!check.valid) {
+    res.status(422).json({
+      success: false,
+      error: check.error || 'Cannot access this catalog with your WhatsApp connection.',
+      hint: check.hint || 'Confirm the Catalog ID from Meta Commerce Manager → Catalogs and that your app has catalog_management permission.'
+    });
+    return false;
+  }
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GET CATALOG SETTINGS
 // GET /api/whatsapp-catalog/settings
@@ -142,15 +160,26 @@ exports.updateCatalogSettings = async (req, res, next) => {
     }
 
     // Persist catalogId on the connection
+    const trimmedCatalogId = String(catalogId).trim();
     connection.platformData = connection.platformData || {};
-    connection.platformData.catalogId = String(catalogId).trim();
+    connection.platformData.catalogId = trimmedCatalogId;
     connection.markModified('platformData');
     await connection.save();
+
+    // Verify catalog is accessible before linking to WhatsApp number
+    const catalogCheck = await whatsappCatalogService.verifyCatalogAccess(connection, trimmedCatalogId);
+    if (!catalogCheck.valid) {
+      return res.status(422).json({
+        success: false,
+        error: catalogCheck.error || 'Cannot access this catalog ID.',
+        hint: catalogCheck.hint
+      });
+    }
 
     // Push to Meta (update WhatsApp Commerce Settings)
     let metaResult = null;
     try {
-      metaResult = await whatsappCatalogService.updateCommerceSettings(connection, connection.platformData.catalogId);
+      metaResult = await whatsappCatalogService.updateCommerceSettings(connection, trimmedCatalogId);
     } catch (metaErr) {
       logger.warn('[whatsappCatalogController] Meta commerce settings update failed (catalogId saved locally)', {
         error: metaErr.message
@@ -187,7 +216,7 @@ exports.syncOneProduct = async (req, res, next) => {
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
 
     const catalogId = connection?.platformData?.catalogId;
-    if (!_requireCatalogId(catalogId, res)) return;
+    if (!await _assertCatalogReady(connection, catalogId, res)) return;
 
     // Mark as pending
     product.whatsapp = product.whatsapp || {};
@@ -227,7 +256,7 @@ exports.syncAllProducts = async (req, res, next) => {
     const orgId = req.user.organization._id;
     const connection = await _getWaConnection(orgId);
     const catalogId = connection?.platformData?.catalogId;
-    if (!_requireCatalogId(catalogId, res)) return;
+    if (!await _assertCatalogReady(connection, catalogId, res)) return;
 
     const products = await Product.find({ organization: orgId, isActive: true }).lean();
     if (products.length === 0) {
@@ -240,15 +269,38 @@ exports.syncAllProducts = async (req, res, next) => {
       { $set: { 'whatsapp.syncStatus': 'pending' } }
     );
 
-    const { results } = await whatsappCatalogService.batchSync(connection, catalogId, products);
+    // Use individual upsertProduct (not batch) so we get catalogItemId per product.
+    // Batch API returns async handles only — we cannot reliably map them back to item IDs.
+    const CONCURRENCY = 5;
+    const results = [];
+    for (let i = 0; i < products.length; i += CONCURRENCY) {
+      const chunk = products.slice(i, i + CONCURRENCY);
+      const settled = await Promise.allSettled(
+        chunk.map((p) => whatsappCatalogService.upsertProduct(connection, catalogId, p))
+      );
+      settled.forEach((outcome, idx) => {
+        const p = chunk[idx];
+        if (outcome.status === 'fulfilled') {
+          results.push({ productId: p._id.toString(), success: true, catalogItemId: outcome.value?.id });
+        } else {
+          results.push({ productId: p._id.toString(), success: false, error: outcome.reason?.message });
+        }
+      });
+    }
 
-    // Build bulk-write ops from results
     const bulkOps = results.map(r => ({
       updateOne: {
         filter: { _id: r.productId },
         update: r.success
-          ? { $set: { 'whatsapp.syncStatus': 'synced', 'whatsapp.syncedAt': new Date(), 'whatsapp.syncError': null } }
-          : { $set: { 'whatsapp.syncStatus': 'failed', 'whatsapp.syncError': r.error || 'Batch sync failed' } }
+          ? {
+              $set: {
+                'whatsapp.syncStatus': 'synced',
+                'whatsapp.syncedAt': new Date(),
+                'whatsapp.syncError': null,
+                ...(r.catalogItemId ? { 'whatsapp.catalogItemId': r.catalogItemId } : {})
+              }
+            }
+          : { $set: { 'whatsapp.syncStatus': 'failed', 'whatsapp.syncError': r.error || 'Sync failed' } }
       }
     }));
 

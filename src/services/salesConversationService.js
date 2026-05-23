@@ -485,6 +485,17 @@ async function handleInboundDm(interaction, organizationId) {
         state.lastStageAt = new Date();
         await state.save();
         svcLogger.info('[salesConversation] WhatsApp number captured', { instagramUserId, phone });
+
+        // IG→WA Bridge: create/update a unified Contact with the captured WA number
+        // and pre-load the linked product as context so the WA inbox thread shows
+        // "Came from IG Post" when the agent opens it.
+        _bridgeToWhatsApp({
+          phone,
+          instagramUserId,
+          organizationId,
+          productOrderId: state.productOrderId,
+          postId: state.instagramPostId
+        }).catch((e) => svcLogger.warn('[salesConversation] WA bridge failed (non-fatal)', { error: e.message }));
       } else {
         const reprompt = 'Please share your WhatsApp number (e.g. +91 98765 43210) so we can reach you. 😊';
         await instagramService.sendMessage(instagramUserId, reprompt, conn.accessToken, conn.pageId, false, conn.connType);
@@ -495,6 +506,67 @@ async function handleInboundDm(interaction, organizationId) {
   } catch (err) {
     // Non-fatal: never break the webhook pipeline
     svcLogger.error('[salesConversation] Unhandled error', { error: err.message, stack: err.stack });
+  }
+}
+
+/**
+ * IG→WA Bridge
+ *
+ * When a customer shares their WhatsApp number in the IG sales funnel,
+ * create (or update) a unified Contact with their WA phone so agents can
+ * continue the conversation in the WhatsApp inbox with full product context.
+ *
+ * @param {object} opts
+ * @param {string} opts.phone            - Raw phone string from IG DM
+ * @param {string} opts.instagramUserId  - IG platform user id
+ * @param {string} opts.organizationId
+ * @param {string} [opts.productOrderId] - ProductOrder._id if available
+ * @param {string} [opts.postId]         - Instagram post id that triggered the funnel
+ */
+async function _bridgeToWhatsApp({ phone, instagramUserId, organizationId, productOrderId, postId }) {
+  try {
+    const Contact = require('../models/Contact');
+    const { normalizePhoneE164 } = require('../utils/phoneNormalize');
+
+    const normalized = normalizePhoneE164(phone, { defaultRegion: 'IN' });
+    const waPhone = normalized.status !== 'invalid' ? normalized.phone : phone.replace(/\D/g, '');
+
+    if (!waPhone) return;
+
+    const update = {
+      $set: {
+        organization: organizationId,
+        platform: 'whatsapp',
+        platformId: waPhone,
+        phone: waPhone,
+        igBridgeSource: 'sales_funnel'
+      },
+      $setOnInsert: {
+        createdAt: new Date()
+      }
+    };
+
+    if (postId) {
+      update.$set['metadata.sourceIgPostId'] = postId;
+    }
+    if (instagramUserId) {
+      update.$set['metadata.sourceIgUserId'] = instagramUserId;
+    }
+    if (productOrderId) {
+      update.$set['metadata.productOrderId'] = String(productOrderId);
+    }
+
+    await Contact.findOneAndUpdate(
+      { organization: organizationId, phone: waPhone },
+      update,
+      { upsert: true, new: true }
+    );
+
+    svcLogger.info('[salesConversation] WA Contact created/updated from IG bridge', {
+      waPhone, instagramUserId, organizationId
+    });
+  } catch (err) {
+    svcLogger.warn('[salesConversation] _bridgeToWhatsApp error', { error: err.message });
   }
 }
 

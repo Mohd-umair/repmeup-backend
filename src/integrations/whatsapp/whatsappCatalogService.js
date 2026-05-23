@@ -47,36 +47,146 @@ function _jsonHeaders(connection) {
   };
 }
 
+/** Currencies without fractional units — Meta price is whole units, not ×100. */
+const ZERO_DECIMAL_CURRENCIES = new Set(['JPY', 'KRW', 'VND', 'CLP', 'PYG', 'UGX', 'XAF', 'XOF']);
+
 /**
- * Convert our internal price (e.g. 49.99) to the Meta format string "4999 AED"
- * Meta expects price as an integer string "AMOUNT CURRENCY" where AMOUNT is in
- * the smallest currency unit for currencies with sub-units (e.g. fils/cents),
- * or just the integer for zero-decimal currencies.
- * We always multiply by 100 and round to handle standard 2-decimal currencies.
+ * Resolve retailer_id — always a plain string (sku preferred, else Mongo _id).
  */
-function _formatMetaPrice(price, currency = 'AED') {
-  const cents = Math.round(Number(price) * 100);
-  return `${cents} ${currency.toUpperCase()}`;
+function _resolveRetailerId(product) {
+  if (product.sku && String(product.sku).trim()) {
+    return String(product.sku).trim();
+  }
+  const id = product._id;
+  if (!id) return '';
+  if (typeof id === 'string') return id;
+  if (typeof id.toString === 'function') return id.toString();
+  return String(id);
+}
+
+/** Effective sell price after discountPercent, if any. */
+function _effectivePrice(product) {
+  const base = Number(product.price);
+  if (!Number.isFinite(base) || base < 0) return 0;
+  const discount = Number(product.discountPercent || 0);
+  if (discount > 0 && discount <= 100) {
+    return +(base * (1 - discount / 100)).toFixed(2);
+  }
+  return base;
 }
 
 /**
- * Build the product payload Meta expects for catalog items.
- * retailer_id is our product's _id (or sku when present).
+ * POST /{catalog-id}/products expects `price` as a number in the currency's
+ * smallest unit (e.g. 49.99 AED → 4999). NOT a string like "4999 AED".
+ */
+function _priceMinorUnits(amount, currency = 'AED') {
+  const cur = (currency || 'AED').toUpperCase();
+  const num = Number(amount);
+  if (!Number.isFinite(num) || num < 0) return 0;
+  if (ZERO_DECIMAL_CURRENCIES.has(cur)) return Math.round(num);
+  return Math.round(num * 100);
+}
+
+/**
+ * items_batch expects price as "amount CURRENCY" string, e.g. "49.99 AED".
+ */
+function _formatBatchPriceString(amount, currency = 'AED') {
+  const cur = (currency || 'AED').toUpperCase();
+  const num = Number(amount);
+  const safe = Number.isFinite(num) && num >= 0 ? num : 0;
+  return `${safe.toFixed(2)} ${cur}`;
+}
+
+function _productLink(product) {
+  const url = product.paymentUrl && String(product.paymentUrl).trim();
+  if (url && /^https:\/\//i.test(url)) return url;
+  return 'https://example.com';
+}
+
+function _productImageUrl(product) {
+  const url = product.images?.[0] && String(product.images[0]).trim();
+  if (url && /^https:\/\//i.test(url)) return url;
+  return '';
+}
+
+/**
+ * Payload for POST /{catalog-id}/products (single-item upsert).
  */
 function _buildMetaProductPayload(product) {
-  const retailerId = product.sku || product._id.toString();
-  const price = _formatMetaPrice(product.price || 0, product.currency || 'AED');
-  return {
+  const retailerId = _resolveRetailerId(product);
+  const currency = (product.currency || 'AED').toUpperCase();
+  const priceAmount = _effectivePrice(product);
+
+  const payload = {
     retailer_id: retailerId,
-    name: product.name,
-    description: product.description || product.name,
-    price,
-    currency: (product.currency || 'AED').toUpperCase(),
-    url: product.paymentUrl || 'https://example.com',
-    image_url: (product.images && product.images[0]) || '',
-    availability: (product.stock === 0 ? 'out of stock' : 'in stock'),
+    name: String(product.name || 'Product').substring(0, 200),
+    description: String(product.description || product.name || 'Product').substring(0, 5000),
+    price: _priceMinorUnits(priceAmount, currency),
+    currency,
+    url: _productLink(product),
+    availability: product.stock === 0 ? 'out of stock' : 'in stock',
     condition: 'new'
   };
+
+  const imageUrl = _productImageUrl(product);
+  if (imageUrl) payload.image_url = imageUrl;
+
+  return payload;
+}
+
+/**
+ * Data block for items_batch (batch sync). Field names differ from /products.
+ */
+function _buildBatchProductData(product) {
+  const id = _resolveRetailerId(product);
+  const currency = (product.currency || 'AED').toUpperCase();
+  const priceAmount = _effectivePrice(product);
+
+  const data = {
+    id,
+    title: String(product.name || 'Product').substring(0, 200),
+    description: String(product.description || product.name || 'Product').substring(0, 5000),
+    price: _formatBatchPriceString(priceAmount, currency),
+    availability: product.stock === 0 ? 'out of stock' : 'in stock',
+    condition: 'new',
+    link: _productLink(product)
+  };
+
+  const imageUrl = _productImageUrl(product);
+  if (imageUrl) data.image_link = imageUrl;
+
+  return data;
+}
+
+/**
+ * Verify the catalog ID exists and is accessible with the connection token.
+ * Helps catch wrong IDs (WABA id, product set id) before sync attempts.
+ */
+async function verifyCatalogAccess(connection, catalogId) {
+  if (!catalogId) {
+    return { valid: false, error: 'Catalog ID is not configured' };
+  }
+  try {
+    const res = await axios.get(
+      `${BASE_URL}/${catalogId}`,
+      {
+        params: { fields: 'id,name' },
+        headers: _authHeader(connection),
+        timeout: 15000
+      }
+    );
+    if (!res.data?.id) {
+      return { valid: false, error: 'Catalog not found' };
+    }
+    return { valid: true, id: res.data.id, name: res.data.name };
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    return {
+      valid: false,
+      error: msg,
+      hint: 'Use the Catalog ID from Meta Commerce Manager → Catalogs (not your WABA or phone number ID). Ensure the WhatsApp app token has catalog_management permission.'
+    };
+  }
 }
 
 // ── Commerce Settings ─────────────────────────────────────────────────────────
@@ -140,7 +250,16 @@ async function updateCommerceSettings(connection, catalogId) {
  * @returns {Promise<{ id: string }>} Meta product item id
  */
 async function upsertProduct(connection, catalogId, product) {
+  const retailerId = _resolveRetailerId(product);
   const payload = _buildMetaProductPayload(product);
+
+  if (!payload.price && payload.price !== 0) {
+    throw new Error('Product price is invalid — set a numeric price before syncing');
+  }
+  if (!retailerId) {
+    throw new Error('Product must have a sku or _id to use as retailer_id');
+  }
+
   try {
     const res = await axios.post(
       `${BASE_URL}/${catalogId}/products`,
@@ -153,11 +272,15 @@ async function upsertProduct(connection, catalogId, product) {
     }
     return { id: itemId };
   } catch (err) {
+    const apiMsg = err.response?.data?.error?.message || err.message;
     logger.error('[whatsappCatalogService] upsertProduct failed', {
-      retailerId: product.sku || product._id,
-      error: err.response?.data?.error?.message || err.message
+      retailerId,
+      catalogId,
+      price: payload.price,
+      currency: payload.currency,
+      error: apiMsg
     });
-    throw new Error(err.response?.data?.error?.message || 'Failed to sync product to WhatsApp catalog');
+    throw new Error(apiMsg || 'Failed to sync product to WhatsApp catalog');
   }
 }
 
@@ -196,40 +319,61 @@ async function deleteProduct(connection, catalogItemId) {
 async function batchSync(connection, catalogId, products) {
   if (!products || products.length === 0) return { results: [] };
 
-  const CHUNK = 1000;
+  const CHUNK = 500;
   const allResults = [];
 
   for (let i = 0; i < products.length; i += CHUNK) {
     const chunk = products.slice(i, i + CHUNK);
-    const requests = chunk.map(p => ({
+    const requests = chunk.map((p) => ({
       method: 'UPDATE',
-      retailer_id: p.sku || p._id.toString(),
-      data: _buildMetaProductPayload(p)
+      data: _buildBatchProductData(p)
     }));
 
     try {
       const res = await axios.post(
         `${BASE_URL}/${catalogId}/items_batch`,
-        { allow_upsert: true, requests },
+        {
+          allow_upsert: true,
+          item_type: 'PRODUCT_ITEM',
+          requests
+        },
         { headers: _jsonHeaders(connection), timeout: 120000 }
       );
 
-      const handles = res.data?.handles || [];
-      chunk.forEach((p, idx) => {
-        allResults.push({
-          retailerId: p.sku || p._id.toString(),
-          productId: p._id.toString(),
-          success: true,
-          handle: handles[idx] || null
-        });
+      const validation = res.data?.validation_status || [];
+      const validationByRetailer = {};
+      validation.forEach((v) => {
+        if (v.retailer_id) validationByRetailer[v.retailer_id] = v;
+      });
+
+      chunk.forEach((p) => {
+        const retailerId = _resolveRetailerId(p);
+        const productId = p._id != null ? String(p._id) : '';
+        const v = validationByRetailer[retailerId];
+        const errors = v?.errors || [];
+        if (errors.length > 0) {
+          allResults.push({
+            retailerId,
+            productId,
+            success: false,
+            error: errors.map((e) => e.message).join('; ')
+          });
+        } else {
+          allResults.push({
+            retailerId,
+            productId,
+            success: true,
+            handle: res.data?.handles?.[0] || null
+          });
+        }
       });
     } catch (err) {
       const errMsg = err.response?.data?.error?.message || err.message;
-      logger.error('[whatsappCatalogService] batchSync chunk failed', { error: errMsg });
-      chunk.forEach(p => {
+      logger.error('[whatsappCatalogService] batchSync chunk failed', { error: errMsg, catalogId });
+      chunk.forEach((p) => {
         allResults.push({
-          retailerId: p.sku || p._id.toString(),
-          productId: p._id.toString(),
+          retailerId: _resolveRetailerId(p),
+          productId: p._id?.toString?.() || String(p._id),
           success: false,
           error: errMsg
         });
@@ -349,9 +493,15 @@ async function sendProductListMessage(
 module.exports = {
   getCommerceSettings,
   updateCommerceSettings,
+  verifyCatalogAccess,
   upsertProduct,
   deleteProduct,
   batchSync,
   sendProductMessage,
-  sendProductListMessage
+  sendProductListMessage,
+  // exported for unit tests
+  _buildMetaProductPayload,
+  _buildBatchProductData,
+  _resolveRetailerId,
+  _priceMinorUnits
 };

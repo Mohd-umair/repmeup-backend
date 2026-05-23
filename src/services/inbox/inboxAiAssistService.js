@@ -40,6 +40,7 @@ const aiService = require('../aiService');
 const aiCreditService = require('../aiCreditService');
 const cacheService = require('../cacheService');
 const { runWithAiContextAndUsageId } = require('../aiRequestContext');
+const { searchProducts, buildProductPromptBlock } = require('../ai/productSearchService');
 
 // ─── constants ──────────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ const MAX_KB_ENTRY_CHARS = 600;
 const MAX_CHILD_INTERACTIONS = 10;
 const MAX_RECENT_REPLIES = 10;
 const AUTO_REPLY_BATCH_SIZE = 20;
+const MAX_PRODUCT_SUGGESTIONS = 3;
 
 /**
  * Single source of truth for the three reply variants used by AI Assist and
@@ -255,9 +257,29 @@ async function fetchKnowledgeBaseContext(orgId, query, {
 }
 
 /**
+ * Fetch up to MAX_PRODUCT_SUGGESTIONS products relevant to the interaction.
+ * Returns both the products (for the frontend chips) and a prompt block.
+ * Never throws — AI assist must not fail because of a product search error.
+ */
+async function fetchProductContext(orgId, query, instagramPostId = null) {
+  try {
+    const { products, fromFallback } = await searchProducts(
+      orgId,
+      query,
+      { limit: MAX_PRODUCT_SUGGESTIONS, instagramPostId }
+    );
+    const productPromptBlock = buildProductPromptBlock(products, MAX_PRODUCT_SUGGESTIONS);
+    return { products, productPromptBlock, fromFallback };
+  } catch (err) {
+    logger.warn('[inboxAiAssist] product search failed (non-fatal)', { error: err.message });
+    return { products: [], productPromptBlock: '', fromFallback: false };
+  }
+}
+
+/**
  * Build the system prompt shared by aiAssist + aiAssistRegenerate.
  */
-function buildAssistSystemPrompt({ chatContext, kbContext, interaction }) {
+function buildAssistSystemPrompt({ chatContext, kbContext, productContext, interaction }) {
   return `You are a professional customer service AI assistant.
 You help agents draft replies to customer messages.
 
@@ -266,10 +288,13 @@ ${chatContext}
 
 ${kbContext ? `KNOWLEDGE BASE (use this information to ground your answers):\n${kbContext}` : 'No knowledge base content available. Provide helpful general responses.'}
 
+${productContext ? `RELEVANT PRODUCTS FROM CATALOG (mention naturally if relevant):\n${productContext}` : ''}
+
 IMPORTANT RULES:
 - Address the customer's concern directly
 - Be polite, empathetic, and professional
 - If knowledge base content is provided, prioritize those facts
+- If catalog products are listed, reference them accurately (name, price, availability)
 - Never say placeholders like "[Your Name]" or "[Company]"
 - Match the tone to the platform: ${interaction.platform} (${interaction.type})
 - Do NOT include a greeting like "Dear customer" unless the message is formal`;
@@ -393,14 +418,16 @@ async function generateAssistTriple({ interactionId, user }) {
   const interaction = await loadOwnedInteraction(interactionId, orgId);
   await ensureCreditsAvailable(orgIdStr, 1);
 
-  const [{ chatContext }, kb] = await Promise.all([
+  const [{ chatContext }, kb, productCtx] = await Promise.all([
     buildConversationContext(interaction, orgId),
-    fetchKnowledgeBaseContext(orgIdStr, interaction.content, { loggerLabel: 'aiAssist' })
+    fetchKnowledgeBaseContext(orgIdStr, interaction.content, { loggerLabel: 'aiAssist' }),
+    fetchProductContext(orgIdStr, interaction.content, interaction.metadata?.instagramPostId || null)
   ]);
 
   const systemPrompt = buildAssistSystemPrompt({
     chatContext,
     kbContext: kb.kbContext,
+    productContext: productCtx.productPromptBlock,
     interaction
   });
   const userPrompt = buildAssistUserPrompt(interaction);
@@ -455,7 +482,8 @@ async function generateAssistTriple({ interactionId, user }) {
       detailed: triple.detailed,
       sales: triple.sales,
       usedKnowledgeBase: kb.usedKnowledgeBase,
-      knowledgeBaseCount: kb.knowledgeBaseCount
+      knowledgeBaseCount: kb.knowledgeBaseCount,
+      suggestedProducts: productCtx.products
     },
     credits
   };
@@ -800,6 +828,7 @@ module.exports = {
   ensureCreditsAvailable,
   buildConversationContext,
   fetchKnowledgeBaseContext,
+  fetchProductContext,
   buildAssistSystemPrompt,
   buildAssistUserPrompt,
   runWithCreditDeductAndRollback,

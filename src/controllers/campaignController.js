@@ -112,7 +112,7 @@ exports.deleteCampaign = async (req, res) => {
 //   - Otherwise the simpler phone[,name] path is used (backward-compatible).
 exports.addRecipients = async (req, res) => {
   try {
-    const { rawText, mapping, defaultParams } = req.body;
+    const { rawText, mapping, defaultParams, defaultCountry, countryCodeColumn } = req.body;
     if (!rawText || !String(rawText).trim()) {
       return res.status(400).json({ success: false, error: 'rawText is required' });
     }
@@ -125,11 +125,19 @@ exports.addRecipients = async (req, res) => {
         campaignId,
         rawText,
         mapping,
-        defaultParams
+        defaultParams,
+        defaultCountry,
+        countryCodeColumn
       });
       return res.json({ success: true, ...result });
     }
-    const result = await service.addRecipients({ orgId, campaignId, rawText });
+    const result = await service.addRecipients({
+      orgId,
+      campaignId,
+      rawText,
+      defaultCountry,
+      countryCodeColumn
+    });
     res.json({ success: true, ...result });
   } catch (err) {
     handleError(res, err);
@@ -140,14 +148,29 @@ exports.addRecipients = async (req, res) => {
 // Returns headers + sample rows + suggested column → slot mapping
 exports.previewRecipientCsv = async (req, res) => {
   try {
-    const { rawText } = req.body;
+    const { rawText, defaultCountry, countryCodeColumn, phoneColumn } = req.body;
     if (!rawText || !String(rawText).trim()) {
       return res.status(400).json({ success: false, error: 'rawText is required' });
     }
     const result = await service.previewRecipientCsv({
       orgId: req.user.organization._id,
       campaignId: req.params.id,
-      rawText
+      rawText,
+      defaultCountry,
+      countryCodeColumn,
+      phoneColumn
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+exports.getAudienceDefaults = async (req, res) => {
+  try {
+    const result = await service.getAudienceDefaults({
+      orgId: req.user.organization._id,
+      campaignId: req.params.id
     });
     res.json({ success: true, ...result });
   } catch (err) {
@@ -290,7 +313,7 @@ exports.getCampaignStats = async (req, res) => {
 //     When omitted, the most recent real recipient's params are used (or template examples).
 exports.sendTestMessage = async (req, res) => {
   try {
-    const { testPhone, testParams } = req.body;
+    const { testPhone, testParams, defaultCountry } = req.body;
     if (!testPhone) {
       return res.status(400).json({ success: false, error: 'testPhone is required' });
     }
@@ -298,7 +321,8 @@ exports.sendTestMessage = async (req, res) => {
       orgId: req.user.organization._id,
       campaignId: req.params.id,
       testPhone,
-      testParams: testParams && typeof testParams === 'object' ? testParams : null
+      testParams: testParams && typeof testParams === 'object' ? testParams : null,
+      defaultCountry
     });
     res.json({ success: true, result });
   } catch (err) {

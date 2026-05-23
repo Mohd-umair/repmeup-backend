@@ -127,6 +127,12 @@ const whatsappCampaignSchema = new mongoose.Schema(
      */
     variableMapping: { type: mongoose.Schema.Types.Mixed, default: undefined },
 
+    /** Audience import settings — default country for local numbers, optional CSV country column. */
+    audienceSettings: {
+      defaultCountry: { type: String, maxlength: 2, uppercase: true },
+      countryCodeColumn: { type: String, maxlength: 100 }
+    },
+
     status: {
       type: String,
       enum: ['draft', 'scheduled', 'running', 'paused', 'completed', 'cancelled', 'failed'],

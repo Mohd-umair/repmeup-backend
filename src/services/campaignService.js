@@ -19,6 +19,14 @@ const {
   assertCampaignReadyForTemplate
 } = require('../utils/whatsappCampaignBuilder');
 const { parseCsv, looksLikeHeaderRow } = require('../utils/csvParser');
+const {
+  inferDefaultRegionFromDisplayNumber,
+  sanitizeDefaultRegion,
+  normalizePhoneE164,
+  normalizePhoneLegacy,
+  FALLBACK_REGION,
+  SUPPORTED_REGIONS
+} = require('../utils/phoneNormalize');
 
 // Statuses that allow editing
 const EDITABLE_STATUSES = ['draft'];
@@ -141,7 +149,7 @@ async function applyRecipientDeliveryStatus(messageId, newStatus, timestamp, err
 async function markRecipientReplied({ orgId, phone }) {
   if (!orgId || !phone) return;
 
-  const normalized = normalizePhone(phone) || String(phone).replace(/\D/g, '');
+  const normalized = normalizePhoneLegacy(phone) || String(phone).replace(/\D/g, '');
   if (!normalized) return;
 
   await WhatsAppCampaignRecipient.findOneAndUpdate(
@@ -159,18 +167,100 @@ async function markRecipientReplied({ orgId, phone }) {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Normalise a raw phone string to E.164 digits-only.
- * Returns null if the number cannot be normalised (too short / non-numeric).
+ * Normalise a raw phone string to E.164 digits-only (legacy — uses IN default).
+ * @deprecated Use normalizePhoneE164 via campaign import helpers.
  */
 function normalizePhone(raw) {
-  if (!raw) return null;
-  // Strip common formatting characters
-  let digits = String(raw).replace(/[\s\-().+]/g, '');
-  // Keep only digits
-  digits = digits.replace(/\D/g, '');
-  // Minimum 7 digits, maximum 15
-  if (digits.length < 7 || digits.length > 15) return null;
-  return digits;
+  return normalizePhoneLegacy(raw, FALLBACK_REGION);
+}
+
+async function getConnectionDisplayPhone(connectionId) {
+  const conn = await PlatformConnection.findById(connectionId)
+    .select('platformData.displayPhoneNumber platformData.phoneNumber')
+    .lean();
+  return conn?.platformData?.displayPhoneNumber || conn?.platformData?.phoneNumber || null;
+}
+
+async function resolveAudiencePhoneSettings(campaign, opts = {}) {
+  const display = await getConnectionDisplayPhone(campaign.connection);
+  const suggestedDefaultCountry = inferDefaultRegionFromDisplayNumber(display);
+  const defaultRegion = sanitizeDefaultRegion(
+    opts.defaultCountry ||
+      campaign.audienceSettings?.defaultCountry ||
+      suggestedDefaultCountry
+  );
+  const countryCodeColumn =
+    opts.countryCodeColumn !== undefined
+      ? opts.countryCodeColumn || null
+      : campaign.audienceSettings?.countryCodeColumn || null;
+
+  return { defaultRegion, countryCodeColumn, suggestedDefaultCountry };
+}
+
+function detectCountryCodeColumn(headers) {
+  const candidates = [
+    'country_code',
+    'countrycode',
+    'country',
+    'dial_code',
+    'dialcode',
+    'phone_country',
+    'isd'
+  ];
+  for (const cand of candidates) {
+    const found = headers.find((h) => normalizeHeaderKey(h) === cand);
+    if (found) return found;
+  }
+  return null;
+}
+
+function buildPhonePreviewSample({
+  rows,
+  phoneIdx,
+  countryIdx,
+  defaultRegion,
+  limit = 5
+}) {
+  const phonePreview = [];
+  const phoneStats = { valid: 0, prefixed: 0, invalid: 0 };
+
+  for (let i = 0; i < Math.min(rows.length, limit); i++) {
+    const row = rows[i];
+    const raw = String(row[phoneIdx] || '').trim();
+    const rowRegionHint = countryIdx >= 0 ? String(row[countryIdx] || '').trim() : undefined;
+    const result = normalizePhoneE164(raw, { defaultRegion, rowRegion: rowRegionHint });
+
+    if (result.status === 'valid') phoneStats.valid++;
+    else if (result.status === 'prefixed') phoneStats.prefixed++;
+    else phoneStats.invalid++;
+
+    phonePreview.push({
+      row: i + 1,
+      raw,
+      normalized: result.phone,
+      status: result.status,
+      ...(result.reason ? { reason: result.reason } : {})
+    });
+  }
+
+  return { phonePreview, phoneStats };
+}
+
+function countPhoneStatsForRows({ rows, phoneIdx, countryIdx, defaultRegion }) {
+  const phoneStats = { valid: 0, prefixed: 0, invalid: 0 };
+  for (const row of rows) {
+    const raw = String(row[phoneIdx] || '').trim();
+    if (!raw) {
+      phoneStats.invalid++;
+      continue;
+    }
+    const rowRegionHint = countryIdx >= 0 ? String(row[countryIdx] || '').trim() : undefined;
+    const result = normalizePhoneE164(raw, { defaultRegion, rowRegion: rowRegionHint });
+    if (result.status === 'valid') phoneStats.valid++;
+    else if (result.status === 'prefixed') phoneStats.prefixed++;
+    else phoneStats.invalid++;
+  }
+  return phoneStats;
 }
 
 /**
@@ -178,7 +268,7 @@ function normalizePhone(raw) {
  * CSV format: first column = phone, optional second column = name.
  * Returns { phones: [{phone, recipientName}], skipped: number }
  */
-function parsePhoneInput(rawText) {
+function parsePhoneInput(rawText, { defaultRegion = FALLBACK_REGION } = {}) {
   const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const results = [];
   let skipped = 0;
@@ -188,12 +278,12 @@ function parsePhoneInput(rawText) {
     const rawPhone = (parts[0] || '').trim();
     const recipientName = (parts[1] || '').trim() || undefined;
 
-    const phone = normalizePhone(rawPhone);
-    if (!phone) {
+    const result = normalizePhoneE164(rawPhone, { defaultRegion });
+    if (!result.phone) {
       skipped++;
       continue;
     }
-    results.push({ phone, recipientName });
+    results.push({ phone: result.phone, recipientName });
   }
 
   return { phones: results, skipped };
@@ -290,7 +380,8 @@ async function updateCampaign({ orgId, campaignId, updates }) {
     'headerMedia',
     'headerLocation',
     'urlButtonParams',
-    'variableMapping'
+    'variableMapping',
+    'audienceSettings'
   ];
   for (const key of allowed) {
     if (updates[key] === undefined) continue;
@@ -336,6 +427,10 @@ async function updateCampaign({ orgId, campaignId, updates }) {
     }
     if (key === 'variableMapping') {
       campaign.variableMapping = sanitizeVariableMapping(updates.variableMapping);
+      continue;
+    }
+    if (key === 'audienceSettings') {
+      campaign.audienceSettings = sanitizeAudienceSettings(updates.audienceSettings);
       continue;
     }
 
@@ -397,6 +492,9 @@ function sanitizeVariableMapping(input) {
   const out = {};
   if (input.phoneColumn) out.phoneColumn = String(input.phoneColumn).slice(0, 100);
   if (input.nameColumn) out.nameColumn = String(input.nameColumn).slice(0, 100);
+  if (input.countryCodeColumn) {
+    out.countryCodeColumn = String(input.countryCodeColumn).slice(0, 100);
+  }
   if (input.slots && typeof input.slots === 'object') {
     out.slots = {};
     for (const k of Object.keys(input.slots)) {
@@ -404,6 +502,28 @@ function sanitizeVariableMapping(input) {
     }
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeAudienceSettings(input) {
+  if (input == null || typeof input !== 'object') return undefined;
+  const out = {};
+  if (input.defaultCountry) {
+    out.defaultCountry = sanitizeDefaultRegion(input.defaultCountry);
+  }
+  if (input.countryCodeColumn !== undefined && input.countryCodeColumn !== null) {
+    const col = String(input.countryCodeColumn).trim().slice(0, 100);
+    if (col) out.countryCodeColumn = col;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+async function persistAudienceSettings(campaignId, { defaultRegion, countryCodeColumn }) {
+  const settings = sanitizeAudienceSettings({
+    defaultCountry: defaultRegion,
+    countryCodeColumn: countryCodeColumn || undefined
+  });
+  if (!settings) return;
+  await WhatsAppCampaign.findByIdAndUpdate(campaignId, { $set: { audienceSettings: settings } });
 }
 
 async function deleteCampaign({ orgId, campaignId }) {
@@ -527,9 +647,16 @@ function suggestSlotMapping(headers, slots) {
  * Preview a CSV the user just uploaded for this campaign.
  * Returns headers, the first ~5 sample rows, and a suggested column → slot mapping.
  */
-async function previewRecipientCsv({ orgId, campaignId, rawText }) {
+async function previewRecipientCsv({
+  orgId,
+  campaignId,
+  rawText,
+  defaultCountry,
+  countryCodeColumn,
+  phoneColumn: phoneColumnOverride
+}) {
   const campaign = await WhatsAppCampaign.findOne({ _id: campaignId, organization: orgId })
-    .select('templateRef')
+    .select('templateRef connection audienceSettings')
     .lean();
   if (!campaign) {
     const err = new Error('Campaign not found');
@@ -542,10 +669,14 @@ async function previewRecipientCsv({ orgId, campaignId, rawText }) {
     throw err;
   }
 
+  const audience = await resolveAudiencePhoneSettings(campaign, {
+    defaultCountry,
+    countryCodeColumn
+  });
+
   const hasHeader = looksLikeHeaderRow(rawText);
   const parsed = parseCsv(rawText, { hasHeader });
 
-  // If there are no headers (numbers-only file), synthesize sensible names
   let headers = parsed.headers;
   let rows = parsed.rows;
   if (!hasHeader && rows.length) {
@@ -553,16 +684,58 @@ async function previewRecipientCsv({ orgId, campaignId, rawText }) {
     headers = Array.from({ length: cols }, (_, i) => (i === 0 ? 'phone' : i === 1 ? 'name' : `column_${i + 1}`));
   }
 
-  // Surface a slot mapping suggestion only when the campaign already has a template
   let slots = null;
   if (campaign.templateRef) {
     const template = await WhatsAppTemplate.findById(campaign.templateRef).lean();
     if (template) slots = deriveTemplateSlots(template);
   }
 
-  const phoneColumn = detectPhoneColumn(headers);
+  const phoneColumn = phoneColumnOverride || detectPhoneColumn(headers);
   const nameColumn = detectNameColumn(headers, phoneColumn);
+  const detectedCountryColumn = detectCountryCodeColumn(headers);
+  const resolvedCountryColumn = audience.countryCodeColumn || detectedCountryColumn;
   const suggestedSlotMapping = slots ? suggestSlotMapping(headers, slots) : {};
+
+  let phonePreview = [];
+  let phoneStats = { valid: 0, prefixed: 0, invalid: 0 };
+
+  if (phoneColumn && headers.includes(phoneColumn)) {
+    const phoneIdx = headers.indexOf(phoneColumn);
+    const countryIdx = resolvedCountryColumn && headers.includes(resolvedCountryColumn)
+      ? headers.indexOf(resolvedCountryColumn)
+      : -1;
+
+    const sample = buildPhonePreviewSample({
+      rows,
+      phoneIdx,
+      countryIdx,
+      defaultRegion: audience.defaultRegion,
+      limit: 5
+    });
+    phonePreview = sample.phonePreview;
+    phoneStats = countPhoneStatsForRows({
+      rows,
+      phoneIdx,
+      countryIdx,
+      defaultRegion: audience.defaultRegion
+    });
+  } else if (!hasHeader && rows.length) {
+    // Paste-style rows without headers — first column is phone
+    const sample = buildPhonePreviewSample({
+      rows,
+      phoneIdx: 0,
+      countryIdx: -1,
+      defaultRegion: audience.defaultRegion,
+      limit: 5
+    });
+    phonePreview = sample.phonePreview;
+    phoneStats = countPhoneStatsForRows({
+      rows,
+      phoneIdx: 0,
+      countryIdx: -1,
+      defaultRegion: audience.defaultRegion
+    });
+  }
 
   return {
     hasHeader,
@@ -572,9 +745,14 @@ async function previewRecipientCsv({ orgId, campaignId, rawText }) {
     suggestedMapping: {
       phoneColumn,
       nameColumn,
+      countryCodeColumn: resolvedCountryColumn,
       slots: suggestedSlotMapping
     },
-    slots
+    slots,
+    phonePreview,
+    phoneStats,
+    suggestedDefaultCountry: audience.suggestedDefaultCountry,
+    defaultCountry: audience.defaultRegion
   };
 }
 
@@ -589,7 +767,15 @@ async function previewRecipientCsv({ orgId, campaignId, rawText }) {
  * @param {object} [opts.mapping]   { phoneColumn, nameColumn?, slots: { slotKey: csvHeader } }
  * @param {object} [opts.defaultParams] - slotKey → fallback string used when the row's cell is empty
  */
-async function addRecipientsWithMapping({ orgId, campaignId, rawText, mapping, defaultParams }) {
+async function addRecipientsWithMapping({
+  orgId,
+  campaignId,
+  rawText,
+  mapping,
+  defaultParams,
+  defaultCountry,
+  countryCodeColumn
+}) {
   const campaign = await WhatsAppCampaign.findOne({ _id: campaignId, organization: orgId });
   if (!campaign) {
     const err = new Error('Campaign not found');
@@ -606,6 +792,12 @@ async function addRecipientsWithMapping({ orgId, campaignId, rawText, mapping, d
     err.statusCode = 400;
     throw err;
   }
+
+  const audience = await resolveAudiencePhoneSettings(campaign, {
+    defaultCountry,
+    countryCodeColumn
+  });
+  await persistAudienceSettings(campaignId, audience);
 
   const hasHeader = looksLikeHeaderRow(rawText);
   const parsed = parseCsv(rawText, { hasHeader });
@@ -636,6 +828,10 @@ async function addRecipientsWithMapping({ orgId, campaignId, rawText, mapping, d
     (mapping && mapping.phoneColumn) || detectPhoneColumn(headers);
   const nameColumn = (mapping && mapping.nameColumn) || detectNameColumn(headers, phoneColumn);
   const slotMap = (mapping && mapping.slots) || {};
+  const resolvedCountryColumn =
+    countryCodeColumn ||
+    audience.countryCodeColumn ||
+    detectCountryCodeColumn(headers);
 
   if (!phoneColumn || !headers.includes(phoneColumn)) {
     const err = new Error('Phone column is required and must match a CSV header.');
@@ -667,16 +863,25 @@ async function addRecipientsWithMapping({ orgId, campaignId, rawText, mapping, d
 
   const phoneIdx = colIndex[phoneColumn];
   const nameIdx = nameColumn ? colIndex[nameColumn] : -1;
+  const countryIdx =
+    resolvedCountryColumn && colIndex[resolvedCountryColumn] !== undefined
+      ? colIndex[resolvedCountryColumn]
+      : -1;
 
   const docs = [];
   let skipped = 0;
   for (const row of rows) {
     const rawPhone = row[phoneIdx] || '';
-    const phone = normalizePhone(rawPhone);
-    if (!phone) {
+    const rowRegionHint = countryIdx >= 0 ? String(row[countryIdx] || '').trim() : undefined;
+    const phoneResult = normalizePhoneE164(rawPhone, {
+      defaultRegion: audience.defaultRegion,
+      rowRegion: rowRegionHint
+    });
+    if (!phoneResult.phone) {
       skipped++;
       continue;
     }
+    const phone = phoneResult.phone;
     const recipientName = nameIdx >= 0 ? String(row[nameIdx] || '').trim() || undefined : undefined;
 
     // Per-recipient template params
@@ -731,7 +936,12 @@ async function addRecipientsWithMapping({ orgId, campaignId, rawText, mapping, d
       variableMapping: sanitizeVariableMapping({
         phoneColumn,
         nameColumn,
+        countryCodeColumn: resolvedCountryColumn || undefined,
         slots: slotMap
+      }),
+      audienceSettings: sanitizeAudienceSettings({
+        defaultCountry: audience.defaultRegion,
+        countryCodeColumn: resolvedCountryColumn || undefined
       })
     }
   });
@@ -745,7 +955,7 @@ async function addRecipientsWithMapping({ orgId, campaignId, rawText, mapping, d
  * Bulk-insert recipients from pasted text or CSV content.
  * Idempotent: duplicate phones for the same campaign are ignored.
  */
-async function addRecipients({ orgId, campaignId, rawText }) {
+async function addRecipients({ orgId, campaignId, rawText, defaultCountry, countryCodeColumn }) {
   const campaign = await WhatsAppCampaign.findOne({ _id: campaignId, organization: orgId });
   if (!campaign) {
     const err = new Error('Campaign not found');
@@ -758,7 +968,13 @@ async function addRecipients({ orgId, campaignId, rawText }) {
     throw err;
   }
 
-  const { phones, skipped } = parsePhoneInput(rawText);
+  const audience = await resolveAudiencePhoneSettings(campaign, {
+    defaultCountry,
+    countryCodeColumn
+  });
+  await persistAudienceSettings(campaignId, audience);
+
+  const { phones, skipped } = parsePhoneInput(rawText, { defaultRegion: audience.defaultRegion });
   if (phones.length === 0) {
     const err = new Error('No valid phone numbers found in the provided input');
     err.statusCode = 400;
@@ -791,7 +1007,14 @@ async function addRecipients({ orgId, campaignId, rawText }) {
   // Update campaign total
   const total = await WhatsAppCampaignRecipient.countDocuments({ campaign: campaignId });
   await WhatsAppCampaign.findByIdAndUpdate(campaignId, {
-    $set: { 'stats.total': total, 'stats.pending': total }
+    $set: {
+      'stats.total': total,
+      'stats.pending': total,
+      audienceSettings: sanitizeAudienceSettings({
+        defaultCountry: audience.defaultRegion,
+        countryCodeColumn: audience.countryCodeColumn || undefined
+      })
+    }
   });
 
   return { inserted, duplicates, skipped, total };
@@ -1099,7 +1322,7 @@ async function getCampaignStats({ orgId, campaignId }) {
 
 // ─── Test send ────────────────────────────────────────────────────────────────
 
-async function sendTestMessage({ orgId, campaignId, testPhone, testParams }) {
+async function sendTestMessage({ orgId, campaignId, testPhone, testParams, defaultCountry }) {
   // Load campaign and full template (need .components for slot derivation)
   const campaign = await WhatsAppCampaign.findOne({ _id: campaignId, organization: orgId }).lean();
   if (!campaign) {
@@ -1126,12 +1349,14 @@ async function sendTestMessage({ orgId, campaignId, testPhone, testParams }) {
   }
   assertCampaignReadyForTemplate(template, campaign);
 
-  const phone = normalizePhone(testPhone);
-  if (!phone) {
-    const err = new Error('Invalid test phone number');
+  const audience = await resolveAudiencePhoneSettings(campaign, { defaultCountry });
+  const phoneResult = normalizePhoneE164(testPhone, { defaultRegion: audience.defaultRegion });
+  if (!phoneResult.phone) {
+    const err = new Error(phoneResult.reason || 'Invalid test phone number');
     err.statusCode = 400;
     throw err;
   }
+  const phone = phoneResult.phone;
 
   const connection = await PlatformConnection.findOne({
     _id: campaign.connection,
@@ -1171,6 +1396,24 @@ async function sendTestMessage({ orgId, campaignId, testPhone, testParams }) {
   return result;
 }
 
+async function getAudienceDefaults({ orgId, campaignId }) {
+  const campaign = await WhatsAppCampaign.findOne({ _id: campaignId, organization: orgId })
+    .select('connection audienceSettings')
+    .lean();
+  if (!campaign) {
+    const err = new Error('Campaign not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  const audience = await resolveAudiencePhoneSettings(campaign, {});
+  return {
+    suggestedDefaultCountry: audience.suggestedDefaultCountry,
+    defaultCountry: audience.defaultRegion,
+    countryCodeColumn: audience.countryCodeColumn || null,
+    supportedRegions: SUPPORTED_REGIONS
+  };
+}
+
 module.exports = {
   createCampaign,
   listCampaigns,
@@ -1180,6 +1423,7 @@ module.exports = {
   addRecipients,
   addRecipientsWithMapping,
   previewRecipientCsv,
+  getAudienceDefaults,
   getTemplateSlotsForCampaign,
   getRecipients,
   getRecipientsReport,

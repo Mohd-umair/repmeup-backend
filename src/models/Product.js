@@ -155,6 +155,8 @@ productSchema.index({ organization: 1, isActive: 1 });
 productSchema.index({ organization: 1, instagramPostIds: 1 });
 productSchema.index({ organization: 1, sku: 1 }, { unique: true, partialFilterExpression: { sku: { $exists: true, $type: 'string' } } });
 productSchema.index({ organization: 1, 'whatsapp.syncStatus': 1 });
+// Text index for AI product search — enables $text queries in productSearchService
+productSchema.index({ name: 'text', description: 'text', sku: 'text' }, { weights: { name: 10, sku: 5, description: 1 } });
 
 /** Returns the effective price after discount */
 productSchema.virtual('effectivePrice').get(function () {
