@@ -115,72 +115,50 @@ exports.getCatalogSettings = async (req, res, next) => {
 
     let storedId = catalogId ? String(catalogId).trim() : null;
 
-    // Live Meta link — WABA product_catalogs (commerce settings does NOT return catalog_id)
-    let metaSettings = null;
-    let metaCatalogId = null;
-    let wabaCatalogIds = [];
-    try {
-      [metaSettings, wabaCatalogIds] = await Promise.all([
-        whatsappCatalogService.getCommerceSettings(connection),
-        whatsappCatalogService.getWabaCatalogIds(connection)
-      ]);
-      if (storedId && wabaCatalogIds.includes(storedId)) {
-        metaCatalogId = storedId;
-      } else if (wabaCatalogIds.length === 1) {
-        metaCatalogId = wabaCatalogIds[0];
-      } else if (wabaCatalogIds.length > 1 && storedId) {
-        metaCatalogId = wabaCatalogIds.includes(storedId) ? storedId : null;
+    let assessment = {
+      metaCatalogId: null,
+      catalogLinkStatus: 'not_linked',
+      catalogLinkVerified: false,
+      wabaCatalogIds: [],
+      isCatalogVisible: false,
+      isCartEnabled: false
+    };
+
+    if (storedId) {
+      try {
+        assessment = await whatsappCatalogService.assessCatalogLink(connection, storedId);
+      } catch (_e) {
+        // non-fatal
       }
-    } catch (_e) {
-      // non-fatal — still return local settings
     }
 
-    // Heal stale/truncated locally stored IDs when Meta reports a different linked catalog
-    if (metaCatalogId && storedId && metaCatalogId !== storedId) {
+    // Heal stored ID when Meta reports a single WABA catalog different from local typo
+    if (assessment.metaCatalogId && storedId && assessment.metaCatalogId !== storedId && assessment.catalogLinkStatus === 'mismatch') {
+      // keep storedId — user must fix mismatch deliberately
+    } else if (assessment.metaCatalogId && storedId && assessment.metaCatalogId !== storedId && assessment.catalogLinkVerified) {
       await PlatformConnection.updateOne(
         { _id: connection._id },
-        { $set: { 'platformData.catalogId': metaCatalogId } }
+        { $set: { 'platformData.catalogId': assessment.metaCatalogId } }
       );
-      logger.info('[whatsappCatalogController] Corrected stored catalogId to Meta-linked value', {
-        previous: storedId,
-        metaCatalogId
-      });
-      storedId = metaCatalogId;
-    } else if (metaCatalogId && !storedId) {
-      await PlatformConnection.updateOne(
-        { _id: connection._id },
-        { $set: { 'platformData.catalogId': metaCatalogId } }
-      );
-      storedId = metaCatalogId;
+      storedId = assessment.metaCatalogId;
     }
 
-    let catalogLinkStatus = 'not_linked';
-    if (metaCatalogId && storedId && metaCatalogId === storedId) {
-      catalogLinkStatus = 'linked';
-    } else if (metaCatalogId && storedId && metaCatalogId !== storedId) {
-      catalogLinkStatus = 'mismatch';
-    } else if (metaCatalogId && !storedId) {
-      catalogLinkStatus = 'linked';
-    } else if (storedId && !metaCatalogId) {
-      catalogLinkStatus = 'not_linked';
-    }
-
-    const isVerifiedLink = catalogLinkStatus === 'linked';
-    const responseCatalogId = isVerifiedLink ? (metaCatalogId || storedId) : storedId;
+    const isVerifiedLink = Boolean(assessment.catalogLinkVerified);
+    const responseCatalogId = storedId || assessment.metaCatalogId;
 
     return res.json({
       success: true,
       data: {
         connected: true,
         catalogId: responseCatalogId,
-        metaCatalogId,
-        catalogLinkStatus,
+        metaCatalogId: assessment.metaCatalogId,
+        catalogLinkStatus: assessment.catalogLinkStatus,
         catalogLinkVerified: isVerifiedLink,
         phoneNumberId: connection.platformData?.phoneNumberId || null,
         displayPhoneNumber: connection.platformData?.displayPhoneNumber || null,
-        isCatalogVisible: isVerifiedLink ? (metaSettings?.isCatalogVisible ?? false) : false,
-        isCartEnabled: isVerifiedLink ? (metaSettings?.isCartEnabled ?? false) : false,
-        wabaCatalogIds,
+        isCatalogVisible: assessment.isCatalogVisible,
+        isCartEnabled: assessment.isCartEnabled,
+        wabaCatalogIds: assessment.wabaCatalogIds,
         syncedCount,
         failedCount,
         notSyncedCount
@@ -237,51 +215,25 @@ exports.updateCatalogSettings = async (req, res, next) => {
       });
     }
 
-    // Verify via WABA product_catalogs — the API Meta documents for catalog linkage
-    let linkedCatalogId = metaResult.settings?.catalogId
-      ? String(metaResult.settings.catalogId)
-      : null;
+    const assessment = metaResult.assessment
+      || (await whatsappCatalogService.assessCatalogLink(connection, trimmedCatalogId));
 
-    if (!linkedCatalogId) {
-      try {
-        linkedCatalogId = await whatsappCatalogService.readLinkedCatalogId(connection);
-      } catch (readErr) {
-        logger.warn('[whatsappCatalogController] Could not read WABA catalog link after save', {
-          error: readErr.message
-        });
-      }
-    }
-
-    const wabaIds = await whatsappCatalogService.getWabaCatalogIds(connection);
-    const verifiedOnWaba = wabaIds.includes(trimmedCatalogId);
-
-    if (!verifiedOnWaba) {
+    if (!assessment.catalogLinkVerified) {
       return res.status(422).json({
         success: false,
-        error: 'This catalog is not linked to your WhatsApp Business Account yet.',
+        error: assessment.error || 'Catalog is not active on this WhatsApp number yet.',
         hint:
-          'Open WhatsApp Manager → your number → Account tools → Catalog → connect catalog ' +
-          trimmedCatalogId +
-          '. Ensure the catalog belongs to the same Meta Business as RepmeupWa, then click Save again.'
+          assessment.hint ||
+          'In WhatsApp Manager → Account tools → Catalog, connect your catalog and enable the catalog icon.'
       });
     }
 
-    linkedCatalogId = trimmedCatalogId;
+    const linkedCatalogId = trimmedCatalogId;
 
     connection.platformData = connection.platformData || {};
     connection.platformData.catalogId = linkedCatalogId;
     connection.markModified('platformData');
     await connection.save();
-
-    let isCatalogVisible = metaResult.settings?.isCatalogVisible ?? true;
-    let isCartEnabled = metaResult.settings?.isCartEnabled ?? true;
-    try {
-      const live = await whatsappCatalogService.getCommerceSettings(connection);
-      isCatalogVisible = live.isCatalogVisible;
-      isCartEnabled = live.isCartEnabled;
-    } catch (_e) {
-      // non-fatal
-    }
 
     return res.json({
       success: true,
@@ -290,8 +242,8 @@ exports.updateCatalogSettings = async (req, res, next) => {
         metaCatalogId: linkedCatalogId,
         catalogLinkStatus: 'linked',
         catalogLinkVerified: true,
-        isCatalogVisible,
-        isCartEnabled,
+        isCatalogVisible: assessment.isCatalogVisible,
+        isCartEnabled: assessment.isCartEnabled,
         metaSynced: true,
         metaResult: metaResult.data
       }

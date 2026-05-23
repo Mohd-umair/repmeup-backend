@@ -270,55 +270,129 @@ async function verifyCatalogAccess(connection, catalogId) {
     return { valid: false, error: 'Catalog ID is not configured' };
   }
 
-  const expected = String(catalogId).trim();
-
   try {
-    const [wabaCatalogIds, settings] = await Promise.all([
-      getWabaCatalogIds(connection),
-      getCommerceSettings(connection)
-    ]);
-
-    const linkedOnWaba = wabaCatalogIds.includes(expected);
-
-    if (linkedOnWaba) {
+    const assessment = await assessCatalogLink(connection, catalogId);
+    if (assessment.catalogLinkVerified) {
       return {
         valid: true,
-        id: expected,
-        isCatalogVisible: settings.isCatalogVisible,
-        isCartEnabled: settings.isCartEnabled,
-        source: 'waba_product_catalogs'
-      };
-    }
-
-    if (wabaCatalogIds.length > 0) {
-      return {
-        valid: false,
-        error: `WhatsApp is linked to a different catalog (${wabaCatalogIds[0]}).`,
-        hint: 'Use that Catalog ID in RepMeUp, or link your catalog in WhatsApp Manager → Account tools → Catalog.'
+        id: assessment.metaCatalogId || String(catalogId).trim(),
+        isCatalogVisible: assessment.isCatalogVisible,
+        isCartEnabled: assessment.isCartEnabled,
+        source: assessment.verificationSource
       };
     }
 
     return {
       valid: false,
-      error: 'This catalog is not linked to your WhatsApp Business Account yet.',
-      hint:
-        'In WhatsApp Manager → your number → Account tools → Catalog, connect catalog ' +
-        expected +
-        '. Or click Save & Link Catalog in RepMeUp after assigning the catalog to your app in Commerce Manager.'
+      error: assessment.error || 'Catalog is not ready for WhatsApp sync.',
+      hint: assessment.hint
     };
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
     logger.warn('[whatsappCatalogService] verifyCatalogAccess fallback to stored catalogId', {
-      catalogId: expected,
+      catalogId: String(catalogId).trim(),
       error: msg
     });
     return {
       valid: true,
-      id: expected,
+      id: String(catalogId).trim(),
       source: 'stored_fallback',
       warning: msg
     };
   }
+}
+
+/**
+ * Determine whether a catalog ID is linked for this WhatsApp number.
+ * WABA product_catalogs is ideal but often empty on embedded-signup tokens.
+ * Fallback: phone commerce settings show catalog visible (matches WhatsApp Manager UI).
+ */
+async function assessCatalogLink(connection, storedCatalogId) {
+  const storedId = storedCatalogId ? String(storedCatalogId).trim() : null;
+
+  let settings = { isCatalogVisible: false, isCartEnabled: false };
+  let wabaCatalogIds = [];
+  try {
+    [settings, wabaCatalogIds] = await Promise.all([
+      getCommerceSettings(connection),
+      getWabaCatalogIds(connection)
+    ]);
+  } catch (err) {
+    logger.warn('[whatsappCatalogService] assessCatalogLink partial read failed', {
+      error: err.message
+    });
+  }
+
+  if (storedId && wabaCatalogIds.includes(storedId)) {
+    return {
+      storedId,
+      metaCatalogId: storedId,
+      catalogLinkStatus: 'linked',
+      catalogLinkVerified: true,
+      verificationSource: 'waba_product_catalogs',
+      wabaCatalogIds,
+      isCatalogVisible: settings.isCatalogVisible,
+      isCartEnabled: settings.isCartEnabled
+    };
+  }
+
+  if (wabaCatalogIds.length === 1 && storedId && wabaCatalogIds[0] !== storedId) {
+    return {
+      storedId,
+      metaCatalogId: wabaCatalogIds[0],
+      catalogLinkStatus: 'mismatch',
+      catalogLinkVerified: false,
+      verificationSource: 'waba_product_catalogs',
+      wabaCatalogIds,
+      isCatalogVisible: settings.isCatalogVisible,
+      isCartEnabled: settings.isCartEnabled,
+      error: `WhatsApp is linked to catalog ${wabaCatalogIds[0]}.`,
+      hint: 'Update the Catalog ID in RepMeUp to match, or change the catalog in WhatsApp Manager.'
+    };
+  }
+
+  if (storedId && settings.isCatalogVisible) {
+    return {
+      storedId,
+      metaCatalogId: storedId,
+      catalogLinkStatus: 'linked',
+      catalogLinkVerified: true,
+      verificationSource: 'commerce_visibility',
+      wabaCatalogIds,
+      isCatalogVisible: settings.isCatalogVisible,
+      isCartEnabled: settings.isCartEnabled
+    };
+  }
+
+  if (storedId) {
+    return {
+      storedId,
+      metaCatalogId: null,
+      catalogLinkStatus: 'not_linked',
+      catalogLinkVerified: false,
+      verificationSource: null,
+      wabaCatalogIds,
+      isCatalogVisible: settings.isCatalogVisible,
+      isCartEnabled: settings.isCartEnabled,
+      error: 'Catalog is not active on this WhatsApp number yet.',
+      hint:
+        'In WhatsApp Manager → your number → Account tools → Catalog, connect your catalog and turn on ' +
+        '"Show catalog icon". Then click Save & Link Catalog in RepMeUp.'
+    };
+  }
+
+  return {
+    storedId: null,
+    metaCatalogId: wabaCatalogIds[0] || null,
+    catalogLinkStatus: 'not_linked',
+    catalogLinkVerified: false,
+    verificationSource: null,
+    wabaCatalogIds,
+    isCatalogVisible: settings.isCatalogVisible,
+    isCartEnabled: settings.isCartEnabled,
+    error: 'No catalog ID configured.',
+    hint: 'Enter your Catalog ID from Commerce Manager and save.'
+  };
 }
 
 // ── Commerce Settings ─────────────────────────────────────────────────────────
@@ -371,14 +445,17 @@ async function getCommerceSettings(connection) {
 async function updateCommerceSettings(connection, catalogId) {
   const phoneNumberId = _phoneNumberId(connection);
   const trimmed = String(catalogId).trim();
+  const existing = await getWabaCatalogIds(connection);
 
-  const linkResult = await linkCatalogToWaba(connection, trimmed);
-  if (!linkResult.success && !linkResult.skipped && !linkResult.alreadyLinked) {
-    throw new Error(
-      linkResult.error ||
-        'Could not link this catalog to your WhatsApp Business Account. ' +
-          'Link it manually in WhatsApp Manager → Account tools → Catalog.'
-    );
+  let linkResult = { skipped: true, alreadyLinked: existing.includes(trimmed) };
+  if (!existing.includes(trimmed)) {
+    linkResult = await linkCatalogToWaba(connection, trimmed);
+    if (!linkResult.success && !linkResult.alreadyLinked) {
+      logger.warn('[whatsappCatalogService] WABA catalog link API failed; continuing with commerce settings', {
+        catalogId: trimmed,
+        error: linkResult.error
+      });
+    }
   }
 
   try {
@@ -393,19 +470,17 @@ async function updateCommerceSettings(connection, catalogId) {
     );
 
     const settings = await getCommerceSettings(connection);
-    const wabaCatalogIds = await getWabaCatalogIds(connection);
-    const linkedCatalogId = wabaCatalogIds.includes(trimmed)
-      ? trimmed
-      : (await readLinkedCatalogId(connection, { retries: 2, delayMs: 500 })) || trimmed;
+    const assessment = await assessCatalogLink(connection, trimmed);
 
     return {
       success: true,
       data: res.data,
       settings: {
-        catalogId: linkedCatalogId,
+        catalogId: assessment.metaCatalogId || trimmed,
         isCatalogVisible: settings.isCatalogVisible,
         isCartEnabled: settings.isCartEnabled
       },
+      assessment,
       linkResult
     };
   } catch (err) {
@@ -777,6 +852,7 @@ module.exports = {
   getLinkedCatalogId,
   resolveCatalogIdForSync,
   verifyCatalogAccess,
+  assessCatalogLink,
   linkCatalogToWaba,
   upsertProduct,
   deleteProduct,
