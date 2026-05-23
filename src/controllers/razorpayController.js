@@ -7,6 +7,19 @@ const Organization = require('../models/Organization');
 const User = require('../models/User');
 const logger = require('../config/logger');
 const entitlementsService = require('../services/entitlementsService');
+const { extractRzpError } = require('../services/razorpayPlanService');
+
+function isValidRazorpayPlanId(id) {
+  return typeof id === 'string' && id.startsWith('plan_') && id.length > 5;
+}
+
+/** True when Razorpay says the resource does not exist (test ID + live keys, etc.). */
+function isRzpNotFoundError(err) {
+  const code = err?.error?.code;
+  const desc = (err?.error?.description || '').toLowerCase();
+  const status = err?.statusCode;
+  return status === 404 || code === 'BAD_REQUEST_ERROR' && desc.includes('invalid') && desc.includes('not be found');
+}
 
 /** For webhook-created transactions: org display name + a user id to link in super-admin (admin first, else earliest user). */
 async function resolveTransactionUserContext(organizationId) {
@@ -46,6 +59,7 @@ async function resolveTransactionUserContext(organizationId) {
  * @access  Private
  */
 exports.createSubscription = async (req, res, next) => {
+  let plan;
   try {
     const { planId } = req.body;
 
@@ -53,7 +67,7 @@ exports.createSubscription = async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'planId is required' });
     }
 
-    const plan = await Plan.getByPlanId(planId);
+    plan = await Plan.getByPlanId(planId);
     if (!plan) {
       return res.status(404).json({ success: false, error: 'Plan not found' });
     }
@@ -62,22 +76,24 @@ exports.createSubscription = async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Free plan does not require payment' });
     }
 
-    if (!plan.razorpayPlanId) {
+    if (plan.price === 'custom' || plan.billingCycle === 'custom' || plan.billingCycle === 'lifetime') {
       return res.status(400).json({
         success: false,
-        error: 'This plan is not yet configured for online payment. Please contact support.'
+        error: 'This plan requires a custom quote. Please contact sales.'
       });
     }
 
-    // Detect test-mode plan IDs when running with live keys
-    const isLiveKey = (process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_');
-    const isTestPlanId = plan.razorpayPlanId.startsWith('plan_') &&
-      !plan.razorpayPlanId.startsWith('plan_Live') && isLiveKey;
-    if (isLiveKey && plan.razorpayPlanId && !plan.razorpayPlanId.includes('live') && !plan.razorpayPlanId.includes('Live')) {
-      // Razorpay live plans IDs are not prefixed specially, so we query to validate
-      // but we can warn in logs for ops visibility
-      logger.warn('[Razorpay] Live key in use — ensure razorpayPlanId is a LIVE plan ID, not a test one', {
-        razorpayPlanId: plan.razorpayPlanId
+    if (!plan.razorpayPlanId) {
+      return res.status(400).json({
+        success: false,
+        error: 'This plan is not yet configured for online payment. Save the plan in Admin to create a Razorpay plan, or contact support.'
+      });
+    }
+
+    if (!isValidRazorpayPlanId(plan.razorpayPlanId)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid Razorpay Plan ID on "${plan.planId}". Expected a value like plan_Xxxxx from Razorpay Dashboard, got "${plan.razorpayPlanId}".`
       });
     }
 
@@ -95,19 +111,43 @@ exports.createSubscription = async (req, res, next) => {
       });
     }
 
-    // Cancel previous Razorpay subscription if one exists and is active
+    // Cancel previous Razorpay subscription if one exists (may be stale test-mode ID after going live)
     if (subscription.razorpaySubscriptionId) {
       try {
         await razorpay.subscriptions.cancel(subscription.razorpaySubscriptionId, {
           cancel_at_cycle_end: false
         });
       } catch (err) {
-        const cancelDesc = err?.error?.description || err?.message;
+        const cancelDesc = extractRzpError(err);
         logger.warn('[Razorpay] Could not cancel previous subscription', {
           id: subscription.razorpaySubscriptionId,
           error: cancelDesc
         });
+        if (isRzpNotFoundError(err)) {
+          subscription.razorpaySubscriptionId = undefined;
+          await subscription.save();
+          logger.info('[Razorpay] Cleared stale razorpaySubscriptionId from org subscription');
+        }
       }
+    }
+
+    // Verify plan exists in current Razorpay mode (live vs test) before checkout
+    try {
+      await razorpay.plans.fetch(plan.razorpayPlanId);
+    } catch (fetchErr) {
+      const mode = (process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_') ? 'live' : 'test';
+      logger.error('[Razorpay] Plan ID not found in Razorpay', {
+        appPlanId: plan.planId,
+        razorpayPlanId: plan.razorpayPlanId,
+        mode,
+        error: extractRzpError(fetchErr)
+      });
+      return res.status(400).json({
+        success: false,
+        error:
+          `Razorpay plan "${plan.razorpayPlanId}" was not found in ${mode} mode. ` +
+          `Update the "${plan.planId}" plan in Admin (re-save to auto-create) or set the correct live Plan ID from Razorpay Dashboard → Subscriptions → Plans.`
+      });
     }
 
     // Build notes for customer context
@@ -177,15 +217,17 @@ exports.createSubscription = async (req, res, next) => {
       description: rzpDesc,
       code: rzpCode,
       statusCode: rzpStatus,
-      razorpayPlanId: req.body?.planId
+      appPlanId: req.body?.planId,
+      razorpayPlanId: plan?.razorpayPlanId
     });
 
     // Surface a human-readable error to the client instead of a generic 500
     if (rzpDesc) {
+      const isPlanError = /plan|invalid|not be found/i.test(rzpDesc);
       return res.status(rzpStatus || 400).json({
         success: false,
-        error: rzpDesc.includes('plan id')
-          ? `Razorpay plan not found. Please update your plan configuration with the correct live Razorpay Plan ID. (${rzpDesc})`
+        error: isPlanError
+          ? `Razorpay plan not found for "${req.body?.planId}". Ensure Plan.razorpayPlanId in the database matches a plan in Razorpay ${(process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_') ? 'live' : 'test'} mode. (${rzpDesc})`
           : rzpDesc
       });
     }
