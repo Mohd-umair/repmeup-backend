@@ -1,6 +1,7 @@
 const Plan = require('../models/Plan');
 const planAdminService = require('../services/planAdminService');
 const entitlementsService = require('../services/entitlementsService');
+const { syncPlanWithRazorpay, RazorpayPlanSyncError } = require('../services/razorpayPlanService');
 const Subscription = require('../models/Subscription');
 const { CATALOG_BY_KEY } = require('../config/featureCatalog');
 const { emitToOrg } = require('../utils/socketEmitter');
@@ -33,6 +34,19 @@ function sanitizeEntitlementsPayload(rawIn) {
     if (Object.keys(next).length) cleaned[key] = next;
   }
   return cleaned;
+}
+
+function applyRazorpaySyncToPlan(plan, syncResult) {
+  if (syncResult.razorpayPlanId) {
+    plan.razorpayPlanId = syncResult.razorpayPlanId;
+  } else {
+    plan.razorpayPlanId = undefined;
+  }
+  if (syncResult.priceInr != null && syncResult.priceInr > 0) {
+    plan.priceInr = syncResult.priceInr;
+  } else {
+    plan.priceInr = undefined;
+  }
 }
 
 /**
@@ -162,9 +176,7 @@ exports.createPlan = async (req, res, next) => {
       displayOrder,
       stripePriceId,
       stripeProductId,
-      trialDays,
-      razorpayPlanId,
-      priceInr
+      trialDays
     } = req.body;
 
     // Check if plan with same planId already exists
@@ -176,7 +188,7 @@ exports.createPlan = async (req, res, next) => {
       });
     }
 
-    const plan = await Plan.create({
+    const draftPlan = {
       planId,
       name,
       description,
@@ -194,16 +206,32 @@ exports.createPlan = async (req, res, next) => {
       displayOrder,
       stripePriceId,
       stripeProductId,
-      trialDays,
-      razorpayPlanId: razorpayPlanId || undefined,
-      priceInr: priceInr !== undefined ? Number(priceInr) : undefined,
+      trialDays
+    };
+
+    let razorpaySync;
+    try {
+      razorpaySync = await syncPlanWithRazorpay(draftPlan);
+    } catch (err) {
+      if (err instanceof RazorpayPlanSyncError) {
+        return res.status(err.statusCode).json({ success: false, error: err.message });
+      }
+      throw err;
+    }
+
+    const plan = await Plan.create({
+      ...draftPlan,
+      razorpayPlanId: razorpaySync.razorpayPlanId || undefined,
+      priceInr: razorpaySync.priceInr || undefined,
       createdBy: req.user._id
     });
 
     res.status(201).json({
       success: true,
       data: plan,
-      message: 'Plan created successfully'
+      message: razorpaySync.created
+        ? 'Plan created and linked to Razorpay successfully'
+        : 'Plan created successfully'
     });
   } catch (error) {
     console.error('Create plan error:', error);
@@ -235,12 +263,14 @@ exports.updatePlan = async (req, res, next) => {
       });
     }
 
-    // Update fields
+    const previousPlan = plan.toObject();
+
+    // Update fields (razorpayPlanId/priceInr are server-managed via Razorpay sync)
     const allowedFields = [
       'name', 'description', 'tier', 'price', 'billingCycle',
       'limits', 'features', 'badge', 'badgeColor', 'highlightColor',
       'isActive', 'isPublic', 'displayOrder', 'stripePriceId',
-      'stripeProductId', 'trialDays', 'razorpayPlanId', 'priceInr'
+      'stripeProductId', 'trialDays'
     ];
 
     allowedFields.forEach(field => {
@@ -255,6 +285,17 @@ exports.updatePlan = async (req, res, next) => {
       plan.markModified('entitlements');
     }
 
+    let razorpaySync;
+    try {
+      razorpaySync = await syncPlanWithRazorpay(plan, previousPlan);
+    } catch (err) {
+      if (err instanceof RazorpayPlanSyncError) {
+        return res.status(err.statusCode).json({ success: false, error: err.message });
+      }
+      throw err;
+    }
+
+    applyRazorpaySyncToPlan(plan, razorpaySync);
     plan.updatedBy = req.user._id;
     await plan.save();
 
@@ -280,7 +321,9 @@ exports.updatePlan = async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: plan,
-      message: 'Plan updated successfully',
+      message: razorpaySync.created
+        ? 'Plan updated and new Razorpay plan linked (price or billing changed)'
+        : 'Plan updated successfully',
       syncedSubscriptionCount
     });
   } catch (error) {
