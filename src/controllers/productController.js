@@ -14,11 +14,27 @@ const { syncProductToKb, removeProductFromKb } = require('../services/ai/product
 async function _autoSyncToMeta(product, orgId) {
   try {
     const whatsappCatalogService = require('../integrations/whatsapp/whatsappCatalogService');
-    const conn = await PlatformConnection.findOne({ organization: orgId, platform: 'whatsapp', isActive: true }).lean();
+    const conn = await PlatformConnection.findOne({
+      organization: orgId,
+      platform: 'whatsapp',
+      status: 'connected',
+      isActive: true
+    }).lean();
     if (!conn) return;
-    const catalogId = conn.platformData?.catalogId || conn.metadata?.catalogId;
-    if (!catalogId) return;
 
+    const resolved = await whatsappCatalogService.resolveCatalogIdForSync(conn);
+    if (!resolved.catalogId) return;
+
+    const check = await whatsappCatalogService.verifyCatalogAccess(conn, resolved.catalogId);
+    if (!check.valid) {
+      logger.warn('[productController] Auto-sync skipped — catalog not linked in Meta', {
+        productId: String(product._id),
+        error: check.error
+      });
+      return;
+    }
+
+    const catalogId = check.id || resolved.catalogId;
     const { id: itemId } = await whatsappCatalogService.upsertProduct(conn, catalogId, product);
     if (itemId) {
       await Product.updateOne(

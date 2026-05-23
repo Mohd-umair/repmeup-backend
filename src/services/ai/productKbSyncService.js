@@ -12,7 +12,7 @@
  *   content:  structured product details
  *   keywords: name tokens + sku + category-level tags
  *
- * The entry is idempotent — upserted by (organization, source, sourceId).
+ * The entry is idempotent — upserted by (organization, type, metadata.productId).
  *
  * Called from:
  *   productController.createProduct  → syncProductToKb
@@ -31,6 +31,14 @@ const logger = require('../../config/logger');
  */
 async function syncProductToKb(product) {
   if (!product?._id || !product?.organization) return;
+
+  const createdBy = product.createdBy?._id || product.createdBy;
+  if (!createdBy) {
+    logger.warn('[productKbSync] Skipping KB sync — product has no createdBy', {
+      productId: String(product._id)
+    });
+    return;
+  }
 
   try {
     const orgId = String(product.organization._id || product.organization);
@@ -68,27 +76,29 @@ async function syncProductToKb(product) {
       : product.name;
 
     await KnowledgeBase.findOneAndUpdate(
-      { organization: orgId, source: 'manual', sourceId: productId },
+      { organization: orgId, type: 'product_info', 'metadata.productId': productId },
       {
         $set: {
           organization: orgId,
           title,
           content,
-          category: 'product_info',
+          type: 'product_info',
           keywords,
           source: 'manual',
-          sourceId: productId,
+          'metadata.productId': productId,
+          'metadata.syncSource': 'product_catalog',
           isActive: Boolean(product.isActive !== false),
           isTrainingData: true,
           priority: 5,
-          trainingWeight: 5
+          trainingWeight: 5,
+          updatedBy: product.updatedBy || createdBy
         },
         $setOnInsert: {
           usageCount: 0,
-          createdAt: new Date()
+          createdBy
         }
       },
-      { upsert: true, new: true, runValidators: false }
+      { upsert: true, new: true, runValidators: true }
     );
 
     logger.debug('[productKbSync] KB entry synced', { productId, orgId });
@@ -113,7 +123,7 @@ async function removeProductFromKb(productId, organizationId) {
     const pid = String(productId?._id || productId);
 
     await KnowledgeBase.updateOne(
-      { organization: orgId, source: 'manual', sourceId: pid },
+      { organization: orgId, type: 'product_info', 'metadata.productId': pid },
       { $set: { isActive: false } }
     );
 

@@ -23,7 +23,7 @@ const whatsappService = require('./whatsappService');
  * Auth host:     https://www.facebook.com/dialog/oauth (or /v{version}/dialog/oauth)
  * Token URL:     https://graph.facebook.com/oauth/access_token
  * Graph API:     https://graph.facebook.com/v23.0
- * Scopes:        whatsapp_business_management, whatsapp_business_messaging
+ * Scopes:        whatsapp_business_management, whatsapp_business_messaging, catalog_management
  *
  * Embedded Signup configuration (App Dashboard → WhatsApp → Embedded Signup):
  *   META_WHATSAPP_CONFIG_ID  Same numeric id as `config_id` in Meta’s onboarding URL, e.g.
@@ -120,7 +120,8 @@ class WhatsAppLoginAuthService {
       redirect_uri: redirectUri,
       scope: [
         'whatsapp_business_management',
-        'whatsapp_business_messaging'
+        'whatsapp_business_messaging',
+        'catalog_management'
       ].join(','),
       response_type: 'code',
       state
