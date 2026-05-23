@@ -179,12 +179,47 @@ function _buildBatchProductData(product) {
 }
 
 /**
- * Read the catalog ID Meta has linked to this WhatsApp phone number.
- * This is the authoritative source — more reliable than GET /{catalog-id}.
+ * Catalog IDs linked to the WhatsApp Business Account.
+ * This is the correct source for catalog_id — whatsapp_commerce_settings does NOT return it.
+ */
+async function getWabaCatalogIds(connection) {
+  const wabaId = _wabaId(connection);
+  if (!wabaId) return [];
+
+  try {
+    const res = await axios.get(
+      `${BASE_URL}/${wabaId}/product_catalogs`,
+      {
+        headers: _authHeader(connection),
+        params: { fields: 'id,name' },
+        timeout: 15000
+      }
+    );
+    return (res.data?.data || [])
+      .map((row) => (row?.id != null ? String(row.id) : null))
+      .filter(Boolean);
+  } catch (err) {
+    logger.warn('[whatsappCatalogService] getWabaCatalogIds failed', {
+      wabaId,
+      error: err.response?.data?.error?.message || err.message
+    });
+    return [];
+  }
+}
+
+/**
+ * Read the catalog ID Meta has linked to this WABA.
  */
 async function getLinkedCatalogId(connection) {
-  const settings = await getCommerceSettings(connection);
-  return settings.catalogId ? String(settings.catalogId) : null;
+  const wabaIds = await getWabaCatalogIds(connection);
+  if (wabaIds.length === 1) return wabaIds[0];
+
+  const stored = connection?.platformData?.catalogId
+    ? String(connection.platformData.catalogId).trim()
+    : null;
+  if (stored && wabaIds.includes(stored)) return stored;
+
+  return wabaIds[0] || null;
 }
 
 /**
@@ -235,37 +270,51 @@ async function verifyCatalogAccess(connection, catalogId) {
     return { valid: false, error: 'Catalog ID is not configured' };
   }
 
-  try {
-    const settings = await getCommerceSettings(connection);
-    const linkedId = settings.catalogId ? String(settings.catalogId) : null;
+  const expected = String(catalogId).trim();
 
-    if (linkedId) {
+  try {
+    const [wabaCatalogIds, settings] = await Promise.all([
+      getWabaCatalogIds(connection),
+      getCommerceSettings(connection)
+    ]);
+
+    const linkedOnWaba = wabaCatalogIds.includes(expected);
+
+    if (linkedOnWaba) {
       return {
         valid: true,
-        id: linkedId,
+        id: expected,
         isCatalogVisible: settings.isCatalogVisible,
         isCartEnabled: settings.isCartEnabled,
-        source: 'commerce_settings'
+        source: 'waba_product_catalogs'
       };
     }
 
-    // Commerce settings readable but no catalog linked yet — user must save settings
+    if (wabaCatalogIds.length > 0) {
+      return {
+        valid: false,
+        error: `WhatsApp is linked to a different catalog (${wabaCatalogIds[0]}).`,
+        hint: 'Use that Catalog ID in RepMeUp, or link your catalog in WhatsApp Manager → Account tools → Catalog.'
+      };
+    }
+
     return {
       valid: false,
-      error: 'Catalog is not linked to your WhatsApp number in Meta yet.',
-      hint: 'Go to Catalog → WhatsApp Catalog, enter your Catalog ID, click Save, then sync again.'
+      error: 'This catalog is not linked to your WhatsApp Business Account yet.',
+      hint:
+        'In WhatsApp Manager → your number → Account tools → Catalog, connect catalog ' +
+        expected +
+        '. Or click Save & Link Catalog in RepMeUp after assigning the catalog to your app in Commerce Manager.'
     };
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
-    // If we cannot read commerce settings, allow sync attempt with stored catalog id
-    // (updateCommerceSettings may have succeeded earlier).
     logger.warn('[whatsappCatalogService] verifyCatalogAccess fallback to stored catalogId', {
-      catalogId,
+      catalogId: expected,
       error: msg
     });
     return {
       valid: true,
-      id: String(catalogId),
+      id: expected,
       source: 'stored_fallback',
       warning: msg
     };
@@ -275,7 +324,8 @@ async function verifyCatalogAccess(connection, catalogId) {
 // ── Commerce Settings ─────────────────────────────────────────────────────────
 
 function _parseCommerceSettingsPayload(payload) {
-  const data = payload?.data?.[0] || payload?.data || payload || {};
+  const rows = Array.isArray(payload?.data) ? payload.data : payload?.data ? [payload.data] : [];
+  const data = rows[0] || payload || {};
   return {
     catalogId: data.catalog_id || data.catalogId || null,
     isCatalogVisible: data.is_catalog_visible ?? data.isCatalogVisible ?? false,
@@ -314,24 +364,50 @@ async function getCommerceSettings(connection) {
 }
 
 /**
- * Link a Meta Catalog to this WhatsApp phone number and make it visible.
- * @param {object} connection
- * @param {string} catalogId  Meta Commerce Catalog ID
+ * Link a Meta Catalog to this WhatsApp phone number:
+ *  1. Attach catalog to WABA (product_catalogs)
+ *  2. Enable catalog visibility + cart on the phone number (commerce settings)
  */
 async function updateCommerceSettings(connection, catalogId) {
   const phoneNumberId = _phoneNumberId(connection);
+  const trimmed = String(catalogId).trim();
+
+  const linkResult = await linkCatalogToWaba(connection, trimmed);
+  if (!linkResult.success && !linkResult.skipped && !linkResult.alreadyLinked) {
+    throw new Error(
+      linkResult.error ||
+        'Could not link this catalog to your WhatsApp Business Account. ' +
+          'Link it manually in WhatsApp Manager → Account tools → Catalog.'
+    );
+  }
+
   try {
     const res = await axios.post(
       `${BASE_URL}/${phoneNumberId}/whatsapp_commerce_settings`,
-      { catalog_id: catalogId, is_catalog_visible: true, is_cart_enabled: true },
-      { headers: _jsonHeaders(connection), timeout: 15000 }
+      null,
+      {
+        headers: _authHeader(connection),
+        params: { is_catalog_visible: 'true', is_cart_enabled: 'true' },
+        timeout: 15000
+      }
     );
 
-    // Catalog link for Cloud API is complete via whatsapp_commerce_settings above.
-    // Do not POST /{waba-id}/product_catalogs — it is redundant, often fails with
-    // "unknown error" when already linked or without catalog_management, and is not required.
+    const settings = await getCommerceSettings(connection);
+    const wabaCatalogIds = await getWabaCatalogIds(connection);
+    const linkedCatalogId = wabaCatalogIds.includes(trimmed)
+      ? trimmed
+      : (await readLinkedCatalogId(connection, { retries: 2, delayMs: 500 })) || trimmed;
 
-    return { success: true, data: res.data, settings: _parseCommerceSettingsPayload(res.data) };
+    return {
+      success: true,
+      data: res.data,
+      settings: {
+        catalogId: linkedCatalogId,
+        isCatalogVisible: settings.isCatalogVisible,
+        isCartEnabled: settings.isCartEnabled
+      },
+      linkResult
+    };
   } catch (err) {
     logger.error('[whatsappCatalogService] updateCommerceSettings failed', {
       error: err.response?.data?.error?.message || err.message
@@ -341,16 +417,12 @@ async function updateCommerceSettings(connection, catalogId) {
 }
 
 /**
- * Read catalog_id from Meta commerce settings with short retries (GET can lag after POST).
+ * Read catalog ID linked on the WABA (with short retries after link).
  */
 async function readLinkedCatalogId(connection, { retries = 4, delayMs = 750 } = {}) {
   for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      const settings = await getCommerceSettings(connection);
-      if (settings.catalogId) return String(settings.catalogId);
-    } catch (err) {
-      if (attempt === retries - 1) throw err;
-    }
+    const linked = await getLinkedCatalogId(connection);
+    if (linked) return linked;
     if (attempt < retries - 1) await _sleep(delayMs);
   }
   return null;
@@ -362,25 +434,20 @@ async function readLinkedCatalogId(connection, { retries = 4, delayMs = 750 } = 
  */
 async function linkCatalogToWaba(connection, catalogId) {
   const wabaId = _wabaId(connection);
-  if (!wabaId || !catalogId) {
+  const trimmed = String(catalogId).trim();
+  if (!wabaId || !trimmed) {
     return { skipped: true, reason: 'missing_waba_or_catalog' };
   }
 
-  // whatsapp_commerce_settings is the primary link path for Cloud API.
-  // Skip WABA product_catalogs when Meta already linked this catalog to the phone number.
-  try {
-    const settings = await getCommerceSettings(connection);
-    if (settings.catalogId && String(settings.catalogId) === String(catalogId).trim()) {
-      return { skipped: true, reason: 'already_linked_via_commerce_settings' };
-    }
-  } catch (_e) {
-    // continue — optional pre-check only
+  const existing = await getWabaCatalogIds(connection);
+  if (existing.includes(trimmed)) {
+    return { success: true, alreadyLinked: true };
   }
 
   try {
     const res = await axios.post(
       `${BASE_URL}/${wabaId}/product_catalogs`,
-      { catalog_id: String(catalogId).trim() },
+      { catalog_id: trimmed },
       { headers: _jsonHeaders(connection), timeout: 15000 }
     );
     return { success: true, data: res.data };
@@ -389,21 +456,31 @@ async function linkCatalogToWaba(connection, catalogId) {
     const apiMsg = metaError.message || err.message;
     const apiCode = metaError.code;
     const apiSubcode = metaError.error_subcode;
-    // Already linked is OK
     if (/already|duplicate/i.test(apiMsg)) {
       return { success: true, alreadyLinked: true };
     }
-    logger.warn('[whatsappCatalogService] linkCatalogToWaba failed (non-fatal)', {
+
+    // Re-check — link may have succeeded despite opaque Meta error
+    const after = await getWabaCatalogIds(connection);
+    if (after.includes(trimmed)) {
+      return { success: true, alreadyLinked: true };
+    }
+
+    logger.warn('[whatsappCatalogService] linkCatalogToWaba failed', {
       wabaId,
-      catalogId,
+      catalogId: trimmed,
       error: apiMsg,
       code: apiCode,
-      errorSubcode: apiSubcode,
-      hint:
-        'WhatsApp commerce uses whatsapp_commerce_settings on the phone number — this WABA link is optional. ' +
-        'Ensure catalog belongs to the same Business as WABA, is E-commerce type, and Repmeup app is assigned as catalog partner.'
+      errorSubcode: apiSubcode
     });
-    return { success: false, error: apiMsg, code: apiCode, errorSubcode: apiSubcode };
+    return {
+      success: false,
+      error:
+        apiMsg ||
+        'Could not link catalog to WhatsApp. Link manually in WhatsApp Manager → Account tools → Catalog.',
+      code: apiCode,
+      errorSubcode: apiSubcode
+    };
   }
 }
 
@@ -694,6 +771,7 @@ async function sendProductListMessage(
 
 module.exports = {
   getCommerceSettings,
+  getWabaCatalogIds,
   readLinkedCatalogId,
   updateCommerceSettings,
   getLinkedCatalogId,
