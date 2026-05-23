@@ -268,9 +268,15 @@ planSchema.statics.getPublicPlans = function() {
     .select('-stripePriceId -stripeProductId -metadata -createdBy -updatedBy');
 };
 
-// Static method to get plan by planId
+// Static method to get plan by planId (case-insensitive — frontend may send "Starter", DB stores "starter").
 planSchema.statics.getByPlanId = function(planId) {
-  return this.findOne({ planId, isActive: true });
+  if (planId == null || String(planId).trim() === '') return null;
+  const raw = String(planId).trim();
+  const normalized = raw.toLowerCase();
+  return this.findOne({
+    isActive: true,
+    $or: [{ planId: normalized }, { planId: raw }]
+  });
 };
 
 // Static method to get next tier plan

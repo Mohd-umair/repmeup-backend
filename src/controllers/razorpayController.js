@@ -61,7 +61,8 @@ async function resolveTransactionUserContext(organizationId) {
 exports.createSubscription = async (req, res, next) => {
   let plan;
   try {
-    const { planId } = req.body;
+    const planIdRaw = req.body?.planId;
+    const planId = planIdRaw != null ? String(planIdRaw).trim() : '';
 
     if (!planId) {
       return res.status(400).json({ success: false, error: 'planId is required' });
@@ -69,7 +70,11 @@ exports.createSubscription = async (req, res, next) => {
 
     plan = await Plan.getByPlanId(planId);
     if (!plan) {
-      return res.status(404).json({ success: false, error: 'Plan not found' });
+      logger.warn('[Razorpay] Plan lookup failed', { sentPlanId: planId });
+      return res.status(404).json({
+        success: false,
+        error: `Plan "${planId}" not found. Available plan IDs are case-insensitive (e.g. starter, pro).`
+      });
     }
 
     if (plan.price === 0 || plan.price === 'free') {
