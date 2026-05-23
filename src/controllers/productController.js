@@ -8,8 +8,8 @@ const axios = require('axios');
 const { syncProductToKb, removeProductFromKb } = require('../services/ai/productKbSyncService');
 
 /**
- * Fire-and-forget: auto-sync a product to the org's WhatsApp catalog if connected.
- * Never throws — product CRUD must not fail because of a Meta API issue.
+ * Auto-sync a product to the org's WhatsApp catalog if connected.
+ * Returns sync outcome so create/update APIs can surface Meta failures to the UI.
  */
 async function _autoSyncToMeta(product, orgId) {
   try {
@@ -20,18 +20,27 @@ async function _autoSyncToMeta(product, orgId) {
       status: 'connected',
       isActive: true
     }).lean();
-    if (!conn) return;
+    if (!conn) {
+      return { attempted: false, synced: false, skippedReason: 'no_whatsapp_connection' };
+    }
 
     const resolved = await whatsappCatalogService.resolveCatalogIdForSync(conn);
-    if (!resolved.catalogId) return;
+    if (!resolved.catalogId) {
+      return { attempted: false, synced: false, skippedReason: 'no_catalog_id' };
+    }
 
     const check = await whatsappCatalogService.verifyCatalogAccess(conn, resolved.catalogId);
     if (!check.valid) {
+      const error = check.error || 'Catalog is not linked on Meta.';
+      await Product.updateOne(
+        { _id: product._id },
+        { $set: { 'whatsapp.syncStatus': 'failed', 'whatsapp.syncError': error } }
+      ).catch(() => {});
       logger.warn('[productController] Auto-sync skipped — catalog not linked in Meta', {
         productId: String(product._id),
-        error: check.error
+        error
       });
-      return;
+      return { attempted: true, synced: false, error };
     }
 
     const catalogId = check.id || resolved.catalogId;
@@ -42,7 +51,15 @@ async function _autoSyncToMeta(product, orgId) {
         { $set: { 'whatsapp.catalogItemId': itemId, 'whatsapp.syncStatus': 'synced', 'whatsapp.syncedAt': new Date(), 'whatsapp.syncError': null } }
       );
       logger.info('[productController] Auto-synced to WA catalog', { productId: String(product._id), itemId });
+      return { attempted: true, synced: true };
     }
+
+    const error = 'Meta did not return a catalog item ID.';
+    await Product.updateOne(
+      { _id: product._id },
+      { $set: { 'whatsapp.syncStatus': 'failed', 'whatsapp.syncError': error } }
+    ).catch(() => {});
+    return { attempted: true, synced: false, error };
   } catch (err) {
     logger.warn('[productController] Auto-sync to WA catalog failed (non-fatal)', {
       productId: String(product._id),
@@ -52,6 +69,7 @@ async function _autoSyncToMeta(product, orgId) {
       { _id: product._id },
       { $set: { 'whatsapp.syncStatus': 'failed', 'whatsapp.syncError': err.message } }
     ).catch(() => {});
+    return { attempted: true, synced: false, error: err.message };
   }
 }
 
@@ -200,11 +218,12 @@ exports.createProduct = async (req, res, next) => {
       createdBy: req.user._id
     });
 
-    // Fire-and-forget side effects (non-blocking)
+    // KB sync stays non-blocking; WA sync is awaited so the UI can show Meta errors.
     syncProductToKb(product).catch(() => {});
-    _autoSyncToMeta(product, orgId).catch(() => {});
+    const whatsappSync = await _autoSyncToMeta(product, orgId);
 
-    res.status(201).json({ success: true, data: product });
+    const freshProduct = await Product.findById(product._id).lean();
+    res.status(201).json({ success: true, data: freshProduct, whatsappSync });
   } catch (err) {
     next(err);
   }
@@ -230,16 +249,18 @@ exports.updateProduct = async (req, res, next) => {
 
     await product.save();
 
-    // Fire-and-forget side effects
+    // Fire-and-forget KB sync; await WA sync so Meta failures reach the UI.
     syncProductToKb(product).catch(() => {});
+    let whatsappSync = { attempted: false, synced: false };
     if (product.isActive) {
-      _autoSyncToMeta(product, req.user.organization._id).catch(() => {});
+      whatsappSync = await _autoSyncToMeta(product, req.user.organization._id);
     } else if (wasActive && !product.isActive) {
       _autoDeleteFromMeta(product, req.user.organization._id).catch(() => {});
       removeProductFromKb(product._id, req.user.organization._id).catch(() => {});
     }
 
-    res.json({ success: true, data: product });
+    const freshProduct = await Product.findById(product._id).lean();
+    res.json({ success: true, data: freshProduct, whatsappSync });
   } catch (err) {
     next(err);
   }
