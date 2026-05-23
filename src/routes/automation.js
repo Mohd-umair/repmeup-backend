@@ -24,4 +24,9 @@ router.get('/reviews/settings', protect, reviewController.getSettings);
 router.put('/reviews/settings', protect, reviewController.updateSettings);
 router.get('/reviews/stats', protect, reviewController.getStats);
 
+// ── WhatsApp Catalog Keyword Automation ──────────────────────────────────────
+const waKeywordController = require('../controllers/waKeywordAutomationController');
+router.get('/wa-keyword', protect, waKeywordController.getSettings);
+router.put('/wa-keyword', protect, waKeywordController.updateSettings);
+
 module.exports = router;

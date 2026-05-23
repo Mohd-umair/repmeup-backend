@@ -27,10 +27,24 @@ exports.estimateAudienceSize = async (orgId, audienceType, filters = {}) => {
         return distinct.length;
       }
       case 'abandoned_cart': {
-        const ProductOrder = require('../models/ProductOrder').catch(() => null);
-        if (!ProductOrder) return 0;
-        const orders = await (await ProductOrder).countDocuments({ organization: orgId, status: 'pending' });
-        return orders;
+        // Count CommerceOrders that are stuck at cart_started or payment_pending (>1h ago)
+        // AND the legacy ProductOrder dm_sent records.
+        const CommerceOrder = require('../models/CommerceOrder');
+        const ProductOrder = require('../models/ProductOrder');
+        const oneHourAgo = new Date(Date.now() - 3600000);
+        const [commerceAbandoned, igAbandoned] = await Promise.all([
+          CommerceOrder.countDocuments({
+            organization: orgId,
+            status: { $in: ['cart_started', 'payment_pending'] },
+            updatedAt: { $lt: oneHourAgo }
+          }),
+          ProductOrder.countDocuments({
+            organization: orgId,
+            status: 'dm_sent',
+            createdAt: { $lt: oneHourAgo }
+          })
+        ]);
+        return commerceAbandoned + igAbandoned;
       }
       case 'new_leads': {
         const days = filters.days || 7;

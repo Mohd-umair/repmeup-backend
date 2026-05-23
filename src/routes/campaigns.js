@@ -16,6 +16,7 @@ router.delete('/:id', protect, ctrl.deleteCampaign);
 
 // Template introspection (drives the dynamic-param editor UI)
 router.get('/:id/template-slots', protect, ctrl.getTemplateSlots);
+router.get('/:id/audience-defaults', protect, ctrl.getAudienceDefaults);
 
 // Recipients
 router.get('/:id/recipients/report', protect, ctrl.getRecipientsReport);

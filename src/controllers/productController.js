@@ -5,6 +5,63 @@ const instagramService = require('../integrations/meta/instagramService');
 const logger = require('../config/logger');
 const xlsx = require('xlsx');
 const axios = require('axios');
+const { syncProductToKb, removeProductFromKb } = require('../services/ai/productKbSyncService');
+
+/**
+ * Fire-and-forget: auto-sync a product to the org's WhatsApp catalog if connected.
+ * Never throws — product CRUD must not fail because of a Meta API issue.
+ */
+async function _autoSyncToMeta(product, orgId) {
+  try {
+    const whatsappCatalogService = require('../integrations/whatsapp/whatsappCatalogService');
+    const conn = await PlatformConnection.findOne({ organization: orgId, platform: 'whatsapp', isActive: true }).lean();
+    if (!conn) return;
+    const catalogId = conn.platformData?.catalogId || conn.metadata?.catalogId;
+    if (!catalogId) return;
+
+    const { id: itemId } = await whatsappCatalogService.upsertProduct(conn, catalogId, product);
+    if (itemId) {
+      await Product.updateOne(
+        { _id: product._id },
+        { $set: { 'whatsapp.catalogItemId': itemId, 'whatsapp.syncStatus': 'synced', 'whatsapp.syncedAt': new Date(), 'whatsapp.syncError': null } }
+      );
+      logger.info('[productController] Auto-synced to WA catalog', { productId: String(product._id), itemId });
+    }
+  } catch (err) {
+    logger.warn('[productController] Auto-sync to WA catalog failed (non-fatal)', {
+      productId: String(product._id),
+      error: err.message
+    });
+    await Product.updateOne(
+      { _id: product._id },
+      { $set: { 'whatsapp.syncStatus': 'failed', 'whatsapp.syncError': err.message } }
+    ).catch(() => {});
+  }
+}
+
+/**
+ * Fire-and-forget: remove a product from the org's WA catalog when it is deactivated.
+ */
+async function _autoDeleteFromMeta(product, orgId) {
+  try {
+    const catalogItemId = product.whatsapp?.catalogItemId;
+    if (!catalogItemId) return;
+    const whatsappCatalogService = require('../integrations/whatsapp/whatsappCatalogService');
+    const conn = await PlatformConnection.findOne({ organization: orgId, platform: 'whatsapp', isActive: true }).lean();
+    if (!conn) return;
+    await whatsappCatalogService.deleteProduct(conn, catalogItemId);
+    await Product.updateOne(
+      { _id: product._id },
+      { $set: { 'whatsapp.syncStatus': 'not_synced', 'whatsapp.catalogItemId': null } }
+    );
+    logger.info('[productController] Removed product from WA catalog on deactivate', { productId: String(product._id) });
+  } catch (err) {
+    logger.warn('[productController] Auto-delete from WA catalog failed (non-fatal)', {
+      productId: String(product._id),
+      error: err.message
+    });
+  }
+}
 
 // Default settings returned when the org's commentToDmSettings subdocument is missing or empty
 const DEFAULT_COMMENT_TO_DM_SETTINGS = {
@@ -127,6 +184,10 @@ exports.createProduct = async (req, res, next) => {
       createdBy: req.user._id
     });
 
+    // Fire-and-forget side effects (non-blocking)
+    syncProductToKb(product).catch(() => {});
+    _autoSyncToMeta(product, orgId).catch(() => {});
+
     res.status(201).json({ success: true, data: product });
   } catch (err) {
     next(err);
@@ -146,11 +207,22 @@ exports.updateProduct = async (req, res, next) => {
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
 
     const allowedFields = ['name', 'description', 'price', 'currency', 'discountPercent', 'images', 'paymentUrl', 'sizes', 'colors', 'stock', 'isActive'];
+    const wasActive = product.isActive;
     allowedFields.forEach(f => {
       if (req.body[f] !== undefined) product[f] = req.body[f];
     });
 
     await product.save();
+
+    // Fire-and-forget side effects
+    syncProductToKb(product).catch(() => {});
+    if (product.isActive) {
+      _autoSyncToMeta(product, req.user.organization._id).catch(() => {});
+    } else if (wasActive && !product.isActive) {
+      _autoDeleteFromMeta(product, req.user.organization._id).catch(() => {});
+      removeProductFromKb(product._id, req.user.organization._id).catch(() => {});
+    }
+
     res.json({ success: true, data: product });
   } catch (err) {
     next(err);
@@ -162,13 +234,19 @@ exports.updateProduct = async (req, res, next) => {
 // ─────────────────────────────────────────────
 exports.deleteProduct = async (req, res, next) => {
   try {
+    const orgId = req.user.organization._id;
     const product = await Product.findOneAndUpdate(
-      { _id: req.params.id, organization: req.user.organization._id },
+      { _id: req.params.id, organization: orgId },
       { isActive: false },
       { new: true }
     );
 
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+
+    // Fire-and-forget cleanup
+    _autoDeleteFromMeta(product, orgId).catch(() => {});
+    removeProductFromKb(product._id, orgId).catch(() => {});
+
     res.json({ success: true, message: 'Product deleted' });
   } catch (err) {
     next(err);

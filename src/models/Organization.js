@@ -598,11 +598,32 @@ const organizationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
-  
+
   isActive: {
     type: Boolean,
     default: true
-  }
+  },
+
+  // ── WhatsApp Catalog Keyword Automation ──────────────────────────────────
+  // When any of these keywords are received in a WA DM, the bot automatically
+  // replies with a product list message — no LLM required for Phase 1.
+  waKeywordAutomation: {
+    enabled: { type: Boolean, default: false },
+    keywords: {
+      type: [String],
+      default: ['catalog', 'price', 'menu', 'products', 'shop', 'buy', 'order']
+    },
+    /** Optional header text shown above the product list */
+    headerText: { type: String, default: 'Our Products' },
+    /** Optional body text */
+    bodyText: { type: String, default: 'Here are our available products. Tap one to learn more!' },
+    /** Max products to show per auto-response */
+    maxProducts: { type: Number, default: 10, min: 1, max: 30 }
+  },
+
+  // ── Commerce Guardrails (Phase 2 groundwork) ─────────────────────────────
+  autonomousCommerceEnabled: { type: Boolean, default: false },
+  autonomousCommerceMaxSendsPerUserPerDay: { type: Number, default: 3 }
 }, {
   timestamps: true
 });

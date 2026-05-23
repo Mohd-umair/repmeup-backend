@@ -56,7 +56,13 @@ const FEATURE_KEYS = Object.freeze({
   AGENTS_ENABLED: 'agents.enabled',
 
   // ── Voice IVR ─────────────────────────────────────────────────────────────
-  VOICE_IVR_ENABLED: 'voice.ivr.enabled'
+  VOICE_IVR_ENABLED: 'voice.ivr.enabled',
+
+  // ── Commerce (catalog + orders + AI selling) ──────────────────────────────
+  COMMERCE_PRODUCTS_MAX: 'commerce.products.max',
+  COMMERCE_WA_CATALOG_ENABLED: 'commerce.whatsappCatalog.enabled',
+  COMMERCE_AI_ASSIST_ENABLED: 'commerce.aiAssist.enabled',
+  COMMERCE_AUTONOMOUS_AGENT: 'commerce.autonomousAgent.enabled'
 });
 
 /**
@@ -300,6 +306,45 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     sortOrder: 30
+  },
+
+  // ── Commerce ──────────────────────────────────────────────────────────────
+  {
+    key: FEATURE_KEYS.COMMERCE_PRODUCTS_MAX,
+    label: 'Max products in catalog',
+    description: 'Total active products the organization can maintain.',
+    category: 'commerce',
+    kind: 'limit',
+    defaultValue: -1,
+    unit: 'count',
+    sortOrder: 10
+  },
+  {
+    key: FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED,
+    label: 'WhatsApp Catalog',
+    description: 'Enable WhatsApp Commerce Catalog sync, product cards, and cart orders.',
+    category: 'commerce',
+    kind: 'boolean',
+    defaultValue: true,
+    sortOrder: 20
+  },
+  {
+    key: FEATURE_KEYS.COMMERCE_AI_ASSIST_ENABLED,
+    label: 'AI Commerce Assist',
+    description: 'AI-powered product suggestions and sales replies in the inbox.',
+    category: 'commerce',
+    kind: 'boolean',
+    defaultValue: true,
+    sortOrder: 30
+  },
+  {
+    key: FEATURE_KEYS.COMMERCE_AUTONOMOUS_AGENT,
+    label: 'Autonomous AI Sales Agent',
+    description: 'Allow AI to auto-send product messages and handle sales without agent intervention.',
+    category: 'commerce',
+    kind: 'boolean',
+    defaultValue: false,
+    sortOrder: 40
   }
 ];
 

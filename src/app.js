@@ -182,6 +182,7 @@ const routeMap = [
   ['/whatsapp-flows',       './routes/whatsappFlows'],
   ['/campaigns',            './routes/campaigns'],
   ['/reports/number',       './routes/numberReports'],
+  ['/commerce-orders',      './routes/commerceOrders'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];
