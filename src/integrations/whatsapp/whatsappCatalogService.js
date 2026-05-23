@@ -336,6 +336,17 @@ async function linkCatalogToWaba(connection, catalogId) {
     return { skipped: true, reason: 'missing_waba_or_catalog' };
   }
 
+  // whatsapp_commerce_settings is the primary link path for Cloud API.
+  // Skip WABA product_catalogs when Meta already linked this catalog to the phone number.
+  try {
+    const settings = await getCommerceSettings(connection);
+    if (settings.catalogId && String(settings.catalogId) === String(catalogId).trim()) {
+      return { skipped: true, reason: 'already_linked_via_commerce_settings' };
+    }
+  } catch (_e) {
+    // continue — optional pre-check only
+  }
+
   try {
     const res = await axios.post(
       `${BASE_URL}/${wabaId}/product_catalogs`,
@@ -344,7 +355,10 @@ async function linkCatalogToWaba(connection, catalogId) {
     );
     return { success: true, data: res.data };
   } catch (err) {
-    const apiMsg = err.response?.data?.error?.message || err.message;
+    const metaError = err.response?.data?.error || {};
+    const apiMsg = metaError.message || err.message;
+    const apiCode = metaError.code;
+    const apiSubcode = metaError.error_subcode;
     // Already linked is OK
     if (/already|duplicate/i.test(apiMsg)) {
       return { success: true, alreadyLinked: true };
@@ -352,9 +366,14 @@ async function linkCatalogToWaba(connection, catalogId) {
     logger.warn('[whatsappCatalogService] linkCatalogToWaba failed (non-fatal)', {
       wabaId,
       catalogId,
-      error: apiMsg
+      error: apiMsg,
+      code: apiCode,
+      errorSubcode: apiSubcode,
+      hint:
+        'WhatsApp commerce uses whatsapp_commerce_settings on the phone number — this WABA link is optional. ' +
+        'Ensure catalog belongs to the same Business as WABA, is E-commerce type, and Repmeup app is assigned as catalog partner.'
     });
-    return { success: false, error: apiMsg };
+    return { success: false, error: apiMsg, code: apiCode, errorSubcode: apiSubcode };
   }
 }
 
