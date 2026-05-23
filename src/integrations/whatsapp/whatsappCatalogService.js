@@ -274,6 +274,19 @@ async function verifyCatalogAccess(connection, catalogId) {
 
 // ── Commerce Settings ─────────────────────────────────────────────────────────
 
+function _parseCommerceSettingsPayload(payload) {
+  const data = payload?.data?.[0] || payload?.data || payload || {};
+  return {
+    catalogId: data.catalog_id || data.catalogId || null,
+    isCatalogVisible: data.is_catalog_visible ?? data.isCatalogVisible ?? false,
+    isCartEnabled: data.is_cart_enabled ?? data.isCartEnabled ?? false
+  };
+}
+
+function _sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Retrieve current WhatsApp Commerce settings for the phone number.
  * @param {object} connection
@@ -286,11 +299,11 @@ async function getCommerceSettings(connection) {
       `${BASE_URL}/${phoneNumberId}/whatsapp_commerce_settings`,
       { headers: _authHeader(connection), timeout: 15000 }
     );
-    const data = res.data?.data?.[0] || res.data || {};
+    const data = _parseCommerceSettingsPayload(res.data);
     return {
-      catalogId: data.catalog_id || null,
-      isCatalogVisible: data.is_catalog_visible ?? false,
-      isCartEnabled: data.is_cart_enabled ?? false
+      catalogId: data.catalogId || null,
+      isCatalogVisible: data.isCatalogVisible,
+      isCartEnabled: data.isCartEnabled
     };
   } catch (err) {
     logger.error('[whatsappCatalogService] getCommerceSettings failed', {
@@ -314,16 +327,33 @@ async function updateCommerceSettings(connection, catalogId) {
       { headers: _jsonHeaders(connection), timeout: 15000 }
     );
 
-    // Also link catalog on the WABA (required for some setups before items_batch works)
-    await linkCatalogToWaba(connection, catalogId).catch(() => {});
+    // Catalog link for Cloud API is complete via whatsapp_commerce_settings above.
+    // Do not POST /{waba-id}/product_catalogs — it is redundant, often fails with
+    // "unknown error" when already linked or without catalog_management, and is not required.
 
-    return { success: true, data: res.data };
+    return { success: true, data: res.data, settings: _parseCommerceSettingsPayload(res.data) };
   } catch (err) {
     logger.error('[whatsappCatalogService] updateCommerceSettings failed', {
       error: err.response?.data?.error?.message || err.message
     });
     throw new Error(err.response?.data?.error?.message || 'Failed to update WhatsApp commerce settings');
   }
+}
+
+/**
+ * Read catalog_id from Meta commerce settings with short retries (GET can lag after POST).
+ */
+async function readLinkedCatalogId(connection, { retries = 4, delayMs = 750 } = {}) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const settings = await getCommerceSettings(connection);
+      if (settings.catalogId) return String(settings.catalogId);
+    } catch (err) {
+      if (attempt === retries - 1) throw err;
+    }
+    if (attempt < retries - 1) await _sleep(delayMs);
+  }
+  return null;
 }
 
 /**
@@ -664,6 +694,7 @@ async function sendProductListMessage(
 
 module.exports = {
   getCommerceSettings,
+  readLinkedCatalogId,
   updateCommerceSettings,
   getLinkedCatalogId,
   resolveCatalogIdForSync,
