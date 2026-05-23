@@ -159,32 +159,95 @@ function _buildBatchProductData(product) {
 }
 
 /**
- * Verify the catalog ID exists and is accessible with the connection token.
- * Helps catch wrong IDs (WABA id, product set id) before sync attempts.
+ * Read the catalog ID Meta has linked to this WhatsApp phone number.
+ * This is the authoritative source — more reliable than GET /{catalog-id}.
+ */
+async function getLinkedCatalogId(connection) {
+  const settings = await getCommerceSettings(connection);
+  return settings.catalogId ? String(settings.catalogId) : null;
+}
+
+/**
+ * Resolve which catalog ID to use for sync.
+ * Prefers Meta's whatsapp_commerce_settings.catalog_id over locally stored value.
+ */
+async function resolveCatalogIdForSync(connection) {
+  const stored = connection?.platformData?.catalogId
+    ? String(connection.platformData.catalogId).trim()
+    : null;
+
+  let metaCatalogId = null;
+  try {
+    metaCatalogId = await getLinkedCatalogId(connection);
+  } catch (err) {
+    logger.warn('[whatsappCatalogService] Could not read commerce settings', {
+      error: err.message
+    });
+  }
+
+  const catalogId = metaCatalogId || stored;
+  if (!catalogId) {
+    return {
+      catalogId: null,
+      error: 'No catalog linked to this WhatsApp number. Enter your Catalog ID in WhatsApp Catalog settings and save.',
+      hint: 'Meta Commerce Manager → Catalogs → copy Catalog ID → paste in RepMeUp → Save.'
+    };
+  }
+
+  if (metaCatalogId && stored && metaCatalogId !== stored) {
+    logger.info('[whatsappCatalogService] Using Meta-linked catalog id over stored value', {
+      metaCatalogId,
+      stored
+    });
+  }
+
+  return { catalogId, metaCatalogId, stored };
+}
+
+/**
+ * Verify catalog is ready for product sync.
+ * Uses whatsapp_commerce_settings (works with WhatsApp Cloud API tokens).
+ * Does NOT GET /{catalog-id} — that endpoint often returns "Unsupported get request"
+ * for WhatsApp system-user tokens even when sync works fine.
  */
 async function verifyCatalogAccess(connection, catalogId) {
   if (!catalogId) {
     return { valid: false, error: 'Catalog ID is not configured' };
   }
+
   try {
-    const res = await axios.get(
-      `${BASE_URL}/${catalogId}`,
-      {
-        params: { fields: 'id,name' },
-        headers: _authHeader(connection),
-        timeout: 15000
-      }
-    );
-    if (!res.data?.id) {
-      return { valid: false, error: 'Catalog not found' };
+    const settings = await getCommerceSettings(connection);
+    const linkedId = settings.catalogId ? String(settings.catalogId) : null;
+
+    if (linkedId) {
+      return {
+        valid: true,
+        id: linkedId,
+        isCatalogVisible: settings.isCatalogVisible,
+        isCartEnabled: settings.isCartEnabled,
+        source: 'commerce_settings'
+      };
     }
-    return { valid: true, id: res.data.id, name: res.data.name };
-  } catch (err) {
-    const msg = err.response?.data?.error?.message || err.message;
+
+    // Commerce settings readable but no catalog linked yet — user must save settings
     return {
       valid: false,
-      error: msg,
-      hint: 'Use the Catalog ID from Meta Commerce Manager → Catalogs (not your WABA or phone number ID). Ensure the WhatsApp app token has catalog_management permission.'
+      error: 'Catalog is not linked to your WhatsApp number in Meta yet.',
+      hint: 'Go to Catalog → WhatsApp Catalog, enter your Catalog ID, click Save, then sync again.'
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    // If we cannot read commerce settings, allow sync attempt with stored catalog id
+    // (updateCommerceSettings may have succeeded earlier).
+    logger.warn('[whatsappCatalogService] verifyCatalogAccess fallback to stored catalogId', {
+      catalogId,
+      error: msg
+    });
+    return {
+      valid: true,
+      id: String(catalogId),
+      source: 'stored_fallback',
+      warning: msg
     };
   }
 }
@@ -242,42 +305,56 @@ async function updateCommerceSettings(connection, catalogId) {
 // ── Catalog Product Item CRUD ─────────────────────────────────────────────────
 
 /**
- * Create or update a single product in the Meta catalog.
+ * Create or update a single product in the Meta catalog via items_batch.
  * Uses retailer_id as the idempotency key — Meta updates the item if it already exists.
+ *
+ * Note: WhatsApp Cloud API tokens often reject POST /{catalog-id}/products and
+ * GET /{catalog-id}. items_batch + whatsapp_commerce_settings are the supported paths.
+ *
  * @param {object} connection
  * @param {string} catalogId
  * @param {object} product  Mongoose Product document or plain object
- * @returns {Promise<{ id: string }>} Meta product item id
+ * @returns {Promise<{ id: string, batchHandle?: string }>}
  */
 async function upsertProduct(connection, catalogId, product) {
   const retailerId = _resolveRetailerId(product);
-  const payload = _buildMetaProductPayload(product);
+  const data = _buildBatchProductData(product);
 
-  if (!payload.price && payload.price !== 0) {
-    throw new Error('Product price is invalid — set a numeric price before syncing');
-  }
   if (!retailerId) {
     throw new Error('Product must have a sku or _id to use as retailer_id');
+  }
+  const amount = _effectivePrice(product);
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error('Product price is invalid — set a numeric price before syncing');
   }
 
   try {
     const res = await axios.post(
-      `${BASE_URL}/${catalogId}/products`,
-      payload,
-      { headers: _jsonHeaders(connection), timeout: 30000 }
+      `${BASE_URL}/${catalogId}/items_batch`,
+      {
+        allow_upsert: true,
+        item_type: 'PRODUCT_ITEM',
+        requests: [{ method: 'UPDATE', data }]
+      },
+      { headers: _jsonHeaders(connection), timeout: 60000 }
     );
-    const itemId = res.data?.id;
-    if (!itemId) {
-      throw new Error(res.data?.error?.message || 'No product item id returned');
+
+    const validation = res.data?.validation_status || [];
+    const entry = validation.find((v) => v.retailer_id === retailerId) || validation[0];
+    const errors = entry?.errors || [];
+    if (errors.length > 0) {
+      const errMsg = errors.map((e) => e.message).join('; ');
+      throw new Error(errMsg);
     }
-    return { id: itemId };
+
+    // WhatsApp send uses retailer_id — Meta batch returns handles, not always item ids
+    return { id: retailerId, batchHandle: res.data?.handles?.[0] || null };
   } catch (err) {
     const apiMsg = err.response?.data?.error?.message || err.message;
     logger.error('[whatsappCatalogService] upsertProduct failed', {
       retailerId,
       catalogId,
-      price: payload.price,
-      currency: payload.currency,
+      price: data.price,
       error: apiMsg
     });
     throw new Error(apiMsg || 'Failed to sync product to WhatsApp catalog');
@@ -493,6 +570,8 @@ async function sendProductListMessage(
 module.exports = {
   getCommerceSettings,
   updateCommerceSettings,
+  getLinkedCatalogId,
+  resolveCatalogIdForSync,
   verifyCatalogAccess,
   upsertProduct,
   deleteProduct,
