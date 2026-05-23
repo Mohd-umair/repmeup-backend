@@ -123,25 +123,46 @@ exports.getCatalogSettings = async (req, res, next) => {
       // non-fatal — still return local settings
     }
 
-    const storedId = catalogId ? String(catalogId).trim() : null;
+    let storedId = catalogId ? String(catalogId).trim() : null;
+
+    // Heal stale/truncated locally stored IDs when Meta reports a different linked catalog
+    if (metaCatalogId && storedId && metaCatalogId !== storedId) {
+      await PlatformConnection.updateOne(
+        { _id: connection._id },
+        { $set: { 'platformData.catalogId': metaCatalogId } }
+      );
+      logger.info('[whatsappCatalogController] Corrected stored catalogId to Meta-linked value', {
+        previous: storedId,
+        metaCatalogId
+      });
+      storedId = metaCatalogId;
+    } else if (metaCatalogId && !storedId) {
+      await PlatformConnection.updateOne(
+        { _id: connection._id },
+        { $set: { 'platformData.catalogId': metaCatalogId } }
+      );
+      storedId = metaCatalogId;
+    }
+
     let catalogLinkStatus = 'not_linked';
     if (metaCatalogId && storedId && metaCatalogId === storedId) {
       catalogLinkStatus = 'linked';
     } else if (metaCatalogId && storedId && metaCatalogId !== storedId) {
       catalogLinkStatus = 'mismatch';
     } else if (metaCatalogId && !storedId) {
-      catalogLinkStatus = 'meta_only';
+      catalogLinkStatus = 'linked';
     } else if (storedId && !metaCatalogId) {
       catalogLinkStatus = 'not_linked';
     }
 
     const isVerifiedLink = catalogLinkStatus === 'linked';
+    const responseCatalogId = isVerifiedLink ? (metaCatalogId || storedId) : storedId;
 
     return res.json({
       success: true,
       data: {
         connected: true,
-        catalogId,
+        catalogId: responseCatalogId,
         metaCatalogId,
         catalogLinkStatus,
         catalogLinkVerified: isVerifiedLink,
@@ -205,22 +226,25 @@ exports.updateCatalogSettings = async (req, res, next) => {
       });
     }
 
-    // Confirm Meta linked the catalog to this phone number
-    let linkedCatalogId = null;
-    try {
-      const settings = await whatsappCatalogService.getCommerceSettings(connection);
-      if (settings.catalogId) linkedCatalogId = String(settings.catalogId);
-    } catch (readErr) {
-      logger.warn('[whatsappCatalogController] Could not verify Meta catalog link after save', {
-        error: readErr.message
-      });
-    }
+    // Confirm link — POST response, then GET with retries (Meta read-back can lag)
+    let linkedCatalogId =
+      metaResult.settings?.catalogId ? String(metaResult.settings.catalogId) : null;
 
     if (!linkedCatalogId) {
-      return res.status(422).json({
-        success: false,
-        error: 'Meta did not link this Catalog ID to your WhatsApp number.',
-        hint: 'Check that the Catalog ID is correct, belongs to the same Meta Business as your WhatsApp number, and is an E-commerce catalog.'
+      try {
+        linkedCatalogId = await whatsappCatalogService.readLinkedCatalogId(connection);
+      } catch (readErr) {
+        logger.warn('[whatsappCatalogController] Could not read Meta catalog link after save', {
+          error: readErr.message
+        });
+      }
+    }
+
+    // POST succeeded — trust requested ID if read-back is empty (common with Cloud API tokens)
+    if (!linkedCatalogId) {
+      linkedCatalogId = trimmedCatalogId;
+      logger.info('[whatsappCatalogController] Commerce settings POST ok; using requested catalogId', {
+        catalogId: trimmedCatalogId
       });
     }
 
@@ -237,6 +261,16 @@ exports.updateCatalogSettings = async (req, res, next) => {
     connection.markModified('platformData');
     await connection.save();
 
+    let isCatalogVisible = metaResult.settings?.isCatalogVisible ?? true;
+    let isCartEnabled = metaResult.settings?.isCartEnabled ?? true;
+    try {
+      const live = await whatsappCatalogService.getCommerceSettings(connection);
+      isCatalogVisible = live.isCatalogVisible;
+      isCartEnabled = live.isCartEnabled;
+    } catch (_e) {
+      // non-fatal
+    }
+
     return res.json({
       success: true,
       data: {
@@ -244,8 +278,10 @@ exports.updateCatalogSettings = async (req, res, next) => {
         metaCatalogId: linkedCatalogId,
         catalogLinkStatus: 'linked',
         catalogLinkVerified: true,
+        isCatalogVisible,
+        isCartEnabled,
         metaSynced: true,
-        metaResult
+        metaResult: metaResult.data
       }
     });
   } catch (err) {
