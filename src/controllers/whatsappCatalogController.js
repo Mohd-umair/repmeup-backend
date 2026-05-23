@@ -50,21 +50,32 @@ function _requireCatalogId(catalogId, res) {
 }
 
 /**
- * Verify catalog exists and token can access it before attempting product sync.
+ * Resolve Meta-linked catalog id and verify commerce settings before sync.
+ * Returns { catalogId } or sends 422 and returns null.
  */
-async function _assertCatalogReady(connection, catalogId, res) {
-  if (!_requireCatalogId(catalogId, res)) return false;
+async function _resolveCatalogForSync(connection, res) {
+  const resolved = await whatsappCatalogService.resolveCatalogIdForSync(connection);
+  if (!resolved.catalogId) {
+    res.status(422).json({
+      success: false,
+      error: resolved.error || 'No catalog configured',
+      hint: resolved.hint
+    });
+    return null;
+  }
 
-  const check = await whatsappCatalogService.verifyCatalogAccess(connection, catalogId);
+  const check = await whatsappCatalogService.verifyCatalogAccess(connection, resolved.catalogId);
   if (!check.valid) {
     res.status(422).json({
       success: false,
-      error: check.error || 'Cannot access this catalog with your WhatsApp connection.',
-      hint: check.hint || 'Confirm the Catalog ID from Meta Commerce Manager → Catalogs and that your app has catalog_management permission.'
+      error: check.error || 'Catalog is not linked to your WhatsApp number.',
+      hint: check.hint || 'Save your Catalog ID in WhatsApp Catalog settings, then sync again.'
     });
-    return false;
+    return null;
   }
-  return true;
+
+  // Prefer catalog id confirmed by Meta commerce settings
+  return check.id || resolved.catalogId;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,17 +177,7 @@ exports.updateCatalogSettings = async (req, res, next) => {
     connection.markModified('platformData');
     await connection.save();
 
-    // Verify catalog is accessible before linking to WhatsApp number
-    const catalogCheck = await whatsappCatalogService.verifyCatalogAccess(connection, trimmedCatalogId);
-    if (!catalogCheck.valid) {
-      return res.status(422).json({
-        success: false,
-        error: catalogCheck.error || 'Cannot access this catalog ID.',
-        hint: catalogCheck.hint
-      });
-    }
-
-    // Push to Meta (update WhatsApp Commerce Settings)
+    // Push to Meta (update WhatsApp Commerce Settings) — this is the authoritative link step
     let metaResult = null;
     try {
       metaResult = await whatsappCatalogService.updateCommerceSettings(connection, trimmedCatalogId);
@@ -184,15 +185,31 @@ exports.updateCatalogSettings = async (req, res, next) => {
       logger.warn('[whatsappCatalogController] Meta commerce settings update failed (catalogId saved locally)', {
         error: metaErr.message
       });
-      return res.json({
-        success: true,
-        data: { catalogId: connection.platformData.catalogId, metaSynced: false, metaError: metaErr.message }
+      return res.status(422).json({
+        success: false,
+        error: metaErr.message || 'Meta rejected this Catalog ID.',
+        hint: 'Use the Catalog ID from Meta Commerce Manager → Catalogs. It must belong to the same Business as your WhatsApp number.'
       });
+    }
+
+    // Confirm Meta linked the catalog to this phone number
+    let linkedCatalogId = trimmedCatalogId;
+    try {
+      const settings = await whatsappCatalogService.getCommerceSettings(connection);
+      if (settings.catalogId) linkedCatalogId = String(settings.catalogId);
+    } catch (_e) {
+      // non-fatal — updateCommerceSettings already succeeded
+    }
+
+    if (linkedCatalogId !== trimmedCatalogId) {
+      connection.platformData.catalogId = linkedCatalogId;
+      connection.markModified('platformData');
+      await connection.save();
     }
 
     return res.json({
       success: true,
-      data: { catalogId: connection.platformData.catalogId, metaSynced: true, metaResult }
+      data: { catalogId: linkedCatalogId, metaSynced: true, metaResult }
     });
   } catch (err) {
     next(err);
@@ -214,9 +231,12 @@ exports.syncOneProduct = async (req, res, next) => {
     ]);
 
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+    if (!connection) {
+      return res.status(422).json({ success: false, error: 'No active WhatsApp connection found.' });
+    }
 
-    const catalogId = connection?.platformData?.catalogId;
-    if (!await _assertCatalogReady(connection, catalogId, res)) return;
+    const catalogId = await _resolveCatalogForSync(connection, res);
+    if (!catalogId) return;
 
     // Mark as pending
     product.whatsapp = product.whatsapp || {};
@@ -255,8 +275,12 @@ exports.syncAllProducts = async (req, res, next) => {
   try {
     const orgId = req.user.organization._id;
     const connection = await _getWaConnection(orgId);
-    const catalogId = connection?.platformData?.catalogId;
-    if (!await _assertCatalogReady(connection, catalogId, res)) return;
+    if (!connection) {
+      return res.status(422).json({ success: false, error: 'No active WhatsApp connection found.' });
+    }
+
+    const catalogId = await _resolveCatalogForSync(connection, res);
+    if (!catalogId) return;
 
     const products = await Product.find({ organization: orgId, isActive: true }).lean();
     if (products.length === 0) {
