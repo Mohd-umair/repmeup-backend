@@ -448,12 +448,23 @@ async function updateCommerceSettings(connection, catalogId, { enableVisibility 
   const phoneNumberId = _phoneNumberId(connection);
   const trimmed = String(catalogId).trim();
 
-  // Try WABA link — non-fatal if it fails (needs catalog_management approval)
+  // Try WABA link — non-fatal if it fails (needs catalog_management approval).
+  // Exception: code 100 = invalid catalog ID — surface this as a hard error immediately.
   const existing = await getWabaCatalogIds(connection);
   let linkResult = { skipped: true, alreadyLinked: existing.includes(trimmed) };
   if (!existing.includes(trimmed)) {
     linkResult = await linkCatalogToWaba(connection, trimmed);
     if (!linkResult.success && !linkResult.alreadyLinked) {
+      if (linkResult.code === 100) {
+        const err = new Error(
+          'This Catalog ID does not exist on Meta. Copy the exact ID from ' +
+          'Meta Commerce Manager → Catalogs → Settings.'
+        );
+        err.metaCode = 100;
+        err.isInvalidCatalogId = true;
+        throw err;
+      }
+      // Other failures (e.g. errorSubcode 2388004 = catalog_management pending App Review) are non-fatal
       logger.info('[whatsappCatalogService] WABA catalog link requires catalog_management (pending App Review)', {
         catalogId: trimmed
       });
