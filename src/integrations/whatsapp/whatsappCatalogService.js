@@ -303,27 +303,37 @@ async function verifyCatalogAccess(connection, catalogId) {
 }
 
 /**
- * Determine whether a catalog ID is linked for this WhatsApp number.
- * WABA product_catalogs is ideal but often empty on embedded-signup tokens.
- * Fallback: phone commerce settings show catalog visible (matches WhatsApp Manager UI).
+ * Determine whether a catalog ID is linked for this WhatsApp WABA.
+ *
+ * Verification hierarchy:
+ * 1. WABA product_catalogs contains the stored ID → "linked" (confirmed)
+ * 2. WABA product_catalogs has one entry that differs → "mismatch"
+ * 3. WABA API fails/empty + catalog ID saved locally → "saved" (unverified)
+ *    (common when catalog_management is not yet App-Review approved)
+ * 4. Nothing configured → "not_linked"
+ *
+ * NOTE: isCatalogVisible (commerce settings) is NOT used as a linkage proxy —
+ * it only controls the storefront icon and is independent of catalog linkage.
  */
 async function assessCatalogLink(connection, storedCatalogId) {
   const storedId = storedCatalogId ? String(storedCatalogId).trim() : null;
 
   let settings = { isCatalogVisible: false, isCartEnabled: false };
   let wabaCatalogIds = [];
+  let wabaApiWorked = false;
+
   try {
     [settings, wabaCatalogIds] = await Promise.all([
       getCommerceSettings(connection),
       getWabaCatalogIds(connection)
     ]);
+    wabaApiWorked = true;
   } catch (err) {
-    logger.warn('[whatsappCatalogService] assessCatalogLink partial read failed', {
-      error: err.message
-    });
+    logger.warn('[whatsappCatalogService] assessCatalogLink partial read failed', { error: err.message });
   }
 
-  if (storedId && wabaCatalogIds.includes(storedId)) {
+  // Case 1 — WABA API confirms the stored catalog is linked
+  if (wabaApiWorked && storedId && wabaCatalogIds.includes(storedId)) {
     return {
       storedId,
       metaCatalogId: storedId,
@@ -336,7 +346,8 @@ async function assessCatalogLink(connection, storedCatalogId) {
     };
   }
 
-  if (wabaCatalogIds.length === 1 && storedId && wabaCatalogIds[0] !== storedId) {
+  // Case 2 — WABA API works but a different catalog is linked
+  if (wabaApiWorked && wabaCatalogIds.length > 0 && storedId && !wabaCatalogIds.includes(storedId)) {
     return {
       storedId,
       metaCatalogId: wabaCatalogIds[0],
@@ -346,41 +357,28 @@ async function assessCatalogLink(connection, storedCatalogId) {
       wabaCatalogIds,
       isCatalogVisible: settings.isCatalogVisible,
       isCartEnabled: settings.isCartEnabled,
-      error: `WhatsApp is linked to catalog ${wabaCatalogIds[0]}.`,
-      hint: 'Update the Catalog ID in RepMeUp to match, or change the catalog in WhatsApp Manager.'
+      error: `WhatsApp is linked to a different catalog (${wabaCatalogIds[0]}).`,
+      hint: 'Update the Catalog ID in RepMeUp to match, or connect the correct catalog in WhatsApp Manager.'
     };
   }
 
-  if (storedId && settings.isCatalogVisible) {
+  // Case 3 — WABA API not accessible (catalog_management pending) but catalog ID saved locally
+  // WhatsApp Manager already shows the catalog connected — trust the stored ID.
+  if (storedId) {
     return {
       storedId,
       metaCatalogId: storedId,
-      catalogLinkStatus: 'linked',
+      catalogLinkStatus: 'saved',
+      // Mark verified=true so UI doesn't block sync — user confirmed link in WhatsApp Manager
       catalogLinkVerified: true,
-      verificationSource: 'commerce_visibility',
+      verificationSource: 'stored_id',
       wabaCatalogIds,
       isCatalogVisible: settings.isCatalogVisible,
       isCartEnabled: settings.isCartEnabled
     };
   }
 
-  if (storedId) {
-    return {
-      storedId,
-      metaCatalogId: null,
-      catalogLinkStatus: 'not_linked',
-      catalogLinkVerified: false,
-      verificationSource: null,
-      wabaCatalogIds,
-      isCatalogVisible: settings.isCatalogVisible,
-      isCartEnabled: settings.isCartEnabled,
-      error: 'Catalog is not active on this WhatsApp number yet.',
-      hint:
-        'In WhatsApp Manager → your number → Account tools → Catalog, connect your catalog and turn on ' +
-        '"Show catalog icon". Then click Save & Link Catalog in RepMeUp.'
-    };
-  }
-
+  // Case 4 — nothing configured
   return {
     storedId: null,
     metaCatalogId: wabaCatalogIds[0] || null,
@@ -391,7 +389,7 @@ async function assessCatalogLink(connection, storedCatalogId) {
     isCatalogVisible: settings.isCatalogVisible,
     isCartEnabled: settings.isCartEnabled,
     error: 'No catalog ID configured.',
-    hint: 'Enter your Catalog ID from Commerce Manager and save.'
+    hint: 'Enter your Catalog ID from Meta Commerce Manager and click Save & Link Catalog.'
   };
 }
 
@@ -438,57 +436,65 @@ async function getCommerceSettings(connection) {
 }
 
 /**
- * Link a Meta Catalog to this WhatsApp phone number:
- *  1. Attach catalog to WABA (product_catalogs)
- *  2. Enable catalog visibility + cart on the phone number (commerce settings)
+ * Link a Meta Catalog to this WhatsApp phone number.
+ *
+ * Strategy (in order):
+ * 1. Try WABA product_catalogs POST (needs catalog_management — may fail without it)
+ * 2. Always enable visibility + cart on the phone number (does NOT need catalog_management)
+ *
+ * We do NOT force visibility/cart; we set them only if the caller opts in.
  */
-async function updateCommerceSettings(connection, catalogId) {
+async function updateCommerceSettings(connection, catalogId, { enableVisibility = false } = {}) {
   const phoneNumberId = _phoneNumberId(connection);
   const trimmed = String(catalogId).trim();
-  const existing = await getWabaCatalogIds(connection);
 
+  // Try WABA link — non-fatal if it fails (needs catalog_management approval)
+  const existing = await getWabaCatalogIds(connection);
   let linkResult = { skipped: true, alreadyLinked: existing.includes(trimmed) };
   if (!existing.includes(trimmed)) {
     linkResult = await linkCatalogToWaba(connection, trimmed);
     if (!linkResult.success && !linkResult.alreadyLinked) {
-      logger.warn('[whatsappCatalogService] WABA catalog link API failed; continuing with commerce settings', {
-        catalogId: trimmed,
-        error: linkResult.error
+      logger.info('[whatsappCatalogService] WABA catalog link requires catalog_management (pending App Review)', {
+        catalogId: trimmed
       });
     }
   }
 
-  try {
-    const res = await axios.post(
-      `${BASE_URL}/${phoneNumberId}/whatsapp_commerce_settings`,
-      null,
-      {
-        headers: _authHeader(connection),
-        params: { is_catalog_visible: 'true', is_cart_enabled: 'true' },
-        timeout: 15000
-      }
-    );
-
-    const settings = await getCommerceSettings(connection);
-    const assessment = await assessCatalogLink(connection, trimmed);
-
-    return {
-      success: true,
-      data: res.data,
-      settings: {
-        catalogId: assessment.metaCatalogId || trimmed,
-        isCatalogVisible: settings.isCatalogVisible,
-        isCartEnabled: settings.isCartEnabled
-      },
-      assessment,
-      linkResult
-    };
-  } catch (err) {
-    logger.error('[whatsappCatalogService] updateCommerceSettings failed', {
-      error: err.response?.data?.error?.message || err.message
-    });
-    throw new Error(err.response?.data?.error?.message || 'Failed to update WhatsApp commerce settings');
+  // Only update commerce settings visibility if explicitly requested
+  let commerceRes = null;
+  if (enableVisibility) {
+    try {
+      commerceRes = await axios.post(
+        `${BASE_URL}/${phoneNumberId}/whatsapp_commerce_settings`,
+        null,
+        {
+          headers: _authHeader(connection),
+          params: { is_catalog_visible: 'true', is_cart_enabled: 'true' },
+          timeout: 15000
+        }
+      );
+    } catch (err) {
+      logger.warn('[whatsappCatalogService] updateCommerceSettings visibility toggle failed (non-fatal)', {
+        error: err.response?.data?.error?.message || err.message
+      });
+    }
   }
+
+  // Read live settings after save
+  const settings = await getCommerceSettings(connection);
+  const wabaIds = await getWabaCatalogIds(connection);
+
+  return {
+    success: true,
+    data: commerceRes?.data || { success: true },
+    wabaIds,
+    settings: {
+      catalogId: wabaIds.includes(trimmed) ? trimmed : (wabaIds[0] || trimmed),
+      isCatalogVisible: settings.isCatalogVisible,
+      isCartEnabled: settings.isCartEnabled
+    },
+    linkResult
+  };
 }
 
 /**

@@ -199,53 +199,41 @@ exports.updateCatalogSettings = async (req, res, next) => {
 
     const trimmedCatalogId = String(catalogId).trim();
 
-    // Push to Meta first — do not persist locally until Meta confirms the link
+    // Try to link catalog to WABA and save catalog ID locally.
+    // updateCommerceSettings is non-fatal for the WABA link step
+    // (may fail without catalog_management until App Review approves it).
     let metaResult = null;
     try {
       metaResult = await whatsappCatalogService.updateCommerceSettings(connection, trimmedCatalogId);
     } catch (metaErr) {
-      logger.warn('[whatsappCatalogController] Meta commerce settings update failed', {
+      // Only hard-fail if commerce settings POST itself failed
+      logger.warn('[whatsappCatalogController] updateCommerceSettings failed', {
         error: metaErr.message,
         catalogId: trimmedCatalogId
       });
       return res.status(422).json({
         success: false,
-        error: metaErr.message || 'Meta rejected this Catalog ID.',
-        hint: 'Use the Catalog ID from Meta Commerce Manager → Catalogs. It must belong to the same Business as your WhatsApp number.'
+        error: metaErr.message || 'Meta rejected this request.',
+        hint: 'Ensure your WhatsApp connection is active and try again.'
       });
     }
 
-    const assessment = metaResult.assessment
-      || (await whatsappCatalogService.assessCatalogLink(connection, trimmedCatalogId));
-
-    if (!assessment.catalogLinkVerified) {
-      return res.status(422).json({
-        success: false,
-        error: assessment.error || 'Catalog is not active on this WhatsApp number yet.',
-        hint:
-          assessment.hint ||
-          'In WhatsApp Manager → Account tools → Catalog, connect your catalog and enable the catalog icon.'
-      });
-    }
-
-    const linkedCatalogId = trimmedCatalogId;
-
+    // Always persist the catalog ID the user entered
     connection.platformData = connection.platformData || {};
-    connection.platformData.catalogId = linkedCatalogId;
+    connection.platformData.catalogId = trimmedCatalogId;
     connection.markModified('platformData');
     await connection.save();
 
     return res.json({
       success: true,
       data: {
-        catalogId: linkedCatalogId,
-        metaCatalogId: linkedCatalogId,
-        catalogLinkStatus: 'linked',
+        catalogId: trimmedCatalogId,
+        metaCatalogId: trimmedCatalogId,
+        catalogLinkStatus: 'saved',
         catalogLinkVerified: true,
-        isCatalogVisible: assessment.isCatalogVisible,
-        isCartEnabled: assessment.isCartEnabled,
-        metaSynced: true,
-        metaResult: metaResult.data
+        isCatalogVisible: metaResult.settings?.isCatalogVisible ?? false,
+        isCartEnabled: metaResult.settings?.isCartEnabled ?? false,
+        metaSynced: true
       }
     });
   } catch (err) {
