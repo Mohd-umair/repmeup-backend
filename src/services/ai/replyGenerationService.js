@@ -239,9 +239,16 @@ async function callSelfAssessment(interaction, baseGuidelines, conversationTrans
 ${baseGuidelines}
 
 Reply with JSON only (no markdown):
-{"resolvable":true/false,"reason":"why not resolvable (if false)","confidence":0.0-1.0,"reply":"customer-facing reply","messageType":"small_talk|business|unclear","noReply":false}
+{"resolvable":true/false,"reason":"why not resolvable (if false)","confidence":0.0-1.0,"reply":"customer-facing reply text","messageType":"small_talk|business|unclear|closing","noReply":false}
 
-Rules: greeting/small talk → messageType small_talk, resolvable true, confidence 1.0. Unclear query → attempt a clarifying question (low confidence). Cannot resolve → resolvable false.`;
+CRITICAL RULES — you MUST follow all of these:
+1. greeting/small talk → messageType "small_talk", resolvable true, confidence 1.0, always include a friendly reply.
+2. Cannot resolve (missing private data, wrong business, etc.) → resolvable false, include a SHORT generic reply such as "I'm sorry, I'm unable to help with that. A team member will assist you shortly." OR set noReply true if no reply should be sent at all.
+3. NEVER omit the "reply" field unless noReply is explicitly true. An empty or missing reply with resolvable:false causes internal JSON to be delivered to the customer — this is a critical bug.
+4. Automated pleasantries / bot-like messages ("thank you so much, always a pleasure to connect, wishing you a wonderful day") → messageType "closing", noReply true, reply "".
+5. Message is from the wrong business or a competitor reference and you cannot help → resolvable false, short polite handoff reply, confidence < 0.5.
+6. Unclear query → attempt a clarifying question (low confidence).
+7. noReply true → reply field may be empty string "".`;
 
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
   const userContent = transcript
@@ -328,7 +335,8 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
       // messages before this AI call is made. Only 'small_talk' and 'business' messages reach here.
       const { raw, parsed } = await callSelfAssessment(interaction, baseGuidelines, conversationTranscript);
 
-      if (parsed && typeof parsed.reply === 'string') {
+      // Case 1 — ideal path: JSON parsed AND contains a customer-safe reply string.
+      if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim().length > 0) {
         const resolvable = parsed.resolvable !== false;
         const messageType = parsed.messageType || 'business';
         const noReply = parsed.noReply === true;
@@ -350,7 +358,77 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
         };
       }
 
-      // Parse failed — treat raw text as a resolvable business reply.
+      // Case 2 — JSON parsed but no customer-facing reply.
+      // This happens when the model returns resolvable:false / noReply:true without a reply field.
+      // NEVER use raw JSON text as the customer reply.
+      if (parsed) {
+        const confidence = typeof parsed.confidence === 'number'
+          ? Math.max(0, Math.min(1, parsed.confidence))
+          : kbBackedConfidence(relevantKB);
+
+        // Explicit noReply or closing signal — resolve conversation silently.
+        if (parsed.noReply === true || parsed.messageType === 'closing') {
+          logger.info('[AI] Self-assessment: noReply/closing signal — resolving silently', {
+            interactionId: interaction._id?.toString(),
+            messageType: parsed.messageType
+          });
+          return {
+            content: '',
+            confidence,
+            resolvable: true,
+            noReply: true,
+            messageType: parsed.messageType || 'closing',
+            resolvableReason: null,
+            generatedAt: new Date(),
+            usedKnowledgeBase: !!relevantKB?.length,
+            knowledgeBaseCount: relevantKB?.length || 0,
+            knowledgeBaseFallback
+          };
+        }
+
+        // resolvable:false without a reply — route to human, send handoff message.
+        logger.warn('[AI] Self-assessment returned resolvable:false or empty reply — routing to human', {
+          interactionId: interaction._id?.toString(),
+          resolvable: parsed.resolvable,
+          reason: parsed.reason
+        });
+        return {
+          content: '',
+          confidence,
+          resolvable: false,
+          noReply: false,
+          messageType: parsed.messageType || 'business',
+          resolvableReason: parsed.reason || 'Requires access to private account or system data',
+          generatedAt: new Date(),
+          usedKnowledgeBase: !!relevantKB?.length,
+          knowledgeBaseCount: relevantKB?.length || 0,
+          knowledgeBaseFallback
+        };
+      }
+
+      // Case 3 — JSON parse failed entirely.
+      // If raw output looks like internal JSON metadata, never send it to the customer.
+      const looksLikeInternalJson = /^\s*\{[\s\S]*"resolvable"/.test(raw);
+      if (looksLikeInternalJson) {
+        logger.warn('[AI] Self-assessment raw output looks like internal JSON — routing to human instead of sending', {
+          interactionId: interaction._id?.toString(),
+          rawPreview: raw.slice(0, 120)
+        });
+        return {
+          content: '',
+          confidence: kbBackedConfidence(relevantKB),
+          resolvable: false,
+          noReply: false,
+          messageType: 'business',
+          resolvableReason: 'AI response could not be parsed into a customer reply',
+          generatedAt: new Date(),
+          usedKnowledgeBase: !!relevantKB?.length,
+          knowledgeBaseCount: relevantKB?.length || 0,
+          knowledgeBaseFallback
+        };
+      }
+
+      // Case 4 — raw text is a plain non-JSON string (rare, valid fallback).
       return {
         content: raw,
         confidence: kbBackedConfidence(relevantKB),

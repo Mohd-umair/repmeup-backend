@@ -8,7 +8,7 @@ const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 const { emitToOrg } = require('../utils/socketEmitter');
-const { classifyMessage, countPreviousFallbacks } = require('../utils/messageIntentClassifier');
+const { classifyMessage, countPreviousFallbacks, isInternalAiPayload, isPleasantriesMessage, detectBotConversationLoop } = require('../utils/messageIntentClassifier');
 const { updateAIInsights } = require('../services/contactService');
 const { shouldSkipAiProcessingForSyncedInteraction } = require('../utils/syncInteractionBackfillGuard');
 
@@ -388,6 +388,50 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         return { sent: shouldSend, escalated: true, reason: 'gibberish_fallback' };
       }
       return { skipped: true, reason: 'gibberish_no_fallback_configured' };
+    }
+
+    // ─── LAYER 0.5: Bot-to-bot pleasantries loop detection ────────────────────
+    // Detects automated ping-pong loops where the other side is also a bot replying
+    // with polite closings. Resolves the conversation silently without any reply or
+    // AI credit spend. Must run BEFORE Layer 1 / Layer 3 / AI call.
+    if (isPleasantriesMessage(interactionForReply.content) || detectBotConversationLoop(interactionForReply)) {
+      logger.info('[Auto-reply] Layer 0.5: pleasantries/bot loop detected — resolving silently', {
+        interactionId: interactionForReply._id?.toString(),
+        content: interactionForReply.content?.slice(0, 60)
+      });
+      await Interaction.updateOne(
+        { _id: interactionForReply._id },
+        { $set: { status: 'resolved', resolvedAt: new Date(), chatOpen: false } }
+      );
+      try {
+        const fresh = await Interaction.findById(interactionForReply._id).lean();
+        if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+      } catch (_e) {}
+      return { skipped: true, reason: 'bot_pleasantries_loop_resolved' };
+    }
+
+    // ─── LAYER 0.6: Max auto-reply hard stop ──────────────────────────────────
+    // Enforce reply limit BEFORE generating an AI reply so bot-loop conversations
+    // cannot consume unlimited credits by exploiting the "send first, escalate second"
+    // ordering used later in the pipeline. Applies only to thread DMs.
+    const maxAutoReplies = organization.escalationSettings?.maxAutoReplies ?? 3;
+    if (threadDmReply && (interactionForReply.autoReplyCount || 0) >= maxAutoReplies) {
+      logger.info('[Auto-reply] Layer 0.6: max auto-replies reached — escalating without new reply', {
+        interactionId: interactionForReply._id?.toString(),
+        autoReplyCount: interactionForReply.autoReplyCount,
+        maxAutoReplies
+      });
+      await escalationService.escalateInteraction(
+        interactionForReply, organization,
+        [`Max auto-replies reached (${interactionForReply.autoReplyCount}/${maxAutoReplies})`],
+        'reply_limit',
+        {}
+      );
+      try {
+        const fresh = await Interaction.findById(interactionForReply._id).lean();
+        if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
+      } catch (_e) {}
+      return { skipped: true, escalated: true, reason: 'max_auto_replies_reached' };
     }
 
     // ─── LAYER 3: Conversation loop detection ──────────────────────────────────
@@ -1046,6 +1090,24 @@ async function getConnectionForReply(interaction) {
 const ALLOWED_CONNECTION_STATUS = ['connected', 'available'];
 
 async function sendReplyToPlatform(interaction, content, organization, confidence = null, messageType = null) {
+  // Defense-in-depth: never send internal AI metadata JSON to a customer.
+  // This catches any regression in the reply generation pipeline.
+  if (isInternalAiPayload(content)) {
+    logger.error('[Auto-reply] BLOCKED — attempted to send internal AI JSON as customer reply', {
+      interactionId: interaction._id?.toString(),
+      platform: interaction.platform,
+      contentPreview: String(content).slice(0, 120)
+    });
+    return false;
+  }
+
+  if (!content || !String(content).trim()) {
+    logger.warn('[Auto-reply] sendReplyToPlatform called with empty content — skipping send', {
+      interactionId: interaction._id?.toString()
+    });
+    return false;
+  }
+
   try {
     const connection = await getConnectionForReply(interaction);
     if (!connection || !ALLOWED_CONNECTION_STATUS.includes(connection.status) || !connection.isActive) {
