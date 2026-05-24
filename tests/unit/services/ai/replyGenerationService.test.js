@@ -508,6 +508,79 @@ describe('generateResponseOpenAI() — self-assessment mode', () => {
     );
     expect(result.resolvableReason).toBe('Requires access to private account or system data');
   });
+
+  // ── JSON leak regression tests (Bug 1 fix) ─────────────────────────────────
+
+  it('NEVER sends raw internal JSON when resolvable:false and reply is missing', async () => {
+    // Exact payload that was delivered to customers — wrong business, no reply field
+    const internalJson = JSON.stringify({
+      resolvable: false,
+      reason: 'Customer is repeatedly contacting the wrong business (Lulu Hypermarket UAE vs RepMeUp)',
+      confidence: 0.94,
+      messageType: 'business',
+      noReply: false
+    });
+    openaiClient.chatCompletion.mockResolvedValue(okChat(internalJson));
+
+    const result = await generateResponseOpenAI(
+      makeInteraction(), null, null, { withSelfAssessment: true }
+    );
+
+    // Must NOT contain the raw JSON string as content
+    expect(result.content).not.toContain('"resolvable"');
+    expect(result.content).not.toContain('Lulu Hypermarket');
+    // Must route to human
+    expect(result.resolvable).toBe(false);
+    expect(result.resolvableReason).toBeTruthy();
+  });
+
+  it('routes to human when JSON has resolvable:false with no reply field', async () => {
+    openaiClient.chatCompletion.mockResolvedValue(okChat(JSON.stringify({
+      resolvable: false,
+      reason: 'Cannot access private account data',
+      confidence: 0.85,
+      messageType: 'business'
+    })));
+
+    const result = await generateResponseOpenAI(
+      makeInteraction(), null, null, { withSelfAssessment: true }
+    );
+
+    expect(result.resolvable).toBe(false);
+    expect(result.resolvableReason).toBe('Cannot access private account data');
+    expect(result.content).toBe('');
+  });
+
+  it('returns noReply:true and empty content for closing/pleasantries JSON', async () => {
+    openaiClient.chatCompletion.mockResolvedValue(okChat(JSON.stringify({
+      resolvable: true,
+      confidence: 1.0,
+      messageType: 'closing',
+      noReply: true,
+      reply: ''
+    })));
+
+    const result = await generateResponseOpenAI(
+      makeInteraction(), null, null, { withSelfAssessment: true }
+    );
+
+    expect(result.noReply).toBe(true);
+    expect(result.messageType).toBe('closing');
+  });
+
+  it('blocks raw JSON-shaped text that failed to parse as content', async () => {
+    // Malformed JSON — parse will fail, but it looks like internal metadata
+    const malformedJson = '{"resolvable":false,"messageType":"business","confidence":0.9 BROKEN';
+    openaiClient.chatCompletion.mockResolvedValue(okChat(malformedJson));
+
+    const result = await generateResponseOpenAI(
+      makeInteraction(), null, null, { withSelfAssessment: true }
+    );
+
+    // Should not send the broken JSON as content; should route to human
+    expect(result.content).not.toContain('"resolvable"');
+    expect(result.resolvable).toBe(false);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
