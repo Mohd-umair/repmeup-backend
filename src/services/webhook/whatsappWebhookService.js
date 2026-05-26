@@ -704,6 +704,34 @@ async function processIncomingMessage(change, connection, rawPayload) {
  *
  * @param {object} status  { id, status, timestamp }
  */
+
+/** After a delivery webhook, push the updated thread to open inbox clients. */
+async function _emitInteractionUpdatedForReplyWamid(wamid) {
+  try {
+    const stub = await Interaction.findOne({
+      platform: 'whatsapp',
+      'replies.platformResponseId': wamid
+    })
+      .select('_id organization')
+      .lean();
+    if (!stub?._id) return;
+
+    const fresh = await Interaction.findById(stub._id).lean();
+    if (!fresh?.organization) return;
+
+    const orgId =
+      typeof fresh.organization.toString === 'function'
+        ? fresh.organization.toString()
+        : String(fresh.organization);
+    emitToOrg(orgId, 'interaction_updated', { interaction: fresh });
+  } catch (err) {
+    logger.warn('[WhatsApp] Failed to emit interaction_updated after status change', {
+      wamid,
+      error: err.message
+    });
+  }
+}
+
 async function processStatusUpdate(status) {
   if (!status?.id) return;
   logger.info('[WhatsApp] Status update', { id: status.id, status: status.status });
@@ -722,7 +750,21 @@ async function processStatusUpdate(status) {
     errorDetail
   );
 
+  const statusAt = new Date(parseInt(status.timestamp, 10) * 1000);
+
   if (status.status === 'failed') {
+    // Mark agent/manual inbox sends as failed so the UI shows "Not sent".
+    await Interaction.updateOne(
+      { platform: 'whatsapp', 'replies.platformResponseId': status.id },
+      {
+        $set: {
+          'replies.$.deliveryStatus': 'failed',
+          'replies.$.deliveryStatusAt': statusAt,
+          'replies.$.status': 'failed'
+        }
+      }
+    );
+
     // Drop failed campaign deliveries from inbox — only successfully sent messages belong there.
     await Interaction.updateOne(
       {
@@ -732,6 +774,8 @@ async function processStatusUpdate(status) {
       },
       { $pull: { replies: { platformResponseId: status.id } } }
     );
+
+    await _emitInteractionUpdatedForReplyWamid(status.id);
     return;
   }
 
@@ -741,10 +785,12 @@ async function processStatusUpdate(status) {
     {
       $set: {
         'replies.$.deliveryStatus': status.status,
-        'replies.$.deliveryStatusAt': new Date(parseInt(status.timestamp, 10) * 1000)
+        'replies.$.deliveryStatusAt': statusAt
       }
     }
   );
+
+  await _emitInteractionUpdatedForReplyWamid(status.id);
 }
 
 /**

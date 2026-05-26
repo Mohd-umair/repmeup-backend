@@ -24,6 +24,7 @@ jest.mock('../../../../src/models/Interaction', () => ({
   findOne: jest.fn(),
   findOneAndUpdate: jest.fn().mockResolvedValue(undefined),
   findByIdAndUpdate: jest.fn().mockResolvedValue(undefined),
+  findById: jest.fn().mockResolvedValue(null),
   updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
   find: jest.fn()
 }));
@@ -103,6 +104,7 @@ beforeEach(() => {
   Interaction.findOneAndUpdate.mockReset().mockResolvedValue(undefined);
   Interaction.updateOne.mockReset().mockResolvedValue({ modifiedCount: 1 });
   Interaction.findByIdAndUpdate.mockReset().mockResolvedValue(undefined);
+  Interaction.findById.mockReset().mockResolvedValue(null);
   Interaction.find.mockReset();
 
   PlatformConnection.findOne.mockReset();
@@ -247,9 +249,9 @@ describe('processWhatsAppWebhook', () => {
     });
 
     expect(Interaction.updateOne).toHaveBeenCalledWith(
-      { platformId: 'wamid.s', platform: 'whatsapp' },
+      { platform: 'whatsapp', 'replies.platformResponseId': 'wamid.s' },
       expect.objectContaining({
-        $set: expect.objectContaining({ 'metadata.deliveryStatus': 'delivered' })
+        $set: expect.objectContaining({ 'replies.$.deliveryStatus': 'delivered' })
       })
     );
   });
@@ -279,7 +281,7 @@ describe('processWhatsAppWebhook', () => {
     });
 
     expect(Interaction.updateOne).toHaveBeenCalledWith(
-      { platformId: 'wamid.s', platform: 'whatsapp' },
+      { platform: 'whatsapp', 'replies.platformResponseId': 'wamid.s' },
       expect.any(Object)
     );
   });
@@ -498,14 +500,44 @@ describe('processStatusUpdate', () => {
     expect(Interaction.updateOne).not.toHaveBeenCalled();
   });
 
-  test('updates metadata.deliveryStatus and converts timestamp to Date', async () => {
+  test('updates replies deliveryStatus and converts timestamp to Date', async () => {
+    Interaction.findOne.mockReturnValueOnce(chainable({ _id: 'int-1', organization: 'org-1' }));
+    Interaction.findById.mockReturnValueOnce(chainable({ _id: 'int-1', organization: 'org-1', replies: [] }));
+
     await svc.processStatusUpdate({
       id: 'wamid.abc', status: 'delivered', timestamp: '1700000000'
     });
+
     const [filter, update] = Interaction.updateOne.mock.calls[0];
-    expect(filter).toEqual({ platformId: 'wamid.abc', platform: 'whatsapp' });
-    expect(update.$set['metadata.deliveryStatus']).toBe('delivered');
-    expect(update.$set['metadata.statusTimestamp']).toBeInstanceOf(Date);
-    expect(update.$set['metadata.statusTimestamp'].getTime()).toBe(1700000000 * 1000);
+    expect(filter).toEqual({ platform: 'whatsapp', 'replies.platformResponseId': 'wamid.abc' });
+    expect(update.$set['replies.$.deliveryStatus']).toBe('delivered');
+    expect(update.$set['replies.$.deliveryStatusAt']).toBeInstanceOf(Date);
+    expect(update.$set['replies.$.deliveryStatusAt'].getTime()).toBe(1700000000 * 1000);
+    expect(emitToOrg).toHaveBeenCalledWith('org-1', 'interaction_updated', expect.any(Object));
+  });
+
+  test('failed status marks inbox reply as failed and emits interaction_updated', async () => {
+    Interaction.findOne.mockReturnValueOnce(chainable({ _id: 'int-2', organization: 'org-2' }));
+    Interaction.findById.mockReturnValueOnce(chainable({
+      _id: 'int-2',
+      organization: 'org-2',
+      replies: [{ platformResponseId: 'wamid.fail', status: 'failed', deliveryStatus: 'failed' }]
+    }));
+
+    await svc.processStatusUpdate({
+      id: 'wamid.fail', status: 'failed', timestamp: '1700000001'
+    });
+
+    expect(Interaction.updateOne).toHaveBeenCalledWith(
+      { platform: 'whatsapp', 'replies.platformResponseId': 'wamid.fail' },
+      {
+        $set: {
+          'replies.$.deliveryStatus': 'failed',
+          'replies.$.deliveryStatusAt': expect.any(Date),
+          'replies.$.status': 'failed'
+        }
+      }
+    );
+    expect(emitToOrg).toHaveBeenCalledWith('org-2', 'interaction_updated', expect.any(Object));
   });
 });
