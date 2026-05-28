@@ -59,6 +59,13 @@ exports.uploadHeaderExample = async (req, res, next) => {
  */
 exports.createTemplate = async (req, res, next) => {
   try {
+    const orgId = req.user.organization._id;
+    const entitlementsService = require('../services/entitlementsService');
+    const WhatsAppTemplate = require('../models/WhatsAppTemplate');
+    const { FEATURE_KEYS } = require('../config/featureCatalog');
+    const templateCount = await WhatsAppTemplate.countDocuments({ organization: orgId });
+    await entitlementsService.assert(orgId.toString(), FEATURE_KEYS.WHATSAPP_TEMPLATES_MAX, templateCount + 1);
+
     const { connectionId, name, category, language, parameter_format, components } = req.body;
 
     const template = await templateService.createTemplate(

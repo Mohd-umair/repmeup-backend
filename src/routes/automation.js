@@ -5,6 +5,8 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middlewares/auth');
+const { requireFeature } = require('../middlewares/requireFeature');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const automationHubController = require('../controllers/automationHubController');
 const escalationController = require('../controllers/escalationController');
 const reviewController = require('../controllers/reviewCollectionController');
@@ -26,7 +28,8 @@ router.get('/reviews/stats', protect, reviewController.getStats);
 
 // ── WhatsApp Catalog Keyword Automation ──────────────────────────────────────
 const waKeywordController = require('../controllers/waKeywordAutomationController');
-router.get('/wa-keyword', protect, waKeywordController.getSettings);
-router.put('/wa-keyword', protect, waKeywordController.updateSettings);
+const requireWaCatalog = requireFeature(FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED);
+router.get('/wa-keyword', protect, requireWaCatalog, waKeywordController.getSettings);
+router.put('/wa-keyword', protect, requireWaCatalog, waKeywordController.updateSettings);
 
 module.exports = router;

@@ -7,6 +7,7 @@ const userActivityLogService = require('../services/userActivityLogService');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
 const cacheService = require('../services/cacheService');
 const entitlementsService = require('../services/entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 
 // @desc    Get all users in organization
 // @route   GET /api/users
@@ -159,6 +160,19 @@ exports.createUser = async (req, res, next) => {
 
     // Check user limits via entitlementsService (single source of truth).
     const currentUserCount = await User.countDocuments({ organization: organizationId, isActive: true });
+    try {
+      await entitlementsService.assert(organizationId.toString(), FEATURE_KEYS.AGENTS_ENABLED);
+    } catch (err) {
+      if (err?.name === 'EntitlementError') {
+        return res.status(err.statusCode || 403).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+          featureKey: err.featureKey
+        });
+      }
+      throw err;
+    }
     const { allowed, limit: maxUsers } = await entitlementsService.canAddResource(
       organizationId,
       'users',

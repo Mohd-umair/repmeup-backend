@@ -175,7 +175,7 @@ exports.getInteraction = async (req, res, next) => {
 
     const rawLimit = parseInt(req.query.msgLimit, 10);
     const msgLimit = Math.min(
-      Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 10, 1),
+      Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 1),
       300
     );
     const msgBeforeRaw = req.query.msgBefore;
@@ -322,6 +322,12 @@ exports.getInteraction = async (req, res, next) => {
 
     interaction.metadata = interaction.metadata || {};
     interaction.metadata.incomingMessages = incomingMessages;
+    interaction.metadata.messagePagination = {
+      hasOlderMessages,
+      oldestMessageTimestamp,
+      totalMessages,
+      returnedMessages
+    };
 
     const interactionObj = interaction;
 
@@ -1645,6 +1651,13 @@ exports.getWhatsAppMedia = async (req, res, next) => {
       download.contentType ||
       mediaInfo.mimeType ||
       'application/octet-stream';
+
+    const msgFilename =
+      msg.attachmentDisplayName ||
+      (typeof msg.text === 'string' && /\.(pdf|doc|docx)$/i.test(msg.text.trim()) ? msg.text.trim() : null);
+    if (msgFilename) {
+      res.set('Content-Disposition', `inline; filename="${msgFilename.replace(/"/g, '')}"`);
+    }
 
     res.set('Content-Type', contentType);
     res.set('Cache-Control', 'private, max-age=3600');

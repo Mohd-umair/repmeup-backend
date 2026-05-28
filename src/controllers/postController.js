@@ -26,6 +26,14 @@ function respondEntitlement(res, err) {
     meta: err.meta
   });
 }
+
+/** Assert + consume monthly post quota before scheduling or publishing. */
+async function assertAndConsumePostQuota(organizationId) {
+  const orgIdStr = organizationId.toString();
+  await entitlementsService.assert(orgIdStr, FEATURE_KEYS.POSTS_PER_MONTH, 1);
+  await entitlementsService.consume(orgIdStr, FEATURE_KEYS.POSTS_PER_MONTH, 1);
+}
+
 const auditLogController = require('./auditLogController');
 const logger = require('../config/logger');
 const multer = require('multer');
@@ -412,6 +420,13 @@ exports.publishPost = async (req, res) => {
         return res.status(400).json({ message: 'Platform and content are required' });
       }
 
+      try {
+        await assertAndConsumePostQuota(organizationId);
+      } catch (err) {
+        if (err?.name === 'EntitlementError') return respondEntitlement(res, err);
+        throw err;
+      }
+
       const connection = await postPublishService.resolvePlatformConnection(organizationId, platform);
 
       const mediaFields = await postPublishService.resolveMediaForPost(
@@ -524,6 +539,13 @@ exports.schedulePost = async (req, res) => {
       const scheduleLeadCheck = assertScheduledForMinLead(scheduledFor);
       if (!scheduleLeadCheck.ok) {
         return res.status(400).json({ message: scheduleLeadCheck.message });
+      }
+
+      try {
+        await assertAndConsumePostQuota(organizationId);
+      } catch (err) {
+        if (err?.name === 'EntitlementError') return respondEntitlement(res, err);
+        throw err;
       }
 
       let query = {

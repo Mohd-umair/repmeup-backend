@@ -4,6 +4,24 @@
  */
 const WhatsAppFlow = require('../models/WhatsAppFlow');
 const logger = require('../config/logger');
+const entitlementsService = require('../services/entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
+
+async function assertFlowCap(organizationId) {
+  const orgIdStr = organizationId.toString();
+  const count = await WhatsAppFlow.countDocuments({ organization: organizationId });
+  const quota = await entitlementsService.quota(orgIdStr, FEATURE_KEYS.AUTOMATION_FLOWS_MAX);
+  if (!quota.isUnlimited && count >= quota.limit) {
+    const err = new Error(
+      `WhatsApp automation flow limit reached (${count}/${quota.limit}). Upgrade to add more flows.`
+    );
+    err.name = 'EntitlementError';
+    err.statusCode = 402;
+    err.code = 'QUOTA_EXCEEDED';
+    err.featureKey = FEATURE_KEYS.AUTOMATION_FLOWS_MAX;
+    throw err;
+  }
+}
 
 exports.listFlows = async (req, res, next) => {
   try {
@@ -18,6 +36,7 @@ exports.listFlows = async (req, res, next) => {
 
 exports.createFlow = async (req, res, next) => {
   try {
+    await assertFlowCap(req.user.organization._id);
     const flow = await WhatsAppFlow.create({
       ...req.body,
       organization: req.user.organization._id,
@@ -26,6 +45,15 @@ exports.createFlow = async (req, res, next) => {
     });
     return res.status(201).json({ success: true, data: flow });
   } catch (err) {
+    if (err?.name === 'EntitlementError') {
+      return res.status(err.statusCode || 402).json({
+        success: false,
+        code: err.code,
+        error: err.message,
+        featureKey: err.featureKey,
+        meta: err.meta
+      });
+    }
     logger.error('[whatsappFlowController] createFlow', { error: err.message });
     next(err);
   }

@@ -544,6 +544,12 @@ async function processIncomingMessage(change, connection, rawPayload) {
     const rawType = md.mediaType || 'file';
     msgExtra.attachmentType =
       rawType === 'document' ? 'file' : rawType === 'sticker' ? 'image' : rawType;
+    if (rawType === 'document') {
+      msgExtra.attachmentDisplayName =
+        (typeof md.content === 'string' && md.content.trim() && md.content !== '[Document]')
+          ? md.content.trim()
+          : undefined;
+    }
   }
 
   const { interaction: savedInteraction, skipped } = await upsertWhatsAppThread({
@@ -825,6 +831,11 @@ async function _checkWaKeywordAutomation({ textContent, connection, organization
 
   const catalogId = connection.platformData?.catalogId || connection.metadata?.catalogId;
   if (!catalogId) return;
+
+  const entitlementsService = require('../entitlementsService');
+  const { FEATURE_KEYS } = require('../../config/featureCatalog');
+  const allowed = await entitlementsService.can(organizationId.toString(), FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED);
+  if (!allowed) return;
 
   const whatsappCatalogService = require('../../integrations/whatsapp/whatsappCatalogService');
 

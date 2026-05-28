@@ -62,7 +62,15 @@ const FEATURE_KEYS = Object.freeze({
   COMMERCE_PRODUCTS_MAX: 'commerce.products.max',
   COMMERCE_WA_CATALOG_ENABLED: 'commerce.whatsappCatalog.enabled',
   COMMERCE_AI_ASSIST_ENABLED: 'commerce.aiAssist.enabled',
-  COMMERCE_AUTONOMOUS_AGENT: 'commerce.autonomousAgent.enabled'
+  COMMERCE_AUTONOMOUS_AGENT: 'commerce.autonomousAgent.enabled',
+
+  // ── Campaigns & WhatsApp broadcast ────────────────────────────────────────
+  CAMPAIGNS_ENABLED: 'campaigns.enabled',
+  CAMPAIGNS_RECIPIENTS_MONTHLY: 'campaigns.recipients.monthly',
+  WHATSAPP_TEMPLATES_MAX: 'whatsapp.templates.max',
+  WHATSAPP_BROADCAST_ENABLED: 'whatsapp.broadcast.enabled',
+  AUTOMATION_FLOWS_MAX: 'automation.flows.max',
+  CONTACTS_MAX: 'contacts.max'
 });
 
 /**
@@ -345,12 +353,107 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     sortOrder: 40
+  },
+
+  // ── Campaigns ─────────────────────────────────────────────────────────────
+  {
+    key: FEATURE_KEYS.CAMPAIGNS_ENABLED,
+    label: 'WhatsApp campaigns',
+    description: 'Master switch for WhatsApp template campaign module.',
+    category: 'campaigns',
+    kind: 'boolean',
+    defaultValue: true,
+    sortOrder: 10
+  },
+  {
+    key: FEATURE_KEYS.CAMPAIGNS_RECIPIENTS_MONTHLY,
+    label: 'Campaign recipients / month',
+    description: 'Maximum WhatsApp template messages sent via campaigns per billing month.',
+    category: 'campaigns',
+    kind: 'limit',
+    defaultValue: -1,
+    unit: 'recipients',
+    resetPeriod: 'monthly',
+    sortOrder: 20
+  },
+  {
+    key: FEATURE_KEYS.WHATSAPP_BROADCAST_ENABLED,
+    label: 'Bulk template broadcast',
+    description: 'Allow launching bulk WhatsApp template campaigns.',
+    category: 'campaigns',
+    kind: 'boolean',
+    defaultValue: true,
+    sortOrder: 30
+  },
+
+  // ── Integrations (WhatsApp templates, flows, CRM) ─────────────────────────
+  {
+    key: FEATURE_KEYS.WHATSAPP_TEMPLATES_MAX,
+    label: 'Approved WA templates stored',
+    description: 'Maximum WhatsApp message templates synced/stored for the org.',
+    category: 'integrations',
+    kind: 'limit',
+    defaultValue: -1,
+    unit: 'count',
+    sortOrder: 10
+  },
+  {
+    key: FEATURE_KEYS.AUTOMATION_FLOWS_MAX,
+    label: 'WhatsApp automation flows',
+    description: 'Maximum active WhatsApp automation flows.',
+    category: 'integrations',
+    kind: 'limit',
+    defaultValue: -1,
+    unit: 'count',
+    sortOrder: 20
+  },
+  {
+    key: FEATURE_KEYS.CONTACTS_MAX,
+    label: 'CRM contacts stored',
+    description: 'Maximum contacts stored in the CRM.',
+    category: 'integrations',
+    kind: 'limit',
+    defaultValue: -1,
+    unit: 'count',
+    sortOrder: 30
   }
 ];
 
 const BUCKET_KEYS = CATALOG
   .filter((c) => c.kind === 'limit' && c.resetPeriod && c.resetPeriod !== 'none')
   .map((c) => c.key);
+
+/** Keys with backend assert/consume/requireFeature wired — shown in admin as "enforced". */
+const ENFORCED_FEATURE_KEYS = new Set([
+  FEATURE_KEYS.USERS_MAX,
+  FEATURE_KEYS.ACCOUNTS_MAX,
+  FEATURE_KEYS.STORAGE_GB,
+  FEATURE_KEYS.CREDITS_AUTO_REPLY,
+  FEATURE_KEYS.CREDITS_POST_CREATION,
+  FEATURE_KEYS.CREDITS_AI_GENERAL,
+  FEATURE_KEYS.INBOX_UNIQUE_CONTACTS,
+  FEATURE_KEYS.INBOX_BUCKET_CREATE,
+  FEATURE_KEYS.KB_ENTRIES_MAX,
+  FEATURE_KEYS.KB_UPLOAD_URL,
+  FEATURE_KEYS.KB_UPLOAD_PDF,
+  FEATURE_KEYS.POSTS_PER_MONTH,
+  FEATURE_KEYS.POSTS_PLATFORMS_MAX,
+  FEATURE_KEYS.POSTS_AI_VARIANTS_MAX,
+  FEATURE_KEYS.POSTS_TRENDS,
+  FEATURE_KEYS.POSTS_SAVE_DRAFT,
+  FEATURE_KEYS.AUTO_REPLY_ENABLED,
+  FEATURE_KEYS.ANALYTICS_ADVANCED,
+  FEATURE_KEYS.AGENTS_ENABLED,
+  FEATURE_KEYS.VOICE_IVR_ENABLED,
+  FEATURE_KEYS.COMMERCE_PRODUCTS_MAX,
+  FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED,
+  FEATURE_KEYS.CAMPAIGNS_ENABLED,
+  FEATURE_KEYS.CAMPAIGNS_RECIPIENTS_MONTHLY,
+  FEATURE_KEYS.WHATSAPP_BROADCAST_ENABLED,
+  FEATURE_KEYS.WHATSAPP_TEMPLATES_MAX,
+  FEATURE_KEYS.AUTOMATION_FLOWS_MAX,
+  FEATURE_KEYS.CONTACTS_MAX
+]);
 
 const CATALOG_BY_KEY = Object.freeze(
   CATALOG.reduce((acc, row) => {
@@ -359,9 +462,40 @@ const CATALOG_BY_KEY = Object.freeze(
   }, {})
 );
 
+/** Case-insensitive lookup — Feature model historically lowercased dotted keys in MongoDB. */
+const CATALOG_BY_LOWER_KEY = Object.freeze(
+  CATALOG.reduce((acc, row) => {
+    acc[row.key.toLowerCase()] = acc[row.key.toLowerCase()] || row;
+    return acc;
+  }, {})
+);
+
+const ENFORCED_FEATURE_KEYS_LOWER = Object.freeze(
+  new Set([...ENFORCED_FEATURE_KEYS].map((k) => k.toLowerCase()))
+);
+
+function normalizeFeatureKeyForLookup(key) {
+  return String(key || '').toLowerCase();
+}
+
+function isEnforcedFeatureKey(key) {
+  return ENFORCED_FEATURE_KEYS_LOWER.has(normalizeFeatureKeyForLookup(key));
+}
+
+function resolveCatalogEntry(featureKey) {
+  if (!featureKey) return null;
+  return CATALOG_BY_KEY[featureKey] || CATALOG_BY_LOWER_KEY[normalizeFeatureKeyForLookup(featureKey)] || null;
+}
+
 module.exports = {
   FEATURE_KEYS,
   CATALOG,
   CATALOG_BY_KEY,
-  BUCKET_KEYS
+  CATALOG_BY_LOWER_KEY,
+  BUCKET_KEYS,
+  ENFORCED_FEATURE_KEYS,
+  ENFORCED_FEATURE_KEYS_LOWER,
+  normalizeFeatureKeyForLookup,
+  isEnforcedFeatureKey,
+  resolveCatalogEntry
 };

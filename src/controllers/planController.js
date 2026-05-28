@@ -1,6 +1,7 @@
 const Plan = require('../models/Plan');
 const planAdminService = require('../services/planAdminService');
 const entitlementsService = require('../services/entitlementsService');
+const { buildPublicPlanCard } = require('../services/planPresentationService');
 const { syncPlanWithRazorpay, RazorpayPlanSyncError } = require('../services/razorpayPlanService');
 const Subscription = require('../models/Subscription');
 const { CATALOG_BY_KEY } = require('../config/featureCatalog');
@@ -66,14 +67,11 @@ exports.getPlans = async (req, res, next) => {
     // Transform to match frontend expectation (object with planId as keys)
     const plansObject = {};
     plans.forEach(plan => {
+      const card = buildPublicPlanCard(plan);
       plansObject[plan.planId] = {
-        name: plan.name,
-        tier: plan.tier,
-        price: plan.price,
-        limits: plan.limits,
-        features: plan.features,
-        badge: plan.badge,
-        badgeColor: plan.badgeColor
+        ...card,
+        // Legacy `features` string array — deprecated; prefer `features: { key, label }[]`
+        legacyFeatures: plan.features || []
       };
     });
 

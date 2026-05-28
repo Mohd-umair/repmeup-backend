@@ -151,6 +151,17 @@ async function resolveContact(payload, organizationId) {
 
     // 4. Create new contact
     if (!contact) {
+      const storedCount = await Contact.countDocuments({ organization: orgId, isDeleted: false });
+      const contactQuota = await entitlementsService.quota(orgId, FEATURE_KEYS.CONTACTS_MAX);
+      if (!contactQuota.isUnlimited && storedCount >= contactQuota.limit) {
+        logger.warn('[contactService] contacts.max reached — skipping new contact create', {
+          organizationId: orgId,
+          storedCount,
+          limit: contactQuota.limit
+        });
+        return null;
+      }
+
       contact = await Contact.create({
         organization: orgId,
         primaryName: name || username || 'Unknown',

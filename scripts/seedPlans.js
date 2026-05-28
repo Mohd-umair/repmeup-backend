@@ -6,6 +6,13 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const Plan = require('../src/models/Plan');
+const {
+  FREE_ENTITLEMENTS,
+  STARTER_ENTITLEMENTS,
+  PRO_ENTITLEMENTS,
+  BUSINESS_ENTITLEMENTS,
+  ENTERPRISE_ENTITLEMENTS
+} = require('./planTierEntitlements');
 
 // MongoDB connection
 const connectDB = async () => {
@@ -48,20 +55,8 @@ const defaultPlans = [
     // the new entitlementsService consumes first; legacy `limits` is the
     // back-compat fallback only.
     entitlements: {
-      'users.max':                       { limit: 1 },
-      'credits.autoReply.monthly':       { limit: 100 },
-      'credits.postCreation.monthly':    { limit: 50 },
-      'inbox.uniqueContacts.monthly':    { limit: 200 },
-      'kb.entries.max':                  { limit: 2 },
-      'kb.upload.url':                   { enabled: false },
-      'kb.upload.pdf':                   { enabled: true },
-      'posts.platforms.maxPerPost':      { limit: 1 },
-      'posts.ai.variants.max':           { limit: 2 },
-      'posts.trends':                    { enabled: false },
-      'posts.logo':                      { enabled: false },
-      'posts.saveDraft':                 { enabled: false },
-      'inbox.bucket.chat':               { enabled: false },
-      'inbox.bucket.create':             { enabled: false }
+      ...FREE_ENTITLEMENTS,
+      'inbox.uniqueContacts.monthly': { limit: 200 }
     },
     isActive: true,
     isPublic: true,
@@ -92,6 +87,7 @@ const defaultPlans = [
       'team_collaboration',
       'email_support'
     ],
+    entitlements: STARTER_ENTITLEMENTS,
     isActive: true,
     isPublic: true,
     displayOrder: 2,
@@ -125,6 +121,7 @@ const defaultPlans = [
       'bulk_scheduling',
       'advanced_reporting'
     ],
+    entitlements: PRO_ENTITLEMENTS,
     badge: 'MOST POPULAR',
     badgeColor: 'blue',
     highlightColor: '#3B82F6',
@@ -162,6 +159,7 @@ const defaultPlans = [
       'advanced_security',
       'audit_logs'
     ],
+    entitlements: BUSINESS_ENTITLEMENTS,
     badge: 'BEST VALUE',
     badgeColor: 'purple',
     highlightColor: '#8B5CF6',
@@ -198,6 +196,7 @@ const defaultPlans = [
       'compliance_certifications',
       '24_7_phone_support'
     ],
+    entitlements: ENTERPRISE_ENTITLEMENTS,
     badge: 'CONTACT SALES',
     badgeColor: 'indigo',
     highlightColor: '#6366F1',
