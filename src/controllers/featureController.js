@@ -12,6 +12,7 @@
 
 const Feature = require('../models/Feature');
 const entitlementsService = require('../services/entitlementsService');
+const { isEnforcedFeatureKey } = require('../config/featureCatalog');
 
 /**
  * GET /api/super-admin/features
@@ -20,7 +21,10 @@ const entitlementsService = require('../services/entitlementsService');
  */
 exports.listCatalog = async (req, res, next) => {
   try {
-    const items = await Feature.getCatalog();
+    const items = (await Feature.getCatalog()).map((row) => ({
+      ...row,
+      enforced: isEnforcedFeatureKey(row.key)
+    }));
 
     const grouped = items.reduce((acc, row) => {
       const cat = row.category || 'general';

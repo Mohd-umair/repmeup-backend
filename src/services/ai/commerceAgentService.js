@@ -85,6 +85,14 @@ async function tryAutonomousCommerceAction({ organizationId, senderId, text, con
     const catalogId = connection.platformData?.catalogId || connection.metadata?.catalogId;
     if (!catalogId) return;
 
+    const entitlementsService = require('../entitlementsService');
+    const { FEATURE_KEYS } = require('../../config/featureCatalog');
+    const catalogAllowed = await entitlementsService.can(
+      organizationId.toString(),
+      FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED
+    );
+    if (!catalogAllowed) return;
+
     // Send the product card
     const whatsappCatalogService = require('../../integrations/whatsapp/whatsappCatalogService');
     const msgResult = await whatsappCatalogService.sendProductMessage(

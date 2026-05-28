@@ -203,6 +203,20 @@ async function deductCreditsSafely(organizationId, operation, interaction, aiApi
  */
 async function generateAutoReply(interaction, organizationId, organizationSettings = {}) {
   try {
+    try {
+      await entitlementsService.assert(organizationId.toString(), FEATURE_KEYS.AUTO_REPLY_ENABLED);
+    } catch (err) {
+      if (err?.name === 'EntitlementError') {
+        return {
+          eligible: false,
+          reason: err.message,
+          code: err.code,
+          featureKey: err.featureKey
+        };
+      }
+      throw err;
+    }
+
     if (!(await canAutoReply(interaction, organizationSettings))) {
       return {
         eligible: false,

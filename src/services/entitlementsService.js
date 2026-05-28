@@ -98,13 +98,34 @@ const HARD_DEFAULTS = Object.freeze({
  *
  * Order: plan.entitlements[key] → plan.limits.<legacy> → plan.features[]string → catalog default.
  */
+/**
+ * Read plan.entitlements[key] with case-insensitive fallback for legacy lowercase keys.
+ */
+function readPlanEntitlement(plan, featureKey) {
+  const entitlements = plan?.entitlements;
+  if (!entitlements) return null;
+  if (typeof entitlements.get === 'function') {
+    const direct = entitlements.get(featureKey);
+    if (direct !== undefined && direct !== null) return direct;
+    const lower = String(featureKey).toLowerCase();
+    for (const [k, v] of entitlements.entries()) {
+      if (String(k).toLowerCase() === lower) return v;
+    }
+    return null;
+  }
+  if (entitlements[featureKey] !== undefined && entitlements[featureKey] !== null) {
+    return entitlements[featureKey];
+  }
+  const lower = String(featureKey).toLowerCase();
+  const matchKey = Object.keys(entitlements).find((k) => String(k).toLowerCase() === lower);
+  return matchKey ? entitlements[matchKey] : null;
+}
+
 function resolveFeatureFromPlan(plan, catalogEntry) {
   const empty = { source: 'default' };
 
   // 1. Admin-edited entitlements Map ────────────────────────────────────────
-  const entRaw =
-    plan?.entitlements?.[catalogEntry.key] ||
-    (typeof plan?.entitlements?.get === 'function' ? plan.entitlements.get(catalogEntry.key) : null);
+  const entRaw = readPlanEntitlement(plan, catalogEntry.key);
   if (entRaw && (entRaw.enabled !== undefined || entRaw.limit !== undefined || entRaw.value !== undefined)) {
     return { ...empty, source: 'plan.entitlements', ...normalizeValue(catalogEntry, entRaw) };
   }
@@ -409,6 +430,25 @@ async function canAddResource(organizationId, kind, currentCountOverride, delta 
   return { allowed, limit, current, remaining, isUnlimited };
 }
 
+function resolvePlanFeature(plan, featureKey) {
+  const catalogEntry = CATALOG_BY_KEY[featureKey];
+  if (!catalogEntry) return null;
+  return resolveFeatureFromPlan(plan || {}, catalogEntry);
+}
+
+function buildLegacyLimitsFromPlan(plan) {
+  const limits = {};
+  for (const [legacyField, key] of Object.entries(LEGACY_LIMIT_TO_KEY)) {
+    const catalogEntry = CATALOG_BY_KEY[key];
+    const resolved = resolveFeatureFromPlan(plan || {}, catalogEntry);
+    limits[legacyField] =
+      resolved?.kind === 'limit'
+        ? resolved.limit
+        : (HARD_DEFAULTS.limits[legacyField] ?? -1);
+  }
+  return limits;
+}
+
 module.exports = {
   // New API
   getEntitlements,
@@ -418,10 +458,13 @@ module.exports = {
   consume,
   invalidateEntitlements,
   EntitlementError,
+  resolvePlanFeature,
+  buildLegacyLimitsFromPlan,
   // Legacy API (still used by accounts/users middlewares — keep stable)
   canAddResource,
   // Test hooks
   _resolveFromDb: resolveFromDb,
+  _resolveFeatureFromPlan: resolveFeatureFromPlan,
   _LEGACY_LIMIT_TO_KEY: LEGACY_LIMIT_TO_KEY,
   _LEGACY_USAGE_TO_KEY: LEGACY_USAGE_TO_KEY
 };

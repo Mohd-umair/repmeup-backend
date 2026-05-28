@@ -26,6 +26,8 @@ const FEATURE_CATEGORIES = [
   'kb',
   'automation',
   'analytics',
+  'commerce',
+  'campaigns',
   'integrations'
 ];
 const RESET_PERIODS = ['none', 'daily', 'monthly'];
@@ -36,9 +38,9 @@ const featureSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
-      lowercase: true,
       trim: true
-      // e.g. 'inbox.bucket.chat', 'kb.entries.max', 'credits.autoReply.monthly'
+      // e.g. 'inbox.bucket.chat', 'commerce.whatsappCatalog.enabled'
+      // NOTE: do NOT lowercase — catalog keys are case-sensitive identifiers.
     },
     label: {
       type: String,

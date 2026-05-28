@@ -336,20 +336,9 @@ exports.createManualKnowledgeBase = async (req, res) => {
 exports.createPDFKnowledgeBase = async (req, res) => {
   try {
     const orgId = req.user.organization._id || req.user.organization;
+    await entitlementsService.assert(orgId.toString(), FEATURE_KEYS.KB_UPLOAD_PDF);
     await assertKbEntryCapAvailable(orgId);
-  } catch (error) {
-    if (error?.name === 'EntitlementError') {
-      return res.status(error.statusCode || 402).json({
-        success: false,
-        code: error.code,
-        error: error.message,
-        featureKey: error.featureKey,
-        meta: error.meta
-      });
-    }
-    return res.status(500).json({ success: false, error: 'Failed to validate plan limits' });
-  }
-  try {
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -389,6 +378,15 @@ exports.createPDFKnowledgeBase = async (req, res) => {
       message: 'Knowledge base created from PDF successfully'
     });
   } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
     console.error('Create PDF knowledge base error:', error);
     res.status(500).json({
       success: false,

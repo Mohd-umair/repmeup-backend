@@ -2,6 +2,33 @@ const Media = require('../models/Media');
 const path = require('path');
 const fs = require('fs');
 const storageService = require('../services/storageService');
+const entitlementsService = require('../services/entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
+
+async function assertStorageAvailable(organizationId, additionalBytes) {
+  const q = await entitlementsService.quota(organizationId, FEATURE_KEYS.STORAGE_GB);
+  if (q.isUnlimited) return;
+
+  const orgObjectId = organizationId;
+  const agg = await Media.aggregate([
+    { $match: { organization: orgObjectId } },
+    { $group: { _id: null, total: { $sum: '$size' } } }
+  ]);
+  const usedBytes = agg[0]?.total || 0;
+  const limitBytes = q.limit * 1024 * 1024 * 1024;
+  if (usedBytes + additionalBytes > limitBytes) {
+    const usedGb = (usedBytes / (1024 ** 3)).toFixed(2);
+    const err = new Error(
+      `Storage limit reached (${usedGb} GB / ${q.limit} GB). Upgrade to upload more media.`
+    );
+    err.name = 'EntitlementError';
+    err.statusCode = 402;
+    err.code = 'QUOTA_EXCEEDED';
+    err.featureKey = FEATURE_KEYS.STORAGE_GB;
+    err.meta = { limit: q.limit, usedGb };
+    throw err;
+  }
+}
 
 /**
  * Media Library Controller
@@ -22,9 +49,11 @@ exports.uploadMedia = async (req, res) => {
       });
     }
 
+    const organizationId = req.user.organization?._id || req.user.organization;
+    await assertStorageAvailable(organizationId, req.file.size || 0);
+
     const { tags, description } = req.body;
     const file = req.file;
-    const organizationId = req.user.organization?._id || req.user.organization;
 
     // Determine media type
     let mediaType = 'video';
@@ -91,6 +120,15 @@ exports.uploadMedia = async (req, res) => {
       data: media
     });
   } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
     console.error('❌ [Media Library] Upload error:', error);
     console.error('❌ [Media Library] Error stack:', error.stack);
     res.status(500).json({

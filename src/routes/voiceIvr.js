@@ -3,6 +3,8 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middlewares/auth');
+const { requireFeature } = require('../middlewares/requireFeature');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const controller = require('../controllers/voiceIvrController');
 
 // ─── Public Twilio webhooks (no auth; signature validated in controller) ────
@@ -12,6 +14,7 @@ router.post('/webhooks/recording', express.urlencoded({ extended: false }), cont
 
 // ─── Protected routes ───────────────────────────────────────────────────────
 router.use(protect);
+router.use(requireFeature(FEATURE_KEYS.VOICE_IVR_ENABLED));
 
 // Credentials
 router.get('/credentials', controller.getCredentials);

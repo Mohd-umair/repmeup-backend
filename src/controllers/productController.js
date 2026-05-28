@@ -197,6 +197,25 @@ exports.getProduct = async (req, res, next) => {
 exports.createProduct = async (req, res, next) => {
   try {
     const orgId = req.user.organization._id;
+    const orgIdStr = orgId.toString();
+    const entitlementsService = require('../services/entitlementsService');
+    const { FEATURE_KEYS } = require('../config/featureCatalog');
+
+    await entitlementsService.assert(orgIdStr, FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED);
+
+    const activeCount = await Product.countDocuments({ organization: orgId, isActive: true });
+    const productQuota = await entitlementsService.quota(orgIdStr, FEATURE_KEYS.COMMERCE_PRODUCTS_MAX);
+    if (!productQuota.isUnlimited && activeCount >= productQuota.limit) {
+      const err = new Error(
+        `Product limit reached (${activeCount}/${productQuota.limit}). Upgrade to add more products.`
+      );
+      err.name = 'EntitlementError';
+      err.statusCode = 402;
+      err.code = 'QUOTA_EXCEEDED';
+      err.featureKey = FEATURE_KEYS.COMMERCE_PRODUCTS_MAX;
+      throw err;
+    }
+
     const { name, description, price, currency, discountPercent, images, paymentUrl, sizes, colors, stock } = req.body;
 
     if (!name || price === undefined || price === null) {

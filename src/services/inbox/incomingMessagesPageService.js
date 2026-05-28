@@ -3,7 +3,7 @@
 const mongoose = require('mongoose');
 
 /** Default DM thread chunks — semantic “latest N inbound” after global chronological sort */
-const DEFAULT_INCOMING_MSG_LIMIT = 10;
+const DEFAULT_INCOMING_MSG_LIMIT = 20;
 const MAX_INCOMING_MSG_LIMIT = 300;
 
 /** Match frontend `normalizeTimestampMs`: unix *seconds* are below this cutoff */

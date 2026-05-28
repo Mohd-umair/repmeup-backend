@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const analyticsController = require('../controllers/analyticsController');
 const { protect } = require('../middlewares/auth');
+const { requireFeature } = require('../middlewares/requireFeature');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const {
   validateAnalyticsDashboard,
   validateAnalyticsExport,
@@ -25,13 +27,13 @@ router.post('/dashboard', validateAnalyticsDashboard, analyticsController.getDas
 router.post('/platform/:platform', validateAnalyticsPlatform, analyticsController.getPlatformAnalytics);
 
 // Export analytics data
-router.post('/export', validateAnalyticsExport, analyticsController.exportData);
+router.post('/export', requireFeature(FEATURE_KEYS.ANALYTICS_ADVANCED), validateAnalyticsExport, analyticsController.exportData);
 
 // Agent analytics
-router.post('/agents', validateAnalyticsAgents, analyticsController.getAgentAnalytics);
+router.post('/agents', requireFeature(FEATURE_KEYS.ANALYTICS_ADVANCED), validateAnalyticsAgents, analyticsController.getAgentAnalytics);
 
 // Engagement analytics
-router.post('/engagement', validateAnalyticsEngagement, analyticsController.getEngagementAnalytics);
+router.post('/engagement', requireFeature(FEATURE_KEYS.ANALYTICS_ADVANCED), validateAnalyticsEngagement, analyticsController.getEngagementAnalytics);
 
 // Content performance (AI vs Human) and suggested improvements
 router.get('/content-performance', analyticsController.getContentPerformance);

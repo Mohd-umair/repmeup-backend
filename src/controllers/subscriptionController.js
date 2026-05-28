@@ -5,6 +5,7 @@ const User = require('../models/User');
 const ScheduledPost = require('../models/ScheduledPost');
 const AICreditUsage = require('../models/AICreditUsage');
 const entitlementsService = require('../services/entitlementsService');
+const { buildPublicPlanCard } = require('../services/planPresentationService');
 const { cancelRazorpaySubscription } = require('./razorpayController');
 
 /**
@@ -96,39 +97,47 @@ exports.getLimits = async (req, res, next) => {
     subscription.usage.aiCreditsThisMonth = aiCreditsThisMonth;
     await subscription.save();
 
-    // Calculate remaining quota
-    const canConnectMore = subscription.limits.maxAccounts === -1 || 
-                          subscription.usage.connectedAccounts < subscription.limits.maxAccounts;
+    const orgId = req.user.organization._id;
+    const ent = await entitlementsService.getEntitlements(orgId);
+    const resolvedLimits = ent.limits;
 
-    const remaining = subscription.limits.maxAccounts === -1 ? 
-                     Infinity : 
-                     Math.max(0, subscription.limits.maxAccounts - subscription.usage.connectedAccounts);
+    const canConnectMore =
+      resolvedLimits.maxAccounts === -1 ||
+      subscription.usage.connectedAccounts < resolvedLimits.maxAccounts;
 
-    // Get next tier info from database
-    const currentTier = subscription.tier;
-    const nextTier = await Plan.getNextTierPlan(currentTier);
+    const remaining =
+      resolvedLimits.maxAccounts === -1
+        ? Infinity
+        : Math.max(0, resolvedLimits.maxAccounts - subscription.usage.connectedAccounts);
+
+    const currentTier = ent.tier ?? subscription.tier;
+    const nextTierPlan = await Plan.getNextTierPlan(currentTier);
+    const nextTier = nextTierPlan
+      ? {
+          ...buildPublicPlanCard(nextTierPlan),
+          planId: nextTierPlan.planId,
+          name: nextTierPlan.name,
+          tier: nextTierPlan.tier,
+          price: nextTierPlan.price,
+          maxAccounts: buildPublicPlanCard(nextTierPlan).limits.maxAccounts
+        }
+      : null;
 
     res.status(200).json({
       success: true,
       data: {
-        plan: subscription.planName,
-        planId: subscription.planId,
-        tier: subscription.tier,
+        plan: ent.planName || subscription.planName,
+        planId: ent.planId || subscription.planId,
+        tier: ent.tier ?? subscription.tier,
         status: subscription.status,
         limits: {
-          ...subscription.limits,
-          maxAICreditsPerMonth: subscription.limits.maxAICreditsPerMonth || 500
+          ...resolvedLimits,
+          maxAICreditsPerMonth: resolvedLimits.maxAICreditsPerMonth || 500
         },
         usage: subscription.usage,
         canConnectMore,
         remaining,
-        nextTier: nextTier ? {
-          name: nextTier.name,
-          tier: nextTier.tier,
-          maxAccounts: nextTier.limits.maxAccounts,
-          price: nextTier.price,
-          planId: nextTier.planId
-        } : null,
+        nextTier,
         billing: {
           currentPeriodStart: subscription.currentPeriodStart ?? null,
           currentPeriodEnd: subscription.currentPeriodEnd ?? null,
@@ -280,15 +289,11 @@ exports.getPlans = async (req, res, next) => {
 
     const plans = await Plan.getPublicPlans();
     const plansObject = {};
-    plans.forEach(plan => {
+    plans.forEach((plan) => {
+      const card = buildPublicPlanCard(plan);
       plansObject[plan.planId] = {
-        name: plan.name,
-        tier: plan.tier,
-        price: plan.price,
-        limits: plan.limits,
-        features: plan.features,
-        badge: plan.badge,
-        badgeColor: plan.badgeColor
+        ...card,
+        legacyFeatures: plan.features || []
       };
     });
 

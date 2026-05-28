@@ -19,6 +19,8 @@ const {
   assertCampaignReadyForTemplate
 } = require('../utils/whatsappCampaignBuilder');
 const { parseCsv, looksLikeHeaderRow } = require('../utils/csvParser');
+const entitlementsService = require('./entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const {
   inferDefaultRegionFromDisplayNumber,
   sanitizeDefaultRegion,
@@ -1199,6 +1201,11 @@ async function launchCampaign({ orgId, campaignId /* templateComponents intentio
     err.statusCode = 400;
     throw err;
   }
+
+  const orgIdStr = orgId.toString();
+  await entitlementsService.assert(orgIdStr, FEATURE_KEYS.WHATSAPP_BROADCAST_ENABLED);
+  await entitlementsService.assert(orgIdStr, FEATURE_KEYS.CAMPAIGNS_RECIPIENTS_MONTHLY, total);
+  await entitlementsService.consume(orgIdStr, FEATURE_KEYS.CAMPAIGNS_RECIPIENTS_MONTHLY, total);
 
   // Freeze the full template definition so the worker can build per-recipient components
   campaign.templateSnapshot = {

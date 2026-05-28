@@ -2,19 +2,22 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { protect } = require('../middlewares/auth');
+const { requireFeature } = require('../middlewares/requireFeature');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const productController = require('../controllers/productController');
 
 const upload = multer({ storage: multer.memoryStorage() });
+const requireCatalog = requireFeature(FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED);
 
 router.use(protect);
 
 // ── Static/named routes MUST come before /:id ──────────────────────────────
 // Import products — Excel/CSV
-router.post('/import', upload.single('file'), productController.importProducts);
+router.post('/import', requireCatalog, upload.single('file'), productController.importProducts);
 // Import from external platforms
-router.post('/import/woocommerce', productController.importFromWooCommerce);
-router.post('/import/shopify', productController.importFromShopify);
-router.post('/import/url', productController.importFromUrl);
+router.post('/import/woocommerce', requireCatalog, productController.importFromWooCommerce);
+router.post('/import/shopify', requireCatalog, productController.importFromShopify);
+router.post('/import/url', requireCatalog, productController.importFromUrl);
 // Comment-to-DM settings
 router.get('/settings/comment-to-dm', productController.getCommentToDmSettings);
 router.put('/settings/comment-to-dm', productController.updateCommentToDmSettings);
@@ -30,7 +33,7 @@ router.get('/resolve-post', productController.resolvePostId);
 router.get('/instagram-media', productController.getInstagramMedia);
 
 // Backfill numeric media IDs for all products that only have shortcodes stored
-router.post('/backfill-post-ids', productController.backfillPostNumericIds);
+router.post('/backfill-post-ids', requireCatalog, productController.backfillPostNumericIds);
 
 // Posts by Instagram post ID
 router.get('/by-post/:postId', productController.getProductsByPost);
@@ -38,17 +41,17 @@ router.get('/by-post/:postId', productController.getProductsByPost);
 // ── Catalog CRUD ────────────────────────────────────────────────────────────
 router.get('/', productController.getProducts);
 router.get('/:id', productController.getProduct);
-router.post('/', productController.createProduct);
-router.put('/:id', productController.updateProduct);
-router.delete('/:id', productController.deleteProduct);
+router.post('/', requireCatalog, productController.createProduct);
+router.put('/:id', requireCatalog, productController.updateProduct);
+router.delete('/:id', requireCatalog, productController.deleteProduct);
 
 // ── Per-product DM configuration ────────────────────────────────────────────
 router.get('/:id/dm-config', productController.getProductDmConfig);
-router.put('/:id/dm-config', productController.updateProductDmConfig);
+router.put('/:id/dm-config', requireCatalog, productController.updateProductDmConfig);
 
 // ── Post-product mapping ────────────────────────────────────────────────────
-router.post('/:id/posts', productController.linkPost);
-router.post('/:id/posts/unlink', productController.unlinkPost);   // body: { postId } — safe for full-URL postIds
-router.delete('/:id/posts/:postId', productController.unlinkPost); // legacy param-based route
+router.post('/:id/posts', requireCatalog, productController.linkPost);
+router.post('/:id/posts/unlink', requireCatalog, productController.unlinkPost);   // body: { postId } — safe for full-URL postIds
+router.delete('/:id/posts/:postId', requireCatalog, productController.unlinkPost); // legacy param-based route
 
 module.exports = router;
