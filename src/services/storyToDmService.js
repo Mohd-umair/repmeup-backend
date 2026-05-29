@@ -22,7 +22,7 @@ const {
   filterProductsByPerProductKeywords,
   MAX_PICKER_ELEMENTS
 } = require('./commentToDmProductHelpers');
-const { sendProductCtaDm } = require('./commentToDmService');
+const { sendProductCtaDm, createPickerPendingOrders, cancelSiblingPickerPendingOrders } = require('./commentToDmService');
 
 const svcLogger = logger.createChild({ module: 'storyToDmService' });
 
@@ -142,7 +142,7 @@ async function processStoryEngagement(interaction, organizationId) {
         accessToken,
         pageId,
         connType,
-        triggerType
+        orgDoc
       });
     } else {
       await sendSingleProductFlow({
@@ -229,7 +229,8 @@ async function shouldSkipDedup(organizationId, instagramUserId, storyMediaId, tr
   const alreadySent = await ProductOrder.exists({
     organization: organizationId,
     instagramUserId: String(instagramUserId),
-    instagramPostId: String(storyMediaId)
+    instagramPostId: String(storyMediaId),
+    status: { $nin: ['picker_pending', 'cancelled'] }
   });
   if (alreadySent) {
     svcLogger.info('[storyToDm] Skipping — ProductOrder dedup', { instagramUserId, storyMediaId });
@@ -318,21 +319,44 @@ async function sendWelcomeIfConfigured(settings, instagramUserId, username, acce
 
 async function sendStoryProductPickerFlow(ctx) {
   const {
-    interaction, organizationId, products, storyMediaId, instagramUserId, username, accessToken, pageId, connType
+    interaction, organizationId, products, storyMediaId, instagramUserId, username,
+    accessToken, pageId, connType, orgDoc
   } = ctx;
+  const sfSettings = orgDoc?.salesFlowSettings || {};
   const selectionToken = nanoid(24);
   const candidateProductIds = products.map(p => p._id);
+
+  let orderTokensByProductId = {};
+  if (products.length <= MAX_PICKER_ELEMENTS) {
+    orderTokensByProductId = await createPickerPendingOrders({
+      organizationId,
+      products,
+      postId: storyMediaId,
+      commenterId: instagramUserId,
+      commentInteractionId: interaction._id
+    });
+  }
 
   try {
     if (products.length > MAX_PICKER_ELEMENTS) {
       const text = buildNumberedPickerText(products, username);
       await instagramService.sendMessage(instagramUserId, text, accessToken, pageId, false, connType);
     } else {
-      const elements = buildProductPickerElements(products, selectionToken);
+      const elements = buildProductPickerElements(
+        products,
+        selectionToken,
+        sfSettings,
+        orderTokensByProductId
+      );
       await instagramService.sendGenericTemplateMessage(instagramUserId, elements, accessToken, pageId, connType);
     }
   } catch (pickerErr) {
     svcLogger.warn('[storyToDm] Picker failed — text fallback', { error: pickerErr.message });
+    await cancelSiblingPickerPendingOrders({
+      organizationId,
+      instagramUserId,
+      instagramPostId: storyMediaId
+    });
     const text = buildNumberedPickerText(products, username);
     await instagramService.sendMessage(instagramUserId, text, accessToken, pageId, false, connType);
   }

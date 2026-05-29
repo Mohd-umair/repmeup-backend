@@ -904,6 +904,10 @@ exports.updateCommentToDmSettings = async (req, res, next) => {
     allowed.forEach(f => {
       if (req.body[f] !== undefined) update[`commentToDmSettings.${f}`] = req.body[f];
     });
+    if (req.body.deduplicateDms !== undefined) {
+      update['commentToDmSettings.deduplicateDms'] =
+        req.body.deduplicateDms === true || req.body.deduplicateDms === 'true';
+    }
 
     const org = await Organization.findByIdAndUpdate(
       req.user.organization._id,

@@ -114,6 +114,23 @@ async function processCommentForProduct(interaction, organizationId) {
     if (settings.deduplicateDms !== false) {
       const skip = await shouldSkipDedup(organizationId, commenterId, postId);
       if (skip) return;
+
+      const reserved = await reserveDedupSlot(
+        organizationId,
+        commenterId,
+        postId,
+        interaction._id,
+        usePicker
+      );
+      if (!reserved) return;
+    } else {
+      svcLogger.info('[commentToDm] Dedup decision', {
+        deduplicateDms: false,
+        commenterId,
+        postId,
+        skipped: false,
+        reason: 'dedup_disabled'
+      });
     }
 
     const orgDoc = await Organization.findById(organizationId).select('commentToDmSettings salesFlowSettings');
@@ -252,14 +269,76 @@ async function shortcodeFallbackLookup(interaction, organizationId, postId) {
   }
 }
 
+const ACTIVE_DEDUP_STAGES = [
+  'awaiting_product_selection',
+  'initial_cta_sent',
+  'details_sent',
+  'payment_link_sent'
+];
+
+const NON_DEDUP_ORDER_STATUSES = ['picker_pending', 'cancelled'];
+
+async function cancelSiblingPickerPendingOrders({
+  organizationId,
+  instagramUserId,
+  instagramPostId,
+  exceptOrderId = null,
+  exceptProductId = null
+}) {
+  const filter = {
+    organization: organizationId,
+    instagramUserId: String(instagramUserId),
+    instagramPostId: String(instagramPostId),
+    status: 'picker_pending'
+  };
+  if (exceptOrderId) filter._id = { $ne: exceptOrderId };
+  if (exceptProductId) filter.product = { $ne: exceptProductId };
+
+  await ProductOrder.updateMany(filter, { $set: { status: 'cancelled' } });
+}
+
+async function createPickerPendingOrders({
+  organizationId,
+  products,
+  postId,
+  commenterId,
+  commentInteractionId
+}) {
+  const orderTokensByProductId = {};
+  const pickerProducts = products.slice(0, MAX_PICKER_ELEMENTS);
+
+  for (const p of pickerProducts) {
+    const orderToken = nanoid(24);
+    orderTokensByProductId[String(p._id)] = orderToken;
+    await ProductOrder.create({
+      organization: organizationId,
+      product: p._id,
+      instagramUserId: String(commenterId),
+      instagramPostId: String(postId),
+      commentInteractionId,
+      orderToken,
+      status: 'picker_pending'
+    });
+  }
+
+  return orderTokensByProductId;
+}
+
 async function shouldSkipDedup(organizationId, commenterId, postId) {
   const alreadySent = await ProductOrder.exists({
     organization: organizationId,
     instagramUserId: String(commenterId),
-    instagramPostId: String(postId)
+    instagramPostId: String(postId),
+    status: { $nin: NON_DEDUP_ORDER_STATUSES }
   });
   if (alreadySent) {
-    svcLogger.info('[commentToDm] Skipping — ProductOrder dedup', { commenterId, postId });
+    svcLogger.info('[commentToDm] Dedup decision', {
+      deduplicateDms: true,
+      commenterId,
+      postId,
+      skipped: true,
+      reason: 'product_order_exists'
+    });
     return true;
   }
 
@@ -267,14 +346,59 @@ async function shouldSkipDedup(organizationId, commenterId, postId) {
     organization: organizationId,
     instagramUserId: String(commenterId),
     postId: String(postId),
-    stage: { $in: ['awaiting_product_selection', 'initial_cta_sent', 'details_sent', 'payment_link_sent'] }
+    stage: { $in: ACTIVE_DEDUP_STAGES }
   });
   if (pendingPicker) {
-    svcLogger.info('[commentToDm] Skipping — active sales state exists', { commenterId, postId });
+    svcLogger.info('[commentToDm] Dedup decision', {
+      deduplicateDms: true,
+      commenterId,
+      postId,
+      skipped: true,
+      reason: 'active_sales_state'
+    });
     return true;
   }
 
+  svcLogger.info('[commentToDm] Dedup decision', {
+    deduplicateDms: true,
+    commenterId,
+    postId,
+    skipped: false,
+    reason: 'none'
+  });
   return false;
+}
+
+/**
+ * Atomically reserve a dedup slot before sending to close the check-then-act race.
+ */
+async function reserveDedupSlot(organizationId, commenterId, postId, interactionId, usePicker) {
+  try {
+    await SalesConversationState.create({
+      organization: organizationId,
+      instagramUserId: String(commenterId),
+      postId: String(postId),
+      stage: usePicker ? 'awaiting_product_selection' : 'initial_cta_sent',
+      selectionToken: null,
+      candidateProductIds: [],
+      commentInteractionId: interactionId,
+      productOrderId: null,
+      lastStageAt: new Date()
+    });
+    return true;
+  } catch (err) {
+    if (err.code === 11000) {
+      svcLogger.info('[commentToDm] Dedup decision', {
+        deduplicateDms: true,
+        commenterId,
+        postId,
+        skipped: true,
+        reason: 'reservation_conflict'
+      });
+      return false;
+    }
+    throw err;
+  }
 }
 
 async function resetDailyCounterIfNeeded(orgDoc) {
@@ -326,7 +450,11 @@ async function postPublicStub(interaction, settings, commenterUsername, accessTo
 }
 
 async function sendProductPickerFlow(ctx) {
-  const { interaction, organizationId, products, postId, commenterId, commenterUsername, accessToken, pageId, connType } = ctx;
+  const {
+    interaction, organizationId, products, postId, commenterId, commenterUsername,
+    accessToken, pageId, connType, orgDoc
+  } = ctx;
+  const sfSettings = orgDoc?.salesFlowSettings || {};
   const selectionToken = nanoid(24);
   const candidateProductIds = products.map(p => p._id);
 
@@ -336,12 +464,28 @@ async function sendProductPickerFlow(ctx) {
     selectionToken
   });
 
+  let orderTokensByProductId = {};
+  if (products.length <= MAX_PICKER_ELEMENTS) {
+    orderTokensByProductId = await createPickerPendingOrders({
+      organizationId,
+      products,
+      postId,
+      commenterId,
+      commentInteractionId: interaction._id
+    });
+  }
+
   try {
     if (products.length > MAX_PICKER_ELEMENTS) {
       const text = buildNumberedPickerText(products, commenterUsername);
       await instagramService.sendPrivateReply(interaction.platformId, text, accessToken, pageId, connType);
     } else {
-      const elements = buildProductPickerElements(products, selectionToken);
+      const elements = buildProductPickerElements(
+        products,
+        selectionToken,
+        sfSettings,
+        orderTokensByProductId
+      );
       await instagramService.sendPrivateReplyGenericTemplate(
         interaction.platformId,
         elements,
@@ -352,6 +496,11 @@ async function sendProductPickerFlow(ctx) {
     }
   } catch (pickerErr) {
     svcLogger.warn('[commentToDm] Product picker DM failed — numbered text fallback', { error: pickerErr.message });
+    await cancelSiblingPickerPendingOrders({
+      organizationId,
+      instagramUserId: commenterId,
+      instagramPostId: postId
+    });
     const text = buildNumberedPickerText(products, commenterUsername);
     try {
       await instagramService.sendPrivateReply(interaction.platformId, text, accessToken, pageId, connType);
@@ -468,17 +617,39 @@ async function completeProductSelection({
   if (!conn) return { ok: false, reason: 'no_connection' };
 
   const { accessToken, pageId, connType } = connectionContext(conn);
-  const orderToken = nanoid(24);
 
-  const productOrder = await ProductOrder.create({
+  await cancelSiblingPickerPendingOrders({
+    organizationId,
+    instagramUserId,
+    instagramPostId: postId,
+    exceptProductId: productId
+  });
+
+  let productOrder = await ProductOrder.findOne({
     organization: organizationId,
-    product: product._id,
+    product: productId,
     instagramUserId: String(instagramUserId),
     instagramPostId: String(postId),
-    commentInteractionId: state.commentInteractionId,
-    orderToken,
-    status: 'dm_sent'
+    status: 'picker_pending'
   });
+
+  let orderToken;
+  if (productOrder) {
+    orderToken = productOrder.orderToken;
+    productOrder.status = 'dm_sent';
+    await productOrder.save();
+  } else {
+    orderToken = nanoid(24);
+    productOrder = await ProductOrder.create({
+      organization: organizationId,
+      product: product._id,
+      instagramUserId: String(instagramUserId),
+      instagramPostId: String(postId),
+      commentInteractionId: state.commentInteractionId,
+      orderToken,
+      status: 'dm_sent'
+    });
+  }
 
   await sendProductCtaDm({
     recipientMode: 'user',
@@ -569,5 +740,9 @@ module.exports = {
   processCommentForProduct,
   completeProductSelection,
   buildTemplate,
-  sendProductCtaDm
+  sendProductCtaDm,
+  shouldSkipDedup,
+  cancelSiblingPickerPendingOrders,
+  createPickerPendingOrders,
+  NON_DEDUP_ORDER_STATUSES
 };

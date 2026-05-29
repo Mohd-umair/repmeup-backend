@@ -51,7 +51,7 @@ const productOrderSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['dm_sent', 'payment_initiated', 'paid', 'cancelled'],
+    enum: ['picker_pending', 'dm_sent', 'payment_initiated', 'paid', 'cancelled'],
     default: 'dm_sent'
   },
 

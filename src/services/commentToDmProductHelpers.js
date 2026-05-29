@@ -87,21 +87,38 @@ function productImageUrl(product) {
 
 /**
  * Build Generic Template elements for product picker (max 10).
+ * Uses per-product dmConfig CTA buttons when configured; falls back to Select/PICK.
  */
-function buildProductPickerElements(products, selectionToken) {
+function buildProductPickerElements(products, selectionToken, sfSettings = {}, orderTokensByProductId = {}) {
   const list = products.slice(0, MAX_PICKER_ELEMENTS);
   return list.map((p) => {
+    const productId = String(p._id);
+    const effectiveDmConfig = buildEffectiveDmConfig(p, sfSettings);
+    const orderToken = orderTokensByProductId[productId];
+    const paymentUrlWithToken = p.paymentUrl && orderToken
+      ? `${p.paymentUrl}${p.paymentUrl.includes('?') ? '&' : '?'}ref=${orderToken}`
+      : '';
+    const ctaButtons = orderToken
+      ? buildCtaButtons(effectiveDmConfig, orderToken, paymentUrlWithToken)
+      : [];
+
     const element = {
-      title: String(p.name || 'Product').slice(0, MAX_TITLE),
-      subtitle: formatProductPrice(p).slice(0, MAX_TITLE),
-      buttons: [{
-        type: 'postback',
-        title: 'Select',
-        payload: `PICK:${p._id}:${selectionToken}`
-      }]
+      title: String(effectiveDmConfig.ctaTitle || p.name || 'Product').slice(0, MAX_TITLE),
+      subtitle: String(effectiveDmConfig.ctaSubtitle || formatProductPrice(p)).slice(0, MAX_TITLE),
+      buttons: ctaButtons.length
+        ? ctaButtons
+        : [{
+          type: 'postback',
+          title: 'Select',
+          payload: `PICK:${p._id}:${selectionToken}`
+        }]
     };
-    const img = productImageUrl(p);
-    if (img) element.image_url = img;
+
+    const imgUrl = String(effectiveDmConfig.ctaImageUrl || productImageUrl(p)).trim();
+    if (imgUrl && /^https:\/\//i.test(imgUrl)) {
+      element.image_url = imgUrl;
+    }
+
     return element;
   });
 }

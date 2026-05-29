@@ -351,6 +351,18 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
       return;
     }
 
+    const wasPickerPending = order.status === 'picker_pending';
+    if (wasPickerPending) {
+      order.status = 'dm_sent';
+      await order.save();
+      await commentToDmService.cancelSiblingPickerPendingOrders({
+        organizationId,
+        instagramUserId,
+        instagramPostId: order.instagramPostId,
+        exceptOrderId: order._id
+      });
+    }
+
     // Resolve a working IG connection
     const conn = await resolveIgConnection(organizationId, platformConnectionId);
     if (!conn) {
@@ -364,6 +376,27 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
       instagramUserId,
       postId: order.instagramPostId
     });
+
+    if (!state) {
+      state = await SalesConversationState.create({
+        organization: organizationId,
+        instagramUserId,
+        postId: order.instagramPostId,
+        productOrderId: order._id,
+        stage: 'initial_cta_sent',
+        lastStageAt: new Date()
+      });
+    } else if (wasPickerPending && state.stage === 'awaiting_product_selection') {
+      state.productOrderId = order._id;
+      state.stage = 'initial_cta_sent';
+      state.selectionToken = null;
+      state.candidateProductIds = [];
+      state.lastStageAt = new Date();
+      await state.save();
+    } else if (!state.productOrderId) {
+      state.productOrderId = order._id;
+      await state.save();
+    }
 
     if (action === 'details') {
       await sendProductDetails(instagramUserId, order.product, conn);
