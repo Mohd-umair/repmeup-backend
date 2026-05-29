@@ -140,8 +140,69 @@ function buildInstagramDmPlaceholderText(attachmentType, igPostMediaId) {
   if (igPostMediaId) return '[Shared Instagram post]';
   if (t === 'ig_reel' || t === 'reel') return '[Shared Instagram reel]';
   if (t === 'story' || t === 'ig_story') return '[Shared Instagram story]';
+  if (t === 'story_mention' || t === 'ig_story_mention') return '[Story mention]';
   if (attachmentType) return `[${attachmentType}]`;
   return '';
+}
+
+/**
+ * Detect story reply or story @mention from Instagram Messaging webhook payload.
+ * @returns {{ storyMediaId: string|null, triggerType: 'story_reply'|'story_mention'|null, replyText: string }}
+ */
+function extractStoryContext(message) {
+  if (!message) {
+    return { storyMediaId: null, triggerType: null, replyText: '' };
+  }
+
+  const replyText = (message.text || '').trim();
+  const replyStoryId = message.reply_to?.story?.id;
+  if (replyStoryId) {
+    return {
+      storyMediaId: String(replyStoryId),
+      triggerType: 'story_reply',
+      replyText
+    };
+  }
+
+  const atts = message.attachments || [];
+  for (const att of atts) {
+    const t = String(att?.type || '').toLowerCase();
+    if (t === 'story_mention' || t === 'ig_story_mention') {
+      const p = att.payload || {};
+      const storyId = p.story_media_id || p.media_id || p.id || null;
+      if (storyId) {
+        return {
+          storyMediaId: String(storyId),
+          triggerType: 'story_mention',
+          replyText
+        };
+      }
+    }
+  }
+
+  return { storyMediaId: null, triggerType: null, replyText };
+}
+
+async function lookupLinkedStoryProducts(organizationId, storyMediaId) {
+  if (!storyMediaId) return { linkedProductCount: 0, linkedProductNames: [] };
+  try {
+    const Product = require('../../models/Product');
+    const linked = await Product.find({
+      organization: organizationId,
+      isActive: true,
+      $or: [
+        { instagramStoryIds: String(storyMediaId) },
+        { instagramPostIds: String(storyMediaId) }
+      ]
+    }).select('name').limit(20).lean();
+    return {
+      linkedProductCount: linked.length,
+      linkedProductNames: linked.map(p => p.name).filter(Boolean)
+    };
+  } catch (err) {
+    logger.warn('[instagramWebhookService] story linked product lookup failed', { error: err.message });
+    return { linkedProductCount: 0, linkedProductNames: [] };
+  }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -259,10 +320,15 @@ async function handleInstagramMessage(payload, organizationId) {
 
       const partnerId = sharePostEcho ? event.recipient?.id : event.sender?.id;
       const mid = message.mid;
+      const storyContext = sharePostEcho
+        ? { storyMediaId: null, triggerType: null, replyText: '' }
+        : extractStoryContext(message);
       const { attachmentType, attachmentUrl, igPostMediaId, shareTitle } = buildInstagramDmAttachmentFields(message);
       const text =
         message.text ||
         shareTitle ||
+        (storyContext.triggerType === 'story_mention' ? '[Story mention]' : null) ||
+        (storyContext.triggerType === 'story_reply' && !message.text ? '[Story reply]' : null) ||
         buildInstagramDmPlaceholderText(attachmentType, igPostMediaId);
 
       if (!mid || !partnerId) {
@@ -346,6 +412,20 @@ async function handleInstagramMessage(payload, organizationId) {
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
+      if (storyContext.storyMediaId && storyContext.triggerType) {
+        const { linkedProductCount, linkedProductNames } = await lookupLinkedStoryProducts(
+          organizationId,
+          storyContext.storyMediaId
+        );
+        updateFields['metadata.isStoryEngagement'] = true;
+        updateFields['metadata.storyMediaId'] = storyContext.storyMediaId;
+        updateFields['metadata.storyTriggerType'] = storyContext.triggerType;
+        updateFields['metadata.storyReplyText'] = storyContext.replyText;
+        updateFields['metadata.postId'] = storyContext.storyMediaId;
+        updateFields['metadata.linkedProductCount'] = linkedProductCount;
+        updateFields['metadata.linkedProductNames'] = linkedProductNames;
+      }
+
       // Backfill chatRef into $set for existing interactions that don't have it
       if (existing && !existing.chatRef && _igDmChatRef?.chatRef) {
         updateFields.chatNumber = _igDmChatRef.chatNumber;
@@ -368,6 +448,10 @@ async function handleInstagramMessage(payload, organizationId) {
       if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
       if (attachmentType) incomingMsg.attachmentType = attachmentType;
       if (igPostMediaId) incomingMsg.igPostMediaId = igPostMediaId;
+      if (storyContext.storyMediaId) {
+        incomingMsg.storyMediaId = storyContext.storyMediaId;
+        incomingMsg.storyTriggerType = storyContext.triggerType;
+      }
 
       await Interaction.updateOne(
         {
@@ -450,6 +534,23 @@ async function handleInstagramMessage(payload, organizationId) {
           postUrl = await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mediaId);
         }
 
+        let linkedProductCount = 0;
+        let linkedProductNames = [];
+        if (mediaId) {
+          try {
+            const Product = require('../../models/Product');
+            const linked = await Product.find({
+              organization: organizationId,
+              instagramPostIds: String(mediaId),
+              isActive: true
+            }).select('name').limit(20).lean();
+            linkedProductCount = linked.length;
+            linkedProductNames = linked.map(p => p.name).filter(Boolean);
+          } catch (linkErr) {
+            logger.warn('[instagramWebhookService] linked product lookup failed', { error: linkErr.message });
+          }
+        }
+
         const updatePayload = {
           organization: organizationId,
           platform: 'instagram',
@@ -457,7 +558,12 @@ async function handleInstagramMessage(payload, organizationId) {
           platformId: comment.id,
           content: comment.text,
           author,
-          metadata: { postId: mediaId, postUrl },
+          metadata: {
+            postId: mediaId,
+            postUrl,
+            linkedProductCount,
+            linkedProductNames
+          },
           platformCreatedAt
         };
         if (platformConnectionId) updatePayload.platformConnection = platformConnectionId;
@@ -626,6 +732,7 @@ async function handleInstagramMessage(payload, organizationId) {
 
 module.exports = {
   handleInstagramMessage,
-  // Exported for use in webhookController when it needs to do a direct profile lookup
-  fetchInstagramAuthorProfile
+  fetchInstagramAuthorProfile,
+  extractStoryContext,
+  buildInstagramDmPlaceholderText
 };

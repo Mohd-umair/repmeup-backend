@@ -138,6 +138,19 @@ const DEFAULT_SALES_FLOW_SETTINGS = {
   whatsappCaptureConfirmation: "Thank you! We'll contact you on WhatsApp soon. 🙏"
 };
 
+const DEFAULT_STORY_TO_DM_SETTINGS = {
+  enabled: false,
+  triggerOnReply: true,
+  triggerOnMention: true,
+  triggerKeywords: [],
+  defaultProductId: null,
+  deduplicateDms: true,
+  maxDmsPerDay: 200,
+  welcomeTitle: '',
+  welcomeSubtitle: '',
+  welcomeImageUrl: ''
+};
+
 // ─────────────────────────────────────────────
 // LIST
 // ─────────────────────────────────────────────
@@ -444,13 +457,12 @@ async function resolvePostIds(orgId, rawInput) {
 
 exports.linkPost = async (req, res, next) => {
   try {
-    const { postId } = req.body;
+    const { postId, slideIndex, sortOrder } = req.body;
     if (!postId) return res.status(400).json({ success: false, error: 'postId is required' });
 
     const orgId = req.user.organization._id;
     const shortcode = extractShortcode(postId);
 
-    // Values to add — always add the raw/shortcode form; also add numeric ID if resolvable
     const idsToAdd = new Set([shortcode]);
 
     const resolved = await resolvePostIds(orgId, postId);
@@ -458,13 +470,36 @@ exports.linkPost = async (req, res, next) => {
       idsToAdd.add(resolved.numericId);
     }
 
-    const product = await Product.findOneAndUpdate(
+    const primaryPostId = resolved?.numericId || shortcode;
+
+    let product = await Product.findOneAndUpdate(
       { _id: req.params.id, organization: orgId },
       { $addToSet: { instagramPostIds: { $each: [...idsToAdd] } } },
       { new: true }
     );
 
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+
+    const hasLinkMeta = slideIndex != null || sortOrder != null;
+    if (hasLinkMeta || primaryPostId) {
+      await Product.updateOne(
+        { _id: product._id },
+        { $pull: { instagramPostLinks: { postId: String(primaryPostId) } } }
+      );
+      await Product.updateOne(
+        { _id: product._id },
+        {
+          $push: {
+            instagramPostLinks: {
+              postId: String(primaryPostId),
+              slideIndex: slideIndex != null ? Number(slideIndex) : null,
+              sortOrder: sortOrder != null ? Number(sortOrder) : null
+            }
+          }
+        }
+      );
+      product = await Product.findById(product._id);
+    }
 
     res.json({
       success: true,
@@ -591,6 +626,70 @@ exports.getInstagramMedia = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /products/instagram-media/:mediaId/children
+ * Carousel slide children for catalog linking UI.
+ */
+exports.getInstagramMediaChildren = async (req, res, next) => {
+  try {
+    const orgId = req.user.organization._id;
+    const { mediaId } = req.params;
+    if (!mediaId) {
+      return res.status(400).json({ success: false, error: 'mediaId is required' });
+    }
+
+    const conn = await PlatformConnection.findOne({
+      organization: orgId,
+      platform: 'instagram',
+      isActive: true,
+      status: { $in: ['connected', 'available'] }
+    }).sort({ updatedAt: -1 }).select('accessToken metadata').lean();
+
+    if (!conn?.accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'No active Instagram connection found.'
+      });
+    }
+
+    const resp = await axios.get(`https://graph.facebook.com/v18.0/${mediaId}`, {
+      params: {
+        fields: 'media_type,children{id,media_type,media_url,thumbnail_url}',
+        access_token: conn.accessToken
+      },
+      timeout: 10000
+    });
+
+    const children = resp.data?.children?.data || [];
+    const slides = children.map((c, index) => ({
+      id: c.id,
+      slideIndex: index,
+      mediaType: c.media_type,
+      thumbnailUrl: c.thumbnail_url || c.media_url || null,
+      mediaUrl: c.media_url || null
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        parentId: mediaId,
+        mediaType: resp.data?.media_type || null,
+        slides
+      }
+    });
+  } catch (err) {
+    const apiErr = err.response?.data?.error;
+    if (apiErr) {
+      return res.status(400).json({
+        success: false,
+        error: `Instagram API error: ${apiErr.message || apiErr.code}`,
+        details: apiErr
+      });
+    }
+    next(err);
+  }
+};
+
 exports.unlinkPost = async (req, res, next) => {
   try {
     // Accept postId from body (POST /unlink) or params (DELETE /:postId legacy)
@@ -612,6 +711,58 @@ exports.unlinkPost = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
+// LINK / UNLINK INSTAGRAM STORY
+// ─────────────────────────────────────────────
+exports.linkStory = async (req, res, next) => {
+  try {
+    const { storyId } = req.body;
+    if (!storyId) return res.status(400).json({ success: false, error: 'storyId is required' });
+
+    const orgId = req.user.organization._id;
+    const idsToAdd = new Set([String(storyId).trim()]);
+
+    const resolved = await resolvePostIds(orgId, storyId);
+    if (resolved?.numericId) {
+      idsToAdd.add(resolved.numericId);
+    }
+
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, organization: orgId },
+      { $addToSet: { instagramStoryIds: { $each: [...idsToAdd] } } },
+      { new: true }
+    );
+
+    if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+
+    res.json({
+      success: true,
+      data: product,
+      resolved: resolved ? { shortcode: resolved.shortcode, numericId: resolved.numericId } : null
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.unlinkStory = async (req, res, next) => {
+  try {
+    const storyId = req.body?.storyId || req.params.storyId;
+    if (!storyId) return res.status(400).json({ success: false, error: 'storyId is required' });
+
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, organization: req.user.organization._id },
+      { $pull: { instagramStoryIds: String(storyId) } },
+      { new: true }
+    );
+
+    if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+    res.json({ success: true, data: product });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
 // GET PRODUCTS BY INSTAGRAM POST ID
 // ─────────────────────────────────────────────
 exports.getProductsByPost = async (req, res, next) => {
@@ -621,11 +772,17 @@ exports.getProductsByPost = async (req, res, next) => {
 
     const products = await Product.find({
       organization: orgId,
-      instagramPostIds: String(postId),
-      isActive: true
+      isActive: true,
+      $or: [
+        { instagramPostIds: String(postId) },
+        { instagramStoryIds: String(postId) }
+      ]
     }).lean();
 
-    res.json({ success: true, data: products });
+    const { sortProductsForPost } = require('../services/commentToDmProductHelpers');
+    const sorted = sortProductsForPost(products, postId);
+
+    res.json({ success: true, data: sorted });
   } catch (err) {
     next(err);
   }
@@ -925,6 +1082,66 @@ exports.updateSalesFlowSettings = async (req, res, next) => {
     if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
 
     const merged = { ...DEFAULT_SALES_FLOW_SETTINGS, ...(org.salesFlowSettings || {}) };
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────
+// STORY-TO-DM SETTINGS (Instagram story reply / mention → product DM)
+// ─────────────────────────────────────────────
+
+exports.getStoryToDmSettings = async (req, res, next) => {
+  try {
+    const org = await Organization.findById(req.user.organization._id)
+      .select('storyToDmSettings')
+      .lean();
+
+    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+
+    const merged = { ...DEFAULT_STORY_TO_DM_SETTINGS, ...(org.storyToDmSettings || {}) };
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.updateStoryToDmSettings = async (req, res, next) => {
+  try {
+    const allowed = [
+      'enabled',
+      'triggerOnReply',
+      'triggerOnMention',
+      'triggerKeywords',
+      'defaultProductId',
+      'deduplicateDms',
+      'maxDmsPerDay',
+      'welcomeTitle',
+      'welcomeSubtitle',
+      'welcomeImageUrl'
+    ];
+    const update = {};
+    allowed.forEach((f) => {
+      if (req.body[f] !== undefined) update[`storyToDmSettings.${f}`] = req.body[f];
+    });
+
+    if (req.body.maxDmsPerDay != null) {
+      const n = Number(req.body.maxDmsPerDay);
+      if (!Number.isFinite(n) || n < 1 || n > 10000) {
+        return res.status(400).json({ success: false, error: 'maxDmsPerDay must be between 1 and 10000' });
+      }
+    }
+
+    const org = await Organization.findByIdAndUpdate(
+      req.user.organization._id,
+      { $set: update },
+      { new: true, select: 'storyToDmSettings' }
+    );
+
+    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+
+    const merged = { ...DEFAULT_STORY_TO_DM_SETTINGS, ...(org.storyToDmSettings || {}) };
     res.json({ success: true, data: merged });
   } catch (err) {
     next(err);

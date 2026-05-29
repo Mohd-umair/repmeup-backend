@@ -25,12 +25,15 @@ router.get('/settings/comment-follow-invite', productController.getCommentFollow
 router.put('/settings/comment-follow-invite', productController.updateCommentFollowInviteSettings);
 router.get('/settings/sales-flow', productController.getSalesFlowSettings);
 router.put('/settings/sales-flow', productController.updateSalesFlowSettings);
+router.get('/settings/story-to-dm', productController.getStoryToDmSettings);
+router.put('/settings/story-to-dm', productController.updateStoryToDmSettings);
 
 // Resolve Instagram post shortcode → numeric media ID
 router.get('/resolve-post', productController.resolvePostId);
 
 // List the org's recent Instagram media for the post picker
 router.get('/instagram-media', productController.getInstagramMedia);
+router.get('/instagram-media/:mediaId/children', productController.getInstagramMediaChildren);
 
 // Backfill numeric media IDs for all products that only have shortcodes stored
 router.post('/backfill-post-ids', requireCatalog, productController.backfillPostNumericIds);
@@ -53,5 +56,8 @@ router.put('/:id/dm-config', requireCatalog, productController.updateProductDmCo
 router.post('/:id/posts', requireCatalog, productController.linkPost);
 router.post('/:id/posts/unlink', requireCatalog, productController.unlinkPost);   // body: { postId } — safe for full-URL postIds
 router.delete('/:id/posts/:postId', requireCatalog, productController.unlinkPost); // legacy param-based route
+router.post('/:id/stories', requireCatalog, productController.linkStory);
+router.post('/:id/stories/unlink', requireCatalog, productController.unlinkStory);
+router.delete('/:id/stories/:storyId', requireCatalog, productController.unlinkStory);
 
 module.exports = router;

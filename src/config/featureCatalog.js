@@ -34,6 +34,7 @@ const FEATURE_KEYS = Object.freeze({
 
   // ── Inbox ─────────────────────────────────────────────────────────────────
   INBOX_UNIQUE_CONTACTS: 'inbox.uniqueContacts.monthly',
+  INBOX_MESSAGE_SUGGESTIONS: 'inbox.messageSuggestions.enabled',
   INBOX_BUCKET_CHAT: 'inbox.bucket.chat',
   INBOX_BUCKET_CREATE: 'inbox.bucket.create',
 
@@ -170,6 +171,16 @@ const CATALOG = [
     unit: 'contacts',
     resetPeriod: 'monthly',
     sortOrder: 10
+  },
+
+  {   
+    key: FEATURE_KEYS.INBOX_MESSAGE_SUGGESTIONS,
+    label: 'Message suggestions',
+    description: 'Enable message suggestions in the inbox.',
+    category: 'inbox',
+    kind: 'boolean',
+    defaultValue: true,
+    sortOrder: 15
   },
   {
     key: FEATURE_KEYS.INBOX_BUCKET_CHAT,
@@ -457,6 +468,9 @@ const ENFORCED_FEATURE_KEYS = new Set([
 
 const CATALOG_BY_KEY = Object.freeze(
   CATALOG.reduce((acc, row) => {
+    if (!row?.key) {
+      throw new Error(`Feature catalog row missing "key": ${JSON.stringify(row)}`);
+    }
     acc[row.key] = Object.freeze(row);
     return acc;
   }, {})
@@ -465,7 +479,9 @@ const CATALOG_BY_KEY = Object.freeze(
 /** Case-insensitive lookup — Feature model historically lowercased dotted keys in MongoDB. */
 const CATALOG_BY_LOWER_KEY = Object.freeze(
   CATALOG.reduce((acc, row) => {
-    acc[row.key.toLowerCase()] = acc[row.key.toLowerCase()] || row;
+    if (!row?.key) return acc;
+    const lower = row.key.toLowerCase();
+    acc[lower] = acc[lower] || row;
     return acc;
   }, {})
 );

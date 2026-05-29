@@ -28,6 +28,8 @@ const FREE_ENTITLEMENTS = {
   'whatsapp.broadcast.enabled': { enabled: false },
   'inbox.bucket.chat': { enabled: false },
   'inbox.bucket.create': { enabled: false },
+  'inbox.messageSuggestions.enabled': { enabled: true },
+
   'posts.trends': { enabled: false },
   'posts.logo': { enabled: false },
   'posts.saveDraft': { enabled: false },
@@ -60,6 +62,7 @@ const STARTER_ENTITLEMENTS = {
   'whatsapp.broadcast.enabled': { enabled: true },
   'inbox.bucket.chat': { enabled: true },
   'inbox.bucket.create': { enabled: true },
+  'inbox.messageSuggestions.enabled': { enabled: true },
   'posts.trends': { enabled: true },
   'posts.logo': { enabled: true },
   'posts.saveDraft': { enabled: true },
@@ -94,6 +97,8 @@ const PRO_ENTITLEMENTS = {
   'whatsapp.broadcast.enabled': { enabled: true },
   'inbox.bucket.chat': { enabled: true },
   'inbox.bucket.create': { enabled: true },
+  'inbox.messageSuggestions.enabled': { enabled: true },
+
   'posts.trends': { enabled: true },
   'posts.logo': { enabled: true },
   'posts.saveDraft': { enabled: true },

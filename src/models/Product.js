@@ -90,6 +90,24 @@ const productSchema = new mongoose.Schema({
   }],
 
   /**
+   * Instagram story media IDs linked to this product for Story-to-DM automation.
+   */
+  instagramStoryIds: [{
+    type: String,
+    trim: true
+  }],
+
+  /**
+   * Optional per-post metadata when multiple products share one IG post (e.g. carousel).
+   * postId matches parent carousel album id or single-post id.
+   */
+  instagramPostLinks: [{
+    postId: { type: String, trim: true },
+    slideIndex: { type: Number, min: 0, default: null },
+    sortOrder: { type: Number, min: 0, default: null }
+  }],
+
+  /**
    * Per-product Comment-to-DM configuration.
    * Every field is optional — if omitted the field inherits from
    * org.salesFlowSettings (global defaults).  Presence of ctaButtons[]

@@ -42,6 +42,7 @@ const salesConversationStateSchema = new mongoose.Schema({
 
   /**
    * Sales funnel stage:
+   *  awaiting_product_selection — Multi-product post: picker DM sent; waiting for user to choose
    *  initial_cta_sent   — CTA Generic Template DM was sent; waiting for user reply
    *  details_sent       — Bot sent product details (price, sizes, etc.); waiting for next reply
    *  payment_link_sent  — Bot sent payment link; waiting for next reply
@@ -51,8 +52,36 @@ const salesConversationStateSchema = new mongoose.Schema({
    */
   stage: {
     type: String,
-    enum: ['initial_cta_sent', 'details_sent', 'payment_link_sent', 'whatsapp_requested', 'whatsapp_captured', 'dropped'],
+    enum: [
+      'awaiting_product_selection',
+      'initial_cta_sent',
+      'details_sent',
+      'payment_link_sent',
+      'whatsapp_requested',
+      'whatsapp_captured',
+      'dropped'
+    ],
     default: 'initial_cta_sent'
+  },
+
+  /** Token correlating product-picker postback / numeric replies (multi-product posts). */
+  selectionToken: {
+    type: String,
+    trim: true,
+    default: null
+  },
+
+  /** Product _ids offered on a carousel / multi-product post picker. */
+  candidateProductIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product'
+  }],
+
+  /** Original comment Interaction when funnel started from comment-to-DM. */
+  commentInteractionId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Interaction',
+    default: null
   },
 
   /** Captured WhatsApp number (E.164 or as provided by user) */

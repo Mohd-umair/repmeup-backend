@@ -551,6 +551,9 @@ async function processIncomingMessage(change, connection, rawPayload) {
           : undefined;
     }
   }
+  if (md.isUnsupported) {
+    msgExtra.isUnsupported = true;
+  }
 
   const { interaction: savedInteraction, skipped } = await upsertWhatsAppThread({
     phoneNumberId,

@@ -26,7 +26,7 @@ exports.getHubOverview = async (req, res, next) => {
 
     const [org, connections, reviewSettings, activeRetargeting, activeWaFlow] = await Promise.all([
       Organization.findById(orgId)
-        .select('autoReplySettings escalationSettings commentToDmSettings commentFollowInviteSettings salesFlowSettings')
+        .select('autoReplySettings escalationSettings commentToDmSettings commentFollowInviteSettings salesFlowSettings storyToDmSettings')
         .lean(),
       PlatformConnection.find({ organization: orgId, status: 'connected', isActive: true })
         .select('platform platformData.displayName platformData.displayPhoneNumber')
@@ -82,7 +82,7 @@ exports.getHubOverview = async (req, res, next) => {
         description: 'Convert comments to DM, gain followers and drive more sales.',
         icon: 'fas fa-seedling',
         route: '/app/automation/growth',
-        active: (org?.commentToDmSettings?.enabled || org?.commentFollowInviteSettings?.enabled || org?.salesFlowSettings?.enabled) ?? false
+        active: (org?.commentToDmSettings?.enabled || org?.commentFollowInviteSettings?.enabled || org?.salesFlowSettings?.enabled || org?.storyToDmSettings?.enabled) ?? false
       },
       {
         id: 'whatsapp-flows',
