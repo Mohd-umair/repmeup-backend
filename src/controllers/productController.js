@@ -770,16 +770,18 @@ exports.getProductsByPost = async (req, res, next) => {
     const { postId } = req.params;
     const orgId = req.user.organization._id;
 
+    const { sortProductsForPost } = require('../services/commentToDmProductHelpers');
+    const pid = String(postId);
+
     const products = await Product.find({
       organization: orgId,
       isActive: true,
       $or: [
-        { instagramPostIds: String(postId) },
-        { instagramStoryIds: String(postId) }
+        { instagramPostIds: pid },
+        { 'instagramPostLinks.postId': pid },
+        { instagramStoryIds: pid }
       ]
     }).lean();
-
-    const { sortProductsForPost } = require('../services/commentToDmProductHelpers');
     const sorted = sortProductsForPost(products, postId);
 
     res.json({ success: true, data: sorted });
