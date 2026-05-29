@@ -415,6 +415,36 @@ const organizationSchema = new mongoose.Schema({
     }
   },
 
+  // Instagram: story reply / @mention → automated product DM
+  storyToDmSettings: {
+    enabled: { type: Boolean, default: false },
+    triggerOnReply: { type: Boolean, default: true },
+    triggerOnMention: { type: Boolean, default: true },
+    /** Optional keywords for story replies; empty = all replies qualify */
+    triggerKeywords: {
+      type: [String],
+      default: []
+    },
+    defaultProductId: {
+      type: require('mongoose').Schema.Types.ObjectId,
+      ref: 'Product',
+      default: null
+    },
+    deduplicateDms: { type: Boolean, default: true },
+    maxDmsPerDay: { type: Number, default: 200, min: 1, max: 10000 },
+    dmsSentToday: { type: Number, default: 0 },
+    dmsSentResetDate: { type: Date },
+    welcomeTitle: {
+      type: String,
+      default: ''
+    },
+    welcomeSubtitle: {
+      type: String,
+      default: ''
+    },
+    welcomeImageUrl: { type: String, default: '' }
+  },
+
   // Human agent escalation settings
   escalationSettings: {
     enabled: {

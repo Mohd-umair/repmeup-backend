@@ -1046,9 +1046,12 @@ class InstagramService {
    * @param {string} pageId
    * @param {string|null} [connectionType=null]
    */
-  async sendPrivateReplyGenericTemplate(commentId, element, accessToken, pageId, connectionType = null) {
+  async sendPrivateReplyGenericTemplate(commentId, elementOrElements, accessToken, pageId, connectionType = null) {
     const apiBase = this._getApiBase(connectionType);
     const isIgLogin = connectionType === 'instagram_login';
+    const elements = Array.isArray(elementOrElements)
+      ? elementOrElements
+      : [elementOrElements];
     const body = {
       recipient: { comment_id: String(commentId) },
       message: {
@@ -1056,7 +1059,53 @@ class InstagramService {
           type: 'template',
           payload: {
             template_type: 'generic',
-            elements: [element]
+            elements
+          }
+        }
+      }
+    };
+    if (!isIgLogin) {
+      body.messaging_type = 'RESPONSE';
+    }
+    try {
+      const response = await axios.post(
+        `${apiBase}/${pageId}/messages`,
+        body,
+        { params: this._metaGraphParams({ access_token: accessToken }) }
+      );
+      return {
+        success: true,
+        platformResponseId: response.data.message_id
+      };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const userMsg = apiError?.message || error.message;
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
+    }
+  }
+
+  /**
+   * Send a Generic Template DM to an Instagram user (not a private comment reply).
+   * @param {string} recipientId - IG-scoped user id
+   * @param {object|object[]} elementOrElements
+   */
+  async sendGenericTemplateMessage(recipientId, elementOrElements, accessToken, pageId, connectionType = null) {
+    const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
+    const elements = Array.isArray(elementOrElements)
+      ? elementOrElements
+      : [elementOrElements];
+    const body = {
+      recipient: { id: String(recipientId) },
+      message: {
+        attachment: {
+          type: 'template',
+          payload: {
+            template_type: 'generic',
+            elements
           }
         }
       }

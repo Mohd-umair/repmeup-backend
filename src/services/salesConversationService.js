@@ -26,6 +26,7 @@ const ProductOrder = require('../models/ProductOrder');
 const Product = require('../models/Product');
 const PlatformConnection = require('../models/PlatformConnection');
 const instagramService = require('../integrations/meta/instagramService');
+const commentToDmService = require('./commentToDmService');
 const logger = require('../config/logger');
 
 const svcLogger = logger.createChild({ module: 'salesConversationService' });
@@ -203,6 +204,113 @@ function parsePostbackPayload(payload) {
 }
 
 /**
+ * Parses product-picker postback: `PICK:<productId>:<selectionToken>`.
+ */
+function parsePickPayload(payload) {
+  if (typeof payload !== 'string') return null;
+  if (!payload.startsWith('PICK:')) return null;
+  const parts = payload.split(':');
+  if (parts.length < 3) return null;
+  const productId = parts[1]?.trim();
+  const selectionToken = parts.slice(2).join(':').trim();
+  if (!productId || !selectionToken) return null;
+  return { productId, selectionToken };
+}
+
+/**
+ * Handle product-picker button tap from multi-product carousel comment flow.
+ */
+async function handleProductPickPostback({ instagramUserId, organizationId, payload, platformConnectionId }) {
+  const parsed = parsePickPayload(payload);
+  if (!parsed) return;
+
+  const state = await SalesConversationState.findOne({
+    organization: organizationId,
+    instagramUserId: String(instagramUserId),
+    stage: 'awaiting_product_selection',
+    selectionToken: parsed.selectionToken
+  }).lean();
+
+  if (!state?.postId) {
+    svcLogger.warn('[salesConversation] PICK postback — no matching state', { instagramUserId, selectionToken: parsed.selectionToken });
+    return;
+  }
+
+  await commentToDmService.completeProductSelection({
+    organizationId,
+    instagramUserId,
+    postId: state.postId,
+    productId: parsed.productId,
+    selectionToken: parsed.selectionToken,
+    platformConnectionId
+  });
+}
+
+/**
+ * Numeric/text fallback when user replies "1", "2", etc. to numbered picker DM.
+ */
+async function handleNumericProductSelection({
+  state,
+  replyText,
+  instagramUserId,
+  organizationId,
+  platformConnectionId
+}) {
+  const trimmed = String(replyText || '').trim();
+  if (!trimmed || !state.selectionToken || !state.postId) return false;
+
+  const candidateIds = (state.candidateProductIds || []).map(id => String(id));
+  if (!candidateIds.length) return false;
+
+  let productId = null;
+
+  const numMatch = trimmed.match(/^(\d{1,2})$/);
+  if (numMatch) {
+    const idx = parseInt(numMatch[1], 10) - 1;
+    if (idx >= 0 && idx < candidateIds.length) {
+      productId = candidateIds[idx];
+    }
+  }
+
+  if (!productId) {
+    const products = await Product.find({
+      _id: { $in: candidateIds },
+      organization: organizationId,
+      isActive: true
+    }).select('name sku').lean();
+
+    const { matchProductByCommentText } = require('./commentToDmProductHelpers');
+    const matched = matchProductByCommentText(products, trimmed);
+    if (matched) productId = String(matched._id);
+  }
+
+  if (!productId) {
+    const conn = await resolveIgConnection(organizationId, platformConnectionId);
+    if (conn) {
+      await instagramService.sendMessage(
+        instagramUserId,
+        'Please reply with the number of the product you want (e.g. 1 or 2), or tap Select on a product card. 🛍️',
+        conn.accessToken,
+        conn.pageId,
+        false,
+        conn.connType
+      );
+    }
+    return true;
+  }
+
+  await commentToDmService.completeProductSelection({
+    organizationId,
+    instagramUserId,
+    postId: state.postId,
+    productId,
+    selectionToken: state.selectionToken,
+    platformConnectionId
+  });
+  return true;
+}
+
+/**
  * Called from instagramWebhookService when a user taps a postback CTA button.
  * The payload was generated in commentToDmService as `SALES:<action>:<orderToken>`.
  *
@@ -219,6 +327,11 @@ function parsePostbackPayload(payload) {
 async function handlePostback({ instagramUserId, organizationId, payload, title, platformConnectionId }) {
   try {
     if (!instagramUserId || !organizationId || !payload) return;
+
+    if (String(payload).startsWith('PICK:')) {
+      await handleProductPickPostback({ instagramUserId, organizationId, payload, platformConnectionId });
+      return;
+    }
 
     const parsed = parsePostbackPayload(payload);
     if (!parsed) {
@@ -320,6 +433,41 @@ async function handleInboundDm(interaction, organizationId) {
     const instagramUserId = String(interaction.author?.platformId || '');
     if (!instagramUserId) return;
 
+    const state = await SalesConversationState.findOne({
+      organization: organizationId,
+      instagramUserId
+    }).sort({ createdAt: -1 });
+
+    if (!state) {
+      svcLogger.debug('[salesConversation] No active SalesConversationState found for user', {
+        instagramUserId, organizationId
+      });
+      return;
+    }
+
+    const incomingMessages = interaction.metadata?.incomingMessages || [];
+    const latestMsg = incomingMessages[incomingMessages.length - 1];
+    const replyText = latestMsg?.text || interaction.content || '';
+
+    if (['whatsapp_captured', 'dropped'].includes(state.stage)) {
+      svcLogger.debug('[salesConversation] Conversation already concluded', {
+        instagramUserId, stage: state.stage
+      });
+      return;
+    }
+
+    // Multi-product picker: numeric reply (works even when salesFlow is disabled)
+    if (state.stage === 'awaiting_product_selection') {
+      const handled = await handleNumericProductSelection({
+        state,
+        replyText,
+        instagramUserId,
+        organizationId,
+        platformConnectionId: interaction.platformConnection
+      });
+      if (handled) return;
+    }
+
     // ── 1. Load org settings ───────────────────────────────────────────
     const org = await Organization.findById(organizationId)
       .select('salesFlowSettings')
@@ -331,31 +479,6 @@ async function handleInboundDm(interaction, organizationId) {
     }
 
     const settings = org.salesFlowSettings;
-
-    // ── 2. Load active sales state for this user ───────────────────────
-    const state = await SalesConversationState.findOne({
-      organization: organizationId,
-      instagramUserId
-    }).sort({ createdAt: -1 }); // most recent if multiple
-
-    if (!state) {
-      svcLogger.debug('[salesConversation] No active SalesConversationState found for user', {
-        instagramUserId, organizationId
-      });
-      return;
-    }
-
-    if (['whatsapp_captured', 'dropped'].includes(state.stage)) {
-      svcLogger.debug('[salesConversation] Conversation already concluded', {
-        instagramUserId, stage: state.stage
-      });
-      return;
-    }
-
-    // Extract the latest inbound message text from the interaction
-    const incomingMessages = interaction.metadata?.incomingMessages || [];
-    const latestMsg = incomingMessages[incomingMessages.length - 1];
-    const replyText = latestMsg?.text || interaction.content || '';
 
     svcLogger.info('[salesConversation] Handling inbound DM', {
       instagramUserId, stage: state.stage, replyPreview: replyText.substring(0, 80)
@@ -570,4 +693,13 @@ async function _bridgeToWhatsApp({ phone, instagramUserId, organizationId, produ
   }
 }
 
-module.exports = { handleInboundDm, handlePostback, isHesitant, wantsDetails, wantsPayment, extractPhone };
+module.exports = {
+  handleInboundDm,
+  handlePostback,
+  handleProductPickPostback,
+  parsePickPayload,
+  isHesitant,
+  wantsDetails,
+  wantsPayment,
+  extractPhone
+};

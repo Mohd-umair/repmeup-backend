@@ -3,14 +3,10 @@
  *
  * Flow:
  *  1. Comment arrives on an Instagram post.
- *  2. We check the org's commentToDmSettings — if enabled and the comment contains
- *     a buy-intent keyword.
- *  3. We look up products linked to the post's media ID (falls back to defaultProductId).
- *  4. Deduplication: if we already sent a DM to this user for this post, skip.
- *  5. Daily rate limit check.
- *  6. Post a safe public-stub reply to the comment (no payment link).
- *  7. Send a product DM privately.
- *  8. Record a ProductOrder for deduplication and payment correlation.
+ *  2. Org commentToDmSettings + trigger keyword match.
+ *  3. Resolve product(s) linked to post media ID.
+ *  4. Single product → CTA DM. Multiple products → product-picker DM.
+ *  5. Deduplication, rate limits, public stub, record ProductOrder / SalesConversationState.
  */
 
 const axios = require('axios');
@@ -22,15 +18,19 @@ const PlatformConnection = require('../models/PlatformConnection');
 const instagramService = require('../integrations/meta/instagramService');
 const logger = require('../config/logger');
 const { nanoid } = require('nanoid');
+const {
+  sortProductsForPost,
+  matchProductByCommentText,
+  buildProductPickerElements,
+  buildNumberedPickerText,
+  buildEffectiveDmConfig,
+  buildProductCtaElement,
+  filterProductsByPerProductKeywords,
+  MAX_PICKER_ELEMENTS
+} = require('./commentToDmProductHelpers');
 
 const svcLogger = logger.createChild({ module: 'commentToDmService' });
 
-/**
- * Entry point — call this after an Instagram comment interaction is saved.
- *
- * @param {object} interaction - newly-saved Interaction doc (or plain object)
- * @param {string} organizationId
- */
 async function processCommentForProduct(interaction, organizationId) {
   try {
     if (!interaction || interaction.platform !== 'instagram' || interaction.type !== 'comment') {
@@ -38,8 +38,6 @@ async function processCommentForProduct(interaction, organizationId) {
     }
 
     const interactionId = interaction._id?.toString?.() || 'unknown';
-
-    // ── 1. Load org settings ───────────────────────────────────────────
     const org = await Organization.findById(organizationId)
       .select('commentToDmSettings')
       .lean();
@@ -57,453 +55,501 @@ async function processCommentForProduct(interaction, organizationId) {
     }
 
     const settings = org.commentToDmSettings;
-
-    // ── 2. Buy-intent keyword check ────────────────────────────────────
     const commentText = (interaction.content || '').toLowerCase();
     const keywords = (settings.triggerKeywords || []).map(k => k.toLowerCase().trim()).filter(Boolean);
     const matched = keywords.some(kw => commentText.includes(kw));
-
-    svcLogger.info('[commentToDm] Keyword check', {
-      interactionId,
-      commentText: commentText.substring(0, 80),
-      keywords,
-      matched
-    });
 
     if (!matched) {
       svcLogger.info('[commentToDm] Skipping — no trigger keyword matched', { commentText: commentText.substring(0, 60) });
       return;
     }
 
-    // ── 3. Resolve post → product(s) ──────────────────────────────────
     const postId = interaction.metadata?.postId;
-
     if (!postId) {
-      svcLogger.info('[commentToDm] Skipping — interaction has no metadata.postId (Instagram webhook did not include media.id)', {
-        interactionId,
-        platform: interaction.platform,
-        platformId: interaction.platformId
-      });
+      svcLogger.info('[commentToDm] Skipping — no metadata.postId', { interactionId });
       return;
     }
 
-    let products = await Product.find({
-      organization: organizationId,
-      instagramPostIds: String(postId),
-      isActive: true
-    }).lean();
-
-    // ── Shortcode fallback ─────────────────────────────────────────────
-    // The webhook delivers a numeric media ID (e.g. "17881020939515532") but the
-    // user may have stored the URL shortcode (e.g. "DWlBp0ZgG2C"). Fetch the
-    // shortcode from the Instagram Graph API and retry the lookup.
-    if (!products.length && /^\d+$/.test(String(postId))) {
-      try {
-        // Prefer the connection that was used to receive this webhook.
-        // Also include metadata so we can use the ISUID for Instagram Login connections —
-        // IGAA tokens are valid ONLY for /{ISUID}/... endpoints, not /{globalIgId}/...
-        let conn = interaction.platformConnection
-          ? await PlatformConnection.findById(interaction.platformConnection)
-              .select('accessToken metadata').lean()
-          : null;
-
-        // If the interaction's connection has an expired/invalid token, or wasn't set,
-        // fall back to the most recently updated (freshest) active connection.
-        if (!conn?.accessToken) {
-          conn = await PlatformConnection.findOne({
-            organization: organizationId,
-            platform: 'instagram',
-            isActive: true,
-            status: { $in: ['connected', 'available'] }
-          }).sort({ updatedAt: -1 }).select('accessToken metadata').lean();
-        }
-
-        if (!conn?.accessToken) {
-          svcLogger.warn('[commentToDm] Shortcode fallback skipped — no active Instagram connection found for org', { organizationId });
-        } else {
-          // For Instagram Login (IGAA tokens), the media endpoint requires the ISUID,
-          // not the global IG business account ID stored in platformUserId.
-          const isuid = conn.metadata?.igLoginScopedId;
-          // Use GET /{mediaId}?fields=shortcode — this only needs a valid token, no user ID in path
-          const resp = await axios.get(`https://graph.facebook.com/v18.0/${postId}`, {
-            params: { fields: 'shortcode', access_token: conn.accessToken },
-            timeout: 5000
-          });
-          const shortcode = resp.data?.shortcode;
-          if (!shortcode) {
-            svcLogger.warn('[commentToDm] Instagram Graph API returned no shortcode for postId', { postId, response: resp.data });
-          } else {
-            svcLogger.info('[commentToDm] Resolved numeric postId to shortcode — retrying product lookup', { postId, shortcode, isuid: isuid || 'n/a' });
-            products = await Product.find({
-              organization: organizationId,
-              instagramPostIds: shortcode,
-              isActive: true
-            }).lean();
-
-            // Backfill the numeric ID into the product so future lookups are instant (no API call needed)
-            if (products.length) {
-              await Product.updateMany(
-                { _id: { $in: products.map(p => p._id) } },
-                { $addToSet: { instagramPostIds: String(postId) } }
-              );
-              svcLogger.info('[commentToDm] Backfilled numeric postId into product instagramPostIds', { postId, shortcode });
-            }
-          }
-        }
-      } catch (resolveErr) {
-        const errCode = resolveErr.response?.data?.error?.code;
-        const errMsg = String(resolveErr.message || '');
-        const isTokenError = errCode === 190 ||
-          errMsg.toLowerCase().includes('token') ||
-          errMsg.toLowerCase().includes('oauth') ||
-          resolveErr.response?.status === 400;
-
-        if (isTokenError) {
-          svcLogger.warn(
-            '[commentToDm] Shortcode resolution failed — Instagram access token is expired or invalid. ' +
-            'Reconnect the Instagram account in Settings → Integrations, then click "Fix now" in Catalog → Automation to backfill post IDs.',
-            { postId, errCode, err: resolveErr.message }
-          );
-        } else {
-          svcLogger.warn('[commentToDm] Could not resolve numeric postId to shortcode', { postId, err: resolveErr.message });
-        }
-      }
-    }
-
-    // Fallback: use defaultProductId if no product is linked to this specific post
-    if (!products.length && settings.defaultProductId) {
-      svcLogger.info('[commentToDm] No product linked to post — trying defaultProductId fallback', {
-        postId,
-        defaultProductId: settings.defaultProductId
-      });
-      const defaultProduct = await Product.findOne({
-        _id: settings.defaultProductId,
-        organization: organizationId,
-        isActive: true
-      }).lean();
-      if (defaultProduct) products = [defaultProduct];
-    }
+    let products = await resolveProductsForPost(interaction, organizationId, postId, settings);
 
     if (!products.length) {
-      svcLogger.info('[commentToDm] Skipping — no product is linked to postId and no defaultProductId is set', {
-        postId,
-        organizationId
-      });
+      svcLogger.info('[commentToDm] Skipping — no product linked to post', { postId, organizationId });
       return;
     }
 
-    const product = products[0];
+    products = sortProductsForPost(products, postId);
+    products = filterProductsByPerProductKeywords(products, commentText);
 
-    // ── Per-product config: merge product.dmConfig over org salesFlowSettings ──
-    // product.dmConfig fields win; org salesFlowSettings are the fallback default.
-    // We do this here so both the public-reply stub and the CTA build can use it.
-    const pdc = product.dmConfig || {};
-    // sfSettings is populated at step 8 below; we capture a forward-reference now
-    // so we can build the effective config once sfSettings is available.
-    // Defer the merge to step 8 where sfSettings is loaded.
-
-    svcLogger.info('[commentToDm] Product resolved', {
-      interactionId,
-      postId,
-      productId: product._id,
-      productName: product.name,
-      hasPerProductDmConfig: !!(pdc.ctaButtons?.length || pdc.ctaTitle || pdc.triggerKeywords?.length)
-    });
+    if (!products.length) {
+      svcLogger.info('[commentToDm] Skipping — no products passed per-product keyword filter', { postId });
+      return;
+    }
 
     const commenterId = interaction.author?.platformId;
     if (!commenterId) {
-      svcLogger.warn('[commentToDm] Skipping — comment has no author.platformId (cannot DM)', { interactionId });
+      svcLogger.warn('[commentToDm] Skipping — no author.platformId', { interactionId });
       return;
     }
 
-    // ── 3b. Per-product trigger keyword override ───────────────────────
-    // If the matched product has its own triggerKeywords, the comment must
-    // also match those (acts as an AND filter on top of the global check).
-    if (pdc.triggerKeywords?.length) {
-      const productKws = pdc.triggerKeywords.map(k => k.toLowerCase().trim()).filter(Boolean);
-      const productMatched = productKws.some(kw => commentText.includes(kw));
-      if (!productMatched) {
-        svcLogger.info('[commentToDm] Skipping — comment did not match per-product triggerKeywords', {
-          productId: product._id, productKws, commentText: commentText.substring(0, 60)
-        });
-        return;
-      }
+    const uniqueMatch = matchProductByCommentText(products, commentText);
+    const usePicker = !uniqueMatch && products.length > 1;
+    const product = uniqueMatch || (products.length === 1 ? products[0] : null);
+
+    if (!usePicker && !product) {
+      svcLogger.warn('[commentToDm] Unexpected empty product resolution', { postId, count: products.length });
+      return;
     }
 
-    // ── 4. Deduplication ───────────────────────────────────────────────
     if (settings.deduplicateDms !== false) {
-      const alreadySent = await ProductOrder.exists({
-        organization: organizationId,
-        instagramUserId: String(commenterId),
-        instagramPostId: String(postId)
-      });
-      if (alreadySent) {
-        svcLogger.info('[commentToDm] Skipping — deduplication: DM already sent to this user for this post', {
-          commenterId,
-          postId
-        });
-        return;
-      }
+      const skip = await shouldSkipDedup(organizationId, commenterId, postId);
+      if (skip) return;
     }
 
-    // ── 5. Daily rate limit ────────────────────────────────────────────
     const orgDoc = await Organization.findById(organizationId).select('commentToDmSettings salesFlowSettings');
-    const today = new Date().toDateString();
-    const resetDate = orgDoc.commentToDmSettings.dmsSentResetDate
-      ? new Date(orgDoc.commentToDmSettings.dmsSentResetDate).toDateString()
-      : null;
-
-    if (resetDate !== today) {
-      orgDoc.commentToDmSettings.dmsSentToday = 0;
-      orgDoc.commentToDmSettings.dmsSentResetDate = new Date();
-    }
+    await resetDailyCounterIfNeeded(orgDoc);
 
     const maxDms = orgDoc.commentToDmSettings.maxDmsPerDay || 200;
     if (orgDoc.commentToDmSettings.dmsSentToday >= maxDms) {
-      svcLogger.warn('[commentToDm] Skipping — daily DM limit reached', {
-        dmsSentToday: orgDoc.commentToDmSettings.dmsSentToday,
-        limit: maxDms
-      });
+      svcLogger.warn('[commentToDm] Skipping — daily DM limit reached', { limit: maxDms });
       return;
     }
 
-    // ── 6. Resolve platform connection ────────────────────────────────
-    const connection = interaction.platformConnection
-      ? await PlatformConnection.findById(interaction.platformConnection)
-          .select('accessToken platformData platformPageId platformUserId').lean()
-      : await PlatformConnection.findOne({
-          organization: organizationId,
-          platform: 'instagram',
-          isActive: true
-        }).select('accessToken platformData platformPageId platformUserId').lean();
-
+    const connection = await resolveConnection(interaction, organizationId);
     if (!connection) {
-      svcLogger.warn('[commentToDm] Skipping — no active Instagram platform connection found', { organizationId });
+      svcLogger.warn('[commentToDm] Skipping — no active Instagram connection', { organizationId });
       return;
     }
 
-    const accessToken = connection.accessToken;
-    const connType = connection.metadata?.connectionType
-      || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
-    // For Instagram Login (IGAA tokens), use the app-scoped ISUID stored in
-    // metadata.igLoginScopedId — NOT the self-healed global ID in platformPageId.
-    const pageId = connType === 'instagram_login'
-      ? (connection.metadata?.igLoginScopedId || connection.platformUserId)
-      : (connection.platformData?.pageId || connection.platformPageId || connection.platformUserId);
-
-    // ── 7. Post safe public-comment stub ──────────────────────────────
+    const { accessToken, pageId, connType } = connectionContext(connection);
     const commenterUsername = interaction.author?.username || '';
 
-    // GUARDRAIL: strip payment_url from the public template — never expose payment links in public comments
-    const safePublicTemplate = (settings.publicReplyTemplate || "Hi {{username}}! 👋 We've sent you the details in DM. 😊")
-      .replace(/\{\{payment_url\}\}/gi, '')
-      .replace(/\{\{paymentUrl\}\}/gi, '');
+    await postPublicStub(interaction, settings, commenterUsername, accessToken, connType);
 
-    const publicStub = buildTemplate(safePublicTemplate, {
-      username: commenterUsername ? `@${commenterUsername}` : 'there'
-    });
-
-    try {
-      const stubResult = await instagramService.replyToComment(
-        interaction.platformId,
-        publicStub,
+    if (usePicker) {
+      await sendProductPickerFlow({
+        interaction,
+        organizationId,
+        products,
+        postId,
+        commenterId,
+        commenterUsername,
         accessToken,
-        connType
-      );
-      if (stubResult?.success) {
-        svcLogger.info('[commentToDm] Posted public comment stub', {
-          commentId: interaction.platformId,
-          stub: publicStub
-        });
-      } else {
-        svcLogger.warn('[commentToDm] Public comment stub not posted — continuing to DM', {
-          commentId: interaction.platformId,
-          error: stubResult?.error || 'unknown'
-        });
-      }
-    } catch (stubErr) {
-      // Non-fatal — still send DM even if public reply fails (e.g. comment deleted, permissions)
-      svcLogger.warn('[commentToDm] Failed to post public comment stub — continuing to DM', {
-        commentId: interaction.platformId,
-        error: stubErr.message
+        pageId,
+        connType,
+        orgDoc
       });
-    }
-
-    // ── 8. Build effective DM config (product overrides org defaults) ──
-    // salesFlowSettings were loaded alongside commentToDmSettings (orgDoc at ~step 5).
-    const sfSettings = orgDoc.salesFlowSettings || {};
-
-    /**
-     * Effective config = per-product dmConfig fields (if set) over org salesFlowSettings.
-     * ctaButtons: product array takes full priority (no partial merge) so the product
-     * can have a completely different set of buttons.
-     */
-    const effectiveDmConfig = {
-      ctaTitle:    pdc.ctaTitle    || sfSettings.ctaTitle    || '',
-      ctaSubtitle: pdc.ctaSubtitle || sfSettings.ctaSubtitle || '',
-      ctaImageUrl: pdc.ctaImageUrl || sfSettings.ctaImageUrl || '',
-      ctaButtons:  (pdc.ctaButtons?.length ? pdc.ctaButtons : sfSettings.ctaButtons) || [],
-      hesitancyKeywords:           (pdc.hesitancyKeywords?.length   ? pdc.hesitancyKeywords   : sfSettings.hesitancyKeywords)   || [],
-      whatsappCaptureMessage:      pdc.whatsappCaptureMessage      || sfSettings.whatsappCaptureMessage      || '',
-      whatsappCaptureConfirmation: pdc.whatsappCaptureConfirmation || sfSettings.whatsappCaptureConfirmation || '',
-    };
-    const useSalesFlow = sfSettings.enabled === true;
-
-    // ── 9. Build order token and payment URL ──────────────────────────
-    const orderToken = nanoid(24);
-    const paymentUrlWithToken = product.paymentUrl
-      ? `${product.paymentUrl}${product.paymentUrl.includes('?') ? '&' : '?'}ref=${orderToken}`
-      : '';
-
-    svcLogger.info('[commentToDm] Sending product DM', {
-      commenterId,
-      productId: product._id,
-      orderToken,
-      useSalesFlow
-    });
-
-    // ── 10. Build CTA buttons (postback or web_url) ──────────────────
-    // Always send a CTA-only DM. Price / product details are revealed only after
-    // the user taps a button or replies via the postback / typed-intent flow.
-    const MAX_LABEL = 20;
-    const MAX_TITLE = 80;
-    const rawButtons = Array.isArray(effectiveDmConfig.ctaButtons) ? effectiveDmConfig.ctaButtons : [];
-    const buttons = [];
-
-    for (const btn of rawButtons) {
-      if (buttons.length >= 3) break; // Instagram Generic Template hard limit
-      const label = String(btn.label || '').trim();
-      if (!label) continue;
-      const type = btn.type === 'web_url' ? 'web_url' : 'postback';
-
-      if (type === 'web_url') {
-        let url = String(btn.url || '').replace(/\{\{orderToken\}\}/g, orderToken).trim();
-        // Convenience: empty Pay Now URL falls back to product paymentUrl with token
-        if (!url && /pay/i.test(label) && paymentUrlWithToken) url = paymentUrlWithToken;
-        if (!/^https:\/\//i.test(url)) continue;
-        buttons.push({ type: 'web_url', url, title: label.slice(0, MAX_LABEL) });
-      } else {
-        const payload = String(btn.payload || '').trim() || label.toLowerCase();
-        // Embed orderToken in the payload so the postback handler can correlate
-        // the click back to the exact ProductOrder/SalesConversationState row.
-        buttons.push({
-          type: 'postback',
-          title: label.slice(0, MAX_LABEL),
-          payload: `SALES:${payload}:${orderToken}`
-        });
-      }
-    }
-
-    let dmSendMethod = 'cta_template';
-
-    if (buttons.length > 0) {
-      const element = {
-        title: String(effectiveDmConfig.ctaTitle || `🛍️ ${product.name}`).slice(0, MAX_TITLE),
-        buttons
-      };
-      const subtitle = String(effectiveDmConfig.ctaSubtitle || 'Tap a button below to continue 👇').slice(0, MAX_TITLE);
-      if (subtitle) element.subtitle = subtitle;
-      const imgUrl = String(effectiveDmConfig.ctaImageUrl || product.imageUrl || '').trim();
-      if (imgUrl && /^https:\/\//i.test(imgUrl)) element.image_url = imgUrl;
-
-      try {
-        await instagramService.sendPrivateReplyGenericTemplate(
-          interaction.platformId, element, accessToken, pageId, connType
-        );
-      } catch (gtErr) {
-        // Generic Template failed — fall back to a SHORT teaser text. We deliberately
-        // do NOT reveal price or product details here; the user will get them after
-        // they reply (handled by salesConversationService).
-        svcLogger.warn('[commentToDm] sendPrivateReplyGenericTemplate failed — falling back to short teaser DM', {
-          commentId: interaction.platformId, error: gtErr.message
-        });
-        dmSendMethod = 'cta_text_fallback';
-        const teaser = `Hi${commenterUsername ? ' @' + commenterUsername : ''}! 👋 Thanks for your interest.\n\nReply with "details" for more info, or "buy" to order. 🛍️`;
-        try {
-          await instagramService.sendPrivateReply(interaction.platformId, teaser, accessToken, pageId, connType);
-        } catch (prErr) {
-          await instagramService.sendMessage(String(commenterId), teaser, accessToken, pageId, false, connType);
-        }
-      }
     } else {
-      // No valid buttons configured — send a minimal teaser so the user can reply
-      // and trigger the typed-intent flow. Still no price / product template.
-      svcLogger.warn('[commentToDm] No valid CTA buttons configured — sending short teaser DM', { organizationId });
-      dmSendMethod = 'cta_text_no_buttons';
-      const teaser = `Hi${commenterUsername ? ' @' + commenterUsername : ''}! 👋 Thanks for your interest.\n\nReply with "details" for more info, or "buy" to order. 🛍️`;
-      try {
-        await instagramService.sendPrivateReply(interaction.platformId, teaser, accessToken, pageId, connType);
-      } catch (prErr) {
-        svcLogger.warn('[commentToDm] sendPrivateReply failed — falling back to sendMessage', {
-          commentId: interaction.platformId, error: prErr.message
-        });
-        await instagramService.sendMessage(String(commenterId), teaser, accessToken, pageId, false, connType);
-      }
-    }
-
-    svcLogger.info('[commentToDm] Product DM sent successfully', { commenterId, productId: product._id, dmSendMethod });
-
-    // ── 11. Record the order ──────────────────────────────────────────
-    const productOrder = await ProductOrder.create({
-      organization: organizationId,
-      product: product._id,
-      instagramUserId: String(commenterId),
-      instagramPostId: String(postId),
-      commentInteractionId: interaction._id,
-      orderToken,
-      status: 'dm_sent'
-    });
-
-    // ── 12. Record sales conversation state ───────────────────────────
-    // Always upsert state so both postback clicks and typed replies have a row
-    // to advance. The state machine is invariant to salesFlowSettings.enabled —
-    // that flag now only controls hesitancy detection on typed replies.
-    try {
-      await SalesConversationState.findOneAndUpdate(
-        { organization: organizationId, instagramUserId: String(commenterId), postId: String(postId) },
-        {
-          $set: {
-            productOrderId: productOrder._id,
-            stage: 'initial_cta_sent',
-            lastStageAt: new Date(),
-            whatsappNumber: null
-          }
-        },
-        { upsert: true, new: true }
-      );
-      svcLogger.info('[commentToDm] SalesConversationState upserted', {
-        commenterId, postId, stage: 'initial_cta_sent'
+      await sendSingleProductFlow({
+        interaction,
+        organizationId,
+        product,
+        postId,
+        commenterId,
+        commenterUsername,
+        accessToken,
+        pageId,
+        connType,
+        orgDoc
       });
-    } catch (stateErr) {
-      // Non-fatal: DM was already sent; log and continue
-      svcLogger.warn('[commentToDm] Failed to upsert SalesConversationState', { error: stateErr.message });
     }
 
-    // ── 13. Increment daily counter ───────────────────────────────────
     orgDoc.commentToDmSettings.dmsSentToday += 1;
     await orgDoc.save();
 
     svcLogger.info('[commentToDm] Flow completed successfully', {
       commenterId,
-      productId: product._id,
       postId,
-      orderToken,
+      mode: usePicker ? 'product_picker' : 'single_product',
+      productId: product?._id,
       dmsSentToday: orgDoc.commentToDmSettings.dmsSentToday
     });
   } catch (err) {
-    // Never rethrow — this service runs as a side effect of the webhook and must not break it
     svcLogger.error('[commentToDm] Unhandled error', { error: err.message, stack: err.stack });
   }
 }
 
+async function resolveProductsForPost(interaction, organizationId, postId, settings) {
+  let products = await Product.find({
+    organization: organizationId,
+    instagramPostIds: String(postId),
+    isActive: true
+  }).lean();
+
+  if (!products.length && /^\d+$/.test(String(postId))) {
+    products = await shortcodeFallbackLookup(interaction, organizationId, postId);
+  }
+
+  if (!products.length && settings.defaultProductId) {
+    const defaultProduct = await Product.findOne({
+      _id: settings.defaultProductId,
+      organization: organizationId,
+      isActive: true
+    }).lean();
+    if (defaultProduct) products = [defaultProduct];
+  }
+
+  return products;
+}
+
+async function shortcodeFallbackLookup(interaction, organizationId, postId) {
+  try {
+    let conn = interaction.platformConnection
+      ? await PlatformConnection.findById(interaction.platformConnection).select('accessToken metadata').lean()
+      : null;
+
+    if (!conn?.accessToken) {
+      conn = await PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'instagram',
+        isActive: true,
+        status: { $in: ['connected', 'available'] }
+      }).sort({ updatedAt: -1 }).select('accessToken metadata').lean();
+    }
+
+    if (!conn?.accessToken) return [];
+
+    const resp = await axios.get(`https://graph.facebook.com/v18.0/${postId}`, {
+      params: { fields: 'shortcode', access_token: conn.accessToken },
+      timeout: 5000
+    });
+    const shortcode = resp.data?.shortcode;
+    if (!shortcode) return [];
+
+    const products = await Product.find({
+      organization: organizationId,
+      instagramPostIds: shortcode,
+      isActive: true
+    }).lean();
+
+    if (products.length) {
+      await Product.updateMany(
+        { _id: { $in: products.map(p => p._id) } },
+        { $addToSet: { instagramPostIds: String(postId) } }
+      );
+    }
+    return products;
+  } catch (resolveErr) {
+    svcLogger.warn('[commentToDm] Shortcode fallback failed', { postId, err: resolveErr.message });
+    return [];
+  }
+}
+
+async function shouldSkipDedup(organizationId, commenterId, postId) {
+  const alreadySent = await ProductOrder.exists({
+    organization: organizationId,
+    instagramUserId: String(commenterId),
+    instagramPostId: String(postId)
+  });
+  if (alreadySent) {
+    svcLogger.info('[commentToDm] Skipping — ProductOrder dedup', { commenterId, postId });
+    return true;
+  }
+
+  const pendingPicker = await SalesConversationState.exists({
+    organization: organizationId,
+    instagramUserId: String(commenterId),
+    postId: String(postId),
+    stage: { $in: ['awaiting_product_selection', 'initial_cta_sent', 'details_sent', 'payment_link_sent'] }
+  });
+  if (pendingPicker) {
+    svcLogger.info('[commentToDm] Skipping — active sales state exists', { commenterId, postId });
+    return true;
+  }
+
+  return false;
+}
+
+async function resetDailyCounterIfNeeded(orgDoc) {
+  const today = new Date().toDateString();
+  const resetDate = orgDoc.commentToDmSettings.dmsSentResetDate
+    ? new Date(orgDoc.commentToDmSettings.dmsSentResetDate).toDateString()
+    : null;
+  if (resetDate !== today) {
+    orgDoc.commentToDmSettings.dmsSentToday = 0;
+    orgDoc.commentToDmSettings.dmsSentResetDate = new Date();
+  }
+}
+
+async function resolveConnection(interaction, organizationId) {
+  return interaction.platformConnection
+    ? PlatformConnection.findById(interaction.platformConnection)
+        .select('accessToken platformData platformPageId platformUserId metadata').lean()
+    : PlatformConnection.findOne({
+        organization: organizationId,
+        platform: 'instagram',
+        isActive: true
+      }).select('accessToken platformData platformPageId platformUserId metadata').lean();
+}
+
+function connectionContext(connection) {
+  const accessToken = connection.accessToken;
+  const connType = connection.metadata?.connectionType
+    || (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA') ? 'instagram_login' : null);
+  const pageId = connType === 'instagram_login'
+    ? (connection.metadata?.igLoginScopedId || connection.platformUserId)
+    : (connection.platformData?.pageId || connection.platformPageId || connection.platformUserId);
+  return { accessToken, pageId, connType };
+}
+
+async function postPublicStub(interaction, settings, commenterUsername, accessToken, connType) {
+  const safePublicTemplate = (settings.publicReplyTemplate || "Hi {{username}}! 👋 We've sent you the details in DM. 😊")
+    .replace(/\{\{payment_url\}\}/gi, '')
+    .replace(/\{\{paymentUrl\}\}/gi, '');
+
+  const publicStub = buildTemplate(safePublicTemplate, {
+    username: commenterUsername ? `@${commenterUsername}` : 'there'
+  });
+
+  try {
+    await instagramService.replyToComment(interaction.platformId, publicStub, accessToken, connType);
+  } catch (stubErr) {
+    svcLogger.warn('[commentToDm] Public stub failed — continuing', { error: stubErr.message });
+  }
+}
+
+async function sendProductPickerFlow(ctx) {
+  const { interaction, organizationId, products, postId, commenterId, commenterUsername, accessToken, pageId, connType } = ctx;
+  const selectionToken = nanoid(24);
+  const candidateProductIds = products.map(p => p._id);
+
+  svcLogger.info('[commentToDm] Sending product picker DM', {
+    postId,
+    productCount: products.length,
+    selectionToken
+  });
+
+  try {
+    if (products.length > MAX_PICKER_ELEMENTS) {
+      const text = buildNumberedPickerText(products, commenterUsername);
+      await instagramService.sendPrivateReply(interaction.platformId, text, accessToken, pageId, connType);
+    } else {
+      const elements = buildProductPickerElements(products, selectionToken);
+      await instagramService.sendPrivateReplyGenericTemplate(
+        interaction.platformId,
+        elements,
+        accessToken,
+        pageId,
+        connType
+      );
+    }
+  } catch (pickerErr) {
+    svcLogger.warn('[commentToDm] Product picker DM failed — numbered text fallback', { error: pickerErr.message });
+    const text = buildNumberedPickerText(products, commenterUsername);
+    try {
+      await instagramService.sendPrivateReply(interaction.platformId, text, accessToken, pageId, connType);
+    } catch (prErr) {
+      await instagramService.sendMessage(String(commenterId), text, accessToken, pageId, false, connType);
+    }
+  }
+
+  await SalesConversationState.findOneAndUpdate(
+    { organization: organizationId, instagramUserId: String(commenterId), postId: String(postId) },
+    {
+      $set: {
+        stage: 'awaiting_product_selection',
+        selectionToken,
+        candidateProductIds,
+        commentInteractionId: interaction._id,
+        productOrderId: null,
+        lastStageAt: new Date(),
+        whatsappNumber: null
+      }
+    },
+    { upsert: true, new: true }
+  );
+}
+
+async function sendSingleProductFlow(ctx) {
+  const { interaction, organizationId, product, postId, commenterId, commenterUsername, accessToken, pageId, connType, orgDoc } = ctx;
+  const sfSettings = orgDoc.salesFlowSettings || {};
+  const orderToken = nanoid(24);
+
+  await sendProductCtaDm({
+    recipientMode: 'comment',
+    commentId: interaction.platformId,
+    instagramUserId: String(commenterId),
+    commenterUsername,
+    product,
+    sfSettings,
+    orderToken,
+    accessToken,
+    pageId,
+    connType
+  });
+
+  const productOrder = await ProductOrder.create({
+    organization: organizationId,
+    product: product._id,
+    instagramUserId: String(commenterId),
+    instagramPostId: String(postId),
+    commentInteractionId: interaction._id,
+    orderToken,
+    status: 'dm_sent'
+  });
+
+  await SalesConversationState.findOneAndUpdate(
+    { organization: organizationId, instagramUserId: String(commenterId), postId: String(postId) },
+    {
+      $set: {
+        productOrderId: productOrder._id,
+        stage: 'initial_cta_sent',
+        selectionToken: null,
+        candidateProductIds: [],
+        commentInteractionId: interaction._id,
+        lastStageAt: new Date(),
+        whatsappNumber: null
+      }
+    },
+    { upsert: true, new: true }
+  );
+}
+
 /**
- * Simple Mustache-style template filler.
- * Replaces {{key}} tokens with values from vars.
+ * Send product CTA after user picks from multi-product carousel picker.
+ * Called from salesConversationService.
  */
+async function completeProductSelection({
+  organizationId,
+  instagramUserId,
+  postId,
+  productId,
+  selectionToken,
+  platformConnectionId
+}) {
+  const state = await SalesConversationState.findOne({
+    organization: organizationId,
+    instagramUserId: String(instagramUserId),
+    postId: String(postId),
+    stage: 'awaiting_product_selection',
+    selectionToken: String(selectionToken)
+  });
+
+  if (!state) {
+    svcLogger.warn('[commentToDm] completeProductSelection — state not found', { instagramUserId, postId });
+    return { ok: false, reason: 'invalid_state' };
+  }
+
+  const allowed = (state.candidateProductIds || []).map(id => String(id));
+  if (!allowed.includes(String(productId))) {
+    svcLogger.warn('[commentToDm] completeProductSelection — product not in candidates', { productId });
+    return { ok: false, reason: 'invalid_product' };
+  }
+
+  const product = await Product.findOne({
+    _id: productId,
+    organization: organizationId,
+    isActive: true
+  }).lean();
+
+  if (!product) {
+    return { ok: false, reason: 'product_not_found' };
+  }
+
+  const orgDoc = await Organization.findById(organizationId).select('salesFlowSettings');
+  const conn = await resolveConnection({ platformConnection: platformConnectionId }, organizationId);
+  if (!conn) return { ok: false, reason: 'no_connection' };
+
+  const { accessToken, pageId, connType } = connectionContext(conn);
+  const orderToken = nanoid(24);
+
+  const productOrder = await ProductOrder.create({
+    organization: organizationId,
+    product: product._id,
+    instagramUserId: String(instagramUserId),
+    instagramPostId: String(postId),
+    commentInteractionId: state.commentInteractionId,
+    orderToken,
+    status: 'dm_sent'
+  });
+
+  await sendProductCtaDm({
+    recipientMode: 'user',
+    instagramUserId: String(instagramUserId),
+    product,
+    sfSettings: orgDoc?.salesFlowSettings || {},
+    orderToken,
+    accessToken,
+    pageId,
+    connType
+  });
+
+  state.productOrderId = productOrder._id;
+  state.stage = 'initial_cta_sent';
+  state.selectionToken = null;
+  state.candidateProductIds = [];
+  state.lastStageAt = new Date();
+  await state.save();
+
+  svcLogger.info('[commentToDm] Product selection completed', { instagramUserId, productId: product._id, postId });
+  return { ok: true, productOrderId: productOrder._id };
+}
+
+/**
+ * @returns {{ productOrder: object }}
+ */
+async function sendProductCtaDm({
+  recipientMode,
+  commentId,
+  instagramUserId,
+  commenterUsername = '',
+  product,
+  sfSettings,
+  orderToken,
+  accessToken,
+  pageId,
+  connType
+}) {
+  const effectiveDmConfig = buildEffectiveDmConfig(product, sfSettings);
+  const paymentUrlWithToken = product.paymentUrl
+    ? `${product.paymentUrl}${product.paymentUrl.includes('?') ? '&' : '?'}ref=${orderToken}`
+    : '';
+
+  const element = buildProductCtaElement(product, effectiveDmConfig, orderToken, paymentUrlWithToken);
+  const teaser = `Hi${commenterUsername ? ' @' + commenterUsername : ''}! 👋 Thanks for your interest.\n\nReply with "details" for more info, or "buy" to order. 🛍️`;
+
+  if (element) {
+    try {
+      if (recipientMode === 'comment' && commentId) {
+        await instagramService.sendPrivateReplyGenericTemplate(commentId, element, accessToken, pageId, connType);
+      } else {
+        await instagramService.sendGenericTemplateMessage(instagramUserId, element, accessToken, pageId, connType);
+      }
+    } catch (gtErr) {
+      svcLogger.warn('[commentToDm] CTA template failed — teaser fallback', { error: gtErr.message });
+      if (recipientMode === 'comment' && commentId) {
+        try {
+          await instagramService.sendPrivateReply(commentId, teaser, accessToken, pageId, connType);
+        } catch {
+          await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
+        }
+      } else {
+        await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
+      }
+    }
+  } else {
+    if (recipientMode === 'comment' && commentId) {
+      try {
+        await instagramService.sendPrivateReply(commentId, teaser, accessToken, pageId, connType);
+      } catch {
+        await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
+      }
+    } else {
+      await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
+    }
+  }
+
+  return { productOrder: { orderToken } };
+}
+
 function buildTemplate(template, vars) {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key) =>
     Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key] ?? '') : `{{${key}}}`
   );
 }
 
-module.exports = { processCommentForProduct, buildTemplate };
+module.exports = {
+  processCommentForProduct,
+  completeProductSelection,
+  buildTemplate,
+  sendProductCtaDm
+};

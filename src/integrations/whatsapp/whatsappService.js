@@ -298,6 +298,26 @@ class WhatsAppService {
   // ---------------------------------------------------------------------------
 
   /**
+   * Human-readable text when Meta sends type "unsupported" (Cloud API cannot expose content).
+   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/reference/messages/unsupported
+   */
+  _formatUnsupportedMessage(message) {
+    const err = Array.isArray(message?.errors) ? message.errors[0] : null;
+    const code = err?.code != null ? Number(err.code) : null;
+
+    if (code === 131060) {
+      return 'This message is temporarily unavailable. The customer may have contacted you from the WhatsApp Business app — ask them to send the message again.';
+    }
+    if (code === 131051) {
+      return 'This message type is not supported by WhatsApp Business API (e.g. poll, GIF, or deleted message). Ask the customer to resend as text, photo, or document.';
+    }
+    if (err?.message || err?.title) {
+      return String(err.message || err.title);
+    }
+    return 'This message could not be displayed. WhatsApp did not provide the content via the Business API. Ask the customer to resend as text, photo, or document.';
+  }
+
+  /**
    * Parse an incoming WhatsApp webhook payload and extract message data.
    * Returns { success, skipped, messageData } — does not touch the database.
    */
@@ -375,8 +395,20 @@ class WhatsAppService {
             || message.interactive?.list_reply?.title
             || '[Interactive reply]';
           break;
+        case 'order':
+          messageData.content = message.order?.text?.trim() || '[Product order]';
+          messageData.order = message.order;
+          break;
+        case 'unsupported':
+          messageData.content = this._formatUnsupportedMessage(message);
+          messageData.isUnsupported = true;
+          if (message.errors?.length) {
+            messageData.unsupportedErrors = message.errors;
+          }
+          break;
         default:
           messageData.content = `[Unsupported message type: ${message.type}]`;
+          messageData.isUnsupported = true;
       }
 
       return { success: true, messageData };

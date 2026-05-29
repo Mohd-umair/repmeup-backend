@@ -108,6 +108,25 @@ module.exports = async function processWebhook(job) {
         })();
       }
 
+      // Story-to-DM: story reply / @mention → product DM (before AI queue)
+      let storyToDmSent = false;
+      if (
+        interaction.platform === 'instagram' &&
+        interaction.type === 'dm' &&
+        interaction.metadata?.isStoryEngagement
+      ) {
+        try {
+          const storyToDmService = require('../services/storyToDmService');
+          const result = await storyToDmService.processStoryEngagement(interaction, organizationId);
+          storyToDmSent = !!result?.sent;
+          if (storyToDmSent) {
+            jobLogger.info('Story-to-DM automation sent', { interactionId: interaction._id.toString() });
+          }
+        } catch (err) {
+          jobLogger.warn('story-to-dm automation error', { err: err?.message });
+        }
+      }
+
       // Per-comment / per-message interactions: skip if we already answered that item.
       // DM threads (platformId dm_*_*): one doc per conversation — replies[] is thread history; still queue AI for each new message.
       const hasReplies = interaction.replies && interaction.replies.length > 0;
@@ -116,6 +135,8 @@ module.exports = async function processWebhook(job) {
 
       if (!threadDm && (hasReplies || isAlreadyReplied)) {
         logger.info(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+      } else if (storyToDmSent) {
+        logger.info(`⏭️  [Webhook] Skipping AI — Story-to-DM handled this message: ${interaction._id}`);
       } else {
         // Thread DMs reuse one interaction id per conversation — jobId must include message id or each new message would be deduped by Bull
         const mid = interaction.metadata?.lastMid;
