@@ -539,11 +539,11 @@ async function handleInstagramMessage(payload, organizationId) {
         if (mediaId) {
           try {
             const Product = require('../../models/Product');
-            const linked = await Product.find({
-              organization: organizationId,
-              instagramPostIds: String(mediaId),
-              isActive: true
-            }).select('name').limit(20).lean();
+            const { buildPostLinkedProductQuery } = require('../commentToDmProductHelpers');
+            const linked = await Product.find(buildPostLinkedProductQuery(organizationId, String(mediaId)))
+              .select('name')
+              .limit(20)
+              .lean();
             linkedProductCount = linked.length;
             linkedProductNames = linked.map(p => p.name).filter(Boolean);
           } catch (linkErr) {

@@ -26,6 +26,8 @@ const {
   buildEffectiveDmConfig,
   buildProductCtaElement,
   filterProductsByPerProductKeywords,
+  buildPostLinkedProductQuery,
+  mergeProductsById,
   MAX_PICKER_ELEMENTS
 } = require('./commentToDmProductHelpers');
 
@@ -78,25 +80,34 @@ async function processCommentForProduct(interaction, organizationId) {
     }
 
     products = sortProductsForPost(products, postId);
-    products = filterProductsByPerProductKeywords(products, commentText);
 
-    if (!products.length) {
-      svcLogger.info('[commentToDm] Skipping — no products passed per-product keyword filter', { postId });
+    // Unique text match (name/sku) on all linked products — skips picker when unambiguous.
+    const uniqueMatch = matchProductByCommentText(products, commentText);
+    const usePicker = !uniqueMatch && products.length > 1;
+
+    // Per-product keywords apply only to single-product path (not carousel picker).
+    const productsForSingle = filterProductsByPerProductKeywords(products, commentText);
+    const product = uniqueMatch || (productsForSingle.length === 1 ? productsForSingle[0] : null);
+
+    if (!usePicker && !product) {
+      svcLogger.info('[commentToDm] Skipping — no product matched after keyword filter', {
+        postId,
+        linkedCount: products.length
+      });
       return;
     }
+
+    svcLogger.info('[commentToDm] Product resolution', {
+      postId,
+      linkedCount: products.length,
+      usePicker,
+      uniqueMatchId: uniqueMatch?._id?.toString?.() || null,
+      productIds: products.map(p => String(p._id))
+    });
 
     const commenterId = interaction.author?.platformId;
     if (!commenterId) {
       svcLogger.warn('[commentToDm] Skipping — no author.platformId', { interactionId });
-      return;
-    }
-
-    const uniqueMatch = matchProductByCommentText(products, commentText);
-    const usePicker = !uniqueMatch && products.length > 1;
-    const product = uniqueMatch || (products.length === 1 ? products[0] : null);
-
-    if (!usePicker && !product) {
-      svcLogger.warn('[commentToDm] Unexpected empty product resolution', { postId, count: products.length });
       return;
     }
 
@@ -169,14 +180,13 @@ async function processCommentForProduct(interaction, organizationId) {
 }
 
 async function resolveProductsForPost(interaction, organizationId, postId, settings) {
-  let products = await Product.find({
-    organization: organizationId,
-    instagramPostIds: String(postId),
-    isActive: true
-  }).lean();
+  const pid = String(postId);
+  let products = await Product.find(buildPostLinkedProductQuery(organizationId, pid)).lean();
 
-  if (!products.length && /^\d+$/.test(String(postId))) {
-    products = await shortcodeFallbackLookup(interaction, organizationId, postId);
+  // Always merge shortcode-linked products when webhook sends numeric media id.
+  // Without this, one product with numeric id blocks fallback and hides other carousel links.
+  if (/^\d+$/.test(pid)) {
+    products = await enrichProductsWithShortcodeLookup(interaction, organizationId, pid, products);
   }
 
   if (!products.length && settings.defaultProductId) {
@@ -189,6 +199,11 @@ async function resolveProductsForPost(interaction, organizationId, postId, setti
   }
 
   return products;
+}
+
+async function enrichProductsWithShortcodeLookup(interaction, organizationId, numericPostId, existingProducts = []) {
+  const shortcodeProducts = await shortcodeFallbackLookup(interaction, organizationId, numericPostId);
+  return mergeProductsById(existingProducts, shortcodeProducts);
 }
 
 async function shortcodeFallbackLookup(interaction, organizationId, postId) {
@@ -217,14 +232,17 @@ async function shortcodeFallbackLookup(interaction, organizationId, postId) {
 
     const products = await Product.find({
       organization: organizationId,
-      instagramPostIds: shortcode,
-      isActive: true
+      isActive: true,
+      $or: [
+        { instagramPostIds: shortcode },
+        { 'instagramPostLinks.postId': shortcode }
+      ]
     }).lean();
 
     if (products.length) {
       await Product.updateMany(
         { _id: { $in: products.map(p => p._id) } },
-        { $addToSet: { instagramPostIds: String(postId) } }
+        { $addToSet: { instagramPostIds: { $each: [String(postId), shortcode] } } }
       );
     }
     return products;

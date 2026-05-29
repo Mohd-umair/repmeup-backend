@@ -9,6 +9,32 @@ const MAX_LABEL = 20;
 const MAX_TITLE = 80;
 
 /**
+ * Mongo filter: products linked to an Instagram post (numeric id, shortcode, or instagramPostLinks).
+ */
+function buildPostLinkedProductQuery(organizationId, postId) {
+  const pid = String(postId);
+  return {
+    organization: organizationId,
+    isActive: true,
+    $or: [
+      { instagramPostIds: pid },
+      { 'instagramPostLinks.postId': pid }
+    ]
+  };
+}
+
+function mergeProductsById(...lists) {
+  const map = new Map();
+  for (const list of lists) {
+    for (const p of list || []) {
+      const id = String(p._id);
+      if (p?._id && !map.has(id)) map.set(id, p);
+    }
+  }
+  return [...map.values()];
+}
+
+/**
  * Sort products linked to the same post (carousel slide order / sortOrder / name).
  */
 function sortProductsForPost(products, postId) {
@@ -170,6 +196,8 @@ function filterProductsByPerProductKeywords(products, commentText) {
 
 module.exports = {
   MAX_PICKER_ELEMENTS,
+  buildPostLinkedProductQuery,
+  mergeProductsById,
   sortProductsForPost,
   matchProductByCommentText,
   formatProductPrice,

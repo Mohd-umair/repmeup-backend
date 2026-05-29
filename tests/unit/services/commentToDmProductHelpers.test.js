@@ -8,6 +8,29 @@ const {
   filterProductsByPerProductKeywords
 } = require('../../../src/services/commentToDmProductHelpers');
 
+describe('buildPostLinkedProductQuery / mergeProductsById', () => {
+  const { buildPostLinkedProductQuery, mergeProductsById } = require('../../../src/services/commentToDmProductHelpers');
+
+  it('buildPostLinkedProductQuery matches instagramPostIds and instagramPostLinks', () => {
+    const q = buildPostLinkedProductQuery('org1', '17881020939515532');
+    expect(q.organization).toBe('org1');
+    expect(q.isActive).toBe(true);
+    expect(q.$or).toEqual([
+      { instagramPostIds: '17881020939515532' },
+      { 'instagramPostLinks.postId': '17881020939515532' }
+    ]);
+  });
+
+  it('mergeProductsById dedupes by _id', () => {
+    const merged = mergeProductsById(
+      [{ _id: 'a', name: 'A' }],
+      [{ _id: 'a', name: 'A2' }, { _id: 'b', name: 'B' }]
+    );
+    expect(merged.map(p => p._id)).toEqual(['a', 'b']);
+    expect(merged[0].name).toBe('A');
+  });
+});
+
 describe('commentToDmProductHelpers', () => {
   const postId = '17881020939515532';
 
