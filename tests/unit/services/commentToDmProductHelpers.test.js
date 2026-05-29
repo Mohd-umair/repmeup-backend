@@ -69,14 +69,42 @@ describe('commentToDmProductHelpers', () => {
   });
 
   describe('buildProductPickerElements', () => {
-    it('builds postback payloads with PICK prefix', () => {
+    it('builds postback payloads with PICK prefix when no CTA buttons', () => {
       const products = [
         { _id: 'abc123', name: 'Item A', price: 99, currency: 'AED', images: [] }
       ];
       const elements = buildProductPickerElements(products, 'tok_xyz');
       expect(elements).toHaveLength(1);
       expect(elements[0].buttons[0].payload).toBe('PICK:abc123:tok_xyz');
+      expect(elements[0].buttons[0].title).toBe('Select');
       expect(elements[0].subtitle).toContain('AED');
+    });
+
+    it('uses per-product dmConfig CTA buttons when order tokens provided', () => {
+      const products = [{
+        _id: 'abc123',
+        name: 'Item A',
+        price: 99,
+        currency: 'AED',
+        images: [],
+        paymentUrl: 'https://shop.example/pay',
+        dmConfig: {
+          ctaTitle: 'Buy Item A',
+          ctaSubtitle: 'Limited stock',
+          ctaButtons: [
+            { label: 'Details', type: 'postback', payload: 'details' },
+            { label: 'Pay Now', type: 'postback', payload: 'payment' }
+          ]
+        }
+      }];
+      const sfSettings = { ctaButtons: [{ label: 'Global', type: 'postback', payload: 'details' }] };
+      const elements = buildProductPickerElements(products, 'tok_xyz', sfSettings, { abc123: 'ord_1' });
+      expect(elements[0].title).toBe('Buy Item A');
+      expect(elements[0].subtitle).toBe('Limited stock');
+      expect(elements[0].buttons).toHaveLength(2);
+      expect(elements[0].buttons[0].title).toBe('Details');
+      expect(elements[0].buttons[0].payload).toBe('SALES:details:ord_1');
+      expect(elements[0].buttons[1].payload).toBe('SALES:payment:ord_1');
     });
   });
 
