@@ -18,7 +18,7 @@ const inboxBulkService = require('../services/inboxBulkService');
 const inboxQueryService = require('../services/inbox/inboxQueryService');
 const inboxAiAssistService = require('../services/inbox/inboxAiAssistService');
 const { getIncomingMessagesPage } = require('../services/inbox/incomingMessagesPageService');
-const { mergeIncomingMessagePages } = require('../services/inbox/commentDmThreadLinkService');
+const { mergeIncomingMessagePages, reconcileCommentDmThreadOnRead } = require('../services/inbox/commentDmThreadLinkService');
 const { filterInboxReplies, isCampaignOnlyFailedThread } = require('../utils/campaignInboxFilter');
 
 const {
@@ -219,6 +219,19 @@ exports.getInteraction = async (req, res, next) => {
 
     if (!interaction) {
       return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+
+    if (interaction.type === 'comment' && interaction.platform === 'instagram') {
+      const reconciled = await reconcileCommentDmThreadOnRead({
+        organizationId: orgId,
+        commentInteraction: interaction
+      });
+      if (reconciled?.linkedDmInteractionId) {
+        interaction.metadata = interaction.metadata || {};
+        interaction.metadata.linkedDmInteractionId = reconciled.linkedDmInteractionId;
+        interaction.metadata.linkedDmPlatformId = reconciled.linkedDmPlatformId;
+        interaction.metadata.commentToDmActive = true;
+      }
     }
 
     let messagesPage = messagesPageRaw;
