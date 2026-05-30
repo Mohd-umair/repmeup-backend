@@ -18,7 +18,7 @@ const inboxBulkService = require('../services/inboxBulkService');
 const inboxQueryService = require('../services/inbox/inboxQueryService');
 const inboxAiAssistService = require('../services/inbox/inboxAiAssistService');
 const { getIncomingMessagesPage } = require('../services/inbox/incomingMessagesPageService');
-const { mergeIncomingMessagePages, reconcileCommentDmThreadOnRead } = require('../services/inbox/commentDmThreadLinkService');
+const { mergeIncomingMessagePages, reconcileCommentDmThreadOnRead, getCtdAuthorPlatformIds, buildCtdOrphanInstagramDmExclusion, filterOrphanInstagramDmRows, reconcileRecentCtdOrphanDms } = require('../services/inbox/commentDmThreadLinkService');
 const { filterInboxReplies, isCampaignOnlyFailedThread } = require('../utils/campaignInboxFilter');
 
 const {
@@ -58,6 +58,15 @@ exports.getInteractions = async (req, res, next) => {
       activeConnections
     });
 
+    await reconcileRecentCtdOrphanDms(orgId);
+
+    const ctdAuthorPlatformIds = await getCtdAuthorPlatformIds(orgId);
+    const ctdOrphanExclusion = buildCtdOrphanInstagramDmExclusion(ctdAuthorPlatformIds);
+    if (ctdOrphanExclusion) {
+      mongoQuery.$and = mongoQuery.$and || [];
+      mongoQuery.$and.push(ctdOrphanExclusion);
+    }
+
     const cacheKey = cacheService.interactionsKey(orgId, cacheFilters);
 
     const cached = await cacheService.get(cacheKey);
@@ -73,6 +82,10 @@ exports.getInteractions = async (req, res, next) => {
       if (typeof cached.pagination.total !== 'number') {
         cached.pagination.total = await Interaction.countDocuments(mongoQuery);
       }
+      cached.interactions = filterOrphanInstagramDmRows(
+        cached.interactions || [],
+        ctdAuthorPlatformIds
+      );
       return res.status(200).json({ success: true, data: cached, cached: true });
     }
 
@@ -116,6 +129,7 @@ exports.getInteractions = async (req, res, next) => {
     const hasMore = rawInteractions.length > safeLimit;
     let interactions = hasMore ? rawInteractions.slice(0, safeLimit) : rawInteractions;
     interactions = interactions.filter((row) => !isCampaignOnlyFailedThread(row));
+    interactions = filterOrphanInstagramDmRows(interactions, ctdAuthorPlatformIds);
 
     // Defer chatRef backfill — it's a best-effort legacy fixup, not something the
     // user is waiting for. Running it in-band made every list load pay for a write

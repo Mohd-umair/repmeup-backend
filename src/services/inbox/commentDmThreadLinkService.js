@@ -68,10 +68,6 @@ function parseSalesPostbackOrderToken(payload) {
   return { action: parts[1], orderToken: parts.slice(2).join(':') };
 }
 
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 /**
  * Resolve the canonical DM thread for a customer — prefers the CTD-linked thread so
  * webhook entry.id and connection.platformUserId mismatches do not create duplicate rows.
@@ -103,7 +99,10 @@ async function resolveDmThreadTarget({
       type: 'comment',
       platform: 'instagram',
       'author.platformId': userId,
-      'metadata.commentToDmActive': true
+      $or: [
+        { 'metadata.commentToDmActive': true },
+        { 'metadata.linkedDmPlatformId': { $exists: true, $ne: null } }
+      ]
     })
       .sort({ updatedAt: -1 })
       .select('_id metadata.linkedDmPlatformId')
@@ -295,11 +294,22 @@ async function absorbOrphanDmThreadsForCustomer({
     organization: organizationId,
     type: 'dm',
     platform: 'instagram',
-    platformId: {
-      $ne: canonicalPlatformId,
-      $regex: new RegExp(`^dm_.+_${escapeRegex(userId)}$`)
-    },
-    status: { $ne: 'archived' }
+    platformId: { $ne: canonicalPlatformId },
+    status: { $ne: 'archived' },
+    $and: [
+      {
+        $or: [
+          { 'author.platformId': userId },
+          { threadId: userId }
+        ]
+      },
+      {
+        $or: [
+          { 'metadata.sourceCommentInteractionId': { $exists: false } },
+          { 'metadata.sourceCommentInteractionId': null }
+        ]
+      }
+    ]
   }).select('_id platformId metadata.incomingMessages').lean();
 
   if (!orphans.length) return;
@@ -608,6 +618,104 @@ function shadowDmExclusionCondition() {
   };
 }
 
+/**
+ * Hide orphan Instagram DM rows for customers who already have a CTD comment anchor.
+ * Complements shadowDmExclusionCondition (linked shadow DMs with sourceCommentInteractionId).
+ */
+function buildCtdOrphanInstagramDmExclusion(ctdAuthorPlatformIds) {
+  if (!Array.isArray(ctdAuthorPlatformIds) || ctdAuthorPlatformIds.length === 0) {
+    return null;
+  }
+  const ids = ctdAuthorPlatformIds.filter(Boolean).map(String);
+  return {
+    $or: [
+      { type: { $ne: 'dm' } },
+      { platform: { $ne: 'instagram' } },
+      { 'author.platformId': { $nin: ids } },
+      { 'metadata.sourceCommentInteractionId': { $exists: true, $ne: null } }
+    ]
+  };
+}
+
+async function getCtdAuthorPlatformIds(organizationId) {
+  if (!organizationId) return [];
+  return Interaction.distinct('author.platformId', {
+    organization: organizationId,
+    type: 'comment',
+    platform: 'instagram',
+    $or: [
+      { 'metadata.commentToDmActive': true },
+      { 'metadata.linkedDmPlatformId': { $exists: true, $ne: null } }
+    ],
+    'author.platformId': { $exists: true, $nin: [null, ''] }
+  });
+}
+
+/** Remove orphan Instagram DM list rows for CTD customers (safety net after query filter). */
+function filterOrphanInstagramDmRows(interactions, ctdAuthorPlatformIds) {
+  if (!Array.isArray(interactions) || !interactions.length) return interactions;
+  const ids = new Set((ctdAuthorPlatformIds || []).filter(Boolean).map(String));
+  if (!ids.size) return interactions;
+
+  return interactions.filter((row) => {
+    if (!row || row.type !== 'dm' || row.platform !== 'instagram') return true;
+    if (row.metadata?.sourceCommentInteractionId) return false;
+    if (row.metadata?.mergedIntoDmPlatformId || row.status === 'archived') return false;
+    const authorId = row.author?.platformId;
+    return !(authorId && ids.has(String(authorId)));
+  });
+}
+
+/**
+ * Merge duplicate DM platformId rows into each active CTD comment's canonical thread.
+ * Called on inbox list load so legacy splits disappear without waiting for a new webhook.
+ */
+async function reconcileRecentCtdOrphanDms(organizationId, { limit = 40 } = {}) {
+  if (!organizationId) return;
+
+  const comments = await Interaction.find({
+    organization: organizationId,
+    type: 'comment',
+    platform: 'instagram',
+    'metadata.commentToDmActive': true,
+    'metadata.linkedDmPlatformId': { $exists: true, $ne: null },
+    'author.platformId': { $exists: true, $nin: [null, ''] }
+  })
+    .sort({ updatedAt: -1 })
+    .limit(limit)
+    .select('author.platformId metadata.linkedDmPlatformId _id')
+    .lean();
+
+  await Promise.all(
+    comments.map(async (comment) => {
+      const userId = comment.author?.platformId;
+      const canonicalPlatformId = comment.metadata?.linkedDmPlatformId;
+      if (!userId || !canonicalPlatformId) return;
+
+      await absorbOrphanDmThreadsForCustomer({
+        organizationId,
+        canonicalPlatformId,
+        instagramUserId: userId
+      });
+
+      const dm = await Interaction.findOne({
+        organization: organizationId,
+        platformId: canonicalPlatformId,
+        type: 'dm'
+      }).select('_id');
+
+      if (dm) {
+        await ensureDmThreadLinkedToComment({
+          organizationId,
+          dmInteractionId: dm._id,
+          threadPlatformId: canonicalPlatformId,
+          sourceCommentInteractionId: comment._id
+        });
+      }
+    })
+  );
+}
+
 /** Human-readable inbox line for a CTA postback tap (button title preferred). */
 function formatPostbackIncomingText(title, payload) {
   const label = String(title || '').trim();
@@ -676,6 +784,10 @@ module.exports = {
   ensureCommentDmLink,
   mergeIncomingMessagePages,
   shadowDmExclusionCondition,
+  buildCtdOrphanInstagramDmExclusion,
+  getCtdAuthorPlatformIds,
+  filterOrphanInstagramDmRows,
+  reconcileRecentCtdOrphanDms,
   normalizeTimestampJs,
   formatPostbackIncomingText,
   notifyLinkedCommentInboxRefresh,
