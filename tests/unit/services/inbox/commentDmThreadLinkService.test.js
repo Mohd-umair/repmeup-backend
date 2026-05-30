@@ -139,6 +139,32 @@ describe('commentDmThreadLinkService', () => {
       platformUserId: 'ig_acc_1'
     };
 
+    function mockResolveDmQueries() {
+      Interaction.findById.mockReturnValue({
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue({ metadata: {} })
+        })
+      });
+
+      SalesConversationState.findOne.mockReturnValue({
+        sort: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        lean: jest.fn().mockResolvedValue(null)
+      });
+
+      Interaction.findOne.mockImplementation(() => ({
+        sort: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        lean: jest.fn().mockResolvedValue(null)
+      }));
+
+      Interaction.find.mockReturnValue({
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue([])
+        })
+      });
+    }
+
     it('returns null ids when required args missing', async () => {
       const result = await linkSvc.ensureCommentDmLink({});
       expect(result).toEqual({ dmInteractionId: null, dmPlatformId: null });
@@ -146,9 +172,7 @@ describe('commentDmThreadLinkService', () => {
     });
 
     it('upserts DM thread and links metadata on comment + DM', async () => {
-      Interaction.findOne.mockReturnValue({
-        select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) })
-      });
+      mockResolveDmQueries();
       Interaction.findOneAndUpdate.mockResolvedValue({ _id: 'dm_1' });
       Interaction.updateOne.mockResolvedValue({ modifiedCount: 1 });
 
@@ -188,9 +212,7 @@ describe('commentDmThreadLinkService', () => {
     });
 
     it('updates SalesConversationState.dmInteractionId when postId provided', async () => {
-      Interaction.findOne.mockReturnValue({
-        select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ _id: 'existing_dm' }) })
-      });
+      mockResolveDmQueries();
       Interaction.findOneAndUpdate.mockResolvedValue({ _id: 'dm_1' });
       Interaction.updateOne.mockResolvedValue({});
       SalesConversationState.updateMany.mockResolvedValue({ modifiedCount: 1 });

@@ -15,9 +15,10 @@ const instagramService = require('../../integrations/meta/instagramService');
 const { emitToOrg } = require('../../utils/socketEmitter');
 const { generateChatRef } = require('../../utils/chatRefHelper');
 const {
-  buildDmThreadPlatformId,
   formatPostbackIncomingText,
-  notifyLinkedCommentInboxRefresh
+  notifyLinkedCommentInboxRefresh,
+  resolveDmThreadTarget,
+  finalizeDmThreadForCtd
 } = require('../inbox/commentDmThreadLinkService');
 const logger = require('../../config/logger');
 
@@ -223,10 +224,18 @@ async function persistInstagramPostbackToDmThread({
   platformConnectionId,
   dmReceiverConnection
 }) {
+  const { threadPlatformId, igAccountId: resolvedIgAccountId, sourceCommentInteractionId } =
+    await resolveDmThreadTarget({
+      organizationId,
+      instagramUserId: senderId,
+      webhookEntryId: igAccountId,
+      connection: dmReceiverConnection,
+      payload
+    });
+
   const mid = event.postback?.mid
     || `postback_${event.timestamp || Date.now()}_${String(payload).slice(0, 48)}`;
   const text = formatPostbackIncomingText(title, payload);
-  const threadPlatformId = buildDmThreadPlatformId(igAccountId, senderId);
 
   const existing = await Interaction
     .findOne({ platformId: threadPlatformId, organization: organizationId })
@@ -268,11 +277,15 @@ async function persistInstagramPostbackToDmThread({
     threadId: String(senderId),
     platformCreatedAt: new Date(event.timestamp || Date.now()),
     'metadata.lastMid': mid,
-    'metadata.instagramAccountId': igAccountId,
+    'metadata.instagramAccountId': resolvedIgAccountId || igAccountId,
     status: 'unread',
     isRead: false
   };
   if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
+  if (sourceCommentInteractionId) {
+    updateFields['metadata.sourceCommentInteractionId'] = sourceCommentInteractionId;
+    updateFields['metadata.isCommentShadowDm'] = true;
+  }
   if (existing && !existing.chatRef && chatRefFields?.chatRef) {
     updateFields.chatNumber = chatRefFields.chatNumber;
     updateFields.chatRef = chatRefFields.chatRef;
@@ -311,13 +324,19 @@ async function persistInstagramPostbackToDmThread({
     }
   );
 
-  const interaction = await Interaction.findOne({
+  let interaction = await Interaction.findOne({
     platformId: threadPlatformId,
     organization: organizationId
   });
 
   if (interaction && organizationId) {
-    await notifyLinkedCommentInboxRefresh(organizationId, interaction.toObject ? interaction.toObject() : interaction);
+    interaction = await finalizeDmThreadForCtd({
+      organizationId,
+      dmInteraction: interaction,
+      threadPlatformId,
+      sourceCommentInteractionId,
+      instagramUserId: senderId
+    }) || interaction;
   }
 
   return interaction;
@@ -507,10 +526,14 @@ async function handleInstagramMessage(payload, organizationId) {
       };
       if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
-      // One thread per conversation (IG account + customer), not per message.
-      // All queries are scoped to organizationId because platformId is unique PER ORG,
-      // not globally. Two tenants may share the same thread id.
-      const threadPlatformId = `dm_${String(igAccountId)}_${String(partnerId)}`;
+      const { threadPlatformId, igAccountId: resolvedIgAccountId, sourceCommentInteractionId } =
+        await resolveDmThreadTarget({
+          organizationId,
+          instagramUserId: String(partnerId),
+          webhookEntryId: igAccountId,
+          connection: dmReceiverConnection
+        });
+
       const existing = await Interaction
         .findOne({ platformId: threadPlatformId, organization: organizationId })
         .select('_id metadata.lastMid author chatRef')
@@ -546,11 +569,15 @@ async function handleInstagramMessage(payload, organizationId) {
         threadId: String(partnerId),
         platformCreatedAt: new Date(event.timestamp),
         'metadata.lastMid': mid,
-        'metadata.instagramAccountId': igAccountId,
+        'metadata.instagramAccountId': resolvedIgAccountId || igAccountId,
         status: 'unread',
         isRead: false
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
+      if (sourceCommentInteractionId) {
+        updateFields['metadata.sourceCommentInteractionId'] = sourceCommentInteractionId;
+        updateFields['metadata.isCommentShadowDm'] = true;
+      }
 
       if (storyContext.storyMediaId && storyContext.triggerType) {
         const { linkedProductCount, linkedProductNames } = await lookupLinkedStoryProducts(
@@ -609,10 +636,20 @@ async function handleInstagramMessage(payload, organizationId) {
         }
       );
 
-      const interaction = await Interaction.findOne({
+      let interaction = await Interaction.findOne({
         platformId: threadPlatformId,
         organization: organizationId
       });
+
+      if (interaction && sourceCommentInteractionId) {
+        interaction = await finalizeDmThreadForCtd({
+          organizationId,
+          dmInteraction: interaction,
+          threadPlatformId,
+          sourceCommentInteractionId,
+          instagramUserId: String(partnerId)
+        }) || interaction;
+      }
 
       // Emit real-time socket event so frontend inbox updates immediately
       if (interaction && organizationId) {
