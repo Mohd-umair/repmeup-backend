@@ -33,6 +33,7 @@ const {
   templateSendInboxMetadata
 } = require('./commentToDmProductHelpers');
 const { recordAutomationReply } = require('./inbox/inboxAutomationReplyService');
+const { ensureCommentDmLink } = require('./inbox/commentDmThreadLinkService');
 
 const svcLogger = logger.createChild({ module: 'commentToDmService' });
 
@@ -153,6 +154,14 @@ async function processCommentForProduct(interaction, organizationId) {
 
     const { accessToken, pageId, connType } = connectionContext(connection);
     const commenterUsername = interaction.author?.username || '';
+
+    await ensureCommentDmLink({
+      commentInteraction: interaction,
+      organizationId,
+      instagramUserId: commenterId,
+      platformConnection: connection,
+      postId
+    });
 
     await postPublicStub(interaction, settings, commenterUsername, accessToken, connType, organizationId);
 

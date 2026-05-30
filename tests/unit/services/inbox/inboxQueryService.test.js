@@ -184,6 +184,14 @@ describe('inboxQueryService.buildListFilter', () => {
         { parentId: '' }
       ]
     });
+    // Third $and rule hides shadow DM threads linked to comment CTD
+    expect(mongoQuery.$and[2]).toEqual({
+      $or: [
+        { type: { $ne: 'dm' } },
+        { 'metadata.sourceCommentInteractionId': { $exists: false } },
+        { 'metadata.sourceCommentInteractionId': null }
+      ]
+    });
   });
 
   test('multi-select filters use $in; single values stay equality', () => {
