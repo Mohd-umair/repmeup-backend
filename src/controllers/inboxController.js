@@ -18,6 +18,7 @@ const inboxBulkService = require('../services/inboxBulkService');
 const inboxQueryService = require('../services/inbox/inboxQueryService');
 const inboxAiAssistService = require('../services/inbox/inboxAiAssistService');
 const { getIncomingMessagesPage } = require('../services/inbox/incomingMessagesPageService');
+const { mergeIncomingMessagePages } = require('../services/inbox/commentDmThreadLinkService');
 const { filterInboxReplies, isCampaignOnlyFailedThread } = require('../utils/campaignInboxFilter');
 
 const {
@@ -214,10 +215,17 @@ exports.getInteraction = async (req, res, next) => {
 
     const messagesPagePromise = getIncomingMessagesPage(Interaction, interactionId, { msgLimit, msgBefore });
 
-    const [interaction, messagesPage] = await Promise.all([mainQuery, messagesPagePromise]);
+    const [interaction, messagesPageRaw] = await Promise.all([mainQuery, messagesPagePromise]);
 
     if (!interaction) {
       return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+
+    let messagesPage = messagesPageRaw;
+    const linkedDmId = interaction.metadata?.linkedDmInteractionId;
+    if (interaction.type === 'comment' && linkedDmId) {
+      const dmPage = await getIncomingMessagesPage(Interaction, String(linkedDmId), { msgLimit, msgBefore });
+      messagesPage = mergeIncomingMessagePages(messagesPageRaw, dmPage);
     }
 
     // Agents can only view interactions assigned to them or previously assigned to them.

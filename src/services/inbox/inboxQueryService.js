@@ -26,6 +26,8 @@
 
 'use strict';
 
+const { shadowDmExclusionCondition } = require('./commentDmThreadLinkService');
+
 // ─── constants ──────────────────────────────────────────────────────────────
 
 const SLA_HOURS = 24;
@@ -313,7 +315,8 @@ function buildListFilter({ user, query = {}, activeConnections = [] }) {
         { parentId: '' }
       ]
     },
-    visibilityFilter
+    visibilityFilter,
+    shadowDmExclusionCondition()
   ];
 
   if (intentBucketNoneCondition) conditionsToAnd.push(intentBucketNoneCondition);
@@ -387,7 +390,8 @@ function buildStatsMatchStage({ orgId, platform, activeConnections = [] }) {
     organization: orgId,
     $and: [
       { $or: [{ parentId: { $exists: false } }, { parentId: null }, { parentId: '' }] },
-      visibilityFilter
+      visibilityFilter,
+      shadowDmExclusionCondition()
     ]
   };
   setQueryFieldInOrEquals(matchStage, 'platform', platform);
