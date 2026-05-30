@@ -27,6 +27,7 @@
 
 const mongoose = require('mongoose');
 const Interaction = require('../models/Interaction');
+const ProductOrder = require('../models/ProductOrder');
 const ScheduledPost = require('../models/ScheduledPost');
 
 /**
@@ -121,6 +122,148 @@ function computeAvgResponseTime(totalResponseTime, respondedCount) {
   return respondedCount > 0 ? totalResponseTime / respondedCount / 60000 : 0;
 }
 
+/**
+ * Milliseconds from customer message → first response.
+ * Uses first reply at/after the customer message (not stale thread replies),
+ * valid respondedAt, stored firstResponseTime, and DM last inbound timestamp.
+ */
+const RESPONSE_TIME_MS_EXPR = {
+  $let: {
+    vars: {
+      platformAt: { $ifNull: ['$platformCreatedAt', '$createdAt'] },
+      lastInbound: {
+        $let: {
+          vars: {
+            lastMsg: { $arrayElemAt: [{ $ifNull: ['$metadata.incomingMessages', []] }, -1] }
+          },
+          in: {
+            $cond: [
+              { $ifNull: ['$$lastMsg.timestamp', false] },
+              { $toDate: '$$lastMsg.timestamp' },
+              null
+            ]
+          }
+        }
+      },
+      storedMs: { $ifNull: ['$firstResponseTime', 0] }
+    },
+    in: {
+      $let: {
+        vars: {
+          baseline: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ['$type', 'dm'] },
+                  { $ne: ['$$lastInbound', null] },
+                  { $gt: ['$$lastInbound', '$$platformAt'] }
+                ]
+              },
+              '$$lastInbound',
+              '$$platformAt'
+            ]
+          }
+        },
+        in: {
+          $let: {
+            vars: {
+              repliesAfterBaseline: {
+                $filter: {
+                  input: { $ifNull: ['$replies', []] },
+                  as: 'reply',
+                  cond: {
+                    $and: [
+                      { $ne: ['$$reply.sentAt', null] },
+                      { $gte: ['$$reply.sentAt', '$$baseline'] }
+                    ]
+                  }
+                }
+              }
+            },
+            in: {
+              $let: {
+                vars: {
+                  firstReplyAfter: {
+                    $arrayElemAt: [
+                      { $sortArray: { input: '$$repliesAfterBaseline', sortBy: { sentAt: 1 } } },
+                      0
+                    ]
+                  },
+                  validRespondedAt: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $ne: ['$respondedAt', null] },
+                          { $gte: ['$respondedAt', '$$baseline'] }
+                        ]
+                      },
+                      '$respondedAt',
+                      null
+                    ]
+                  }
+                },
+                in: {
+                  $cond: [
+                    { $gt: ['$$storedMs', 0] },
+                    '$$storedMs',
+                    {
+                      $let: {
+                        vars: {
+                          firstAt: {
+                            $ifNull: ['$$firstReplyAfter.sentAt', '$$validRespondedAt']
+                          }
+                        },
+                        in: {
+                          $cond: [
+                            {
+                              $and: [
+                                { $ne: ['$$firstAt', null] },
+                                { $ne: ['$$baseline', null] }
+                              ]
+                            },
+                            {
+                              $max: [
+                                0,
+                                { $subtract: ['$$firstAt', '$$baseline'] }
+                              ]
+                            },
+                            null
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
+function addResponseTimeMsStage() {
+  return { $addFields: { _responseTimeMs: RESPONSE_TIME_MS_EXPR } };
+}
+
+const HAS_COMPUTABLE_RESPONSE_TIME_MS = {
+  $and: [
+    { $ne: ['$_responseTimeMs', null] },
+    { $gt: ['$_responseTimeMs', 0] }
+  ]
+};
+
+function mergeResponseMetricRows(primary, supplemental) {
+  const a = primary || { totalResponded: 0, totalResponseTime: 0, respondedCount: 0 };
+  const b = supplemental || { totalResponseTime: 0, respondedCount: 0 };
+  return {
+    totalResponded: a.totalResponded || 0,
+    totalResponseTime: (a.totalResponseTime || 0) + (b.totalResponseTime || 0),
+    respondedCount: (a.respondedCount || 0) + (b.respondedCount || 0)
+  };
+}
+
 /** Sentiment score 0-100: positive=100, neutral=50, negative=0. Default 50 when empty. */
 function computeSentimentScore({ positive = 0, neutral = 0 } = {}, total = 0) {
   return total > 0 ? ((positive * 100 + neutral * 50) / total) : 50;
@@ -157,9 +300,10 @@ function countInteractions(matchFilter) {
 /**
  * Returns [{ totalResponded, totalResponseTime, respondedCount }]
  */
-function aggregateResponseMetrics(matchFilter) {
-  return Interaction.aggregate([
+async function aggregateInteractionResponseMetrics(matchFilter) {
+  const rows = await Interaction.aggregate([
     { $match: matchFilter },
+    addResponseTimeMsStage(),
     {
       $group: {
         _id: null,
@@ -169,20 +313,84 @@ function aggregateResponseMetrics(matchFilter) {
           }
         },
         totalResponseTime: {
-          $sum: {
-            $cond: [
-              { $and: [{ $ne: ['$respondedAt', null] }, { $ne: ['$platformCreatedAt', null] }] },
-              { $subtract: ['$respondedAt', '$platformCreatedAt'] },
-              0
-            ]
-          }
+          $sum: { $cond: [HAS_COMPUTABLE_RESPONSE_TIME_MS, '$_responseTimeMs', 0] }
         },
         respondedCount: {
-          $sum: { $cond: [{ $ne: ['$respondedAt', null] }, 1, 0] }
+          $sum: { $cond: [HAS_COMPUTABLE_RESPONSE_TIME_MS, 1, 0] }
         }
       }
     }
   ]);
+  return rows[0] || { totalResponded: 0, totalResponseTime: 0, respondedCount: 0 };
+}
+
+/**
+ * Comment-to-DM / follow flows often create ProductOrders without updating Interaction.replies.
+ */
+async function aggregateProductOrderResponseMetrics(matchFilter) {
+  const dateWindow = matchFilter.platformCreatedAt;
+  if (!dateWindow) return { totalResponseTime: 0, respondedCount: 0 };
+
+  const rows = await ProductOrder.aggregate([
+    {
+      $match: {
+        organization: matchFilter.organization,
+        commentInteractionId: { $exists: true, $ne: null },
+        status: { $nin: ['cancelled'] }
+      }
+    },
+    {
+      $lookup: {
+        from: Interaction.collection.name,
+        localField: 'commentInteractionId',
+        foreignField: '_id',
+        as: 'interaction'
+      }
+    },
+    { $unwind: '$interaction' },
+    {
+      $match: {
+        'interaction.platformCreatedAt': dateWindow,
+        'interaction.respondedAt': null,
+        $expr: { $eq: [{ $size: { $ifNull: ['$interaction.replies', []] } }, 0] }
+      }
+    },
+    {
+      $project: {
+        responseTimeMs: {
+          $max: [
+            0,
+            {
+              $subtract: [
+                '$createdAt',
+                { $ifNull: ['$interaction.platformCreatedAt', '$interaction.createdAt'] }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        totalResponseTime: {
+          $sum: { $cond: [{ $gt: ['$responseTimeMs', 0] }, '$responseTimeMs', 0] }
+        },
+        respondedCount: {
+          $sum: { $cond: [{ $gt: ['$responseTimeMs', 0] }, 1, 0] }
+        }
+      }
+    }
+  ]);
+  return rows[0] || { totalResponseTime: 0, respondedCount: 0 };
+}
+
+async function aggregateResponseMetrics(matchFilter) {
+  const [fromInteractions, fromOrders] = await Promise.all([
+    aggregateInteractionResponseMetrics(matchFilter),
+    aggregateProductOrderResponseMetrics(matchFilter)
+  ]);
+  return [mergeResponseMetricRows(fromInteractions, fromOrders)];
 }
 
 /**
@@ -191,6 +399,7 @@ function aggregateResponseMetrics(matchFilter) {
 function aggregatePlatformMetrics(matchFilter) {
   return Interaction.aggregate([
     { $match: matchFilter },
+    addResponseTimeMsStage(),
     {
       $group: {
         _id: '$platform',
@@ -206,16 +415,10 @@ function aggregatePlatformMetrics(matchFilter) {
           }
         },
         totalResponseTime: {
-          $sum: {
-            $cond: [
-              { $and: [{ $ne: ['$respondedAt', null] }, { $ne: ['$platformCreatedAt', null] }] },
-              { $subtract: ['$respondedAt', '$platformCreatedAt'] },
-              0
-            ]
-          }
+          $sum: { $cond: [HAS_COMPUTABLE_RESPONSE_TIME_MS, '$_responseTimeMs', 0] }
         },
         respondedCount: {
-          $sum: { $cond: [{ $ne: ['$respondedAt', null] }, 1, 0] }
+          $sum: { $cond: [HAS_COMPUTABLE_RESPONSE_TIME_MS, 1, 0] }
         }
       }
     },
@@ -271,18 +474,12 @@ function aggregateTimeSeries(matchFilter) {
  */
 function aggregateResponseTimeDistribution(matchFilter) {
   return Interaction.aggregate([
-    {
-      $match: {
-        ...matchFilter,
-        respondedAt: { $ne: null },
-        platformCreatedAt: { $ne: null }
-      }
-    },
+    { $match: matchFilter },
+    addResponseTimeMsStage(),
+    { $match: { $expr: HAS_COMPUTABLE_RESPONSE_TIME_MS } },
     {
       $project: {
-        responseTime: {
-          $divide: [{ $subtract: ['$respondedAt', '$platformCreatedAt'] }, 60000]
-        }
+        responseTime: { $divide: ['$_responseTimeMs', 60000] }
       }
     },
     {
@@ -755,7 +952,7 @@ function assembleDashboardDto(inputs) {
     totalResponded: 0, totalResponseTime: 0, respondedCount: 0
   };
   const responseRate = computeResponseRate(totalInteractions, responseData.totalResponded);
-  const avgResponseTime = computeAvgResponseTime(
+  const avgFromMetrics = computeAvgResponseTime(
     responseData.totalResponseTime, responseData.respondedCount
   );
 
@@ -769,7 +966,7 @@ function assembleDashboardDto(inputs) {
   const prevResponseRate = computeResponseRate(
     prevTotalInteractions, prevResponseData.totalResponded
   );
-  const prevAvgResponseTime = computeAvgResponseTime(
+  const prevAvgFromMetrics = computeAvgResponseTime(
     prevResponseData.totalResponseTime, prevResponseData.respondedCount
   );
   const prevSentimentData = foldSentimentBreakdown(
@@ -785,6 +982,11 @@ function assembleDashboardDto(inputs) {
   const within1Hour = distribution.find((d) => d._id === 0)?.count || 0;
   const within24Hours = distribution.find((d) => d._id === 60)?.count || 0;
   const over24Hours = distribution.find((d) => d._id === 1440)?.count || 0;
+
+  // Prefer distribution avg when interaction metrics are empty; keep fractional minutes
+  const avgFromDistribution = stats.avg || 0;
+  const avgResponseTime = avgFromMetrics > 0 ? avgFromMetrics : avgFromDistribution;
+  const prevAvgResponseTime = prevAvgFromMetrics > 0 ? prevAvgFromMetrics : 0;
 
   // ── Intent breakdown — keyed by bucket id for the UI ──────────────────
   const intentData = {};
@@ -826,7 +1028,7 @@ function assembleDashboardDto(inputs) {
       },
       avgResponseTime: {
         label: 'Avg Response Time',
-        value: Math.round(avgResponseTime),
+        value: avgResponseTime > 0 ? +avgResponseTime.toFixed(1) : 0,
         icon: 'fas fa-clock',
         color: '#F59E0B',
         change: Math.abs(responseTimeChange),

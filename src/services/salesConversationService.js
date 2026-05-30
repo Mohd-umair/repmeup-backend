@@ -27,6 +27,7 @@ const Product = require('../models/Product');
 const PlatformConnection = require('../models/PlatformConnection');
 const instagramService = require('../integrations/meta/instagramService');
 const commentToDmService = require('./commentToDmService');
+const { recordAutomationReply } = require('./inbox/inboxAutomationReplyService');
 const logger = require('../config/logger');
 
 const svcLogger = logger.createChild({ module: 'salesConversationService' });
@@ -134,10 +135,42 @@ function effectiveConfig(product, orgSettings) {
 
 // ── DM send helpers ──────────────────────────────────────────────────────────
 
-/**
- * Sends the full product details as a plain-text DM.
- */
-async function sendProductDetails(instagramUserId, product, conn) {
+function resolveCommentInteractionId(state, order = null) {
+  return state?.commentInteractionId || order?.commentInteractionId || null;
+}
+
+async function recordSalesOutbound(state, organizationId, order, payload) {
+  const interactionId = resolveCommentInteractionId(state, order);
+  if (!interactionId) return;
+  await recordAutomationReply({
+    interactionId,
+    organizationId,
+    ...payload
+  });
+}
+
+async function sendInstagramTextAndRecord({ state, organizationId, order, conn, instagramUserId, content }) {
+  const result = await instagramService.sendMessage(
+    instagramUserId,
+    content,
+    conn.accessToken,
+    conn.pageId,
+    false,
+    conn.connType
+  );
+
+  if (result?.success) {
+    await recordSalesOutbound(state, organizationId, order, {
+      content,
+      platformResponseId: result.platformResponseId || null,
+      messageType: 'instagram_private_dm'
+    });
+  }
+
+  return result;
+}
+
+function buildProductDetailsText(product) {
   const lines = [];
   lines.push(`🛍️ *${product.name}*`);
   if (product.description) lines.push(`📝 ${product.description}`);
@@ -146,10 +179,25 @@ async function sendProductDetails(instagramUserId, product, conn) {
   if (product.colors?.length) lines.push(`🎨 Colors: ${product.colors.join(', ')}`);
   lines.push('');
   lines.push('Reply with "payment link" to place your order, or ask us anything! 😊');
+  return lines.join('\n');
+}
 
-  await instagramService.sendMessage(
+/**
+ * Sends the full product details as a plain-text DM.
+ */
+async function sendProductDetails(instagramUserId, product, conn, recordCtx = null) {
+  const content = buildProductDetailsText(product);
+  if (recordCtx) {
+    return sendInstagramTextAndRecord({
+      ...recordCtx,
+      conn,
+      instagramUserId,
+      content
+    });
+  }
+  return instagramService.sendMessage(
     instagramUserId,
-    lines.join('\n'),
+    content,
     conn.accessToken,
     conn.pageId,
     false,
@@ -157,28 +205,31 @@ async function sendProductDetails(instagramUserId, product, conn) {
   );
 }
 
+function buildPaymentLinkText(product, orderToken) {
+  if (!product.paymentUrl) {
+    return 'Our payment link will be ready shortly. We\'ll send it to you as soon as it\'s available! 🙏';
+  }
+  const sep = product.paymentUrl.includes('?') ? '&' : '?';
+  const url = orderToken ? `${product.paymentUrl}${sep}ref=${orderToken}` : product.paymentUrl;
+  return `👉 Here's your order link:\n\n${url}\n\nTap the link to complete your purchase! 🛍️`;
+}
+
 /**
  * Sends the payment link as a plain-text DM.
  */
-async function sendPaymentLink(instagramUserId, product, orderToken, conn) {
-  if (!product.paymentUrl) {
-    await instagramService.sendMessage(
+async function sendPaymentLink(instagramUserId, product, orderToken, conn, recordCtx = null) {
+  const content = buildPaymentLinkText(product, orderToken);
+  if (recordCtx) {
+    return sendInstagramTextAndRecord({
+      ...recordCtx,
+      conn,
       instagramUserId,
-      'Our payment link will be ready shortly. We\'ll send it to you as soon as it\'s available! 🙏',
-      conn.accessToken,
-      conn.pageId,
-      false,
-      conn.connType
-    );
-    return;
+      content
+    });
   }
-
-  const sep = product.paymentUrl.includes('?') ? '&' : '?';
-  const url = orderToken ? `${product.paymentUrl}${sep}ref=${orderToken}` : product.paymentUrl;
-
-  await instagramService.sendMessage(
+  return instagramService.sendMessage(
     instagramUserId,
-    `👉 Here's your order link:\n\n${url}\n\nTap the link to complete your purchase! 🛍️`,
+    content,
     conn.accessToken,
     conn.pageId,
     false,
@@ -287,14 +338,13 @@ async function handleNumericProductSelection({
   if (!productId) {
     const conn = await resolveIgConnection(organizationId, platformConnectionId);
     if (conn) {
-      await instagramService.sendMessage(
+      await sendInstagramTextAndRecord({
+        state,
+        organizationId,
+        conn,
         instagramUserId,
-        'Please reply with the number of the product you want (e.g. 1 or 2), or tap Select on a product card. 🛍️',
-        conn.accessToken,
-        conn.pageId,
-        false,
-        conn.connType
-      );
+        content: 'Please reply with the number of the product you want (e.g. 1 or 2), or tap Select on a product card. 🛍️'
+      });
     }
     return true;
   }
@@ -383,6 +433,7 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
         instagramUserId,
         postId: order.instagramPostId,
         productOrderId: order._id,
+        commentInteractionId: order.commentInteractionId || null,
         stage: 'initial_cta_sent',
         lastStageAt: new Date()
       });
@@ -398,8 +449,10 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
       await state.save();
     }
 
+    const recordCtx = { state, organizationId, order };
+
     if (action === 'details') {
-      await sendProductDetails(instagramUserId, order.product, conn);
+      await sendProductDetails(instagramUserId, order.product, conn, recordCtx);
       if (state) {
         state.stage = 'details_sent';
         state.lastStageAt = new Date();
@@ -410,7 +463,7 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
     }
 
     if (action === 'payment') {
-      await sendPaymentLink(instagramUserId, order.product, order.orderToken, conn);
+      await sendPaymentLink(instagramUserId, order.product, order.orderToken, conn, recordCtx);
       if (state) {
         state.stage = 'payment_link_sent';
         state.lastStageAt = new Date();
@@ -425,7 +478,14 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
       const cfg = effectiveConfig(order.product, org?.salesFlowSettings);
       const captureMsg = cfg.whatsappCaptureMessage
         || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
-      await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
+      await sendInstagramTextAndRecord({
+        state,
+        organizationId,
+        order,
+        conn,
+        instagramUserId,
+        content: captureMsg
+      });
       if (state) {
         state.stage = 'whatsapp_requested';
         state.lastStageAt = new Date();
@@ -438,7 +498,14 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
     // Free-form action — echo the button title so the user gets some response
     const echo = title ? `You tapped "${title}". Reply with "details" for product info or "buy" to order. 🛍️` : null;
     if (echo) {
-      await instagramService.sendMessage(instagramUserId, echo, conn.accessToken, conn.pageId, false, conn.connType);
+      await sendInstagramTextAndRecord({
+        state,
+        organizationId,
+        order,
+        conn,
+        instagramUserId,
+        content: echo
+      });
       svcLogger.info('[salesConversation] Postback action unrecognized — echoed title', { action, title });
     } else {
       svcLogger.info('[salesConversation] Postback action unrecognized and no title', { action });
@@ -531,6 +598,7 @@ async function handleInboundDm(interaction, organizationId) {
     // across all stages that might need product data anyway.
     const productData = await loadProductFromState(state);
     const cfg = effectiveConfig(productData?.product, settings);
+    const recordCtx = { state, organizationId };
 
     // ── Stage: initial_cta_sent ────────────────────────────────────────
     if (state.stage === 'initial_cta_sent') {
@@ -540,7 +608,7 @@ async function handleInboundDm(interaction, organizationId) {
 
       if (payIntent) {
         if (productData) {
-          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn);
+          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn, recordCtx);
           state.stage = 'payment_link_sent';
           state.lastStageAt = new Date();
           await state.save();
@@ -553,7 +621,7 @@ async function handleInboundDm(interaction, organizationId) {
 
       if (detailIntent) {
         if (productData) {
-          await sendProductDetails(instagramUserId, productData.product, conn);
+          await sendProductDetails(instagramUserId, productData.product, conn, recordCtx);
           state.stage = 'details_sent';
           state.lastStageAt = new Date();
           await state.save();
@@ -567,7 +635,12 @@ async function handleInboundDm(interaction, organizationId) {
       if (hesitant) {
         const captureMsg = cfg.whatsappCaptureMessage
           || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
-        await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
+        await sendInstagramTextAndRecord({
+          ...recordCtx,
+          conn,
+          instagramUserId,
+          content: captureMsg
+        });
         state.stage = 'whatsapp_requested';
         state.lastStageAt = new Date();
         await state.save();
@@ -586,7 +659,7 @@ async function handleInboundDm(interaction, organizationId) {
 
       if (payIntent) {
         if (productData) {
-          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn);
+          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn, recordCtx);
           state.stage = 'payment_link_sent';
           state.lastStageAt = new Date();
           await state.save();
@@ -598,7 +671,12 @@ async function handleInboundDm(interaction, organizationId) {
       if (hesitant) {
         const captureMsg = cfg.whatsappCaptureMessage
           || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
-        await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
+        await sendInstagramTextAndRecord({
+          ...recordCtx,
+          conn,
+          instagramUserId,
+          content: captureMsg
+        });
         state.stage = 'whatsapp_requested';
         state.lastStageAt = new Date();
         await state.save();
@@ -617,7 +695,12 @@ async function handleInboundDm(interaction, organizationId) {
       if (hesitant) {
         const captureMsg = cfg.whatsappCaptureMessage
           || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
-        await instagramService.sendMessage(instagramUserId, captureMsg, conn.accessToken, conn.pageId, false, conn.connType);
+        await sendInstagramTextAndRecord({
+          ...recordCtx,
+          conn,
+          instagramUserId,
+          content: captureMsg
+        });
         state.stage = 'whatsapp_requested';
         state.lastStageAt = new Date();
         await state.save();
@@ -635,7 +718,12 @@ async function handleInboundDm(interaction, organizationId) {
       if (phone) {
         const confirmMsg = cfg.whatsappCaptureConfirmation
           || 'Thank you! We\'ll contact you on WhatsApp soon. 🙏';
-        await instagramService.sendMessage(instagramUserId, confirmMsg, conn.accessToken, conn.pageId, false, conn.connType);
+        await sendInstagramTextAndRecord({
+          ...recordCtx,
+          conn,
+          instagramUserId,
+          content: confirmMsg
+        });
         state.stage = 'whatsapp_captured';
         state.whatsappNumber = phone;
         state.lastStageAt = new Date();
@@ -654,7 +742,12 @@ async function handleInboundDm(interaction, organizationId) {
         }).catch((e) => svcLogger.warn('[salesConversation] WA bridge failed (non-fatal)', { error: e.message }));
       } else {
         const reprompt = 'Please share your WhatsApp number (e.g. +91 98765 43210) so we can reach you. 😊';
-        await instagramService.sendMessage(instagramUserId, reprompt, conn.accessToken, conn.pageId, false, conn.connType);
+        await sendInstagramTextAndRecord({
+          ...recordCtx,
+          conn,
+          instagramUserId,
+          content: reprompt
+        });
         svcLogger.info('[salesConversation] No phone found — re-prompted user', { instagramUserId });
       }
       return;

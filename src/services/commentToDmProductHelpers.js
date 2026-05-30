@@ -211,6 +211,69 @@ function filterProductsByPerProductKeywords(products, commentText) {
   });
 }
 
+/**
+ * Human-readable inbox preview for multi-card generic template DMs.
+ */
+function formatGenericTemplateInboxText(elements) {
+  const list = (Array.isArray(elements) ? elements : [elements]).filter(Boolean);
+  if (!list.length) return '';
+
+  const parts = list.map((el) => {
+    const title = String(el.title || 'Product').trim();
+    const subtitle = String(el.subtitle || '').trim();
+    return subtitle ? `${title} — ${subtitle}` : title;
+  });
+
+  return list.length > 1 ? `Product picker: ${parts.join(' | ')}` : parts[0];
+}
+
+/**
+ * Human-readable inbox preview for a single CTA generic template element.
+ */
+function formatSingleCtaInboxText(element, fallbackTeaser = '') {
+  if (!element) return String(fallbackTeaser || '').trim();
+
+  const title = String(element.title || '').trim();
+  const subtitle = String(element.subtitle || '').trim();
+  if (title && subtitle) return `${title}\n${subtitle}`;
+  return title || subtitle || String(fallbackTeaser || '').trim();
+}
+
+/**
+ * Derive inbox fields from generic template element(s) or plain-text fallback.
+ */
+function templateSendInboxMetadata(elementOrElements, fallbackText = '') {
+  const elements = (Array.isArray(elementOrElements) ? elementOrElements : [elementOrElements])
+    .filter(Boolean);
+
+  if (elements.length > 1) {
+    const firstImage = elements.find((el) => el.image_url)?.image_url || null;
+    return {
+      inboxContent: formatGenericTemplateInboxText(elements),
+      attachmentUrl: firstImage,
+      attachmentType: firstImage ? 'image' : null,
+      messageType: 'instagram_generic_template'
+    };
+  }
+
+  if (elements.length === 1) {
+    const imageUrl = elements[0].image_url || null;
+    return {
+      inboxContent: formatSingleCtaInboxText(elements[0], fallbackText),
+      attachmentUrl: imageUrl,
+      attachmentType: imageUrl ? 'image' : null,
+      messageType: 'instagram_generic_template'
+    };
+  }
+
+  return {
+    inboxContent: String(fallbackText || '').trim(),
+    attachmentUrl: null,
+    attachmentType: null,
+    messageType: 'instagram_private_dm'
+  };
+}
+
 module.exports = {
   MAX_PICKER_ELEMENTS,
   buildPostLinkedProductQuery,
@@ -224,5 +287,8 @@ module.exports = {
   buildEffectiveDmConfig,
   buildCtaButtons,
   buildProductCtaElement,
-  filterProductsByPerProductKeywords
+  filterProductsByPerProductKeywords,
+  formatGenericTemplateInboxText,
+  formatSingleCtaInboxText,
+  templateSendInboxMetadata
 };

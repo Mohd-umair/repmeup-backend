@@ -5,7 +5,10 @@ const {
   matchProductByCommentText,
   buildProductPickerElements,
   buildNumberedPickerText,
-  filterProductsByPerProductKeywords
+  filterProductsByPerProductKeywords,
+  formatGenericTemplateInboxText,
+  formatSingleCtaInboxText,
+  templateSendInboxMetadata
 } = require('../../../src/services/commentToDmProductHelpers');
 
 describe('buildPostLinkedProductQuery / mergeProductsById', () => {
@@ -137,6 +140,33 @@ describe('commentToDmProductHelpers', () => {
       ];
       const filtered = filterProductsByPerProductKeywords(products, 'price for dress');
       expect(filtered.map(p => p._id)).toEqual(['2']);
+    });
+  });
+
+  describe('inbox template formatting', () => {
+    it('formatGenericTemplateInboxText joins multiple cards', () => {
+      const text = formatGenericTemplateInboxText([
+        { title: 'Dress', subtitle: 'AED 99' },
+        { title: 'Shoes', subtitle: 'AED 50' }
+      ]);
+      expect(text).toBe('Product picker: Dress — AED 99 | Shoes — AED 50');
+    });
+
+    it('formatSingleCtaInboxText uses title and subtitle', () => {
+      const text = formatSingleCtaInboxText(
+        { title: 'Buy now', subtitle: 'Limited stock' },
+        'fallback'
+      );
+      expect(text).toBe('Buy now\nLimited stock');
+    });
+
+    it('templateSendInboxMetadata picks image from first card', () => {
+      const meta = templateSendInboxMetadata([
+        { title: 'A', subtitle: 'B', image_url: 'https://cdn.example/a.jpg' }
+      ], 'fallback');
+      expect(meta.messageType).toBe('instagram_generic_template');
+      expect(meta.attachmentUrl).toBe('https://cdn.example/a.jpg');
+      expect(meta.attachmentType).toBe('image');
     });
   });
 });
