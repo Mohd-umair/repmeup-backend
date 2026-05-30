@@ -6,7 +6,9 @@
 
 const Interaction = require('../../models/Interaction');
 const SalesConversationState = require('../../models/SalesConversationState');
+const cacheService = require('../cacheService');
 const { generateChatRef } = require('../../utils/chatRefHelper');
+const { emitToOrg } = require('../../utils/socketEmitter');
 const logger = require('../../config/logger');
 
 const svcLogger = logger.createChild({ module: 'commentDmThreadLinkService' });
@@ -190,11 +192,69 @@ function shadowDmExclusionCondition() {
   };
 }
 
+/** Human-readable inbox line for a CTA postback tap (button title preferred). */
+function formatPostbackIncomingText(title, payload) {
+  const label = String(title || '').trim();
+  if (label) return label;
+
+  const raw = String(payload || '');
+  if (raw.startsWith('SALES:')) {
+    const action = raw.split(':')[1] || '';
+    const actionLabels = {
+      details: 'Product Details',
+      payment: 'Pay Now',
+      hesitant: 'Maybe later'
+    };
+    return actionLabels[action] || action || 'Button tap';
+  }
+  if (raw.startsWith('PICK:')) return 'Product selection';
+  return 'Button tap';
+}
+
+/**
+ * When inbound activity lands on a shadow DM thread, nudge the linked comment row
+ * so the inbox detail refetches the merged timeline (CTD unified thread).
+ */
+async function notifyLinkedCommentInboxRefresh(organizationId, dmInteraction) {
+  if (!organizationId || !dmInteraction) return;
+
+  const sourceCommentId = dmInteraction.metadata?.sourceCommentInteractionId;
+  if (!sourceCommentId) return;
+
+  try {
+    const comment = await Interaction.findOne({
+      _id: sourceCommentId,
+      organization: organizationId
+    })
+      .populate('assignedTo', 'firstName lastName email avatar')
+      .populate('labels', 'name color icon')
+      .populate('replies.sentBy', 'firstName lastName avatar')
+      .lean();
+
+    if (!comment) return;
+
+    try {
+      await cacheService.invalidateInteractionCaches(String(organizationId));
+    } catch (cacheErr) {
+      svcLogger.warn('[commentDmLink] cache invalidation failed', { error: cacheErr.message });
+    }
+
+    emitToOrg(String(organizationId), 'interaction_updated', {
+      interaction: comment,
+      linkedDmInbound: true
+    });
+  } catch (err) {
+    svcLogger.warn('[commentDmLink] linked comment refresh notify failed', { error: err.message });
+  }
+}
+
 module.exports = {
   buildDmThreadPlatformId,
   resolveIgAccountId,
   ensureCommentDmLink,
   mergeIncomingMessagePages,
   shadowDmExclusionCondition,
-  normalizeTimestampJs
+  normalizeTimestampJs,
+  formatPostbackIncomingText,
+  notifyLinkedCommentInboxRefresh
 };

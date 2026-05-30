@@ -14,6 +14,11 @@ const PlatformConnection = require('../../models/PlatformConnection');
 const instagramService = require('../../integrations/meta/instagramService');
 const { emitToOrg } = require('../../utils/socketEmitter');
 const { generateChatRef } = require('../../utils/chatRefHelper');
+const {
+  buildDmThreadPlatformId,
+  formatPostbackIncomingText,
+  notifyLinkedCommentInboxRefresh
+} = require('../inbox/commentDmThreadLinkService');
 const logger = require('../../config/logger');
 
 // ─── Private helpers ─────────────────────────────────────────────────────────
@@ -205,6 +210,119 @@ async function lookupLinkedStoryProducts(organizationId, storyMediaId) {
   }
 }
 
+/**
+ * Persist a CTA postback tap on the Instagram DM thread so unified CTD inbox can merge it.
+ */
+async function persistInstagramPostbackToDmThread({
+  event,
+  organizationId,
+  igAccountId,
+  senderId,
+  payload,
+  title,
+  platformConnectionId,
+  dmReceiverConnection
+}) {
+  const mid = event.postback?.mid
+    || `postback_${event.timestamp || Date.now()}_${String(payload).slice(0, 48)}`;
+  const text = formatPostbackIncomingText(title, payload);
+  const threadPlatformId = buildDmThreadPlatformId(igAccountId, senderId);
+
+  const existing = await Interaction
+    .findOne({ platformId: threadPlatformId, organization: organizationId })
+    .select('_id metadata.lastMid author chatRef metadata.sourceCommentInteractionId')
+    .lean();
+
+  if (existing?.metadata?.lastMid === mid) {
+    logger.debug('[instagramWebhookService] Duplicate postback mid (webhook retry)', { threadPlatformId, mid });
+    return Interaction.findOne({ platformId: threadPlatformId, organization: organizationId });
+  }
+
+  const profile = await fetchInstagramAuthorProfile(
+    organizationId,
+    String(senderId),
+    dmReceiverConnection?.accessToken || null
+  );
+
+  const existingAuthor = existing?.author || {};
+  const mergedAuthor = {
+    platformId: String(senderId),
+    username: profile.username || existingAuthor.username || undefined,
+    name: profile.name || existingAuthor.name || profile.username || existingAuthor.username || 'Instagram User'
+  };
+  if (profile.avatarUrl) mergedAuthor.avatarUrl = profile.avatarUrl;
+  else if (existingAuthor.avatarUrl) mergedAuthor.avatarUrl = existingAuthor.avatarUrl;
+
+  let chatRefFields = {};
+  if (!existing?.chatRef) {
+    chatRefFields = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+  }
+
+  const updateFields = {
+    organization: organizationId,
+    platform: 'instagram',
+    type: 'dm',
+    platformId: threadPlatformId,
+    content: text,
+    author: mergedAuthor,
+    threadId: String(senderId),
+    platformCreatedAt: new Date(event.timestamp || Date.now()),
+    'metadata.lastMid': mid,
+    'metadata.instagramAccountId': igAccountId,
+    status: 'unread',
+    isRead: false
+  };
+  if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
+  if (existing && !existing.chatRef && chatRefFields?.chatRef) {
+    updateFields.chatNumber = chatRefFields.chatNumber;
+    updateFields.chatRef = chatRefFields.chatRef;
+  }
+
+  const setOnInsertFields = (!existing && chatRefFields?.chatRef)
+    ? { chatNumber: chatRefFields.chatNumber, chatRef: chatRefFields.chatRef, source: 'webhook' }
+    : { source: 'webhook' };
+
+  await Interaction.findOneAndUpdate(
+    { platformId: threadPlatformId, organization: organizationId },
+    { $set: updateFields, $setOnInsert: setOnInsertFields },
+    { upsert: true }
+  );
+
+  const incomingMsg = {
+    mid,
+    text,
+    timestamp: event.timestamp || Date.now(),
+    type: 'postback'
+  };
+
+  await Interaction.updateOne(
+    {
+      platformId: threadPlatformId,
+      organization: organizationId,
+      'metadata.incomingMessages.mid': { $ne: mid }
+    },
+    {
+      $push: {
+        'metadata.incomingMessages': {
+          $each: [incomingMsg],
+          $slice: -100
+        }
+      }
+    }
+  );
+
+  const interaction = await Interaction.findOne({
+    platformId: threadPlatformId,
+    organization: organizationId
+  });
+
+  if (interaction && organizationId) {
+    await notifyLinkedCommentInboxRefresh(organizationId, interaction.toObject ? interaction.toObject() : interaction);
+  }
+
+  return interaction;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -289,6 +407,25 @@ async function handleInstagramMessage(payload, organizationId) {
           senderId, payload, title
         });
         if (senderId && payload) {
+          let postbackInteraction = null;
+          if (igAccountId) {
+            try {
+              postbackInteraction = await persistInstagramPostbackToDmThread({
+                event,
+                organizationId,
+                igAccountId,
+                senderId,
+                payload,
+                title,
+                platformConnectionId,
+                dmReceiverConnection
+              });
+            } catch (persistErr) {
+              logger.warn('[instagramWebhookService] postback persist error (non-fatal)', {
+                error: persistErr.message
+              });
+            }
+          }
           try {
             const salesConvSvc = require('../salesConversationService');
             await salesConvSvc.handlePostback({
@@ -300,6 +437,9 @@ async function handleInstagramMessage(payload, organizationId) {
             });
           } catch (pbErr) {
             logger.warn('[instagramWebhookService] handlePostback error (non-fatal)', { error: pbErr.message });
+          }
+          if (postbackInteraction) {
+            return postbackInteraction;
           }
         }
         continue;
@@ -479,6 +619,10 @@ async function handleInstagramMessage(payload, organizationId) {
         emitToOrg(organizationId.toString(), 'new_interaction', {
           interaction: interaction.toObject()
         });
+        await notifyLinkedCommentInboxRefresh(
+          organizationId,
+          interaction.toObject ? interaction.toObject() : interaction
+        );
       }
 
       // ── Sales conversation: handle multi-turn DM funnel (non-blocking) ──

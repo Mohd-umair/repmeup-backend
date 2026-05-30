@@ -2,12 +2,19 @@
 
 jest.mock('../../../../src/models/Interaction');
 jest.mock('../../../../src/models/SalesConversationState');
+jest.mock('../../../../src/services/cacheService', () => ({
+  invalidateInteractionCaches: jest.fn().mockResolvedValue(undefined)
+}));
+jest.mock('../../../../src/utils/socketEmitter', () => ({
+  emitToOrg: jest.fn()
+}));
 jest.mock('../../../../src/utils/chatRefHelper', () => ({
   generateChatRef: jest.fn().mockResolvedValue({ chatNumber: 101, chatRef: '#REP-101' })
 }));
 
 const Interaction = require('../../../../src/models/Interaction');
 const SalesConversationState = require('../../../../src/models/SalesConversationState');
+const { emitToOrg } = require('../../../../src/utils/socketEmitter');
 const linkSvc = require('../../../../src/services/inbox/commentDmThreadLinkService');
 
 describe('commentDmThreadLinkService', () => {
@@ -79,6 +86,44 @@ describe('commentDmThreadLinkService', () => {
           { 'metadata.sourceCommentInteractionId': null }
         ]
       });
+    });
+  });
+
+  describe('formatPostbackIncomingText', () => {
+    it('prefers button title', () => {
+      expect(linkSvc.formatPostbackIncomingText('Product Details', 'SALES:details:tok')).toBe('Product Details');
+    });
+
+    it('falls back to known SALES actions', () => {
+      expect(linkSvc.formatPostbackIncomingText('', 'SALES:payment:tok')).toBe('Pay Now');
+    });
+
+    it('labels product picker postbacks', () => {
+      expect(linkSvc.formatPostbackIncomingText('', 'PICK:prod:sel')).toBe('Product selection');
+    });
+  });
+
+  describe('notifyLinkedCommentInboxRefresh', () => {
+    it('emits interaction_updated with linkedDmInbound for linked comment row', async () => {
+      Interaction.findOne.mockReturnValue({
+        populate: jest.fn().mockReturnThis(),
+        lean: jest.fn().mockResolvedValue({ _id: 'comment_1', type: 'comment' })
+      });
+
+      await linkSvc.notifyLinkedCommentInboxRefresh('org_1', {
+        metadata: { sourceCommentInteractionId: 'comment_1' }
+      });
+
+      expect(emitToOrg).toHaveBeenCalledWith('org_1', 'interaction_updated', {
+        interaction: { _id: 'comment_1', type: 'comment' },
+        linkedDmInbound: true
+      });
+    });
+
+    it('no-ops when DM is not linked to a comment', async () => {
+      await linkSvc.notifyLinkedCommentInboxRefresh('org_1', { metadata: {} });
+      expect(Interaction.findOne).not.toHaveBeenCalled();
+      expect(emitToOrg).not.toHaveBeenCalled();
     });
   });
 
