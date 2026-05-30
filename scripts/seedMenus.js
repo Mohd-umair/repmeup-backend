@@ -43,10 +43,21 @@ const defaultMenus = [
     description: 'View and respond to customer interactions'
   },
   {
+    label: 'Bucket Board',
+    icon: 'fas fa-columns',
+    route: '/app/inbox/buckets',
+    order: 4,
+    group: 'main',
+    requiredRoles: ['admin', 'manager', 'agent'],
+    requiredPermissions: ['inbox.read'],
+    isActive: true,
+    description: 'Intent bucket kanban board for conversations'
+  },
+  {
     label: 'Publish',
     icon: '✈️',
     route: '/app/publish',
-    order: 4,
+    order: 5,
     group: 'main',
     requiredRoles: ['admin', 'manager', 'agent'],
     isActive: true
