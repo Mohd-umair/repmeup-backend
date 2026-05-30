@@ -89,6 +89,24 @@ describe('commentDmThreadLinkService', () => {
     });
   });
 
+  describe('filterOrphanInstagramDmRows', () => {
+    it('removes orphan instagram DMs for CTD authors', () => {
+      const rows = [
+        { _id: '1', type: 'comment', platform: 'instagram', author: { platformId: 'u1' } },
+        { _id: '2', type: 'dm', platform: 'instagram', author: { platformId: 'u1' }, metadata: {} },
+        { _id: '3', type: 'dm', platform: 'instagram', author: { platformId: 'u2' }, metadata: {} }
+      ];
+      const filtered = linkSvc.filterOrphanInstagramDmRows(rows, ['u1']);
+      expect(filtered.map((r) => r._id)).toEqual(['1', '3']);
+    });
+  });
+
+  describe('buildCtdOrphanInstagramDmExclusion', () => {
+    it('returns null when no CTD authors', () => {
+      expect(linkSvc.buildCtdOrphanInstagramDmExclusion([])).toBeNull();
+    });
+  });
+
   describe('formatPostbackIncomingText', () => {
     it('prefers button title', () => {
       expect(linkSvc.formatPostbackIncomingText('Product Details', 'SALES:details:tok')).toBe('Product Details');
