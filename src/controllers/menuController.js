@@ -346,6 +346,15 @@ exports.seedMenus = async (req, res, next) => {
         }
       },
       {
+        label: 'Bucket Board',
+        icon: 'fas fa-columns',
+        route: '/app/inbox/buckets',
+        order: 4,
+        group: 'main',
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['inbox.read']
+      },
+      {
         label: 'Knowledge Base',
         icon: '🧠',
         route: '/app/knowledge-base',

@@ -294,8 +294,7 @@ async function resolveDmThreadTarget({
     candidatePlatformIds.unshift(threadPlatformId);
   }
 
-  let existingDm = threadPlatformId
-    ? await findDmByPlatformId(organizationId, threadPlatformId)
+  let existingDm = threadPlatformId ? await findDmByPlatformId(organizationId, threadPlatformId)
     : null;
 
   if (!existingDm) {
@@ -323,16 +322,12 @@ async function resolveDmThreadTarget({
 
   // Phase 7: last-resort fallback platformId
   if (!threadPlatformId) {
-    const igAccountId =
-      webhookEntryId
-        ? String(webhookEntryId)
-        : resolveIgAccountId(connection) || accountIds[0] || 'unknown';
+    const igAccountId =  webhookEntryId ? String(webhookEntryId)   : resolveIgAccountId(connection) || accountIds[0] || 'unknown';
     threadPlatformId = buildDmThreadPlatformId(igAccountId, userId);
   }
 
   const parsedPlatform = threadPlatformId.match(/^dm_(.+)_(.+)$/);
-  const igAccountId =
-    parsedPlatform ? parsedPlatform[1] : webhookEntryId || resolveIgAccountId(connection);
+  const igAccountId = parsedPlatform ? parsedPlatform[1] : webhookEntryId || resolveIgAccountId(connection);
 
   return { threadPlatformId, igAccountId, sourceCommentInteractionId, existingDm };
 }
