@@ -7,11 +7,21 @@ jest.mock('../../../src/models/SalesConversationState');
 jest.mock('../../../src/models/StoryEngagementLog');
 jest.mock('../../../src/models/PlatformConnection');
 jest.mock('../../../src/integrations/meta/instagramService', () => ({
-  sendMessage: jest.fn().mockResolvedValue({ success: true }),
-  sendGenericTemplateMessage: jest.fn().mockResolvedValue({ success: true })
+  sendMessage: jest.fn().mockResolvedValue({ success: true, platformResponseId: 'mid.msg' }),
+  sendGenericTemplateMessage: jest.fn().mockResolvedValue({ success: true, platformResponseId: 'mid.tpl' })
 }));
 jest.mock('../../../src/services/commentToDmService', () => ({
-  sendProductCtaDm: jest.fn().mockResolvedValue({ productOrder: { orderToken: 'tok' } })
+  sendProductCtaDm: jest.fn().mockResolvedValue({
+    success: true,
+    platformResponseId: 'mid.cta',
+    inboxContent: 'Red Dress',
+    messageType: 'instagram_generic_template'
+  }),
+  createPickerPendingOrders: jest.fn().mockResolvedValue({}),
+  cancelSiblingPickerPendingOrders: jest.fn().mockResolvedValue(undefined)
+}));
+jest.mock('../../../src/services/inbox/inboxAutomationReplyService', () => ({
+  recordAutomationReply: jest.fn().mockResolvedValue({ recorded: true })
 }));
 
 const Organization = require('../../../src/models/Organization');
@@ -22,6 +32,7 @@ const StoryEngagementLog = require('../../../src/models/StoryEngagementLog');
 const PlatformConnection = require('../../../src/models/PlatformConnection');
 const instagramService = require('../../../src/integrations/meta/instagramService');
 const { sendProductCtaDm } = require('../../../src/services/commentToDmService');
+const { recordAutomationReply } = require('../../../src/services/inbox/inboxAutomationReplyService');
 const { processStoryEngagement } = require('../../../src/services/storyToDmService');
 
 const orgId = '507f1f77bcf86cd799439011';
@@ -164,6 +175,13 @@ describe('storyToDmService', () => {
         instagramUserId: userId
       })
     );
+    expect(recordAutomationReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        interactionId: 'int1',
+        organizationId: orgId,
+        content: 'Red Dress'
+      })
+    );
     expect(ProductOrder.create).toHaveBeenCalled();
     expect(orgDoc.save).toHaveBeenCalled();
   });
@@ -195,6 +213,7 @@ describe('storyToDmService', () => {
 
     expect(result).toEqual({ sent: true });
     expect(instagramService.sendGenericTemplateMessage).toHaveBeenCalled();
+    expect(recordAutomationReply).toHaveBeenCalled();
     expect(SalesConversationState.findOneAndUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ postId: storyMediaId }),
       expect.objectContaining({ $set: expect.objectContaining({ stage: 'awaiting_product_selection' }) }),

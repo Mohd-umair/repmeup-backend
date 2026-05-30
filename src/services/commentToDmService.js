@@ -15,6 +15,7 @@ const Product = require('../models/Product');
 const ProductOrder = require('../models/ProductOrder');
 const SalesConversationState = require('../models/SalesConversationState');
 const PlatformConnection = require('../models/PlatformConnection');
+const Interaction = require('../models/Interaction');
 const instagramService = require('../integrations/meta/instagramService');
 const logger = require('../config/logger');
 const { nanoid } = require('nanoid');
@@ -28,8 +29,10 @@ const {
   filterProductsByPerProductKeywords,
   buildPostLinkedProductQuery,
   mergeProductsById,
-  MAX_PICKER_ELEMENTS
+  MAX_PICKER_ELEMENTS,
+  templateSendInboxMetadata
 } = require('./commentToDmProductHelpers');
+const { recordAutomationReply } = require('./inbox/inboxAutomationReplyService');
 
 const svcLogger = logger.createChild({ module: 'commentToDmService' });
 
@@ -151,7 +154,7 @@ async function processCommentForProduct(interaction, organizationId) {
     const { accessToken, pageId, connType } = connectionContext(connection);
     const commenterUsername = interaction.author?.username || '';
 
-    await postPublicStub(interaction, settings, commenterUsername, accessToken, connType);
+    await postPublicStub(interaction, settings, commenterUsername, accessToken, connType, organizationId);
 
     if (usePicker) {
       await sendProductPickerFlow({
@@ -433,7 +436,41 @@ function connectionContext(connection) {
   return { accessToken, pageId, connType };
 }
 
-async function postPublicStub(interaction, settings, commenterUsername, accessToken, connType) {
+async function persistAutomationReply(interactionId, organizationId, payload) {
+  const result = await recordAutomationReply({
+    interactionId,
+    organizationId,
+    ...payload
+  });
+  if (!result.recorded && result.reason !== 'duplicate') {
+    await markInteractionResponded(interactionId, organizationId);
+  }
+  return result;
+}
+
+async function markInteractionResponded(interactionId, organizationId) {
+  if (!interactionId || !organizationId) return;
+  try {
+    const doc = await Interaction.findOne({ _id: interactionId, organization: organizationId })
+      .select('respondedAt platformCreatedAt status')
+      .lean();
+    if (!doc || doc.respondedAt) return;
+
+    const now = new Date();
+    const update = {
+      respondedAt: now,
+      status: doc.status === 'resolved' ? 'resolved' : 'replied'
+    };
+    if (doc.platformCreatedAt) {
+      update.firstResponseTime = now.getTime() - new Date(doc.platformCreatedAt).getTime();
+    }
+    await Interaction.updateOne({ _id: interactionId }, { $set: update });
+  } catch (err) {
+    svcLogger.warn('[commentToDm] markInteractionResponded failed', { error: err.message });
+  }
+}
+
+async function postPublicStub(interaction, settings, commenterUsername, accessToken, connType, organizationId) {
   const safePublicTemplate = (settings.publicReplyTemplate || "Hi {{username}}! 👋 We've sent you the details in DM. 😊")
     .replace(/\{\{payment_url\}\}/gi, '')
     .replace(/\{\{paymentUrl\}\}/gi, '');
@@ -443,7 +480,14 @@ async function postPublicStub(interaction, settings, commenterUsername, accessTo
   });
 
   try {
-    await instagramService.replyToComment(interaction.platformId, publicStub, accessToken, connType);
+    const result = await instagramService.replyToComment(interaction.platformId, publicStub, accessToken, connType);
+    if (result?.success) {
+      await persistAutomationReply(interaction._id, organizationId, {
+        content: publicStub,
+        platformResponseId: result.platformResponseId || null,
+        messageType: 'instagram_comment_reply'
+      });
+    }
   } catch (stubErr) {
     svcLogger.warn('[commentToDm] Public stub failed — continuing', { error: stubErr.message });
   }
@@ -475,10 +519,18 @@ async function sendProductPickerFlow(ctx) {
     });
   }
 
+  const numberedText = buildNumberedPickerText(products, commenterUsername);
+  let sendResult = null;
+
   try {
     if (products.length > MAX_PICKER_ELEMENTS) {
-      const text = buildNumberedPickerText(products, commenterUsername);
-      await instagramService.sendPrivateReply(interaction.platformId, text, accessToken, pageId, connType);
+      sendResult = await instagramService.sendPrivateReply(
+        interaction.platformId, numberedText, accessToken, pageId, connType
+      );
+      sendResult = {
+        ...sendResult,
+        ...templateSendInboxMetadata(null, numberedText)
+      };
     } else {
       const elements = buildProductPickerElements(
         products,
@@ -486,13 +538,17 @@ async function sendProductPickerFlow(ctx) {
         sfSettings,
         orderTokensByProductId
       );
-      await instagramService.sendPrivateReplyGenericTemplate(
+      sendResult = await instagramService.sendPrivateReplyGenericTemplate(
         interaction.platformId,
         elements,
         accessToken,
         pageId,
         connType
       );
+      sendResult = {
+        ...sendResult,
+        ...templateSendInboxMetadata(elements, numberedText)
+      };
     }
   } catch (pickerErr) {
     svcLogger.warn('[commentToDm] Product picker DM failed — numbered text fallback', { error: pickerErr.message });
@@ -501,12 +557,35 @@ async function sendProductPickerFlow(ctx) {
       instagramUserId: commenterId,
       instagramPostId: postId
     });
-    const text = buildNumberedPickerText(products, commenterUsername);
     try {
-      await instagramService.sendPrivateReply(interaction.platformId, text, accessToken, pageId, connType);
+      sendResult = await instagramService.sendPrivateReply(
+        interaction.platformId, numberedText, accessToken, pageId, connType
+      );
+      sendResult = {
+        ...sendResult,
+        ...templateSendInboxMetadata(null, numberedText)
+      };
     } catch (prErr) {
-      await instagramService.sendMessage(String(commenterId), text, accessToken, pageId, false, connType);
+      sendResult = await instagramService.sendMessage(
+        String(commenterId), numberedText, accessToken, pageId, false, connType
+      );
+      sendResult = {
+        ...sendResult,
+        ...templateSendInboxMetadata(null, numberedText)
+      };
     }
+  }
+
+  if (sendResult?.success) {
+    await persistAutomationReply(interaction._id, organizationId, {
+      content: sendResult.inboxContent,
+      platformResponseId: sendResult.platformResponseId || null,
+      messageType: sendResult.messageType,
+      attachmentUrl: sendResult.attachmentUrl,
+      attachmentType: sendResult.attachmentType
+    });
+  } else {
+    await markInteractionResponded(interaction._id, organizationId);
   }
 
   await SalesConversationState.findOneAndUpdate(
@@ -531,7 +610,7 @@ async function sendSingleProductFlow(ctx) {
   const sfSettings = orgDoc.salesFlowSettings || {};
   const orderToken = nanoid(24);
 
-  await sendProductCtaDm({
+  const sendResult = await sendProductCtaDm({
     recipientMode: 'comment',
     commentId: interaction.platformId,
     instagramUserId: String(commenterId),
@@ -543,6 +622,18 @@ async function sendSingleProductFlow(ctx) {
     pageId,
     connType
   });
+
+  if (sendResult?.success) {
+    await persistAutomationReply(interaction._id, organizationId, {
+      content: sendResult.inboxContent,
+      platformResponseId: sendResult.platformResponseId || null,
+      messageType: sendResult.messageType,
+      attachmentUrl: sendResult.attachmentUrl,
+      attachmentType: sendResult.attachmentType
+    });
+  } else {
+    await markInteractionResponded(interaction._id, organizationId);
+  }
 
   const productOrder = await ProductOrder.create({
     organization: organizationId,
@@ -651,7 +742,7 @@ async function completeProductSelection({
     });
   }
 
-  await sendProductCtaDm({
+  const sendResult = await sendProductCtaDm({
     recipientMode: 'user',
     instagramUserId: String(instagramUserId),
     product,
@@ -661,6 +752,16 @@ async function completeProductSelection({
     pageId,
     connType
   });
+
+  if (sendResult?.success && state.commentInteractionId) {
+    await persistAutomationReply(state.commentInteractionId, organizationId, {
+      content: sendResult.inboxContent,
+      platformResponseId: sendResult.platformResponseId || null,
+      messageType: sendResult.messageType,
+      attachmentUrl: sendResult.attachmentUrl,
+      attachmentType: sendResult.attachmentType
+    });
+  }
 
   state.productOrderId = productOrder._id;
   state.stage = 'initial_cta_sent';
@@ -674,7 +775,7 @@ async function completeProductSelection({
 }
 
 /**
- * @returns {{ productOrder: object }}
+ * @returns {Promise<{ success: boolean, platformResponseId?: string, inboxContent?: string, messageType?: string, attachmentUrl?: string|null, attachmentType?: string|null }>}
  */
 async function sendProductCtaDm({
   recipientMode,
@@ -695,39 +796,41 @@ async function sendProductCtaDm({
 
   const element = buildProductCtaElement(product, effectiveDmConfig, orderToken, paymentUrlWithToken);
   const teaser = `Hi${commenterUsername ? ' @' + commenterUsername : ''}! 👋 Thanks for your interest.\n\nReply with "details" for more info, or "buy" to order. 🛍️`;
+  const templateMeta = templateSendInboxMetadata(element, teaser);
+
+  async function sendPlainTeaser() {
+    if (recipientMode === 'comment' && commentId) {
+      try {
+        const result = await instagramService.sendPrivateReply(commentId, teaser, accessToken, pageId, connType);
+        return { ...result, ...templateSendInboxMetadata(null, teaser) };
+      } catch {
+        const result = await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
+        return { ...result, ...templateSendInboxMetadata(null, teaser) };
+      }
+    }
+    const result = await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
+    return { ...result, ...templateSendInboxMetadata(null, teaser) };
+  }
 
   if (element) {
     try {
       if (recipientMode === 'comment' && commentId) {
-        await instagramService.sendPrivateReplyGenericTemplate(commentId, element, accessToken, pageId, connType);
-      } else {
-        await instagramService.sendGenericTemplateMessage(instagramUserId, element, accessToken, pageId, connType);
+        const result = await instagramService.sendPrivateReplyGenericTemplate(
+          commentId, element, accessToken, pageId, connType
+        );
+        return { ...result, ...templateMeta };
       }
+      const result = await instagramService.sendGenericTemplateMessage(
+        instagramUserId, element, accessToken, pageId, connType
+      );
+      return { ...result, ...templateMeta };
     } catch (gtErr) {
       svcLogger.warn('[commentToDm] CTA template failed — teaser fallback', { error: gtErr.message });
-      if (recipientMode === 'comment' && commentId) {
-        try {
-          await instagramService.sendPrivateReply(commentId, teaser, accessToken, pageId, connType);
-        } catch {
-          await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
-        }
-      } else {
-        await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
-      }
-    }
-  } else {
-    if (recipientMode === 'comment' && commentId) {
-      try {
-        await instagramService.sendPrivateReply(commentId, teaser, accessToken, pageId, connType);
-      } catch {
-        await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
-      }
-    } else {
-      await instagramService.sendMessage(instagramUserId, teaser, accessToken, pageId, false, connType);
+      return sendPlainTeaser();
     }
   }
 
-  return { productOrder: { orderToken } };
+  return sendPlainTeaser();
 }
 
 function buildTemplate(template, vars) {

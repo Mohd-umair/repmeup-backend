@@ -20,9 +20,11 @@ const {
   buildProductPickerElements,
   buildNumberedPickerText,
   filterProductsByPerProductKeywords,
-  MAX_PICKER_ELEMENTS
+  MAX_PICKER_ELEMENTS,
+  templateSendInboxMetadata
 } = require('./commentToDmProductHelpers');
 const { sendProductCtaDm, createPickerPendingOrders, cancelSiblingPickerPendingOrders } = require('./commentToDmService');
+const { recordAutomationReply } = require('./inbox/inboxAutomationReplyService');
 
 const svcLogger = logger.createChild({ module: 'storyToDmService' });
 
@@ -129,7 +131,7 @@ async function processStoryEngagement(interaction, organizationId) {
     const { accessToken, pageId, connType } = connectionContext(connection);
     const username = interaction.author?.username || '';
 
-    await sendWelcomeIfConfigured(settings, instagramUserId, username, accessToken, pageId, connType);
+    await sendWelcomeIfConfigured(settings, interaction, organizationId, instagramUserId, username, accessToken, pageId, connType);
 
     if (usePicker) {
       await sendStoryProductPickerFlow({
@@ -284,7 +286,15 @@ function connectionContext(connection) {
   return { accessToken, pageId, connType };
 }
 
-async function sendWelcomeIfConfigured(settings, instagramUserId, username, accessToken, pageId, connType) {
+async function persistStoryAutomationReply(interactionId, organizationId, payload) {
+  await recordAutomationReply({
+    interactionId,
+    organizationId,
+    ...payload
+  });
+}
+
+async function sendWelcomeIfConfigured(settings, interaction, organizationId, instagramUserId, username, accessToken, pageId, connType) {
   const title = (settings.welcomeTitle || '').trim();
   const subtitle = (settings.welcomeSubtitle || '').trim();
   const imageUrl = (settings.welcomeImageUrl || '').trim();
@@ -299,18 +309,36 @@ async function sendWelcomeIfConfigured(settings, instagramUserId, username, acce
     element.image_url = imageUrl;
   }
 
+  const templateMeta = templateSendInboxMetadata(element, `${title} ${subtitle}`.trim());
+
   try {
-    await instagramService.sendGenericTemplateMessage(
+    const result = await instagramService.sendGenericTemplateMessage(
       instagramUserId,
       element,
       accessToken,
       pageId,
       connType
     );
+    if (result?.success) {
+      await persistStoryAutomationReply(interaction._id, organizationId, {
+        content: templateMeta.inboxContent,
+        platformResponseId: result.platformResponseId || null,
+        messageType: templateMeta.messageType,
+        attachmentUrl: templateMeta.attachmentUrl,
+        attachmentType: templateMeta.attachmentType
+      });
+    }
   } catch (err) {
     const text = `Hi${username ? ' @' + username : ''}! ${title} ${subtitle}`.trim();
     try {
-      await instagramService.sendMessage(instagramUserId, text, accessToken, pageId, false, connType);
+      const result = await instagramService.sendMessage(instagramUserId, text, accessToken, pageId, false, connType);
+      if (result?.success) {
+        await persistStoryAutomationReply(interaction._id, organizationId, {
+          content: text,
+          platformResponseId: result.platformResponseId || null,
+          messageType: 'instagram_private_dm'
+        });
+      }
     } catch (fallbackErr) {
       svcLogger.warn('[storyToDm] Welcome message failed', { error: fallbackErr.message });
     }
@@ -337,10 +365,13 @@ async function sendStoryProductPickerFlow(ctx) {
     });
   }
 
+  const numberedText = buildNumberedPickerText(products, username);
+  let sendResult = null;
+
   try {
     if (products.length > MAX_PICKER_ELEMENTS) {
-      const text = buildNumberedPickerText(products, username);
-      await instagramService.sendMessage(instagramUserId, text, accessToken, pageId, false, connType);
+      sendResult = await instagramService.sendMessage(instagramUserId, numberedText, accessToken, pageId, false, connType);
+      sendResult = { ...sendResult, ...templateSendInboxMetadata(null, numberedText) };
     } else {
       const elements = buildProductPickerElements(
         products,
@@ -348,7 +379,8 @@ async function sendStoryProductPickerFlow(ctx) {
         sfSettings,
         orderTokensByProductId
       );
-      await instagramService.sendGenericTemplateMessage(instagramUserId, elements, accessToken, pageId, connType);
+      sendResult = await instagramService.sendGenericTemplateMessage(instagramUserId, elements, accessToken, pageId, connType);
+      sendResult = { ...sendResult, ...templateSendInboxMetadata(elements, numberedText) };
     }
   } catch (pickerErr) {
     svcLogger.warn('[storyToDm] Picker failed — text fallback', { error: pickerErr.message });
@@ -357,8 +389,18 @@ async function sendStoryProductPickerFlow(ctx) {
       instagramUserId,
       instagramPostId: storyMediaId
     });
-    const text = buildNumberedPickerText(products, username);
-    await instagramService.sendMessage(instagramUserId, text, accessToken, pageId, false, connType);
+    sendResult = await instagramService.sendMessage(instagramUserId, numberedText, accessToken, pageId, false, connType);
+    sendResult = { ...sendResult, ...templateSendInboxMetadata(null, numberedText) };
+  }
+
+  if (sendResult?.success) {
+    await persistStoryAutomationReply(interaction._id, organizationId, {
+      content: sendResult.inboxContent,
+      platformResponseId: sendResult.platformResponseId || null,
+      messageType: sendResult.messageType,
+      attachmentUrl: sendResult.attachmentUrl,
+      attachmentType: sendResult.attachmentType
+    });
   }
 
   await SalesConversationState.findOneAndUpdate(
@@ -386,7 +428,7 @@ async function sendSingleProductFlow(ctx) {
   const sfSettings = orgDoc.salesFlowSettings || {};
   const orderToken = nanoid(24);
 
-  await sendProductCtaDm({
+  const sendResult = await sendProductCtaDm({
     recipientMode: 'user',
     instagramUserId: String(instagramUserId),
     commenterUsername: username,
@@ -397,6 +439,16 @@ async function sendSingleProductFlow(ctx) {
     pageId,
     connType
   });
+
+  if (sendResult?.success) {
+    await persistStoryAutomationReply(interaction._id, organizationId, {
+      content: sendResult.inboxContent,
+      platformResponseId: sendResult.platformResponseId || null,
+      messageType: sendResult.messageType,
+      attachmentUrl: sendResult.attachmentUrl,
+      attachmentType: sendResult.attachmentType
+    });
+  }
 
   const productOrder = await ProductOrder.create({
     organization: organizationId,
