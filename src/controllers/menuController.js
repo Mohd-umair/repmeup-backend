@@ -37,7 +37,7 @@ function buildGroupedMenuTree(accessibleMenus) {
     return { ...parent, children: kids };
   });
 
-  const groupedMenus = { main: [], management: [], settings: [], automation: [] };
+  const groupedMenus = { main: [], management: [], settings: [], automation: [], campaigns: [] };
   enriched.forEach((menu) => {
     if (groupedMenus[menu.group]) {
       groupedMenus[menu.group].push(menu);
@@ -319,7 +319,7 @@ exports.seedMenus = async (req, res, next) => {
     const defaultMenus = [
       {
         label: 'Home',
-        icon: '🏠',
+        icon: 'fas fa-home',
         route: '/',
         order: 1,
         group: 'main',
@@ -327,7 +327,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Dashboard',
-        icon: '📊',
+        icon: 'fas fa-chart-pie',
         route: '/app/dashboard',
         order: 2,
         group: 'main',
@@ -335,7 +335,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Inbox',
-        icon: '📥',
+        icon: 'fas fa-inbox',
         route: '/app/inbox',
         order: 3,
         group: 'main',
@@ -356,7 +356,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Knowledge Base',
-        icon: '🧠',
+        icon: 'fas fa-brain',
         route: '/app/knowledge-base',
         order: 6,
         group: 'main',
@@ -365,7 +365,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Analytics',
-        icon: '📈',
+        icon: 'fas fa-chart-line',
         route: '/app/analytics',
         order: 7,
         group: 'main',
@@ -374,7 +374,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Agents',
-        icon: '👥',
+        icon: 'fas fa-users',
         route: '/app/agents',
         order: 8,
         group: 'management',
@@ -383,7 +383,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Settings',
-        icon: '⚙️',
+        icon: 'fas fa-cog',
         route: '/app/settings',
         order: 9,
         group: 'settings',
@@ -395,7 +395,7 @@ exports.seedMenus = async (req, res, next) => {
 
     const publishParent = await Menu.create({
       label: 'Publish',
-      icon: '✈️',
+      icon: 'fas fa-paper-plane',
       route: '/app/publish',
       order: 4,
       group: 'main',
@@ -406,7 +406,7 @@ exports.seedMenus = async (req, res, next) => {
     const publishChildren = await Menu.insertMany([
       {
         label: 'Create',
-        icon: '✏️',
+        icon: 'fas fa-pen',
         route: '/app/publish',
         order: 1,
         group: 'main',
@@ -416,7 +416,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Calendar',
-        icon: '📅',
+        icon: 'fas fa-calendar-alt',
         route: '/app/publish/calendar',
         order: 2,
         group: 'main',
@@ -426,7 +426,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Published',
-        icon: '📋',
+        icon: 'fas fa-folder-open',
         route: '/app/content',
         queryParams: { view: 'published' },
         order: 3,
@@ -506,7 +506,7 @@ exports.migratePublishSubmenus = async (req, res, next) => {
     const publishChildren = await Menu.insertMany([
       {
         label: 'Create',
-        icon: '✏️',
+        icon: 'fas fa-pen',
         route: '/app/publish',
         order: 1,
         group: 'main',
@@ -516,7 +516,7 @@ exports.migratePublishSubmenus = async (req, res, next) => {
       },
       {
         label: 'Calendar',
-        icon: '📅',
+        icon: 'fas fa-calendar-alt',
         route: '/app/publish/calendar',
         order: 2,
         group: 'main',
@@ -526,7 +526,7 @@ exports.migratePublishSubmenus = async (req, res, next) => {
       },
       {
         label: 'Published',
-        icon: '📋',
+        icon: 'fas fa-folder-open',
         route: '/app/content',
         queryParams: { view: 'published' },
         order: 3,
@@ -569,7 +569,7 @@ exports.migrateContentMenuLibrary = async (req, res, next) => {
 
     const relabeled = await Menu.updateMany(
       { route: '/app/content', label: 'Published' },
-      { $set: { label: 'Content', icon: '📚' } }
+      { $set: { label: 'Content', icon: 'fas fa-folder-open' } }
     );
 
     res.status(200).json({

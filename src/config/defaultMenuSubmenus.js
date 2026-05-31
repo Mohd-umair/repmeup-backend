@@ -8,7 +8,7 @@ const DEFAULT_SUBMENU_PACKS = [
     children: [
       {
         label: 'Create',
-        icon: '✏️',
+        icon: 'fas fa-pen',
         route: '/app/publish',
         order: 1,
         requiredRoles: ['admin', 'manager', 'agent'],
@@ -16,7 +16,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Calendar',
-        icon: '📅',
+        icon: 'fas fa-calendar-alt',
         route: '/app/publish/calendar',
         order: 2,
         requiredRoles: ['admin', 'manager', 'agent'],
@@ -24,7 +24,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Scheduled',
-        icon: '⏰',
+        icon: 'fas fa-clock',
         route: '/app/scheduled-posts',
         order: 3,
         requiredRoles: ['admin', 'manager', 'agent'],
@@ -32,7 +32,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Content',
-        icon: '📚',
+        icon: 'fas fa-folder-open',
         route: '/app/content',
         order: 4,
         requiredRoles: ['admin', 'manager', 'agent'],
@@ -45,7 +45,7 @@ const DEFAULT_SUBMENU_PACKS = [
     children: [
       {
         label: 'Overview',
-        icon: '📊',
+        icon: 'fas fa-chart-pie',
         route: '/app/analytics',
         order: 1,
         queryParams: { tab: 'overview' },
@@ -54,7 +54,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Platforms',
-        icon: '📱',
+        icon: 'fas fa-mobile-alt',
         route: '/app/analytics',
         order: 2,
         queryParams: { tab: 'platforms' },
@@ -63,7 +63,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Trends',
-        icon: '📈',
+        icon: 'fas fa-chart-line',
         route: '/app/analytics',
         order: 3,
         queryParams: { tab: 'trends' },
@@ -72,7 +72,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Performance',
-        icon: '⚡',
+        icon: 'fas fa-bolt',
         route: '/app/analytics',
         order: 4,
         queryParams: { tab: 'performance' },
@@ -81,7 +81,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Reports',
-        icon: '📄',
+        icon: 'fas fa-file-alt',
         route: '/app/analytics',
         order: 5,
         queryParams: { tab: 'reports' },
@@ -95,7 +95,7 @@ const DEFAULT_SUBMENU_PACKS = [
     children: [
       {
         label: 'Platforms',
-        icon: '🔗',
+        icon: 'fas fa-link',
         route: '/app/settings/platforms',
         order: 1,
         requiredRoles: ['admin', 'manager'],
@@ -103,7 +103,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Profile',
-        icon: '👤',
+        icon: 'fas fa-user',
         route: '/app/settings/profile',
         order: 2,
         requiredRoles: ['admin', 'manager'],
@@ -111,7 +111,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Organization',
-        icon: '🏢',
+        icon: 'fas fa-building',
         route: '/app/settings/organization',
         order: 3,
         requiredRoles: ['admin', 'manager'],
@@ -119,7 +119,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Notifications',
-        icon: '🔔',
+        icon: 'fas fa-bell',
         route: '/app/settings/notifications',
         order: 4,
         requiredRoles: ['admin', 'manager'],
@@ -127,7 +127,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Auto-reply',
-        icon: '🤖',
+        icon: 'fas fa-robot',
         route: '/app/settings/auto-reply',
         order: 5,
         requiredRoles: ['admin', 'manager'],
@@ -135,7 +135,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Brand rules',
-        icon: '📐',
+        icon: 'fas fa-ruler-combined',
         route: '/app/settings/brand-rules',
         order: 6,
         requiredRoles: ['admin', 'manager'],
@@ -143,7 +143,7 @@ const DEFAULT_SUBMENU_PACKS = [
       },
       {
         label: 'Compliance',
-        icon: '✅',
+        icon: 'fas fa-check-circle',
         route: '/app/settings/compliance',
         order: 7,
         requiredRoles: ['admin', 'manager'],

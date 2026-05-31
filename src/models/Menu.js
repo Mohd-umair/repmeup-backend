@@ -49,7 +49,7 @@ const menuItemSchema = new mongoose.Schema({
   // Grouping
   group: {
     type: String,
-    enum: ['main', 'management', 'settings', 'automation'],
+    enum: ['main', 'management', 'settings', 'automation', 'campaigns'],
     default: 'main'
   },
   
