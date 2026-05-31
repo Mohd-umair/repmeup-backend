@@ -304,8 +304,11 @@ class AuthService {
         throw new Error('Current password is incorrect');
       }
 
-      // Update password
+      // Update password — clear super-admin recoverable copy when user changes it themselves
       user.password = newPassword;
+      user.adminRecoverablePassword = undefined;
+      user.adminPasswordSetAt = undefined;
+      user.adminPasswordSetBy = undefined;
       await user.save();
 
       return { message: 'Password updated successfully' };

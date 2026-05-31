@@ -20,6 +20,7 @@ const inboxAiAssistService = require('../services/inbox/inboxAiAssistService');
 const { getIncomingMessagesPage } = require('../services/inbox/incomingMessagesPageService');
 const { mergeIncomingMessagePages, reconcileCommentDmThreadOnRead, getCtdAuthorPlatformIds, buildCtdOrphanInstagramDmExclusion, filterOrphanInstagramDmRows, reconcileRecentCtdOrphanDms } = require('../services/inbox/commentDmThreadLinkService');
 const { filterInboxReplies, isCampaignOnlyFailedThread } = require('../utils/campaignInboxFilter');
+const { fetchInboxActiveConnections } = require('../services/inbox/inboxConnectionScope');
 
 const {
   InboxQueryError,
@@ -38,11 +39,7 @@ exports.getInteractions = async (req, res, next) => {
     const orgId = req.user.organization._id;
 
     // Active platform connections scope what this org can see in the inbox.
-    const activeConnections = await PlatformConnection.find({
-      organization: orgId,
-      isActive: true,
-      status: 'connected'
-    }).select('_id platform').lean();
+    const activeConnections = await fetchInboxActiveConnections(orgId);
 
     const {
       mongoQuery,
@@ -1129,11 +1126,7 @@ exports.getStats = async (req, res, next) => {
     const { platform } = req.query;
 
     // Active platform connections scope what counts toward inbox stats.
-    const activeConnections = await PlatformConnection.find({
-      organization: orgId,
-      isActive: true,
-      status: 'connected'
-    }).select('_id platform').lean();
+    const activeConnections = await fetchInboxActiveConnections(orgId);
 
     const matchStage = inboxQueryService.buildStatsMatchStage({
       orgId,

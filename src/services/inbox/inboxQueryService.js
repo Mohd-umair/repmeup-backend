@@ -107,6 +107,8 @@ function resolvePagination({ page, limit }) {
  * Rules:
  *   - Only interactions for platforms that still have at least one active
  *     connected `PlatformConnection` row appear in the inbox.
+ *   - Caller must pass connections from `fetchInboxActiveConnections()` —
+ *     statuses `connected`, `available`, `error`, `token_expired` (see inboxConnectionScope.js).
  *   - An interaction is visible if `platformConnection` references one of those
  *     active connection IDs, or if `platformConnection` is missing/null (legacy
  *     imports before the field existed).

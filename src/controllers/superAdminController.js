@@ -1,6 +1,7 @@
 const superAdminService = require('../services/superAdminService');
 const Transaction = require('../models/Transaction');
 const aiUsageReportService = require('../services/aiUsageReportService');
+const userActivityLogService = require('../services/userActivityLogService');
 
 /**
  * GET /api/super-admin/plans
@@ -64,12 +65,15 @@ exports.createOrganizationUser = async (req, res, next) => {
   try {
     const data = await superAdminService.createUserForOrganization(
       req.params.organizationId,
-      req.body
+      req.body,
+      req.user._id
     );
+    const { provisionalPassword, ...userData } = data || {};
     res.status(201).json({
       success: true,
-      data,
-      message: 'User created successfully'
+      data: userData,
+      message: 'User created successfully',
+      provisionalPassword: provisionalPassword || undefined
     });
   } catch (error) {
     if (error.statusCode) {
@@ -162,6 +166,113 @@ exports.setUserActive = async (req, res, next) => {
       data,
       message: isActive ? 'User activated' : 'User deactivated'
     });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/users/:id/password — reveal admin-stored password if available
+ */
+exports.getUserPassword = async (req, res, next) => {
+  try {
+    const data = await superAdminService.getUserPasswordReveal(req.params.id);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/users/:id/reset-password
+ * Body: { password? } — optional custom password; otherwise auto-generated
+ */
+exports.resetUserPassword = async (req, res, next) => {
+  try {
+    const data = await superAdminService.resetUserPasswordReveal(
+      req.user._id,
+      req.params.id,
+      req.body
+    );
+    res.status(200).json({
+      success: true,
+      data,
+      message: 'Password reset successfully'
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/users/:id/impersonate — issue short-lived JWT for main app
+ */
+exports.impersonateUser = async (req, res, next) => {
+  try {
+    const data = await superAdminService.impersonateUser(req.user._id, req.params.id);
+    userActivityLogService.recordAuthEvent({
+      userId: req.user._id,
+      organizationId: req.user.organization?._id || req.user.organization,
+      action: 'super_admin_impersonate_user',
+      path: `/api/super-admin/users/${req.params.id}/impersonate`,
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent'],
+      metadata: { targetUserId: req.params.id, targetEmail: data.user?.email }
+    });
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/organizations/:id/impersonate — login as org primary admin
+ */
+exports.impersonateOrganization = async (req, res, next) => {
+  try {
+    const data = await superAdminService.impersonateOrganization(req.user._id, req.params.id);
+    userActivityLogService.recordAuthEvent({
+      userId: req.user._id,
+      organizationId: req.user.organization?._id || req.user.organization,
+      action: 'super_admin_impersonate_org',
+      path: `/api/super-admin/organizations/${req.params.id}/impersonate`,
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent'],
+      metadata: {
+        organizationId: req.params.id,
+        targetUserId: data.user?._id,
+        targetEmail: data.user?.email
+      }
+    });
+    res.status(200).json({ success: true, data });
   } catch (error) {
     if (error.statusCode) {
       return res.status(error.statusCode).json({
