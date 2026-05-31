@@ -18,6 +18,7 @@
 const CommerceOrder = require('../models/CommerceOrder');
 const Product = require('../models/Product');
 const logger = require('../config/logger');
+const { assignOrderDisplayRef } = require('../utils/opsRefHelper');
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -245,17 +246,19 @@ exports.createOrder = async (req, res, next) => {
 
     const totalAmount = lineItems.reduce((sum, item) => sum + (item.unitPrice * item.qty), 0);
 
-    const order = await CommerceOrder.create({
-      organization: orgId(req),
-      channel,
-      status: 'product_sent',
-      lineItems,
-      totalAmount: +totalAmount.toFixed(2),
-      currency: lineItems[0]?.currency || 'AED',
-      buyerName,
-      buyerPhone,
-      notes
-    });
+    const order = await CommerceOrder.create(
+      await assignOrderDisplayRef(orgId(req), {
+        organization: orgId(req),
+        channel,
+        status: 'product_sent',
+        lineItems,
+        totalAmount: +totalAmount.toFixed(2),
+        currency: lineItems[0]?.currency || 'AED',
+        buyerName,
+        buyerPhone,
+        notes
+      })
+    );
 
     res.status(201).json({ success: true, data: order });
   } catch (err) {

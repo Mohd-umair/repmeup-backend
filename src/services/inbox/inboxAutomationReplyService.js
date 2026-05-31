@@ -67,7 +67,9 @@ async function recordAutomationReply({
       attachmentUrl || null,
       attachmentType || null,
       null,
-      messageType
+      messageType,
+      null,
+      interaction.platform === 'whatsapp' && platformResponseId ? 'sent' : null
     );
 
     const orgIdStr = organizationId.toString();

@@ -108,7 +108,11 @@ const commerceOrderSchema = new mongoose.Schema({
   shippingAddress: { type: String, trim: true },
 
   // ── Meta data ──────────────────────────────────────────────────────────────
-  notes: { type: String, trim: true }
+  notes: { type: String, trim: true },
+
+  /** Human-readable order ref for inbox ops (e.g. ORD-2847) */
+  orderNumber: { type: Number, index: true },
+  displayRef: { type: String, trim: true, index: true }
 }, {
   timestamps: true
 });
@@ -118,5 +122,6 @@ commerceOrderSchema.index({ organization: 1, status: 1, createdAt: -1 });
 commerceOrderSchema.index({ organization: 1, channel: 1, createdAt: -1 });
 commerceOrderSchema.index({ organization: 1, contact: 1 });
 commerceOrderSchema.index({ organization: 1, 'lineItems.product': 1 });
+commerceOrderSchema.index({ organization: 1, displayRef: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('CommerceOrder', commerceOrderSchema);

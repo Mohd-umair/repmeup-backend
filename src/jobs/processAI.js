@@ -175,6 +175,13 @@ module.exports = async function processAI(job) {
     // exponential duplication of history entries.
     await Interaction.findByIdAndUpdate(interactionId, { $set: aiUpdate }, { new: false });
 
+    try {
+      const { ensureComplaintFromIntent } = require('../services/inbox/complaintAutoCreateService');
+      await ensureComplaintFromIntent(interaction, analysis.intent);
+    } catch (_complaintErr) {
+      /* non-fatal */
+    }
+
     cacheService.invalidateAnalytics(orgIdCtx).catch(() => {});
 
     // Trigger follow-invite DM after AI is done so sentiment + intent are available for filtering

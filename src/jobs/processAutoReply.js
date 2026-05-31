@@ -1261,7 +1261,18 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
         role: { $in: ['admin', 'manager', 'agent', 'super_admin'] }
       }).select('_id').lean();
 
-      await interaction.addReply(content, user?._id ?? null, platformResponseId, true, null, null, confidence, messageType);
+      await interaction.addReply(
+        content,
+        user?._id ?? null,
+        platformResponseId,
+        true,
+        null,
+        null,
+        confidence,
+        messageType,
+        null,
+        interaction.platform === 'whatsapp' && platformResponseId ? 'sent' : null
+      );
       interaction.autoReplied = true;
       interaction.respondedAt = new Date();
       await interaction.save();

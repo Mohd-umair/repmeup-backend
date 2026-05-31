@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const inboxController = require('../controllers/inboxController');
+const inboxOpsController = require('../controllers/inboxOpsController');
 const { protect, authorize } = require('../middlewares/auth');
 const {
   validateReply,
@@ -48,6 +49,26 @@ router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
 router.get('/attachment', inboxController.getAttachment);
 // WhatsApp incoming media (image/audio/video) — proxy with WABA token
 router.get('/whatsapp-media', inboxController.getWhatsAppMedia);
+
+// ── Inbox Operations (orders, complaints, reviews) ─────────────────────────
+router.get('/ops/orders', inboxOpsController.listOrders);
+router.get('/ops/orders/stats', inboxOpsController.getOrderStats);
+router.get('/ops/orders/:id', inboxOpsController.getOrderDetail);
+router.patch('/ops/orders/:id/status', inboxOpsController.updateOrderStatus);
+
+router.get('/ops/complaints', inboxOpsController.listComplaints);
+router.get('/ops/complaints/stats', inboxOpsController.getComplaintStats);
+router.get('/ops/complaints/:id', inboxOpsController.getComplaintDetail);
+router.post('/ops/complaints/:id/acknowledge', inboxOpsController.acknowledgeComplaint);
+router.post('/ops/complaints/:id/assign', inboxOpsController.assignComplaint);
+router.post('/ops/complaints/:id/resolve', inboxOpsController.resolveComplaint);
+router.post('/ops/complaints/:id/close', inboxOpsController.closeComplaint);
+
+router.get('/ops/reviews', inboxOpsController.listReviews);
+router.get('/ops/reviews/stats', inboxOpsController.getReviewStats);
+router.get('/ops/reviews/:id', inboxOpsController.getReviewDetail);
+router.post('/ops/reviews/:id/suggest-reply', inboxOpsController.suggestReviewReply);
+router.post('/ops/reviews/:id/reply', inboxOpsController.publishReviewReply);
 
 // Get single interaction
 router.get('/:id', inboxController.getInteraction);

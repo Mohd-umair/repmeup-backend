@@ -237,6 +237,11 @@ describe('processWhatsAppWebhook', () => {
   });
 
   test('status-only change dispatches to processStatusUpdate', async () => {
+    Interaction.findOne
+      .mockReturnValueOnce(chainable({ replies: [{ platformResponseId: 'wamid.s', deliveryStatus: 'sent' }] }))
+      .mockReturnValueOnce(chainable({ _id: 'int-s', organization: 'org-s' }));
+    Interaction.findById.mockReturnValueOnce(chainable({ _id: 'int-s', organization: 'org-s', replies: [] }));
+
     await svc.processWhatsAppWebhook({
       entry: [{
         changes: [{
@@ -259,6 +264,10 @@ describe('processWhatsAppWebhook', () => {
   test('sibling changes continue to process when one throws', async () => {
     // First change: message with unknown connection → swallowed and skipped.
     PlatformConnection.findOne.mockReturnValueOnce(chainable(null));
+    Interaction.findOne
+      .mockReturnValueOnce(chainable({ replies: [{ platformResponseId: 'wamid.s', deliveryStatus: 'delivered' }] }))
+      .mockReturnValueOnce(chainable({ _id: 'int-s2', organization: 'org-s2' }));
+    Interaction.findById.mockReturnValueOnce(chainable({ _id: 'int-s2', organization: 'org-s2', replies: [] }));
 
     await svc.processWhatsAppWebhook({
       entry: [{
@@ -501,7 +510,9 @@ describe('processStatusUpdate', () => {
   });
 
   test('updates replies deliveryStatus and converts timestamp to Date', async () => {
-    Interaction.findOne.mockReturnValueOnce(chainable({ _id: 'int-1', organization: 'org-1' }));
+    Interaction.findOne
+      .mockReturnValueOnce(chainable({ replies: [{ platformResponseId: 'wamid.abc', deliveryStatus: 'sent' }] }))
+      .mockReturnValueOnce(chainable({ _id: 'int-1', organization: 'org-1' }));
     Interaction.findById.mockReturnValueOnce(chainable({ _id: 'int-1', organization: 'org-1', replies: [] }));
 
     await svc.processStatusUpdate({
@@ -514,6 +525,19 @@ describe('processStatusUpdate', () => {
     expect(update.$set['replies.$.deliveryStatusAt']).toBeInstanceOf(Date);
     expect(update.$set['replies.$.deliveryStatusAt'].getTime()).toBe(1700000000 * 1000);
     expect(emitToOrg).toHaveBeenCalledWith('org-1', 'interaction_updated', expect.any(Object));
+  });
+
+  test('does not downgrade deliveryStatus when webhook rank is lower', async () => {
+    Interaction.findOne.mockReturnValueOnce(
+      chainable({ replies: [{ platformResponseId: 'wamid.read', deliveryStatus: 'read' }] })
+    );
+
+    await svc.processStatusUpdate({
+      id: 'wamid.read', status: 'delivered', timestamp: '1700000000'
+    });
+
+    expect(Interaction.updateOne).not.toHaveBeenCalled();
+    expect(emitToOrg).not.toHaveBeenCalled();
   });
 
   test('failed status marks inbox reply as failed and emits interaction_updated', async () => {
