@@ -90,18 +90,20 @@ async function _handleOrderMessage({ message, connection, organizationId, savedI
 
     const buyerPhone = String(message.from);
 
-    const commerceOrder = await CommerceOrder.create({
-      organization: organizationId,
-      channel: 'whatsapp',
-      status: 'cart_started',
-      lineItems,
-      totalAmount: +totalAmount.toFixed(2),
-      currency: lineItems[0]?.currency || 'AED',
-      whatsappMessageId: message.id,
-      metaOrderId: catalog_id ? `${catalog_id}_${message.id}` : undefined,
-      buyerPhone,
-      sourceInteraction: savedInteraction?._id
-    });
+    const commerceOrder = await CommerceOrder.create(
+      await assignOrderDisplayRef(organizationId, {
+        organization: organizationId,
+        channel: 'whatsapp',
+        status: 'cart_started',
+        lineItems,
+        totalAmount: +totalAmount.toFixed(2),
+        currency: lineItems[0]?.currency || 'AED',
+        whatsappMessageId: message.id,
+        metaOrderId: catalog_id ? `${catalog_id}_${message.id}` : undefined,
+        buyerPhone,
+        sourceInteraction: savedInteraction?._id
+      })
+    );
 
     logger.info('[WhatsApp] CommerceOrder created from native cart', {
       orderId: commerceOrder._id.toString(),
@@ -760,6 +762,7 @@ async function processStatusUpdate(status) {
   );
 
   const statusAt = new Date(parseInt(status.timestamp, 10) * 1000);
+  const DELIVERY_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, failed: -1 };
 
   if (status.status === 'failed') {
     // Mark agent/manual inbox sends as failed so the UI shows "Not sent".
@@ -786,6 +789,22 @@ async function processStatusUpdate(status) {
 
     await _emitInteractionUpdatedForReplyWamid(status.id);
     return;
+  }
+
+  // Only advance delivery lifecycle (sent → delivered → read); never downgrade.
+  const stub = await Interaction.findOne({
+    platform: 'whatsapp',
+    'replies.platformResponseId': status.id
+  })
+    .select('replies')
+    .lean();
+
+  if (stub?.replies?.length) {
+    const reply = stub.replies.find((r) => r.platformResponseId === status.id);
+    const current = reply?.deliveryStatus || 'pending';
+    const currentRank = DELIVERY_RANK[current] ?? 0;
+    const newRank = DELIVERY_RANK[status.status] ?? 0;
+    if (newRank <= currentRank) return;
   }
 
   // Update delivery on outbound reply in thread (match by wamid on replies[])

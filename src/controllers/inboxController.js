@@ -705,6 +705,8 @@ exports.replyToInteraction = async (req, res, next) => {
 
     // Persist reply in DB
     const previousStatus = interaction.status;
+    const waDeliveryStatus =
+      interaction.platform === 'whatsapp' && replyStatus === 'sent' && platformResponseId ? 'sent' : null;
     await interaction.addReply(
       replyContent,
       req.user._id,
@@ -714,7 +716,8 @@ exports.replyToInteraction = async (req, res, next) => {
       attachmentType || undefined,
       undefined,
       undefined,
-      whatsappTemplatePreview || undefined
+      whatsappTemplatePreview || undefined,
+      waDeliveryStatus
     );
     await interaction.populate('replies.sentBy', 'firstName lastName');
 

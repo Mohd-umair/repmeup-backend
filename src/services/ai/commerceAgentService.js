@@ -103,24 +103,28 @@ async function tryAutonomousCommerceAction({ organizationId, senderId, text, con
       `Here's ${product.name} — does this help?`
     );
 
+    const { assignOrderDisplayRef } = require('../../utils/opsRefHelper');
+
     // Log as CommerceOrder for audit trail
-    await CommerceOrder.create({
-      organization: organizationId,
-      channel: 'whatsapp',
-      status: 'product_sent',
-      lineItems: [{
-        product: product._id,
-        retailerId: product.sku || product._id.toString(),
-        name: product.name,
-        qty: 1,
-        unitPrice: product.price,
-        currency: product.currency || 'AED'
-      }],
-      buyerPhone: senderId,
-      whatsappMessageId: msgResult?.messageId,
-      sourceInteraction: interaction?._id,
-      notes: `[Auto-sent by Commerce Agent] Intent: ${intent}, confidence: ${confidence.toFixed(2)}`
-    });
+    await CommerceOrder.create(
+      await assignOrderDisplayRef(organizationId, {
+        organization: organizationId,
+        channel: 'whatsapp',
+        status: 'product_sent',
+        lineItems: [{
+          product: product._id,
+          retailerId: product.sku || product._id.toString(),
+          name: product.name,
+          qty: 1,
+          unitPrice: product.price,
+          currency: product.currency || 'AED'
+        }],
+        buyerPhone: senderId,
+        whatsappMessageId: msgResult?.messageId,
+        sourceInteraction: interaction?._id,
+        notes: `[Auto-sent by Commerce Agent] Intent: ${intent}, confidence: ${confidence.toFixed(2)}`
+      })
+    );
 
     logger.info('[commerceAgent] Autonomous product sent', {
       organizationId,

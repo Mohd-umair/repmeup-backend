@@ -26,6 +26,10 @@ const organizationSchema = new mongoose.Schema({
     type: Number,
     default: 100
   },
+  /** Inbox ops display refs: ORD-2847, CMP-0041, REV-0088 */
+  orderCounter: { type: Number, default: 1000 },
+  complaintCounter: { type: Number, default: 1000 },
+  reviewCounter: { type: Number, default: 1000 },
   size: {
     type: String,
     enum: ['', '1-10', '11-50', '51-200', '201-500', '501-1000', '1000+', 'small', 'medium', 'large', 'enterprise'],
