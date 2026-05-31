@@ -63,9 +63,16 @@ router.post(
   '/organizations/:organizationId/users',
   superAdminController.createOrganizationUser
 );
+router.post(
+  '/organizations/:id/impersonate',
+  superAdminController.impersonateOrganization
+);
 router.get('/organizations/:id', superAdminController.getOrganization);
 router.get('/users', superAdminController.listUsers);
 router.get('/users/:id/activity', superAdminController.getUserActivity);
+router.get('/users/:id/password', superAdminController.getUserPassword);
+router.post('/users/:id/impersonate', superAdminController.impersonateUser);
+router.post('/users/:id/reset-password', superAdminController.resetUserPassword);
 router.get('/users/:id', superAdminController.getUser);
 router.patch('/users/:id/status', superAdminController.setUserActive);
 router.delete('/users/:id', superAdminController.softDeleteUser);

@@ -165,6 +165,19 @@ exports.generateToken = (userId) => {
   });
 };
 
+/**
+ * Short-lived token for super-admin "login as user" in the main app.
+ * @param {import('mongoose').Types.ObjectId|string} userId Target user
+ * @param {import('mongoose').Types.ObjectId|string} impersonatedBy Super-admin operator
+ */
+exports.generateImpersonationToken = (userId, impersonatedBy) => {
+  return jwt.sign(
+    { id: userId, impersonatedBy: String(impersonatedBy), impersonation: true },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_IMPERSONATION_EXPIRE || '2h' }
+  );
+};
+
 // Generate refresh token
 exports.generateRefreshToken = (userId) => {
   return jwt.sign(

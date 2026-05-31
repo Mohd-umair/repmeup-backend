@@ -86,6 +86,10 @@ const userSchema = new mongoose.Schema({
   emailVerificationLastSent: Date,
   passwordResetToken: String,
   passwordResetExpires: Date,
+  /** AES-encrypted password last set via super-admin (create/reset) — select: false */
+  adminRecoverablePassword: { type: String, select: false },
+  adminPasswordSetAt: { type: Date, select: false },
+  adminPasswordSetBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', select: false },
 
   // Email OTP login (6-digit, expires in 10 minutes)
   loginOtpCode: { type: String, select: false },

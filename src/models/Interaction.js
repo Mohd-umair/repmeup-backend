@@ -493,12 +493,14 @@ const interactionSchema = new mongoose.Schema({
   respondedAt: Date,
   resolvedAt: Date,
 
-  // How this interaction was created: 'webhook' = real-time event, 'sync' = pulled
-  // during a manual or initial account sync. Used to suppress auto-reply on
-  // historical/old messages that should never receive automated responses.
+  // How this interaction was created:
+  // - webhook: real-time platform event
+  // - sync: pulled during manual/initial account sync (suppress auto-reply on old messages)
+  // - campaign: outbound WhatsApp campaign thread
+  // - comment_to_dm_link: shadow DM row linked from a comment-to-DM flow
   source: {
     type: String,
-    enum: ['webhook', 'sync'],
+    enum: ['webhook', 'sync', 'campaign', 'comment_to_dm_link'],
     default: 'webhook'
   }
 }, {
