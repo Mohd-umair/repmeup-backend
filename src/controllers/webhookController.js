@@ -2,8 +2,8 @@ const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const youtubeService = require('../integrations/google/youtubeService');
-const { processWebhook } = require('../jobs/processWebhook');
 const logger = require('../config/logger');
+const { ingestInstagramWebhook } = require('../services/webhook/instagramWebhookIngress');
 const logEvents = require('../utils/logEvents');
 const { generateChatRef } = require('../utils/chatRefHelper');
 const { upsertWhatsAppThread } = require('../services/webhook/whatsappWebhookService');
@@ -257,10 +257,17 @@ exports.handleFacebookWebhook = async (req, res) => {
   logger.info('[Facebook Webhook] POST hit – Meta is calling this URL');
 
   try {
+    const obj = req.body?.object;
+
+    // Meta often sends Instagram messaging (object: "instagram") to the same callback URL as Page webhooks.
+    if (obj === 'instagram') {
+      logger.info('[Facebook Webhook] Routing object=instagram to Instagram handler');
+      return exports.handleInstagramWebhook(req, res);
+    }
+
     // If we get a body but no entry/object, log raw keys to debug Meta's payload format
     const hasBody = !!req.body;
     const bodyKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
-    const obj = req.body?.object;
     const entryCount = req.body?.entry?.length ?? 0;
     const firstEntry = req.body?.entry?.[0];
     const pageId = firstEntry?.id;
@@ -345,7 +352,10 @@ exports.verifyInstagramWebhook = (req, res) => {
 
   logger.info('Instagram webhook verification request', { mode, token });
 
-  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+  const expectedToken =
+    process.env.INSTAGRAM_LOGIN_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
+
+  if (mode === 'subscribe' && token === expectedToken) {
     logger.info('Instagram webhook verified successfully');
     res.status(200).send(challenge);
   } else {
@@ -361,103 +371,16 @@ exports.verifyInstagramWebhook = (req, res) => {
  */
 exports.handleInstagramWebhook = async (req, res) => {
   try {
-    // Acknowledge receipt immediately so Meta doesn't retry
     res.sendStatus(200);
 
-    logger.info('📩 [Instagram Webhook] Received POST', { body: req.body });
-
-    const entry = req.body.entry?.[0];
-    if (!entry) {
-      logger.info('No entry in Instagram webhook payload');
-      return;
-    }
-
-    // Process DMs (messaging/standby), comments, or mentions
-    const hasMessaging = entry.messaging && entry.messaging.length > 0;
-    const hasStandby = entry.standby && entry.standby.length > 0;
-    const hasChanges = entry.changes && entry.changes.length > 0;
-    const hasCommentChange = hasChanges && entry.changes.some(c => c.field === 'comments');
-    const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
-    if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) {
-      return;
-    }
-
-    const instagramId = entry.id;
-    const isMetaTestEvent = String(instagramId) === '0';
-    const PlatformConnection = require('../models/PlatformConnection');
-
-    // Lookup Facebook Login connections only (exclude IGAA tokens — those are
-    // handled by the dedicated /api/webhooks/instagram-login endpoint).
-    const fbLoginFilter = {
-      platform: 'instagram',
-      accessToken: { $not: /^IGAA/ },
-      isActive: true
-    };
-
-    let connection = await PlatformConnection.findOne({
-      ...fbLoginFilter,
-      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) }
+    logger.info('[Instagram Webhook] Received POST', {
+      object: req.body?.object,
+      entryId: req.body?.entry?.[0]?.id
     });
 
-    if (!connection) {
-      connection = await PlatformConnection.findOne({
-        ...fbLoginFilter,
-        $or: [
-          { platformPageId: { $in: [instagramId, String(instagramId)].filter(Boolean) } },
-          { 'platformData.businessAccountId': String(instagramId) }
-        ]
-      });
-    }
-
-    if (!connection) {
-      if (isMetaTestEvent && hasMentionChange) {
-        logger.info('[Instagram Webhook] Received Meta test mention event (entry.id=0). This confirms callback URL works.');
-      } else {
-        logger.info(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. Connect this Instagram in Settings → Page Manager to receive DMs/comments/mentions here.`);
-      }
-      return;
-    }
-
-    // If DM arrived in standby, take thread control immediately so we can reply later.
-    // "Take control of conversations" must be ON in the Page's app settings for this to work.
-    if (hasStandby && !hasMessaging) {
-      const axios = require('axios');
-      const pageId = connection.platformPageId || connection.platformData?.pageId;
-      const accessToken = connection.accessToken;
-      if (pageId && accessToken) {
-        for (const event of entry.standby) {
-          const senderId = event.sender?.id;
-          if (!senderId) continue;
-          try {
-            await axios.post(`https://graph.facebook.com/v19.0/${pageId}/take_thread_control`, null, {
-              params: { recipient_id: senderId, access_token: accessToken }
-            });
-            logger.info(`[Instagram Webhook] ✅ Took thread control for standby sender ${senderId}`);
-          } catch (ttcErr) {
-            logger.warn(`[Instagram Webhook] ⚠️ take_thread_control failed for ${senderId}`, { error: ttcErr.response?.data?.error?.message || ttcErr.message });
-          }
-        }
-      }
-    }
-
-    const organizationId = connection.organization.toString();
-
-    // Save DM to DB immediately so inbox polling shows it without Sync
-    const processWebhook = require('../jobs/processWebhook');
-    try {
-      const result = await processWebhook({
-        data: { platform: 'instagram', payload: req.body, organizationId },
-        id: 'instagram-' + Date.now()
-      });
-      if (result && result.interactionId) {
-        logger.info('Instagram webhook processed and DM saved to database');
-      }
-    } catch (processErr) {
-      logger.error('Instagram webhook processing error', { error: processErr.message });
-    }
+    await ingestInstagramWebhook(req.body, '[Instagram Webhook]');
   } catch (error) {
     logger.error('Instagram webhook handler error', { error: error.message, stack: error.stack });
-    // Don't send error response as we already sent 200
   }
 };
 
@@ -497,50 +420,12 @@ exports.handleInstagramLoginWebhook = async (req, res) => {
   try {
     res.sendStatus(200);
 
-    logger.info('📩 [IG-Login Webhook] Received POST', { body: req.body });
-
-    const entry = req.body.entry?.[0];
-    if (!entry) return;
-
-    const hasMessaging = entry.messaging && entry.messaging.length > 0;
-    const hasStandby = entry.standby && entry.standby.length > 0;
-    const hasChanges = entry.changes && entry.changes.length > 0;
-    const hasCommentChange = hasChanges && entry.changes.some(c => c.field === 'comments');
-    const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
-    if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) return;
-
-    // entry.id is the global Instagram Business Account ID. Since saveConnection
-    // now stores user_id (the same global ID) as platformUserId, the lookup is
-    // deterministic — no fallbacks, no self-healing, no cross-account leakage.
-    const instagramId = String(entry.id);
-    const PlatformConnection = require('../models/PlatformConnection');
-
-    const connection = await PlatformConnection.findOne({
-      platform: 'instagram',
-      platformUserId: instagramId,
-      accessToken: { $regex: /^IGAA/ },
-      isActive: true
+    logger.info('[IG-Login Webhook] Received POST', {
+      object: req.body?.object,
+      entryId: req.body?.entry?.[0]?.id
     });
 
-    if (!connection) {
-      logger.info(`[IG-Login Webhook] No active Instagram Login connection for account ${instagramId}. Connect this account via Settings → Connect Instagram (Instagram Login).`);
-      return;
-    }
-
-    const organizationId = connection.organization.toString();
-
-    const processWebhook = require('../jobs/processWebhook');
-    try {
-      const result = await processWebhook({
-        data: { platform: 'instagram', payload: req.body, organizationId },
-        id: 'instagram-login-' + Date.now()
-      });
-      if (result && result.interactionId) {
-        logger.info('[IG-Login Webhook] Processed and saved to database');
-      }
-    } catch (processErr) {
-      logger.error('[IG-Login Webhook] Processing error', { error: processErr.message });
-    }
+    await ingestInstagramWebhook(req.body, '[IG-Login Webhook]');
   } catch (error) {
     logger.error('[IG-Login Webhook] Handler error', { error: error.message, stack: error.stack });
   }
