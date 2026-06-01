@@ -41,6 +41,10 @@ module.exports = async function processWebhook(job) {
       case 'whatsapp':
         interaction = await whatsappWebhookService.handleWhatsAppMessage(payload, organizationId);
         break;
+
+      case 'whatsapp_webhook':
+        await whatsappWebhookService.processWhatsAppWebhook(payload);
+        break;
       
       case 'google':
         interaction = await handleGoogleWebhook(payload, organizationId);

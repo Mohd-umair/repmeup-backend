@@ -104,6 +104,14 @@ const userSchema = new mongoose.Schema({
       type: Boolean,
       default: true
     },
+    negativeSentimentAlerts: {
+      type: Boolean,
+      default: true
+    },
+    weeklyReports: {
+      type: Boolean,
+      default: false
+    },
     emailFrequency: {
       type: String,
       enum: ['instant', 'daily', 'weekly'],

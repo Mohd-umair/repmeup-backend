@@ -30,10 +30,16 @@ const gmailWatchRenewalQueue = new Queue('gmail-watch-renewal', queueOptions);
 const outlookRenewalQueue = new Queue('outlook-subscription-renewal', queueOptions);
 const voiceCallQueue = new Queue('voice-call', queueOptions);
 
-// WhatsApp campaign broadcast — rate-limited to 60 sends/sec (safe for Meta standard tier)
+// WhatsApp campaign broadcast — rate-limited job starts (actual send rate enforced per-WABA in worker)
 const campaignSendQueue = new Queue('campaign-send', {
   ...queueOptions,
   limiter: { max: 60, duration: 1000 }
+});
+
+// Async inbox backfill after campaign sends (cold path)
+const campaignInboxQueue = new Queue('campaign-inbox', {
+  ...queueOptions,
+  limiter: { max: 100, duration: 1000 }
 });
 
 // ============================================================================
@@ -70,7 +76,8 @@ const queues = [
   gmailWatchRenewalQueue,
   outlookRenewalQueue,
   voiceCallQueue,
-  campaignSendQueue
+  campaignSendQueue,
+  campaignInboxQueue
 ];
 
 queues.forEach(queue => {
@@ -114,5 +121,6 @@ module.exports = {
   outlookRenewalQueue,
   voiceCallQueue,
   campaignSendQueue,
+  campaignInboxQueue,
   queueConfig
 };

@@ -11,7 +11,7 @@ const WhatsAppCampaignRecipient = require('../models/WhatsAppCampaignRecipient')
 const WhatsAppTemplate = require('../models/WhatsAppTemplate');
 const PlatformConnection = require('../models/PlatformConnection');
 const whatsappService = require('../integrations/whatsapp/whatsappService');
-const { campaignSendQueue, queueConfig } = require('../config/queue');
+const campaignDispatch = require('./campaignDispatchService');
 const logger = require('../config/logger');
 const { deriveTemplateSlots, flattenSlotKeys } = require('../utils/whatsappTemplateSlots');
 const {
@@ -1234,10 +1234,7 @@ async function launchCampaign({ orgId, campaignId /* templateComponents intentio
   campaign.startedAt = new Date();
   await campaign.save();
 
-  await campaignSendQueue.add(
-    { type: 'send', campaignId: campaignId.toString() },
-    { ...queueConfig, jobId: `campaign-send-${campaignId}` }
-  );
+  await campaignDispatch.enqueueCampaignBatches(campaignId.toString());
 
   logger.info('[Campaign] Launched immediately', { campaignId, total });
   return campaign;
@@ -1269,11 +1266,7 @@ async function resumeCampaign({ orgId, campaignId }) {
     throw err;
   }
 
-  // Re-enqueue the send job
-  await campaignSendQueue.add(
-    { type: 'send', campaignId: campaignId.toString() },
-    { ...queueConfig, jobId: `campaign-send-${campaignId}-resume-${Date.now()}` }
-  );
+  await campaignDispatch.enqueueCampaignBatches(campaignId.toString());
 
   return campaign;
 }

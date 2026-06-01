@@ -341,6 +341,10 @@ const interactionSchema = new mongoose.Schema({
     deviceType: String,
     appVersion: String,
 
+    /** Trimmed by archiveInteractionReplies job when reply array exceeds limit */
+    archivedReplyCount: { type: Number, default: 0 },
+    lastReplyArchiveAt: Date,
+
     // Email-specific metadata (platform === 'email')
     email: {
       subject: String,

@@ -149,6 +149,9 @@ const whatsappCampaignSchema = new mongoose.Schema(
     // Set when the campaign finishes (completed / failed / cancelled)
     finishedAt: { type: Date },
 
+    /** Set when auto-paused by Meta rate-limit governance */
+    pauseReason: { type: String, maxlength: 200 },
+
     stats: { type: statsSchema, default: () => ({}) },
 
     createdBy: {

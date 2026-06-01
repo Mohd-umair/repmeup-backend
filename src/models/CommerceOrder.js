@@ -24,7 +24,7 @@ const lineItemSchema = new mongoose.Schema({
   name: { type: String, trim: true },
   qty: { type: Number, default: 1, min: 1 },
   unitPrice: { type: Number, min: 0 },
-  currency: { type: String, default: 'AED', trim: true }
+  currency: { type: String, default: 'INR', trim: true }
 }, { _id: false });
 
 const commerceOrderSchema = new mongoose.Schema({
@@ -97,7 +97,7 @@ const commerceOrderSchema = new mongoose.Schema({
   paymentRef: { type: String, trim: true },
   /** Total order value (may be null until cart is confirmed) */
   totalAmount: { type: Number, min: 0 },
-  currency: { type: String, default: 'AED', trim: true },
+  currency: { type: String, default: 'INR', trim: true },
   paidAt: { type: Date },
   shippedAt: { type: Date },
   deliveredAt: { type: Date },

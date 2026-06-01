@@ -46,6 +46,13 @@ router.get('/faqs', superAdminFaqController.listFaqs);
 router.put('/faqs', superAdminFaqController.syncFaqs);
 router.post('/faqs/seed-defaults', superAdminFaqController.seedDefaults);
 
+const superAdminCampaignMetricsController = require('../../controllers/superAdminCampaignMetricsController');
+router.get('/campaign-metrics', superAdminCampaignMetricsController.getCampaignMetrics);
+router.patch(
+  '/platform-connections/:id/waba-metadata',
+  superAdminCampaignMetricsController.updateWabaMetadata
+);
+
 // Support tickets
 router.get('/tickets', ticketController.superAdminListTickets);
 router.patch('/tickets/:id/status', ticketController.superAdminUpdateStatus);

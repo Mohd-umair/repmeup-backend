@@ -275,6 +275,14 @@ class AuthService {
         }
       });
 
+      if (updates.preferences) {
+        const existing = await User.findById(userId).select('preferences').lean();
+        updates.preferences = {
+          ...(existing?.preferences || {}),
+          ...updates.preferences
+        };
+      }
+
       const user = await User.findByIdAndUpdate(
         userId,
         updates,

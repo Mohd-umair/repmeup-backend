@@ -122,13 +122,28 @@ if (rateLimitDisabled) {
 }
 
 // Health check route
-app.get('/health', (req, res) => {
-  res.status(200).json({
+app.get('/health', async (req, res) => {
+  const payload = {
     success: true,
     message: 'ORM System API is running',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV
-  });
+    environment: process.env.NODE_ENV,
+    workers: {
+      campaignInCoreWorker: process.env.ENABLE_CAMPAIGN_IN_CORE_WORKER !== 'false',
+      dedicatedCampaignWorkerRecommended: process.env.NODE_ENV === 'production'
+    }
+  };
+
+  if (req.query.campaignMetrics === '1') {
+    try {
+      const campaignMetrics = require('./services/campaignMetricsService');
+      payload.campaignMetrics = await campaignMetrics.getSnapshot();
+    } catch {
+      payload.campaignMetrics = { error: 'metrics_unavailable' };
+    }
+  }
+
+  res.status(200).json(payload);
 });
 
 // Bull Board monitoring UI

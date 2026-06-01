@@ -19,8 +19,8 @@ pm2 start ecosystem.config.medium.js --env production
 pm2 start ecosystem.config.js --env production
 ```
 - **Memory per process**: 512MB
-- **Total memory usage**: ~1.5GB (2 API + 1 worker)
-- **Handles**: 5,000-10,000 messages/hour
+- **Total memory usage**: ~1.5GB (2 API + 1 core worker + 1 campaign worker)
+- **Handles**: 5,000-10,000 messages/hour (interactive); campaigns scale with `orm-campaign-worker`
 - **Cost**: $15-25/month
 - **Good for**: Production, growing businesses, moderate traffic
 
@@ -29,8 +29,8 @@ pm2 start ecosystem.config.js --env production
 pm2 start ecosystem.config.large.js --env production
 ```
 - **Memory per process**: 1GB
-- **Total memory usage**: ~3-4GB (4 API + 2 workers)
-- **Handles**: 15,000-25,000 messages/hour
+- **Total memory usage**: ~3-4GB (4 API + 2 core workers + 2 campaign workers)
+- **Handles**: 15,000-25,000 messages/hour (interactive); large WhatsApp blasts via dedicated campaign workers
 - **Cost**: $40-80/month
 - **Good for**: High traffic, enterprise, multiple clients
 
@@ -41,7 +41,7 @@ pm2 start ecosystem.config.large.js --env production
 | Feature | Small (1GB) | Medium (2GB) | Large (4GB+) |
 |---------|-------------|--------------|--------------|
 | **API Processes** | 1 | 2 | 4 |
-| **Worker Processes** | 0 (inline) | 1 | 2 |
+| **Worker Processes** | 0 | 1 core + 1 campaign | 2 core + 2 campaign |
 | **Queue Concurrency** | 3-3-2 | 5-5-3 | 10-10-5 |
 | **MongoDB Pool** | 10 (3 min) | 20 (5 min) | 50 (10 min) |
 | **Memory Limit/Process** | 400MB | 512MB | 1GB |

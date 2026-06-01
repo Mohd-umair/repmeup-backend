@@ -67,6 +67,9 @@ const whatsappCampaignRecipientSchema = new mongoose.Schema(
     /** Meta webhook failure detail (when deliveryStatus === 'failed') */
     deliveryError: { type: String, maxlength: 500 },
 
+    /** Outbound API send attempts (transient errors retry before marking failed) */
+    sendAttempts: { type: Number, default: 0 },
+
     // Meta message ID returned on success
     messageId: { type: String, index: true, sparse: true },
 
