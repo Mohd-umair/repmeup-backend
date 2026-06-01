@@ -35,7 +35,7 @@ async function main() {
   console.log('3. Super-admin metrics: GET /api/super-admin/campaign-metrics');
   console.log('4. Launch test campaigns: 500 → 5k → 20k recipients per org');
   console.log('5. Watch meta429Today, queue depths, and MongoDB connection count');
-  console.log('6. Production: pm2 start ecosystem.config.medium.js --env production (includes orm-campaign-worker)\n');
+  console.log('6. Production: pm2 start ecosystem.medium.config.js --env production (includes orm-campaign-worker)\n');
 
   process.exit(0);
 }
