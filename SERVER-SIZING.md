@@ -4,7 +4,7 @@
 
 ### 🟢 I have a 1GB RAM server (e.g., DigitalOcean Basic Droplet, AWS t2.micro)
 ```bash
-pm2 start ecosystem.config.small.js --env production
+pm2 start ecosystem.small.config.js --env production
 ```
 - **Memory per process**: 400MB
 - **Total memory usage**: ~400-500MB
@@ -14,7 +14,7 @@ pm2 start ecosystem.config.small.js --env production
 
 ### 🔵 I have a 2GB RAM server (RECOMMENDED for most users)
 ```bash
-pm2 start ecosystem.config.medium.js --env production
+pm2 start ecosystem.medium.config.js --env production
 # OR
 pm2 start ecosystem.config.js --env production
 ```
@@ -26,7 +26,7 @@ pm2 start ecosystem.config.js --env production
 
 ### 🟣 I have a 4GB+ RAM server
 ```bash
-pm2 start ecosystem.config.large.js --env production
+pm2 start ecosystem.large.config.js --env production
 ```
 - **Memory per process**: 1GB
 - **Total memory usage**: ~3-4GB (4 API + 2 core workers + 2 campaign workers)
@@ -148,7 +148,7 @@ MONGODB_POOL_MIN=10
 ### If You're on a Budget:
 
 1. **Start Small**
-   - Use `ecosystem.config.small.js`
+   - Use `ecosystem.small.config.js`
    - Monitor with `pm2 monit`
    - Upgrade only when needed
 
@@ -179,7 +179,7 @@ MONGODB_POOL_MIN=10
 
 ### 1. Start with Small Config
 ```bash
-pm2 start ecosystem.config.small.js --env production
+pm2 start ecosystem.small.config.js --env production
 pm2 monit
 ```
 
@@ -191,7 +191,7 @@ pm2 monit
 ### 3. Upgrade if Needed
 ```bash
 pm2 delete all
-pm2 start ecosystem.config.medium.js --env production
+pm2 start ecosystem.medium.config.js --env production
 ```
 
 ---

@@ -1,4 +1,5 @@
 // PM2 Configuration for SMALL servers (1GB RAM, 1-2 CPU cores)
+// Filename must end in .config.js for PM2 6+ to load the apps array.
 module.exports = {
   apps: [
     {
