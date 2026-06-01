@@ -17,6 +17,24 @@ MONGODB_URI=mongodb://localhost:27017/orm_development
 # Redis
 REDIS_URL=redis://localhost:6379
 
+# Worker concurrency (core worker.js — webhooks, AI, auto-reply, email, voice)
+# WEBHOOK_CONCURRENCY=10
+# AI_CONCURRENCY=10
+# AUTOREPLY_CONCURRENCY=5
+# ENABLE_CAMPAIGN_IN_CORE_WORKER=true   # local dev: campaigns in core worker; production: false + run campaignWorker.js
+
+# WhatsApp campaign broadcast (campaignWorker.js / campaign-send queue)
+# CAMPAIGN_BATCH_SIZE=100
+# CAMPAIGN_BATCH_CONCURRENCY=20
+# CAMPAIGN_SENDS_PER_SECOND=30
+# CAMPAIGN_MAX_INFLIGHT_PER_WABA=5
+# CAMPAIGN_MAX_SEND_ATTEMPTS=3
+# CAMPAIGN_INBOX_CONCURRENCY=10
+# CAMPAIGN_WABA_PAUSE_MS=120000
+# CAMPAIGN_WABA_429_THRESHOLD=10
+# CAMPAIGN_SKIP_STATUS_SOCKET=true
+# INTERACTION_MAX_INLINE_REPLIES=500
+
 # Rate limiting (optional; defaults: 1000 req/15 min per IP, or 10000 in development)
 # RATE_LIMIT_MAX_REQUESTS=1000
 # RATE_LIMIT_WINDOW_MS=900000

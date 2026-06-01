@@ -39,7 +39,7 @@ const productSchema = new mongoose.Schema({
 
   currency: {
     type: String,
-    default: 'AED',
+    default: 'INR',
     trim: true
   },
 

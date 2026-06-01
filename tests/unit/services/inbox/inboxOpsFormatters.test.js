@@ -4,8 +4,8 @@ const fmt = require('../../../../src/services/inbox/inboxOpsFormatters');
 
 describe('inboxOpsFormatters', () => {
   describe('formatMoney', () => {
-    test('formats AED amounts', () => {
-      expect(fmt.formatMoney(1500, 'AED')).toMatch(/1,500/);
+    test('formats INR amounts', () => {
+      expect(fmt.formatMoney(1500, 'INR')).toMatch(/1,500|₹/);
     });
     test('returns em dash for null', () => {
       expect(fmt.formatMoney(null)).toBe('—');

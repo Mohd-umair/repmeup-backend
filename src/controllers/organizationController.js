@@ -1,4 +1,5 @@
 const Organization = require('../models/Organization');
+const { normalizeAutoReplyDelaySettings } = require('../utils/replyDelayHelper');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
@@ -165,6 +166,7 @@ exports.updateOrganization = async (req, res, next) => {
           }
         }
       });
+      normalizeAutoReplyDelaySettings(organization.autoReplySettings);
     }
 
     // Handle inboxSettings (merge nested object)

@@ -51,6 +51,12 @@ const platformConnectionSchema = new mongoose.Schema({
     displayPhoneNumber: String,
     businessAccountId: String,
     catalogId: String,        // Meta Commerce Catalog ID linked to this WABA phone number
+
+    /** Campaign governance — Meta tier / quality / pause state */
+    wabaMessagingTier: String,
+    wabaQualityRating: String,
+    campaignPausedUntil: Date,
+    campaignPauseReason: String,
     
     // For LinkedIn
     organizationId: String,

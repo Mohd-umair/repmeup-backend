@@ -43,16 +43,16 @@ const COMPLAINT_STATUS_LABELS = {
   closed: 'Closed'
 };
 
-function formatMoney(amount, currency = 'AED') {
+function formatMoney(amount, currency = 'INR') {
   if (amount == null || Number.isNaN(Number(amount))) return '—';
   try {
-    return new Intl.NumberFormat('en-AE', {
+    return new Intl.NumberFormat('en-IN', {
       style: 'currency',
-      currency: currency || 'AED',
+      currency: currency || 'INR',
       maximumFractionDigits: 0
     }).format(amount);
   } catch {
-    return `${currency || ''} ${Number(amount).toFixed(2)}`.trim();
+    return `₹${Number(amount).toFixed(2)}`.trim();
   }
 }
 

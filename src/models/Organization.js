@@ -191,7 +191,26 @@ const organizationSchema = new mongoose.Schema({
     },
     webhookDelay: {
       type: Number,
-      default: 5 // Delay in minutes before processing webhook auto-reply
+      default: 1, // Fixed delay in minutes before sending webhook auto-reply
+      min: 0,
+      max: 120
+    },
+    replyDelayMode: {
+      type: String,
+      enum: ['fixed', 'human'],
+      default: 'fixed' // fixed = exact minutes; human = random range
+    },
+    humanDelayMinMinutes: {
+      type: Number,
+      default: 1,
+      min: 0,
+      max: 120
+    },
+    humanDelayMaxMinutes: {
+      type: Number,
+      default: 3,
+      min: 0,
+      max: 120
     },
     scheduleInterval: {
       type: String,

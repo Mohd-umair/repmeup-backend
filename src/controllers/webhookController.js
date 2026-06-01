@@ -779,8 +779,6 @@ exports.verifyWhatsAppWebhook = (req, res) => {
  * @access  Public (called by Meta)
  */
 exports.handleWhatsAppWebhook = async (req, res) => {
-  const whatsappWebhookService = require('../services/webhook/whatsappWebhookService');
-
   logger.info('[WhatsApp Webhook] Received event');
 
   const signature = req.headers['x-hub-signature-256'];
@@ -819,10 +817,23 @@ exports.handleWhatsAppWebhook = async (req, res) => {
   }
 
   try {
-    await whatsappWebhookService.processWhatsAppWebhook(req.body);
+    const { webhookQueue } = require('../config/queue');
+    const hasStatuses = req.body?.entry?.some((e) =>
+      e.changes?.some((c) => c.value?.statuses?.length > 0)
+    );
+    await webhookQueue.add(
+      {
+        platform: 'whatsapp_webhook',
+        payload: req.body
+      },
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+        priority: hasStatuses ? 2 : 1
+      }
+    );
   } catch (error) {
-    logger.error('[WhatsApp Webhook] Handler error', { error: error.message, stack: error.stack });
-    // Intentionally swallow: 200 already sent, Meta doesn't care about processing errors.
+    logger.error('[WhatsApp Webhook] Failed to enqueue', { error: error.message, stack: error.stack });
   }
 };
 

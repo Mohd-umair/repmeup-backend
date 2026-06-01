@@ -2,6 +2,7 @@ const { autoReplyQueue } = require('../config/queue');
 const Organization = require('../models/Organization');
 const aiService = require('./aiService');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const { computeReplyDelayMs } = require('../utils/replyDelayHelper');
 const logger = require('../config/logger');
 
 /**
@@ -123,7 +124,7 @@ class AutoReplyScheduler {
   /**
    * Queue immediate auto-reply job (webhook-triggered)
    */
-  async queueImmediateAutoReply(interactionId, organizationId, delayMinutes = 5) {
+  async queueImmediateAutoReply(interactionId, organizationId, delayMinutes = 1) {
     try {
       const organization = await Organization.findById(organizationId);
       
@@ -182,11 +183,7 @@ class AutoReplyScheduler {
         return false;
       }
 
-      // Use configured delay; enforce a short floor so processAI can finish (sentiment, intent, complaint rules)
-      const rawMin = Number(settings.webhookDelay);
-      const delay =
-        Number.isFinite(rawMin) && rawMin >= 0 ? rawMin : (delayMinutes ?? 5);
-      const delayMs = Math.max(delay * 60 * 1000, 45 * 1000);
+      const delayMs = computeReplyDelayMs(settings, { fallbackMinutes: delayMinutes ?? 1 });
 
       const mid = interaction.metadata?.lastMid;
       const autoReplyJobId =
@@ -213,6 +210,13 @@ class AutoReplyScheduler {
           removeOnFail: false
         }
       );
+
+      logger.info('[Auto-Reply Queue] Job queued', {
+        interactionId,
+        organizationId,
+        delayMs,
+        replyDelayMode: settings.replyDelayMode || 'fixed'
+      });
 
       return true;
 

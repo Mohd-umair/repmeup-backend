@@ -33,6 +33,8 @@ const { generateChatRef } = require('../../utils/chatRefHelper');
 const { emitToOrg } = require('../../utils/socketEmitter');
 const { resolveContact, normalizeAuthorForPlatform } = require('../contactService');
 const logger = require('../../config/logger');
+const campaignConfig = require('../../config/campaignConfig');
+const campaignMetrics = require('../campaignMetricsService');
 
 /**
  * Handle a WhatsApp native-cart order message (type === 'order').
@@ -787,7 +789,9 @@ async function processStatusUpdate(status) {
       { $pull: { replies: { platformResponseId: status.id } } }
     );
 
-    await _emitInteractionUpdatedForReplyWamid(status.id);
+    if (!(await shouldSkipStatusSocketEmit())) {
+      await _emitInteractionUpdatedForReplyWamid(status.id);
+    }
     return;
   }
 
@@ -818,7 +822,14 @@ async function processStatusUpdate(status) {
     }
   );
 
-  await _emitInteractionUpdatedForReplyWamid(status.id);
+  if (!(await shouldSkipStatusSocketEmit())) {
+    await _emitInteractionUpdatedForReplyWamid(status.id);
+  }
+}
+
+async function shouldSkipStatusSocketEmit() {
+  if (!campaignConfig.skipStatusSocketWhenBlasting) return false;
+  return campaignMetrics.isHighVolumeBlast();
 }
 
 /**

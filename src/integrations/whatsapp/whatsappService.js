@@ -141,8 +141,12 @@ class WhatsAppService {
 
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
+      const metaErr = error.response?.data?.error;
       console.error('[WhatsApp] Failed to send template:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp template');
+      const err = new Error(metaErr?.message || 'Failed to send WhatsApp template');
+      err.httpStatus = error.response?.status;
+      err.metaCode = metaErr?.code;
+      throw err;
     }
   }
 
