@@ -160,7 +160,8 @@ exports.getProducts = async (req, res, next) => {
     const { search, isActive, page = 1, limit = 50 } = req.query;
 
     const filter = { organization: orgId };
-    if (isActive !== undefined) filter.isActive = isActive === 'true';
+    // Default to active products only (delete is soft — isActive: false).
+    filter.isActive = isActive === undefined ? true : isActive === 'true';
     if (search) {
       filter.$or = [
         { name: { $regex: search, $options: 'i' } },
