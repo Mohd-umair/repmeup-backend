@@ -363,9 +363,24 @@ exports.syncAllProducts = async (req, res, next) => {
     const synced = results.filter(r => r.success).length;
     const failed = results.filter(r => !r.success).length;
 
+    const failedDetails = results
+      .filter((r) => !r.success)
+      .slice(0, 10)
+      .map((r) => {
+        const p = products.find((prod) => String(prod._id) === r.productId);
+        return {
+          productId: r.productId,
+          productName: p?.name,
+          error: r.error || 'Sync failed'
+        };
+      });
+
     logger.info('[whatsappCatalogController] syncAll complete', { orgId, total: results.length, synced, failed });
 
-    return res.json({ success: true, data: { synced, failed, total: results.length } });
+    return res.json({
+      success: true,
+      data: { synced, failed, total: results.length, errors: failedDetails.length ? failedDetails : undefined }
+    });
   } catch (err) {
     next(err);
   }
