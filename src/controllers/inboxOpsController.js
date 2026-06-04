@@ -197,9 +197,7 @@ exports.suggestReviewReply = async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Review not found' });
     }
 
-    const suggestion = await aiService.generateResponse(
-      interaction,
-      orgId(req).toString()
+    const suggestion = await aiService.generateResponse(interaction,orgId(req).toString()
     );
 
     interaction.aiSuggestion = {
@@ -209,14 +207,7 @@ exports.suggestReviewReply = async (req, res, next) => {
       wasUsed: false
     };
     await interaction.save();
-
-    res.json({
-      success: true,
-      data: {
-        content: suggestion.content,
-        confidence: suggestion.confidence
-      }
-    });
+    res.json({ success: true, data: { content: suggestion.content,  confidence: suggestion.confidence }});
   } catch (err) {
     next(err);
   }
