@@ -157,6 +157,7 @@ app.use('/admin/queues', bullBoardAdapter.getRouter());
 const routeMap = [
   ['/public',         './routes/public'],
   ['/contact',        './routes/contact'],
+  ['/demo',           './routes/demo'],
   ['/auth',           './routes/auth'],
   ['/inbox',          './routes/inbox'],
   ['/knowledge-base', './routes/knowledgeBase'],
