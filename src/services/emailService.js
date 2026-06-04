@@ -472,6 +472,48 @@ class EmailService {
 
     return this.sendEmail({ to, subject, html, text });
   }
+
+  /**
+   * Notify sales when someone books a product demo from the marketing site.
+   */
+  async sendDemoBookingAlert({ to, inquiry }) {
+    const esc = (v) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+
+    const subject = `[${appName}] New demo booking — ${inquiry.name}${inquiry.company ? ` (${inquiry.company})` : ''}`;
+    const html = wrapSimpleEmailHtml(`
+      <h2>New demo booking</h2>
+      <p><strong>Name:</strong> ${esc(inquiry.name)}</p>
+      <p><strong>Email:</strong> <a href="mailto:${esc(inquiry.email)}">${esc(inquiry.email)}</a></p>
+      <p><strong>Phone:</strong> ${esc(inquiry.phone || '—')}</p>
+      <p><strong>Company:</strong> ${esc(inquiry.company || '—')}</p>
+      ${inquiry.teamSize ? `<p><strong>Team size:</strong> ${esc(inquiry.teamSize)}</p>` : ''}
+      <p><strong>Preferred date:</strong> ${esc(inquiry.demoDate)}</p>
+      <p><strong>Preferred time:</strong> ${esc(inquiry.demoTime)} (${esc(inquiry.timezone || 'Asia/Kolkata')})</p>
+      ${inquiry.notes ? `<h3>Notes</h3><pre style="white-space:pre-wrap;font-family:inherit;background:#f3f4f6;padding:12px;border-radius:8px;">${esc(inquiry.notes)}</pre>` : ''}
+      <p style="color:#6b7280;font-size:13px;margin-top:24px;">Submitted from repmeup.in/book-demo</p>
+    `);
+
+    const text = [
+      `New demo booking (${appName})`,
+      `Name: ${inquiry.name}`,
+      `Email: ${inquiry.email}`,
+      `Phone: ${inquiry.phone || '—'}`,
+      `Company: ${inquiry.company || '—'}`,
+      inquiry.teamSize ? `Team size: ${inquiry.teamSize}` : null,
+      `Date: ${inquiry.demoDate}`,
+      `Time: ${inquiry.demoTime} (${inquiry.timezone || 'Asia/Kolkata'})`,
+      inquiry.notes ? `\nNotes:\n${inquiry.notes}` : null
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    return this.sendEmail({ to, subject, html, text });
+  }
 }
 
 module.exports = new EmailService();

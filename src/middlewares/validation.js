@@ -81,6 +81,52 @@ exports.validateContactInquiry = (req, res, next) => {
   next();
 };
 
+const DEMO_TIME_SLOTS = [
+  '09:30 AM', '10:00 AM', '10:30 AM', '11:00 AM', '11:30 AM', '12:00 PM',
+  '02:00 PM', '02:30 PM', '03:00 PM', '03:30 PM', '04:00 PM', '04:30 PM',
+  '05:00 PM', '05:30 PM'
+];
+
+exports.validateDemoBooking = (req, res, next) => {
+  const schema = Joi.object({
+    name: Joi.string().trim().min(2).max(200).required(),
+    email: Joi.string().email().required(),
+    phone: Joi.string().trim().min(8).max(40).required(),
+    company: Joi.string().trim().min(1).max(200).required(),
+    demoDate: Joi.string()
+      .pattern(/^\d{4}-\d{2}-\d{2}$/)
+      .required()
+      .custom((value, helpers) => {
+        const d = new Date(`${value}T00:00:00`);
+        if (Number.isNaN(d.getTime())) return helpers.error('any.invalid');
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (d < today) return helpers.message('Demo date must be today or in the future');
+        const max = new Date(today);
+        max.setDate(max.getDate() + 60);
+        if (d > max) return helpers.message('Demo date must be within the next 60 days');
+        const day = d.getDay();
+        if (day === 0 || day === 6) return helpers.message('Demo date must be a weekday');
+        return value;
+      }),
+    demoTime: Joi.string().valid(...DEMO_TIME_SLOTS).required(),
+    timezone: Joi.string().trim().max(64).default('Asia/Kolkata'),
+    teamSize: Joi.string().trim().max(40).allow('', null),
+    notes: Joi.string().trim().max(5000).allow('', null)
+  });
+
+  const { error, value } = schema.validate(req.body, { abortEarly: true, stripUnknown: true });
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      error: error.details[0].message
+    });
+  }
+
+  req.body = value;
+  next();
+};
+
 // Validate interaction reply
 exports.validateReply = (req, res, next) => {
   const whatsappTemplateSchema = Joi.object({
