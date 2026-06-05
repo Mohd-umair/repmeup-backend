@@ -42,6 +42,8 @@ const campaignInboxQueue = new Queue('campaign-inbox', {
   limiter: { max: 100, duration: 1000 }
 });
 
+const flowTickQueue = new Queue('flow-tick', queueOptions);
+
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
 // Kept in place so existing Bull Board dashboards and imports keep working.
@@ -77,7 +79,8 @@ const queues = [
   outlookRenewalQueue,
   voiceCallQueue,
   campaignSendQueue,
-  campaignInboxQueue
+  campaignInboxQueue,
+  flowTickQueue
 ];
 
 queues.forEach(queue => {
@@ -122,5 +125,6 @@ module.exports = {
   voiceCallQueue,
   campaignSendQueue,
   campaignInboxQueue,
+  flowTickQueue,
   queueConfig
 };

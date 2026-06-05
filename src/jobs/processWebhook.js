@@ -100,8 +100,69 @@ module.exports = async function processWebhook(job) {
         });
       }
 
+      // Unified Flow Builder routing (hybrid / flows_only)
+      let flowHandledComment = false;
+      let flowHandledStory = false;
+      if (organizationId) {
+        try {
+          const flowTriggerRouter = require('../services/flow/flowTriggerRouter');
+          let eventType = `${interaction.platform}.${interaction.type}`;
+          if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+            eventType = 'instagram.comment';
+          } else if (
+            interaction.platform === 'instagram' &&
+            interaction.type === 'dm' &&
+            interaction.metadata?.isStoryEngagement
+          ) {
+            eventType =
+              interaction.metadata.storyTriggerType === 'story_mention'
+                ? 'instagram.story_mention'
+                : 'instagram.story_reply';
+          } else if (interaction.platform === 'instagram' && interaction.type === 'dm') {
+            eventType = 'instagram.dm';
+          } else if (interaction.platform === 'whatsapp') {
+            eventType = 'whatsapp.message';
+          }
+
+          const flowResult = await flowTriggerRouter.route({
+            organizationId,
+            platform: interaction.platform,
+            eventType,
+            interaction,
+            payload: {
+              content: interaction.content,
+              text: interaction.content,
+              postback: interaction.metadata?.postback || interaction.metadata?.buttonPayload
+            }
+          });
+
+          if (flowResult.handled) {
+            if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+              flowHandledComment = true;
+            }
+            if (
+              interaction.platform === 'instagram' &&
+              interaction.type === 'dm' &&
+              interaction.metadata?.isStoryEngagement
+            ) {
+              flowHandledStory = true;
+            }
+            jobLogger.info('Automation flow handled event', {
+              eventType,
+              enrollments: flowResult.enrollments.length
+            });
+          }
+        } catch (flowErr) {
+          jobLogger.warn('Automation flow routing error (non-fatal)', { error: flowErr.message });
+        }
+      }
+
       // Comment-to-DM selling flow only (follow-invite moved to processAI.js so sentiment is available)
-      if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+      if (
+        !flowHandledComment &&
+        interaction.platform === 'instagram' &&
+        interaction.type === 'comment'
+      ) {
         const commentToDmService = require('../services/commentToDmService');
         (async () => {
           try {
@@ -115,6 +176,7 @@ module.exports = async function processWebhook(job) {
       // Story-to-DM: story reply / @mention → product DM (before AI queue)
       let storyToDmSent = false;
       if (
+        !flowHandledStory &&
         interaction.platform === 'instagram' &&
         interaction.type === 'dm' &&
         interaction.metadata?.isStoryEngagement

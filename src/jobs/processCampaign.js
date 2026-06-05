@@ -7,6 +7,7 @@
  *  3. { type: 'send', campaignId } — legacy; fans out batches
  */
 
+const mongoose = require('mongoose');
 const WhatsAppCampaign = require('../models/WhatsAppCampaign');
 const WhatsAppCampaignRecipient = require('../models/WhatsAppCampaignRecipient');
 const PlatformConnection = require('../models/PlatformConnection');
@@ -105,6 +106,26 @@ async function loadCampaignContext(campaignId) {
   };
 }
 
+/**
+ * Recompute campaign stats from the recipient collection — drift-free, idempotent.
+ * Safe to call after every batch because recipient count is capped at 25k.
+ */
+async function syncCampaignStats(campaignId) {
+  const agg = await WhatsAppCampaignRecipient.aggregate([
+    { $match: { campaign: new mongoose.Types.ObjectId(String(campaignId)) } },
+    { $group: { _id: '$status', count: { $sum: 1 } } }
+  ]);
+  const map = {};
+  agg.forEach((s) => { map[s._id] = s.count; });
+  await WhatsAppCampaign.findByIdAndUpdate(campaignId, {
+    $set: {
+      'stats.sent': map.sent || 0,
+      'stats.failed': map.failed || 0,
+      'stats.pending': map.pending || 0
+    }
+  });
+}
+
 // ─── Batch sender ─────────────────────────────────────────────────────────────
 
 async function runCampaignSendBatch(campaignId, recipientIds) {
@@ -141,9 +162,14 @@ async function runCampaignSendBatch(campaignId, recipientIds) {
   const inboxItems = [];
 
   for (const recipient of recipients) {
-    const fresh = await WhatsAppCampaign.findById(campaignId).select('status').lean();
-    if (!fresh || fresh.status === 'paused' || fresh.status === 'cancelled') {
-      return { sentCount, failedCount, interrupted: true, status: fresh?.status };
+    // Cheap, ~2s-cached status check instead of a Mongo findById per recipient.
+    // A pause/cancel still takes effect within ~2s but no longer hammers the primary.
+    const status = await campaignRateLimiter.getCampaignStatusCached(
+      String(campaignId),
+      () => WhatsAppCampaign.findById(campaignId).select('status').lean().then((c) => c?.status || null)
+    );
+    if (!status || status === 'paused' || status === 'cancelled') {
+      return { sentCount, failedCount, interrupted: true, status };
     }
 
     try {
@@ -234,13 +260,10 @@ async function runCampaignSendBatch(campaignId, recipientIds) {
   }
 
   if (sentCount || failedCount) {
-    await WhatsAppCampaign.findByIdAndUpdate(campaignId, {
-      $inc: {
-        'stats.sent': sentCount,
-        'stats.failed': failedCount,
-        'stats.pending': -(sentCount + failedCount)
-      }
-    });
+    // Recompute stats from the recipient collection (source of truth) rather than $inc.
+    // A retried/stalled batch can apply $inc twice; recomputing keeps the live progress
+    // bar honest. Bounded to ≤25k recipients per campaign, so this aggregate is cheap.
+    await syncCampaignStats(campaignId);
   }
 
   if (inboxItems.length) {

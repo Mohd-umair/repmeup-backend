@@ -17,6 +17,8 @@
     "seed:plans": "node scripts/seedPlans.js",
     "seed:features": "node scripts/seedFeatures.js",
     "seed:free-plan": "node scripts/seedFreePlanEntitlements.js",
+    "seed:flow-blueprints": "node scripts/seed-automation-flow-blueprints.js",
+    "migrate:wa-flows": "node scripts/migrate-whatsapp-flows-to-automation.js",
     "migrate:plans-inr": "node scripts/migratePlanPricesToInr.js",
     "setup:razorpay-plans": "node scripts/setup-razorpay-plans.js",
     "create-super-admin": "node scripts/createSuperAdmin.js",

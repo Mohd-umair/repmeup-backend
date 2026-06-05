@@ -81,6 +81,53 @@ exports.validateContactInquiry = (req, res, next) => {
   next();
 };
 
+exports.validateAutomationFlow = (req, res, next) => {
+  const nodeSchema = Joi.object({
+    id: Joi.string().trim().required(),
+    type: Joi.string().trim().required(),
+    label: Joi.string().trim().max(200).allow('', null),
+    position: Joi.object({
+      x: Joi.number().default(0),
+      y: Joi.number().default(0)
+    }).optional(),
+    config: Joi.object().unknown(true).default({}),
+    supportedChannels: Joi.array().items(Joi.string()).default([])
+  });
+
+  const edgeSchema = Joi.object({
+    id: Joi.string().trim().required(),
+    source: Joi.string().trim().required(),
+    target: Joi.string().trim().required(),
+    label: Joi.string().trim().max(100).allow('', null),
+    condition: Joi.alternatives().try(Joi.object().unknown(true), Joi.valid(null)).optional()
+  });
+
+  const schema = Joi.object({
+    name: Joi.string().trim().min(1).max(200).required(),
+    description: Joi.string().trim().max(2000).allow('', null),
+    channels: Joi.array().items(Joi.string().valid('whatsapp', 'instagram', 'facebook')).min(1).default(['whatsapp']),
+    entryNodeId: Joi.string().trim().allow('', null),
+    nodes: Joi.array().items(nodeSchema).default([]),
+    edges: Joi.array().items(edgeSchema).default([]),
+    settings: Joi.object({
+      quietHoursStart: Joi.string().allow('', null),
+      quietHoursEnd: Joi.string().allow('', null),
+      frequencyCap: Joi.number().min(0).optional(),
+      frequencyCapWindowDays: Joi.number().min(1).optional(),
+      timezone: Joi.string().allow('', null)
+    }).optional(),
+    isBlueprint: Joi.boolean().optional(),
+    strictValidate: Joi.boolean().optional()
+  });
+
+  const { error, value } = schema.validate(req.body, { abortEarly: true, stripUnknown: true });
+  if (error) {
+    return res.status(400).json({ success: false, error: error.details[0].message });
+  }
+  req.body = value;
+  next();
+};
+
 const DEMO_TIME_SLOTS = [
   '09:30 AM', '10:00 AM', '10:30 AM', '11:00 AM', '11:30 AM', '12:00 PM',
   '02:00 PM', '02:30 PM', '03:00 PM', '03:30 PM', '04:00 PM', '04:30 PM',

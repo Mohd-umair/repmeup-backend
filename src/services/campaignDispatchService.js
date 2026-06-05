@@ -22,38 +22,53 @@ async function enqueueCampaignBatches(campaignId) {
     return { enqueued: 0 };
   }
 
-  const pendingIds = await WhatsAppCampaignRecipient.find({
+  const batchSize = campaignConfig.batchSize;
+  let enqueued = 0;
+  let recipients = 0;
+  let chunk = [];
+
+  // Stream pending recipient ids with a cursor instead of loading every id into memory.
+  // Batch jobs are keyed by the first recipient id in the chunk (stable identity), so a
+  // re-enqueue (retry-pending) for the same surviving pending set is idempotent — Bull
+  // dedupes on jobId — without the position-based collisions of an array-index key.
+  const cursor = WhatsAppCampaignRecipient.find({
     campaign: campaignId,
     status: 'pending'
   })
     .select('_id')
-    .lean();
+    .sort({ _id: 1 })
+    .lean()
+    .cursor();
 
-  if (pendingIds.length === 0) {
-    await maybeCompleteCampaign(campaignId);
-    return { enqueued: 0 };
-  }
-
-  const batchSize = campaignConfig.batchSize;
-  let enqueued = 0;
-
-  for (let i = 0; i < pendingIds.length; i += batchSize) {
-    const chunk = pendingIds.slice(i, i + batchSize);
-    const batchIndex = Math.floor(i / batchSize);
+  const flush = async () => {
+    if (!chunk.length) return;
+    const jobId = `campaign-${campaignId}-batch-${chunk[0]}`;
     await campaignSendQueue.add(
       {
         type: 'send-batch',
         campaignId: campaignId.toString(),
-        batchIndex,
-        recipientIds: chunk.map((r) => r._id.toString())
+        recipientIds: chunk
       },
       {
         ...queueConfig,
-        jobId: `campaign-${campaignId}-batch-${batchIndex}`,
+        jobId,
         priority: 5
       }
     );
     enqueued++;
+    chunk = [];
+  };
+
+  for await (const doc of cursor) {
+    chunk.push(doc._id.toString());
+    recipients++;
+    if (chunk.length >= batchSize) await flush();
+  }
+  await flush();
+
+  if (recipients === 0) {
+    await maybeCompleteCampaign(campaignId);
+    return { enqueued: 0 };
   }
 
   await campaignMetrics.markCampaignRunning(campaignId);
@@ -61,10 +76,10 @@ async function enqueueCampaignBatches(campaignId) {
   logger.info('[CampaignDispatch] Enqueued batch jobs', {
     campaignId,
     batches: enqueued,
-    recipients: pendingIds.length
+    recipients
   });
 
-  return { enqueued, recipients: pendingIds.length };
+  return { enqueued, recipients };
 }
 
 /**

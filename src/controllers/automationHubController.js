@@ -8,7 +8,7 @@ const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const ReviewRequestSettings = require('../models/ReviewRequestSettings');
 const RetargetingFlow = require('../models/RetargetingFlow');
-const WhatsAppFlow = require('../models/WhatsAppFlow');
+const AutomationFlow = require('../models/AutomationFlow');
 const logger = require('../config/logger');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -33,7 +33,7 @@ exports.getHubOverview = async (req, res, next) => {
         .lean(),
       ReviewRequestSettings.findOne({ organization: orgId }).select('enabled').lean(),
       RetargetingFlow.countDocuments({ organization: orgId, status: 'active' }),
-      WhatsAppFlow.countDocuments({ organization: orgId, status: 'active' })
+      AutomationFlow.countDocuments({ organization: orgId, status: 'active', isBlueprint: { $ne: true } })
     ]);
 
     // ── KPI aggregations ────────────────────────────────────────────────────
@@ -85,11 +85,11 @@ exports.getHubOverview = async (req, res, next) => {
         active: (org?.commentToDmSettings?.enabled || org?.commentFollowInviteSettings?.enabled || org?.salesFlowSettings?.enabled || org?.storyToDmSettings?.enabled) ?? false
       },
       {
-        id: 'whatsapp-flows',
-        label: 'WhatsApp Journeys',
-        description: 'Automate bookings, support, purchases and more on WhatsApp.',
-        icon: 'fab fa-whatsapp',
-        route: '/app/automation/whatsapp-flows',
+        id: 'flow-builder',
+        label: 'Flow Builder',
+        description: 'Visual automations for WhatsApp, Instagram, and Facebook with drag-and-drop nodes.',
+        icon: 'fas fa-project-diagram',
+        route: '/app/automation/flows',
         active: activeWaFlow > 0
       },
       {
