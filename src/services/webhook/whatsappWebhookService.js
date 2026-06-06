@@ -266,7 +266,7 @@ async function upsertWhatsAppThread({
     ...msgExtra
   };
 
-  await Interaction.updateOne(
+  const pushResult = await Interaction.updateOne(
     {
       platformId: threadPlatformId,
       organization: organizationId,
@@ -281,6 +281,23 @@ async function upsertWhatsAppThread({
       }
     }
   );
+
+  // A genuinely new inbound message (not a webhook retry) means the customer is
+  // actively re-engaging. Reset the per-thread auto-reply hard-stop counters so a
+  // long-lived conversation isn't permanently locked out of auto-reply once it has
+  // crossed maxAutoReplies. The cap still protects against AI-to-AI loops, because
+  // those have no inbound message between replies to trigger this reset.
+  if (pushResult.modifiedCount > 0) {
+    await Interaction.updateOne(
+      { platformId: threadPlatformId, organization: organizationId },
+      {
+        $set: {
+          autoReplyCount: 0,
+          'escalationMetadata.sameTopicReplies': 0
+        }
+      }
+    );
+  }
 
   const interaction = await Interaction.findOne({
     platformId: threadPlatformId,
