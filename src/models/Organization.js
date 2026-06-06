@@ -276,6 +276,13 @@ const organizationSchema = new mongoose.Schema({
     }
   },
 
+  /** Unified flow builder runtime mode: legacy | hybrid | flows_only */
+  automationFlowMode: {
+    type: String,
+    enum: ['legacy', 'hybrid', 'flows_only'],
+    default: 'hybrid'
+  },
+
   // Instagram Comment-to-DM selling automation
   commentToDmSettings: {
     enabled: {

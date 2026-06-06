@@ -20,7 +20,39 @@ const {
 } = require('../utils/whatsappCampaignBuilder');
 const { parseCsv, looksLikeHeaderRow } = require('../utils/csvParser');
 const entitlementsService = require('./entitlementsService');
+const campaignConfig = require('../config/campaignConfig');
+const campaignRateLimiter = require('./campaignRateLimiter');
 const { FEATURE_KEYS } = require('../config/featureCatalog');
+
+const MAX_RECIPIENTS = campaignConfig.maxRecipientsPerCampaign;
+
+/**
+ * Guard the per-campaign recipient ceiling. Counts existing pending/added rows and
+ * rejects if adding `incoming` would exceed the cap. Returns remaining headroom so
+ * callers can trim oversized payloads up-front.
+ */
+async function assertRecipientHeadroom(campaignId, incoming = 0) {
+  const existing = await WhatsAppCampaignRecipient.countDocuments({ campaign: campaignId });
+  if (existing + incoming > MAX_RECIPIENTS) {
+    const remaining = Math.max(0, MAX_RECIPIENTS - existing);
+    const err = new Error(
+      `This campaign can hold at most ${MAX_RECIPIENTS.toLocaleString()} recipients. ` +
+      `It already has ${existing.toLocaleString()}; you can add ${remaining.toLocaleString()} more.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  return MAX_RECIPIENTS - existing;
+}
+
+/** Cap the number of input lines before parsing so we never parse a 10M-row paste. */
+function truncateRawTextToCap(rawText, headroom) {
+  const lines = String(rawText).split(/\r?\n/);
+  // +1 tolerance for a possible header row; parser/normalizer discards extras anyway.
+  if (lines.length <= headroom + 1) return { rawText, truncated: 0 };
+  const kept = lines.slice(0, headroom + 1);
+  return { rawText: kept.join('\n'), truncated: lines.length - kept.length };
+}
 const {
   inferDefaultRegionFromDisplayNumber,
   sanitizeDefaultRegion,
@@ -795,14 +827,17 @@ async function addRecipientsWithMapping({
     throw err;
   }
 
+  const headroom = await assertRecipientHeadroom(campaignId, 0);
+  const { rawText: cappedText } = truncateRawTextToCap(rawText, headroom);
+
   const audience = await resolveAudiencePhoneSettings(campaign, {
     defaultCountry,
     countryCodeColumn
   });
   await persistAudienceSettings(campaignId, audience);
 
-  const hasHeader = looksLikeHeaderRow(rawText);
-  const parsed = parseCsv(rawText, { hasHeader });
+  const hasHeader = looksLikeHeaderRow(cappedText);
+  const parsed = parseCsv(cappedText, { hasHeader });
 
   // Synthesize headers for header-less input
   let { headers, rows } = parsed;
@@ -916,7 +951,10 @@ async function addRecipientsWithMapping({
     throw err;
   }
 
-  const result = await WhatsAppCampaignRecipient.insertMany(docs, {
+  // Hard-cap to remaining headroom (race-safe wall against concurrent adds).
+  const cappedDocs = docs.slice(0, Math.max(0, headroom));
+
+  const result = await WhatsAppCampaignRecipient.insertMany(cappedDocs, {
     ordered: false,
     rawResult: true
   }).catch(err => {
@@ -927,7 +965,7 @@ async function addRecipientsWithMapping({
   });
 
   const inserted = result.insertedCount || 0;
-  const duplicates = docs.length - inserted;
+  const duplicates = cappedDocs.length - inserted;
 
   // Persist the mapping on the campaign for reference + recompute totals
   const total = await WhatsAppCampaignRecipient.countDocuments({ campaign: campaignId });
@@ -948,7 +986,7 @@ async function addRecipientsWithMapping({
     }
   });
 
-  return { inserted, duplicates, skipped, total };
+  return { inserted, duplicates, skipped, total, maxRecipients: MAX_RECIPIENTS };
 }
 
 // ─── Recipients ───────────────────────────────────────────────────────────────
@@ -970,21 +1008,27 @@ async function addRecipients({ orgId, campaignId, rawText, defaultCountry, count
     throw err;
   }
 
+  const headroom = await assertRecipientHeadroom(campaignId, 0);
+  const { rawText: cappedText, truncated } = truncateRawTextToCap(rawText, headroom);
+
   const audience = await resolveAudiencePhoneSettings(campaign, {
     defaultCountry,
     countryCodeColumn
   });
   await persistAudienceSettings(campaignId, audience);
 
-  const { phones, skipped } = parsePhoneInput(rawText, { defaultRegion: audience.defaultRegion });
+  const { phones, skipped } = parsePhoneInput(cappedText, { defaultRegion: audience.defaultRegion });
   if (phones.length === 0) {
     const err = new Error('No valid phone numbers found in the provided input');
     err.statusCode = 400;
     throw err;
   }
 
-  // Bulk insert, ignoring duplicate phone+campaign pairs
-  const docs = phones.map(({ phone, recipientName }) => ({
+  // Bulk insert, ignoring duplicate phone+campaign pairs. Trim to remaining headroom so
+  // concurrent adds can't race past the cap (the count check above is advisory; this is the wall).
+  const cappedPhones = phones.slice(0, Math.max(0, headroom));
+  const capTruncated = truncated + (phones.length - cappedPhones.length);
+  const docs = cappedPhones.map(({ phone, recipientName }) => ({
     campaign: campaignId,
     organization: orgId,
     phone,
@@ -1004,7 +1048,7 @@ async function addRecipients({ orgId, campaignId, rawText, defaultCountry, count
   });
 
   const inserted = result.insertedCount || 0;
-  const duplicates = phones.length - inserted;
+  const duplicates = cappedPhones.length - inserted;
 
   // Update campaign total
   const total = await WhatsAppCampaignRecipient.countDocuments({ campaign: campaignId });
@@ -1019,7 +1063,7 @@ async function addRecipients({ orgId, campaignId, rawText, defaultCountry, count
     }
   });
 
-  return { inserted, duplicates, skipped, total };
+  return { inserted, duplicates, skipped, truncated: capTruncated, total, maxRecipients: MAX_RECIPIENTS };
 }
 
 async function getRecipients({ orgId, campaignId, page = 1, limit = 50, status }) {
@@ -1201,6 +1245,16 @@ async function launchCampaign({ orgId, campaignId /* templateComponents intentio
     err.statusCode = 400;
     throw err;
   }
+  // Safety net: never launch a campaign that somehow exceeds the recipient ceiling.
+  if (total > MAX_RECIPIENTS) {
+    const err = new Error(
+      `This campaign has ${total.toLocaleString()} recipients, which exceeds the ` +
+      `${MAX_RECIPIENTS.toLocaleString()} limit. Remove ${(total - MAX_RECIPIENTS).toLocaleString()} ` +
+      'recipients before launching.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
 
   const orgIdStr = orgId.toString();
   await entitlementsService.assert(orgIdStr, FEATURE_KEYS.WHATSAPP_BROADCAST_ENABLED);
@@ -1251,6 +1305,7 @@ async function pauseCampaign({ orgId, campaignId }) {
     err.statusCode = 404;
     throw err;
   }
+  await campaignRateLimiter.invalidateCampaignStatus(campaignId);
   return campaign;
 }
 
@@ -1266,6 +1321,7 @@ async function resumeCampaign({ orgId, campaignId }) {
     throw err;
   }
 
+  await campaignRateLimiter.invalidateCampaignStatus(campaignId);
   await campaignDispatch.enqueueCampaignBatches(campaignId.toString());
 
   return campaign;
@@ -1287,6 +1343,7 @@ async function cancelCampaign({ orgId, campaignId }) {
   campaign.status = 'cancelled';
   campaign.finishedAt = new Date();
   await campaign.save();
+  await campaignRateLimiter.invalidateCampaignStatus(campaignId);
   return campaign;
 }
 

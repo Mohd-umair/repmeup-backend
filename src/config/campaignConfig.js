@@ -2,6 +2,8 @@
  * Campaign pipeline tuning — env-driven for horizontal scale.
  */
 module.exports = {
+  /** Hard cap on recipients per single campaign (enforced at add + launch). */
+  maxRecipientsPerCampaign: parseInt(process.env.CAMPAIGN_MAX_RECIPIENTS, 10) || 25000,
   batchSize: parseInt(process.env.CAMPAIGN_BATCH_SIZE, 10) || 100,
   batchConcurrency: parseInt(process.env.CAMPAIGN_BATCH_CONCURRENCY, 10) || 20,
   sendsPerSecond: parseInt(process.env.CAMPAIGN_SENDS_PER_SECOND, 10) || 30,

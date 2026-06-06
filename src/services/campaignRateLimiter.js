@@ -24,7 +24,21 @@ async function acquireSendToken(phoneNumberId, maxWaitMs = 30000) {
   const started = Date.now();
 
   while (Date.now() - started < maxWaitMs) {
-    const allowed = await tryTakeToken(key, rate, burst);
+    let allowed;
+    try {
+      allowed = await tryTakeToken(key, rate, burst);
+    } catch (err) {
+      // Fail CLOSED: if Redis is unavailable we cannot trust our throughput cap.
+      // Throwing lets the batch job retry with backoff rather than blasting Meta
+      // uncapped (which would trigger 429s and damage the WABA quality rating).
+      logger.error('[CampaignRateLimiter] Redis unavailable — refusing send (fail-closed)', {
+        phoneNumberId,
+        error: err.message
+      });
+      const closed = new Error('Rate limiter unavailable (Redis) — sending paused for safety');
+      closed.code = 'WABA_RATE_LIMITER_UNAVAILABLE';
+      throw closed;
+    }
     if (allowed) return;
 
     const waitMs = Math.min(250, Math.ceil(1000 / rate));
@@ -68,16 +82,66 @@ async function tryTakeToken(key, rate, burst) {
     return 0
   `;
 
+  const now = Date.now() / 1000;
+  const result = await client.eval(script, {
+    keys: [key],
+    arguments: [String(rate), String(burst), String(now)]
+  });
+  return result === 1;
+}
+
+const STATUS_CACHE_PREFIX = 'campaign:status:';
+const STATUS_CACHE_TTL_MS = 2000;
+/** Process-local memo behind the Redis cache, so a single batch doesn't even hit Redis 100×. */
+const localStatusCache = new Map();
+
+/**
+ * Cheap, near-real-time campaign status lookup for the per-recipient interrupt check.
+ *
+ * Replaces a `WhatsAppCampaign.findById` per recipient (which melted the Mongo primary
+ * under load) with a ~2s Redis-cached value plus an in-process memo. A pause/cancel
+ * therefore takes effect within ~2s instead of instantly — an acceptable trade for
+ * eliminating up to N (recipient-count) hot reads against a single document.
+ *
+ * @param {string} campaignId
+ * @param {() => Promise<string|null>} loader - fetches the authoritative status from Mongo
+ * @returns {Promise<string|null>}
+ */
+async function getCampaignStatusCached(campaignId, loader) {
+  const now = Date.now();
+  const memo = localStatusCache.get(campaignId);
+  if (memo && now - memo.at < STATUS_CACHE_TTL_MS) return memo.status;
+
+  const key = `${STATUS_CACHE_PREFIX}${campaignId}`;
   try {
-    const now = Date.now() / 1000;
-    const result = await client.eval(script, {
-      keys: [key],
-      arguments: [String(rate), String(burst), String(now)]
-    });
-    return result === 1;
+    const client = getRedisClient();
+    const cached = await client.get(key);
+    if (cached !== null && cached !== undefined) {
+      localStatusCache.set(campaignId, { status: cached, at: now });
+      return cached;
+    }
+    const status = await loader();
+    if (status) {
+      await client.set(key, status, { PX: STATUS_CACHE_TTL_MS });
+    }
+    localStatusCache.set(campaignId, { status, at: now });
+    return status;
   } catch (err) {
-    logger.warn('[CampaignRateLimiter] Redis eval failed — allowing send', { error: err.message });
-    return true;
+    // On Redis failure, fall back to the authoritative loader (correctness over speed).
+    logger.warn('[CampaignRateLimiter] status cache miss — loading from DB', { error: err.message });
+    const status = await loader();
+    localStatusCache.set(campaignId, { status, at: now });
+    return status;
+  }
+}
+
+/** Invalidate the cached status immediately (call on pause/resume/cancel for instant effect). */
+async function invalidateCampaignStatus(campaignId) {
+  localStatusCache.delete(String(campaignId));
+  try {
+    await getRedisClient().del(`${STATUS_CACHE_PREFIX}${campaignId}`);
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -101,5 +165,7 @@ function sleep(ms) {
 
 module.exports = {
   acquireSendToken,
-  isWabaPaused
+  isWabaPaused,
+  getCampaignStatusCached,
+  invalidateCampaignStatus
 };

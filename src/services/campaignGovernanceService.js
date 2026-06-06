@@ -77,6 +77,12 @@ async function pauseWaba(phoneNumberId, campaignId, reason) {
     await WhatsAppCampaign.findByIdAndUpdate(campaignId, {
       $set: { status: 'paused', pauseReason: reason }
     });
+    // Invalidate cached status so in-flight batches see the pause within the same tick.
+    try {
+      await require('./campaignRateLimiter').invalidateCampaignStatus(campaignId);
+    } catch {
+      /* best-effort */
+    }
   }
 
   logger.warn('[CampaignGovernance] WABA paused due to rate limits', {

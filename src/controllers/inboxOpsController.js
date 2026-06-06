@@ -41,6 +41,18 @@ exports.getOrderDetail = async (req, res, next) => {
   }
 };
 
+exports.createOrder = async (req, res, next) => {
+  try {
+    const result = await orderOps.createOrder(orgId(req), req.body);
+    if (result.error) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+    res.status(201).json({ success: true, data: result.order });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.updateOrderStatus = async (req, res, next) => {
   try {
     const { status, notes } = req.body;
@@ -162,6 +174,18 @@ exports.closeComplaint = async (req, res, next) => {
 
 // ── Reviews ───────────────────────────────────────────────────────────────────
 
+exports.createReview = async (req, res, next) => {
+  try {
+    const result = await reviewOps.createReview(orgId(req), req.body);
+    if (result.error) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+    res.status(201).json({ success: true, data: result.review });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.listReviews = async (req, res, next) => {
   try {
     const data = await reviewOps.listReviews(orgId(req), req.query);
@@ -197,9 +221,7 @@ exports.suggestReviewReply = async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Review not found' });
     }
 
-    const suggestion = await aiService.generateResponse(
-      interaction,
-      orgId(req).toString()
+    const suggestion = await aiService.generateResponse(interaction,orgId(req).toString()
     );
 
     interaction.aiSuggestion = {
@@ -209,14 +231,7 @@ exports.suggestReviewReply = async (req, res, next) => {
       wasUsed: false
     };
     await interaction.save();
-
-    res.json({
-      success: true,
-      data: {
-        content: suggestion.content,
-        confidence: suggestion.confidence
-      }
-    });
+    res.json({ success: true, data: { content: suggestion.content,  confidence: suggestion.confidence }});
   } catch (err) {
     next(err);
   }

@@ -53,6 +53,7 @@ router.get('/whatsapp-media', inboxController.getWhatsAppMedia);
 // ── Inbox Operations (orders, complaints, reviews) ─────────────────────────
 router.get('/ops/orders', inboxOpsController.listOrders);
 router.get('/ops/orders/stats', inboxOpsController.getOrderStats);
+router.post('/ops/orders', inboxOpsController.createOrder);
 router.get('/ops/orders/:id', inboxOpsController.getOrderDetail);
 router.patch('/ops/orders/:id/status', inboxOpsController.updateOrderStatus);
 
@@ -66,6 +67,7 @@ router.post('/ops/complaints/:id/close', inboxOpsController.closeComplaint);
 
 router.get('/ops/reviews', inboxOpsController.listReviews);
 router.get('/ops/reviews/stats', inboxOpsController.getReviewStats);
+router.post('/ops/reviews', inboxOpsController.createReview);
 router.get('/ops/reviews/:id', inboxOpsController.getReviewDetail);
 router.post('/ops/reviews/:id/suggest-reply', inboxOpsController.suggestReviewReply);
 router.post('/ops/reviews/:id/reply', inboxOpsController.publishReviewReply);

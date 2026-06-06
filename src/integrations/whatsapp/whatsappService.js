@@ -230,6 +230,217 @@ class WhatsAppService {
   }
 
   /**
+   * Send a media message by public URL (no pre-upload needed).
+   * Meta fetches the asset from the provided https link.
+   * @param {Object} connection
+   * @param {string} to
+   * @param {string} mediaType  'image' | 'video' | 'audio' | 'document' | 'sticker'
+   * @param {string} link       Public https URL
+   * @param {string} [caption]  Shown for image/video/document only
+   * @param {string} [filename] Customer-visible filename (documents only)
+   */
+  async sendMediaByUrl(connection, to, mediaType, link, caption = '', filename = '') {
+    const phoneNumberId = this._phoneNumberId(connection);
+    try {
+      const mediaPayload = { link };
+      if (mediaType === 'document' && filename) {
+        mediaPayload.filename = filename;
+      }
+      if (caption && ['image', 'video', 'document'].includes(mediaType)) {
+        mediaPayload.caption = caption;
+      }
+
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: mediaType,
+          [mediaType]: mediaPayload
+        },
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send media by url:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp media');
+    }
+  }
+
+  /**
+   * Send a location message.
+   * @param {Object} connection
+   * @param {string} to
+   * @param {{ latitude:number, longitude:number, name?:string, address?:string }} location
+   */
+  async sendLocationMessage(connection, to, location = {}) {
+    const phoneNumberId = this._phoneNumberId(connection);
+    try {
+      const payload = {
+        latitude: Number(location.latitude),
+        longitude: Number(location.longitude)
+      };
+      if (location.name) payload.name = String(location.name);
+      if (location.address) payload.address = String(location.address);
+
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'location',
+          location: payload
+        },
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send location:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp location');
+    }
+  }
+
+  /**
+   * Send an interactive reply-buttons message (1–3 buttons).
+   * @param {Object} connection
+   * @param {string} to
+   * @param {Object} opts
+   * @param {string}  opts.bodyText
+   * @param {string} [opts.headerText]
+   * @param {string} [opts.footerText]
+   * @param {Array<{id:string,title:string}>} opts.buttons
+   */
+  async sendReplyButtonsMessage(connection, to, opts = {}) {
+    const phoneNumberId = this._phoneNumberId(connection);
+    try {
+      const interactive = {
+        type: 'button',
+        body: { text: String(opts.bodyText || '') },
+        action: {
+          buttons: (opts.buttons || []).slice(0, 3).map((b) => ({
+            type: 'reply',
+            reply: { id: String(b.id), title: String(b.title) }
+          }))
+        }
+      };
+      if (opts.headerText) interactive.header = { type: 'text', text: String(opts.headerText) };
+      if (opts.footerText) interactive.footer = { text: String(opts.footerText) };
+
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'interactive',
+          interactive
+        },
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send reply buttons:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp buttons');
+    }
+  }
+
+  /**
+   * Send an interactive list message.
+   * @param {Object} connection
+   * @param {string} to
+   * @param {Object} opts
+   * @param {string}  opts.bodyText
+   * @param {string}  opts.buttonText
+   * @param {string} [opts.headerText]
+   * @param {string} [opts.footerText]
+   * @param {Array<{title:string, rows:Array<{id:string,title:string,description?:string}>}>} opts.sections
+   */
+  async sendListMessage(connection, to, opts = {}) {
+    const phoneNumberId = this._phoneNumberId(connection);
+    try {
+      const interactive = {
+        type: 'list',
+        body: { text: String(opts.bodyText || '') },
+        action: {
+          button: String(opts.buttonText || 'Menu'),
+          sections: (opts.sections || []).map((s) => ({
+            title: String(s.title || 'Options'),
+            rows: (s.rows || []).map((r) => {
+              const row = { id: String(r.id), title: String(r.title) };
+              if (r.description) row.description = String(r.description);
+              return row;
+            })
+          }))
+        }
+      };
+      if (opts.headerText) interactive.header = { type: 'text', text: String(opts.headerText) };
+      if (opts.footerText) interactive.footer = { text: String(opts.footerText) };
+
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'interactive',
+          interactive
+        },
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send list message:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp list');
+    }
+  }
+
+  /**
+   * Send a "View catalog" message exposing the entire linked catalog.
+   * Uses interactive type `catalog_message`. The catalog shown is the one
+   * linked to the WABA — no catalog_id is passed; Meta resolves it.
+   * @param {Object} connection
+   * @param {string} to
+   * @param {Object} opts
+   * @param {string}  opts.bodyText
+   * @param {string} [opts.footerText]
+   * @param {string} [opts.thumbnailRetailerId]  Optional cover product retailer id
+   */
+  async sendCatalogMessage(connection, to, opts = {}) {
+    const phoneNumberId = this._phoneNumberId(connection);
+    try {
+      const interactive = {
+        type: 'catalog_message',
+        body: { text: String(opts.bodyText || '') },
+        action: { name: 'catalog_message' }
+      };
+      if (opts.thumbnailRetailerId) {
+        interactive.action.parameters = {
+          thumbnail_product_retailer_id: String(opts.thumbnailRetailerId)
+        };
+      }
+      if (opts.footerText) interactive.footer = { text: String(opts.footerText) };
+
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'interactive',
+          interactive
+        },
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send catalog message:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp catalog');
+    }
+  }
+
+  /**
    * Mark a message as read.
    * @param {Object} connection
    * @param {string} messageId

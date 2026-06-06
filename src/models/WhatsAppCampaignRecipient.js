@@ -87,6 +87,13 @@ const whatsappCampaignRecipientSchema = new mongoose.Schema(
 // Efficient batch-fetch for the worker (fetch pending per campaign in order)
 whatsappCampaignRecipientSchema.index({ campaign: 1, status: 1 });
 
+// Hot path: dispatcher streams pending recipients sorted by _id. A partial index keeps
+// this lean (only pending rows) and sorted, so cursor fan-out stays O(pending) not O(total).
+whatsappCampaignRecipientSchema.index(
+  { campaign: 1, _id: 1 },
+  { partialFilterExpression: { status: 'pending' } }
+);
+
 // Prevent duplicate phone per campaign
 whatsappCampaignRecipientSchema.index({ campaign: 1, phone: 1 }, { unique: true });
 

@@ -13,7 +13,8 @@ const {
   outlookRenewalQueue,
   voiceCallQueue,
   campaignSendQueue,
-  campaignInboxQueue
+  campaignInboxQueue,
+  flowTickQueue
 } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
@@ -25,6 +26,7 @@ const processImapPolling = require('./jobs/processImapPolling');
 const renewGmailWatches = require('./jobs/renewGmailWatches');
 const renewOutlookSubscriptions = require('./jobs/renewOutlookSubscriptions');
 const processVoiceCall = require('./jobs/processVoiceCall');
+const processFlowTick = require('./jobs/processFlowTick');
 const campaignConfig = require('./config/campaignConfig');
 const { registerCampaignWorkers } = require('./workers/registerCampaignWorkers');
 const logger = require('./config/logger');
@@ -158,6 +160,19 @@ async function startWorker() {
     });
     logger.info('[Worker] voice-call processor started', { concurrency: VOICE_CALL_CONCURRENCY });
 
+    flowTickQueue.process(1, async () => processFlowTick());
+    const flowTickRepeatable = await flowTickQueue.getRepeatableJobs();
+    const flowTickScheduled = flowTickRepeatable.some((j) => j.id && j.id.includes('flow-tick-repeat'));
+    if (!flowTickScheduled) {
+      await flowTickQueue.add({}, {
+        repeat: { every: 30000 },
+        jobId: 'flow-tick-repeat',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] flow-tick repeat job registered (every 30s)');
+    }
+    logger.info('[Worker] flow-tick processor started');
+
     if (campaignConfig.enableInCoreWorker) {
       await registerCampaignWorkers();
       logger.info('[Worker] campaign queues registered in core worker (set ENABLE_CAMPAIGN_IN_CORE_WORKER=false + run campaignWorker.js in production)');
@@ -190,7 +205,8 @@ async function startWorker() {
           outlookRenewalQueue.close(),
           voiceCallQueue.close(),
           campaignSendQueue.close(),
-          campaignInboxQueue.close()
+          campaignInboxQueue.close(),
+          flowTickQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

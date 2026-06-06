@@ -253,11 +253,64 @@ async function loadReview(orgId, interactionId) {
   return Interaction.findOne({ _id: interactionId, organization: orgId, type: 'review' });
 }
 
+async function createReview(orgId, body) {
+  const {
+    platform,
+    customerName,
+    customerHandle,
+    rating,
+    reviewBody,
+    sentiment
+  } = body;
+
+  if (!platform) return { error: 'platform is required' };
+  if (!reviewBody?.trim()) return { error: 'Review content is required' };
+  if (rating != null && (rating < 1 || rating > 5)) return { error: 'Rating must be between 1 and 5' };
+
+  const STAR_MAP = { 1: 'ONE', 2: 'TWO', 3: 'THREE', 4: 'FOUR', 5: 'FIVE' };
+  const ratingNum = rating ? parseInt(rating, 10) : null;
+
+  const derivedSentiment = sentiment || (
+    ratingNum >= 4 ? 'positive' :
+    ratingNum <= 2 ? 'negative' : 'neutral'
+  );
+
+  const uniqueId = `manual-${orgId}-${Date.now()}`;
+  const { displayRef, number } = await generateOpsRef(orgId, 'review');
+
+  const doc = await Interaction.create({
+    organization: orgId,
+    platform,
+    type: 'review',
+    platformId: uniqueId,
+    content: reviewBody.trim(),
+    contentType: 'text',
+    author: {
+      name: customerName?.trim() || 'Anonymous',
+      handle: customerHandle?.trim() || '',
+      platformId: uniqueId
+    },
+    status: 'unread',
+    sentiment: derivedSentiment,
+    metadata: {
+      reviewDisplayRef: displayRef,
+      reviewNumber: number,
+      rating: ratingNum,
+      ...(ratingNum ? { starRating: STAR_MAP[ratingNum] } : {}),
+      manualEntry: true
+    },
+    platformCreatedAt: new Date()
+  });
+
+  return { review: await getReviewDetail(orgId, doc._id) };
+}
+
 module.exports = {
   listReviews,
   getReviewStats,
   getReviewDetail,
   loadReview,
+  createReview,
   ensureReviewDisplayRef,
   buildReviewFilter,
   replyStatusFor,

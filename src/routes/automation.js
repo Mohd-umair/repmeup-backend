@@ -32,4 +32,7 @@ const requireWaCatalog = requireFeature(FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED
 router.get('/wa-keyword', protect, requireWaCatalog, waKeywordController.getSettings);
 router.put('/wa-keyword', protect, requireWaCatalog, waKeywordController.updateSettings);
 
+// ── Unified Flow Builder ────────────────────────────────────────────────────
+router.use('/flows', require('./automationFlows'));
+
 module.exports = router;
