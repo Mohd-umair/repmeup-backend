@@ -39,11 +39,18 @@ function matchesTrigger(node, eventType, payload = {}) {
 }
 
 class FlowTriggerRouter {
-  async shouldUseFlows(organizationId) {
-    const org = await Organization.findById(organizationId).select('automationFlowMode').lean();
-    const mode = org?.automationFlowMode || 'hybrid';
-    if (mode === 'legacy') return false;
-    if (mode === 'flows_only') return true;
+  /**
+   * Whether flows should run for this org+channel, per the per-channel automation
+   * mode (workflow_only / ai_only / hybrid), falling back to the deprecated
+   * org-wide automationFlowMode via replyEngineService.
+   */
+  async shouldUseFlows(organizationId, platform) {
+    const org = await Organization.findById(organizationId)
+      .select('automationModeByChannel automationFlowMode')
+      .lean();
+    const replyEngineService = require('../replyEngineService');
+    const { runFlows } = replyEngineService.decide({ organization: org, platform, flowHandled: false });
+    if (!runFlows) return false;
     const activeCount = await AutomationFlow.countDocuments({ organization: organizationId, status: 'active', isBlueprint: false });
     return activeCount > 0;
   }
@@ -54,7 +61,7 @@ class FlowTriggerRouter {
    */
   async route({ organizationId, platform, eventType, interaction, payload = {} }) {
     try {
-      const useFlows = await this.shouldUseFlows(organizationId);
+      const useFlows = await this.shouldUseFlows(organizationId, platform);
       if (!useFlows) return { handled: false, enrollments: [] };
 
       const flows = await AutomationFlow.find({
@@ -151,6 +158,7 @@ class FlowTriggerRouter {
           await AutomationFlow.updateOne({ _id: flow._id }, { $inc: { 'stats.failed': 1 } });
         }
 
+        await this._markInteractionOwnership(interaction?._id, result.status);
         enrollments.push(enrollment);
       }
 
@@ -180,6 +188,7 @@ class FlowTriggerRouter {
     this._applyResult(enrollmentDoc, result);
     await enrollmentDoc.save();
     await this._recordTerminalStats(flow._id, result.status);
+    await this._markInteractionOwnership(interaction?._id || enrollmentDoc.interaction, result.status);
     return enrollmentDoc;
   }
 
@@ -189,6 +198,7 @@ class FlowTriggerRouter {
     if (!flow || flow.status !== 'active') {
       enrollmentDoc.status = 'dropped';
       await enrollmentDoc.save();
+      await this._markInteractionOwnership(enrollmentDoc.interaction, 'dropped');
       return;
     }
 
@@ -213,6 +223,7 @@ class FlowTriggerRouter {
     this._applyResult(enrollmentDoc, result);
     await enrollmentDoc.save();
     await this._recordTerminalStats(flow._id, result.status);
+    await this._markInteractionOwnership(enrollmentDoc.interaction, result.status);
   }
 
   _applyResult(enrollmentDoc, result) {
@@ -222,6 +233,27 @@ class FlowTriggerRouter {
     enrollmentDoc.lastError = result.lastError;
     enrollmentDoc.history = result.history;
     enrollmentDoc.variables = result.variables;
+  }
+
+  /**
+   * Durable "a workflow owns this conversation" signal read by the AI fallback
+   * gate (autoReplyScheduler / webhook). Set true while the enrollment is
+   * active/waiting; cleared on a terminal status so AI can take over later.
+   * @param {string|ObjectId} interactionId
+   * @param {string} status  enrollment status after a run
+   */
+  async _markInteractionOwnership(interactionId, status) {
+    if (!interactionId) return;
+    const owns = status === 'active' || status === 'waiting';
+    try {
+      const Interaction = require('../../models/Interaction');
+      await Interaction.updateOne(
+        { _id: interactionId },
+        { $set: { 'metadata.flowHandled': owns } }
+      );
+    } catch (err) {
+      logger.warn('[FlowTriggerRouter] failed to set metadata.flowHandled', { error: err.message });
+    }
   }
 
   async _recordTerminalStats(flowId, status) {

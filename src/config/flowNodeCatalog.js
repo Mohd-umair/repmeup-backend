@@ -191,8 +191,8 @@ const FLOW_NODE_CATALOG = [
         options: ['image', 'video', 'audio', 'document', 'sticker'], default: 'image'
       },
       {
-        key: 'mediaUrl', type: 'string', label: 'Media URL', required: true, default: '',
-        hint: 'Public https:// link to the file. Must be reachable by Meta.'
+        key: 'mediaUrl', type: 'media_url', label: 'Media file', required: true, default: '',
+        hint: 'Pick from your media library or upload a new file. Must be publicly accessible.'
       },
       {
         key: 'caption', type: 'textarea', label: 'Caption', default: '',
@@ -314,6 +314,38 @@ const FLOW_NODE_CATALOG = [
       key: 'tone', type: 'select', label: 'Tone', options: ['professional', 'friendly', 'casual'],
       default: 'friendly'
     }]
+  }),
+  node('action.ai_detect_intent', 'action', 'AI detect intent', CHANNELS, {
+    icon: 'fas fa-wand-magic-sparkles',
+    description: 'Classify the customer message into an intent and save it to a flow variable. Branch on it with a "Variable check" node.',
+    defaultConfig: { saveAs: 'intent', intents: [] },
+    fields: [
+      {
+        key: 'intents', type: 'string[]', label: 'Possible intents',
+        hint: 'Optional candidate labels, e.g. sales, support, complaint. Leave empty for open-ended detection.',
+        default: []
+      },
+      {
+        key: 'saveAs', type: 'string', label: 'Save intent as', required: true, default: 'intent',
+        hint: 'Variable name to store the detected intent. Reference it later as {{intent}}.'
+      }
+    ]
+  }),
+  node('action.ai_extract', 'action', 'AI extract data', CHANNELS, {
+    icon: 'fas fa-table-list',
+    description: 'Extract structured fields from the customer message into flow variables. Each field is also saved individually.',
+    defaultConfig: { fields: ['business_type', 'service', 'budget'], saveAs: 'extracted' },
+    fields: [
+      {
+        key: 'fields', type: 'string[]', label: 'Fields to extract', required: true,
+        hint: 'One field name per line, e.g. business_type, service, budget. The AI fills these from the message.',
+        default: ['business_type', 'service', 'budget']
+      },
+      {
+        key: 'saveAs', type: 'string', label: 'Save object as', default: 'extracted',
+        hint: 'Variable name for the full extracted object. Each field is also saved individually (e.g. {{budget}}).'
+      }
+    ]
   }),
   node('action.assign_bucket', 'action', 'Assign intent bucket', CHANNELS, {
     icon: 'fas fa-inbox',

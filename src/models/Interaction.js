@@ -317,6 +317,14 @@ const interactionSchema = new mongoose.Schema({
     lastMid: String,
     instagramAccountId: String,
 
+    /**
+     * Workflow ownership signal. True while an automation flow is actively
+     * handling this conversation (active/waiting enrollment); cleared on
+     * terminal status. Read by the AI-fallback gate (replyEngineService) so the
+     * AI auto-reply stands down while a workflow owns the conversation.
+     */
+    flowHandled: { type: Boolean, default: false },
+
     // For Facebook Messenger DM thread
     facebookPageId: String,
     rating: {

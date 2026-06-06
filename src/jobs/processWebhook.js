@@ -100,9 +100,10 @@ module.exports = async function processWebhook(job) {
         });
       }
 
-      // Unified Flow Builder routing (hybrid / flows_only)
+      // Unified Flow Builder routing (workflow-first; AI is the fallback)
       let flowHandledComment = false;
       let flowHandledStory = false;
+      let flowHandled = false;
       if (organizationId) {
         try {
           const flowTriggerRouter = require('../services/flow/flowTriggerRouter');
@@ -137,6 +138,7 @@ module.exports = async function processWebhook(job) {
           });
 
           if (flowResult.handled) {
+            flowHandled = true;
             if (interaction.platform === 'instagram' && interaction.type === 'comment') {
               flowHandledComment = true;
             }
@@ -199,7 +201,28 @@ module.exports = async function processWebhook(job) {
       const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
       const threadDm = isThreadStyleDm(interaction);
 
-      if (!threadDm && (hasReplies || isAlreadyReplied)) {
+      // Workflow-first gate: AI runs only as a fallback per the channel automation mode.
+      let runAiFallback = true;
+      if (organizationId) {
+        try {
+          const Organization = require('../models/Organization');
+          const replyEngineService = require('../services/replyEngineService');
+          const orgDoc = await Organization.findById(organizationId)
+            .select('automationModeByChannel automationFlowMode')
+            .lean();
+          ({ runAiFallback } = replyEngineService.decide({
+            organization: orgDoc,
+            platform: interaction.platform,
+            flowHandled
+          }));
+        } catch (modeErr) {
+          jobLogger.warn('Reply-engine mode resolve failed (defaulting to AI fallback on)', { error: modeErr.message });
+        }
+      }
+
+      if (!runAiFallback) {
+        logger.info(`⏭️  [Webhook] Skipping AI — channel mode/flow ownership (flowHandled: ${flowHandled}): ${interaction._id}`);
+      } else if (!threadDm && (hasReplies || isAlreadyReplied)) {
         logger.info(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
       } else if (storyToDmSent) {
         logger.info(`⏭️  [Webhook] Skipping AI — Story-to-DM handled this message: ${interaction._id}`);
