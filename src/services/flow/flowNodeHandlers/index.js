@@ -95,11 +95,165 @@ function pickBranchEdge(edges, matched) {
   return unlabeled[1] || unlabeled[0] || edges[1] || edges[0];
 }
 
+/**
+ * Resolve a product (by id or sku) to the retailer id WhatsApp expects.
+ * Prefers SKU, falls back to the document id.
+ */
+async function resolveProductRetailerId(organizationId, productId) {
+  const Product = require('../../../models/Product');
+  const product = await Product.findOne({ _id: productId, organization: organizationId })
+    .select('sku isActive')
+    .lean();
+  if (!product) return null;
+  return (product.sku && String(product.sku).trim()) || String(product._id);
+}
+
+/**
+ * Execute the WhatsApp interactive message actions (media, location, list,
+ * buttons, single/multi product). Records the send on the inbox interaction
+ * when possible. Throws on hard failures so the node is marked failed.
+ */
+async function handleWhatsAppInteractive(node, ctx) {
+  const { config = {} } = node;
+  const { organizationId, interaction, enrollment } = ctx;
+  const messageService = require('../flowMessageService');
+  const whatsappService = require('../../../integrations/whatsapp/whatsappService');
+  const { recordAutomationReply } = require('../../inbox/inboxAutomationReplyService');
+
+  const { conn, recipient } = await messageService.resolveWhatsAppTarget(organizationId, interaction, enrollment);
+  if (!conn || !recipient) {
+    logger.warn('[FlowHandler] whatsapp interactive skipped', {
+      type: node.type, hasConn: !!conn, hasRecipient: !!recipient
+    });
+    return;
+  }
+
+  const record = (content, messageType) => {
+    if (!interaction?._id) return Promise.resolve();
+    return recordAutomationReply({
+      interactionId: interaction._id,
+      organizationId,
+      content,
+      messageType
+    }).catch(() => {});
+  };
+
+  switch (node.type) {
+    case 'action.send_media': {
+      await whatsappService.sendMediaByUrl(
+        conn, recipient, config.mediaType || 'image', config.mediaUrl,
+        config.caption || '', config.filename || ''
+      );
+      await record(config.caption || `[${config.mediaType || 'media'}]`, config.mediaType || 'media');
+      break;
+    }
+    case 'action.send_location': {
+      await whatsappService.sendLocationMessage(conn, recipient, {
+        latitude: config.latitude,
+        longitude: config.longitude,
+        name: config.name,
+        address: config.address
+      });
+      await record(config.name || config.address || '[location]', 'location');
+      break;
+    }
+    case 'action.send_buttons': {
+      await whatsappService.sendReplyButtonsMessage(conn, recipient, {
+        bodyText: config.bodyText,
+        headerText: config.headerText,
+        footerText: config.footerText,
+        buttons: Array.isArray(config.buttons) ? config.buttons : []
+      });
+      await record(config.bodyText || '[buttons]', 'interactive');
+      break;
+    }
+    case 'action.send_list': {
+      await whatsappService.sendListMessage(conn, recipient, {
+        bodyText: config.bodyText,
+        buttonText: config.buttonText,
+        headerText: config.headerText,
+        footerText: config.footerText,
+        sections: Array.isArray(config.sections) ? config.sections : []
+      });
+      await record(config.bodyText || '[list]', 'interactive');
+      break;
+    }
+    case 'action.send_product': {
+      const whatsappCatalogService = require('../../../integrations/whatsapp/whatsappCatalogService');
+      const catalogId = await whatsappCatalogService.getLinkedCatalogId(conn);
+      const retailerId = await resolveProductRetailerId(organizationId, config.productId);
+      if (!catalogId || !retailerId) {
+        throw new Error('Send product: catalog or product could not be resolved');
+      }
+      await whatsappCatalogService.sendProductMessage(
+        conn, recipient, catalogId, retailerId, config.bodyText || ''
+      );
+      await record(config.bodyText || '[product]', 'interactive');
+      break;
+    }
+    case 'action.send_catalog': {
+      let thumbnailRetailerId = '';
+      if (config.thumbnailProductId) {
+        thumbnailRetailerId = await resolveProductRetailerId(organizationId, config.thumbnailProductId) || '';
+      }
+      await whatsappService.sendCatalogMessage(conn, recipient, {
+        bodyText: config.bodyText,
+        footerText: config.footerText,
+        thumbnailRetailerId
+      });
+      await record(config.bodyText || '[catalog]', 'interactive');
+      break;
+    }
+    case 'action.send_product_list': {
+      const whatsappCatalogService = require('../../../integrations/whatsapp/whatsappCatalogService');
+      const catalogId = await whatsappCatalogService.getLinkedCatalogId(conn);
+      if (!catalogId) throw new Error('Send multi-product: catalog could not be resolved');
+
+      const sections = [];
+      for (const section of (config.productSections || [])) {
+        const retailerIds = [];
+        for (const pid of (section.productIds || [])) {
+          const rid = await resolveProductRetailerId(organizationId, pid);
+          if (rid) retailerIds.push(rid);
+        }
+        if (retailerIds.length) {
+          sections.push({ title: section.title || 'Products', productRetailerIds: retailerIds });
+        }
+      }
+      if (!sections.length) throw new Error('Send multi-product: no valid products to send');
+
+      await whatsappCatalogService.sendProductListMessage(
+        conn, recipient, catalogId, sections,
+        config.headerText || '', config.bodyText || '', config.footerText || ''
+      );
+      await record(config.bodyText || '[product list]', 'interactive');
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+const WHATSAPP_INTERACTIVE_TYPES = new Set([
+  'action.send_media',
+  'action.send_location',
+  'action.send_buttons',
+  'action.send_list',
+  'action.send_product',
+  'action.send_product_list',
+  'action.send_catalog'
+]);
+
 async function handleAction(node, ctx) {
   const { config = {} } = node;
   const { dryRun, organizationId, interaction, enrollment } = ctx;
 
   if (dryRun) {
+    return { status: 'continue', nextNodeId: pickEdge(ctx.edges)?.target };
+  }
+
+  if (WHATSAPP_INTERACTIVE_TYPES.has(node.type)) {
+    await handleWhatsAppInteractive(node, ctx);
     return { status: 'continue', nextNodeId: pickEdge(ctx.edges)?.target };
   }
 

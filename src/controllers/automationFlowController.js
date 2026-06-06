@@ -67,48 +67,22 @@ exports.listFlows = async (req, res, next) => {
       filter = { organization: orgId, isBlueprint: { $ne: true } };
     }
 
-    const flows = await AutomationFlow.find(filter).sort({ updatedAt: -1 }).lean();
-    return res.json({ success: true, data: flows });
+    const page  = Math.max(1, parseInt(req.query.page,  10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 12));
+    const skip  = (page - 1) * limit;
+
+    const [flows, total] = await Promise.all([
+      AutomationFlow.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(limit).lean(),
+      AutomationFlow.countDocuments(filter)
+    ]);
+
+    const pages = Math.max(1, Math.ceil(total / limit));
+    return res.json({ success: true, data: flows, total, page, limit, pages });
   } catch (err) {
     next(err);
   }
 };
 
-exports.importFromGrowth = async (req, res, next) => {
-  try {
-    const flowGrowthImportService = require('../services/flow/flowGrowthImportService');
-    const drafts = await flowGrowthImportService.buildDraftsFromGrowthSettings(
-      req.user.organization._id,
-      { sources: req.body?.sources }
-    );
-    if (!drafts.length) {
-      return res.status(400).json({
-        success: false,
-        error: 'No enabled Growth automations found to import. Enable Comment-to-DM, Story-to-DM, Sales, or Follow Invite first.'
-      });
-    }
-
-    const created = [];
-    for (const draft of drafts) {
-      await assertFlowCap(req.user.organization._id);
-      const flow = await AutomationFlow.create({
-        ...draft,
-        organization: req.user.organization._id,
-        createdBy: req.user._id,
-        status: 'draft',
-        version: 1,
-        isBlueprint: false
-      });
-      created.push(flow);
-    }
-    return res.status(201).json({ success: true, data: created });
-  } catch (err) {
-    if (err?.name === 'EntitlementError') {
-      return res.status(err.statusCode || 402).json({ success: false, error: err.message });
-    }
-    next(err);
-  }
-};
 
 exports.createFlow = async (req, res, next) => {
   try {

@@ -1,4 +1,5 @@
 const { getNodeDef, isTriggerType } = require('../../config/flowNodeCatalog');
+const { validateWhatsAppNode } = require('./flowWhatsAppValidation');
 
 /**
  * Validate automation flow graph before save/publish.
@@ -49,6 +50,16 @@ class FlowValidationService {
             message: `${field.label || field.key} is required on node "${node.label || node.type}".`
           });
         }
+      }
+
+      // WhatsApp interactive nodes carry Meta-specific structural limits.
+      for (const issue of validateWhatsAppNode(node)) {
+        errors.push({
+          code: 'WA_CONFIG_INVALID',
+          nodeId: node.id,
+          field: issue.field,
+          message: `${node.label || node.type}: ${issue.message}`
+        });
       }
     }
 

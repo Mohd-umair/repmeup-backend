@@ -1,6 +1,8 @@
 'use strict';
 
 const CommerceOrder = require('../../models/CommerceOrder');
+const Product = require('../../models/Product');
+const { assignOrderDisplayRef } = require('../../utils/opsRefHelper');
 const {
   CHANNEL_LABELS,
   ORDER_STATUS_LABELS,
@@ -245,11 +247,68 @@ async function updateOrderStatus(orgId, orderId, status, notes) {
   return { order: await getOrderDetail(orgId, orderId) };
 }
 
+async function createOrder(orgId, body) {
+  const { channel = 'manual', lineItems = [], buyerName, buyerPhone, shippingAddress, notes } = body;
+
+  if (!lineItems.length) {
+    return { error: 'At least one product is required' };
+  }
+
+  const productIds = lineItems.map((li) => li.productId);
+  const products = await Product.find({
+    _id: { $in: productIds },
+    organization: orgId,
+    isActive: true
+  }).lean();
+
+  if (!products.length) {
+    return { error: 'No matching active products found' };
+  }
+
+  const productMap = products.reduce((m, p) => { m[p._id.toString()] = p; return m; }, {});
+
+  const builtItems = lineItems
+    .filter((li) => productMap[li.productId])
+    .map((li) => {
+      const p = productMap[li.productId];
+      const unitPrice = p.discountPercent
+        ? +(p.price * (1 - p.discountPercent / 100)).toFixed(2)
+        : p.price;
+      return {
+        product: p._id,
+        retailerId: p.sku || p._id.toString(),
+        name: p.name,
+        qty: Math.max(1, parseInt(li.qty, 10) || 1),
+        unitPrice,
+        currency: p.currency || 'INR'
+      };
+    });
+
+  const totalAmount = +builtItems.reduce((sum, li) => sum + li.unitPrice * li.qty, 0).toFixed(2);
+
+  const payload = await assignOrderDisplayRef(orgId, {
+    organization: orgId,
+    channel,
+    status: 'payment_pending',
+    lineItems: builtItems,
+    totalAmount,
+    currency: builtItems[0]?.currency || 'INR',
+    buyerName: buyerName?.trim() || undefined,
+    buyerPhone: buyerPhone?.trim() || undefined,
+    shippingAddress: shippingAddress?.trim() || undefined,
+    notes: notes?.trim() || undefined
+  });
+
+  const order = await CommerceOrder.create(payload);
+  return { order: await getOrderDetail(orgId, order._id) };
+}
+
 module.exports = {
   listOrders,
   getOrderStats,
   getOrderDetail,
   updateOrderStatus,
+  createOrder,
   VALID_STATUS_TRANSITIONS,
   buildListFilter,
   mapOrderRow

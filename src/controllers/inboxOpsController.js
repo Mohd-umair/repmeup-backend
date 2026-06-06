@@ -41,6 +41,18 @@ exports.getOrderDetail = async (req, res, next) => {
   }
 };
 
+exports.createOrder = async (req, res, next) => {
+  try {
+    const result = await orderOps.createOrder(orgId(req), req.body);
+    if (result.error) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+    res.status(201).json({ success: true, data: result.order });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.updateOrderStatus = async (req, res, next) => {
   try {
     const { status, notes } = req.body;
@@ -161,6 +173,18 @@ exports.closeComplaint = async (req, res, next) => {
 };
 
 // ── Reviews ───────────────────────────────────────────────────────────────────
+
+exports.createReview = async (req, res, next) => {
+  try {
+    const result = await reviewOps.createReview(orgId(req), req.body);
+    if (result.error) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+    res.status(201).json({ success: true, data: result.review });
+  } catch (err) {
+    next(err);
+  }
+};
 
 exports.listReviews = async (req, res, next) => {
   try {

@@ -25,6 +25,20 @@ const DEFAULT_SALES_BUTTONS = [
   { label: 'Maybe later', type: 'postback', payload: 'hesitant' }
 ];
 
+// ── WhatsApp interactive defaults ────────────────────────────────────────────
+const DEFAULT_WA_REPLY_BUTTONS = [
+  { id: 'yes', title: 'Yes' },
+  { id: 'no', title: 'No' }
+];
+const DEFAULT_WA_LIST_SECTIONS = [
+  {
+    title: 'Options',
+    rows: [
+      { id: 'option_1', title: 'Option 1', description: '' }
+    ]
+  }
+];
+
 function node(type, category, label, channels, configSchema = {}) {
   const fields = (configSchema.fields || []).map((f) => {
     const defaultConfig = configSchema.defaultConfig || {};
@@ -164,6 +178,123 @@ const FLOW_NODE_CATALOG = [
     description: 'Send a WhatsApp catalog product message.',
     defaultConfig: { productId: '' },
     fields: [{ key: 'productId', type: 'product', label: 'Product', required: true, default: '' }]
+  }),
+
+  // ── WhatsApp interactive messages (Meta Cloud API) ─────────────────────────
+  node('action.send_media', 'action', 'Send media', ['whatsapp'], {
+    icon: 'fas fa-photo-film',
+    description: 'Send an image, video, audio, document, or sticker by public URL.',
+    defaultConfig: { mediaType: 'image', mediaUrl: '', caption: '', filename: '' },
+    fields: [
+      {
+        key: 'mediaType', type: 'select', label: 'Media type', required: true,
+        options: ['image', 'video', 'audio', 'document', 'sticker'], default: 'image'
+      },
+      {
+        key: 'mediaUrl', type: 'string', label: 'Media URL', required: true, default: '',
+        hint: 'Public https:// link to the file. Must be reachable by Meta.'
+      },
+      {
+        key: 'caption', type: 'textarea', label: 'Caption', default: '',
+        hint: 'Optional. Shown with image / video / document only. Max 1024 chars.'
+      },
+      {
+        key: 'filename', type: 'string', label: 'Document filename', default: '',
+        hint: 'Customer-visible filename (documents only), e.g. invoice.pdf'
+      }
+    ]
+  }),
+  node('action.send_location', 'action', 'Send location', ['whatsapp'], {
+    icon: 'fas fa-location-dot',
+    description: 'Send a pinned location with optional name and address.',
+    defaultConfig: { latitude: '', longitude: '', name: '', address: '' },
+    fields: [
+      { key: 'latitude', type: 'string', label: 'Latitude', required: true, default: '', hint: 'Decimal degrees, e.g. 19.0760' },
+      { key: 'longitude', type: 'string', label: 'Longitude', required: true, default: '', hint: 'Decimal degrees, e.g. 72.8777' },
+      { key: 'name', type: 'string', label: 'Location name', default: '', hint: 'Optional label, e.g. Our Store' },
+      { key: 'address', type: 'textarea', label: 'Address', default: '', hint: 'Optional full address shown under the name.' }
+    ]
+  }),
+  node('action.send_buttons', 'action', 'Send reply buttons', ['whatsapp'], {
+    icon: 'fas fa-square-check',
+    description: 'Interactive message with up to 3 quick-reply buttons.',
+    defaultConfig: {
+      bodyText: 'How can we help you today?',
+      headerText: '',
+      footerText: '',
+      buttons: DEFAULT_WA_REPLY_BUTTONS
+    },
+    fields: [
+      { key: 'bodyText', type: 'textarea', label: 'Body', required: true, default: 'How can we help you today?', hint: 'Main message text. Max 1024 chars.' },
+      { key: 'headerText', type: 'string', label: 'Header', default: '', hint: 'Optional bold header. Max 60 chars.' },
+      { key: 'footerText', type: 'string', label: 'Footer', default: '', hint: 'Optional footer. Max 60 chars.' },
+      {
+        key: 'buttons', type: 'reply_buttons', label: 'Buttons', required: true,
+        default: DEFAULT_WA_REPLY_BUTTONS,
+        hint: 'Up to 3 buttons. Each title max 20 chars. Tapping a button can drive the matching outgoing connection (label it with the button id).'
+      }
+    ]
+  }),
+  node('action.send_list', 'action', 'Send list message', ['whatsapp'], {
+    icon: 'fas fa-list-ul',
+    description: 'Interactive list menu with sections and selectable rows.',
+    defaultConfig: {
+      bodyText: 'Choose an option:',
+      buttonText: 'View options',
+      headerText: '',
+      footerText: '',
+      sections: DEFAULT_WA_LIST_SECTIONS
+    },
+    fields: [
+      { key: 'bodyText', type: 'textarea', label: 'Body', required: true, default: 'Choose an option:', hint: 'Main message text. Max 4096 chars.' },
+      { key: 'buttonText', type: 'string', label: 'List button text', required: true, default: 'View options', hint: 'Label that opens the list. Max 20 chars.' },
+      { key: 'headerText', type: 'string', label: 'Header', default: '', hint: 'Optional header. Max 60 chars.' },
+      { key: 'footerText', type: 'string', label: 'Footer', default: '', hint: 'Optional footer. Max 60 chars.' },
+      {
+        key: 'sections', type: 'list_sections', label: 'Sections', required: true,
+        default: DEFAULT_WA_LIST_SECTIONS,
+        hint: 'Up to 10 rows total across all sections. Row title max 24 chars, description max 72 chars.'
+      }
+    ]
+  }),
+  node('action.send_product', 'action', 'Send single product', ['whatsapp'], {
+    icon: 'fas fa-box',
+    description: 'Send one catalog product as an interactive product card.',
+    defaultConfig: { productId: '', bodyText: '' },
+    fields: [
+      { key: 'productId', type: 'product', label: 'Product', required: true, default: '' },
+      { key: 'bodyText', type: 'textarea', label: 'Message', default: '', hint: 'Optional text shown above the product card. Max 1024 chars.' }
+    ]
+  }),
+  node('action.send_product_list', 'action', 'Send multi-product', ['whatsapp'], {
+    icon: 'fas fa-boxes-stacked',
+    description: 'Send a catalog product list (multi-product) message grouped into sections.',
+    defaultConfig: {
+      headerText: 'Our products',
+      bodyText: 'Browse our catalog and tap to add items.',
+      footerText: '',
+      productSections: [{ title: 'Featured', productIds: [] }]
+    },
+    fields: [
+      { key: 'headerText', type: 'string', label: 'Header', required: true, default: 'Our products', hint: 'Required for product lists. Max 60 chars.' },
+      { key: 'bodyText', type: 'textarea', label: 'Body', required: true, default: 'Browse our catalog and tap to add items.', hint: 'Main message text. Max 1024 chars.' },
+      { key: 'footerText', type: 'string', label: 'Footer', default: '', hint: 'Optional footer. Max 60 chars.' },
+      {
+        key: 'productSections', type: 'product_sections', label: 'Product sections', required: true,
+        default: [{ title: 'Featured', productIds: [] }],
+        hint: 'Up to 30 products total across all sections. Each section needs a title.'
+      }
+    ]
+  }),
+  node('action.send_catalog', 'action', 'Send full catalog', ['whatsapp'], {
+    icon: 'fas fa-store',
+    description: 'Send your entire linked WhatsApp catalog as a "View catalog" message.',
+    defaultConfig: { bodyText: 'Browse our full catalog 🛍️', footerText: '', thumbnailProductId: '' },
+    fields: [
+      { key: 'bodyText', type: 'textarea', label: 'Body', required: true, default: 'Browse our full catalog 🛍️', hint: 'Main message text shown above the catalog button. Max 1024 chars.' },
+      { key: 'footerText', type: 'string', label: 'Footer', default: '', hint: 'Optional footer. Max 60 chars.' },
+      { key: 'thumbnailProductId', type: 'product', label: 'Cover product', default: '', hint: 'Optional. The product shown as the catalog cover thumbnail. Defaults to the first catalog item.' }
+    ]
   }),
   node('action.reply_public_comment', 'action', 'Reply public comment', ['instagram'], {
     icon: 'fas fa-reply',
@@ -410,6 +541,8 @@ module.exports = {
   TRIGGER_TYPES,
   DEFAULT_PURCHASE_KEYWORDS,
   DEFAULT_SALES_BUTTONS,
+  DEFAULT_WA_REPLY_BUTTONS,
+  DEFAULT_WA_LIST_SECTIONS,
   getNodeCatalog,
   getNodeDef,
   getStaticDefaultConfig,

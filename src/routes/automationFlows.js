@@ -12,7 +12,6 @@ router.use(protect);
 
 router.get('/node-catalog', automationFlowController.getNodeCatalog);
 router.get('/', automationFlowController.listFlows);
-router.post('/import/growth', automationFlowController.importFromGrowth);
 router.post('/', validateAutomationFlow, automationFlowController.createFlow);
 router.get('/:id/stats', automationFlowController.getFlowStats);
 router.post('/:id/validate', automationFlowController.validateFlow);

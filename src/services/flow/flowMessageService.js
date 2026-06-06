@@ -85,4 +85,19 @@ async function sendTextForInteraction(interaction, organizationId, text) {
   }
 }
 
-module.exports = { sendTextForInteraction, getConnection };
+/**
+ * Resolve the WhatsApp connection + recipient for a flow step in one call.
+ * Returns { conn, recipient } — either may be null when unavailable.
+ */
+async function resolveWhatsAppTarget(organizationId, interaction, enrollment) {
+  const conn = await getConnection(organizationId, 'whatsapp');
+  const recipient = (interaction ? recipientFor(interaction) : '') || enrollment?.platformUserId || '';
+  return { conn, recipient };
+}
+
+module.exports = {
+  sendTextForInteraction,
+  getConnection,
+  recipientFor,
+  resolveWhatsAppTarget
+};
