@@ -191,9 +191,9 @@ const organizationSchema = new mongoose.Schema({
     },
     webhookDelay: {
       type: Number,
-      default: 1, // Fixed delay in minutes before sending webhook auto-reply
+      default: 60, // Fixed delay in SECONDS before sending webhook auto-reply (0 = immediate)
       min: 0,
-      max: 120
+      max: 7200
     },
     replyDelayMode: {
       type: String,
