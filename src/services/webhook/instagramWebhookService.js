@@ -14,6 +14,7 @@ const PlatformConnection = require('../../models/PlatformConnection');
 const instagramService = require('../../integrations/meta/instagramService');
 const { emitToOrg } = require('../../utils/socketEmitter');
 const { generateChatRef } = require('../../utils/chatRefHelper');
+const { resetAutoReplyCountersForNewInbound } = require('../../utils/interactionThreadDm');
 const {
   formatPostbackIncomingText,
   notifyLinkedCommentInboxRefresh,
@@ -620,7 +621,7 @@ async function handleInstagramMessage(payload, organizationId) {
         incomingMsg.storyTriggerType = storyContext.triggerType;
       }
 
-      await Interaction.updateOne(
+      const pushResult = await Interaction.updateOne(
         {
           platformId: threadPlatformId,
           organization: organizationId,
@@ -635,6 +636,18 @@ async function handleInstagramMessage(payload, organizationId) {
           }
         }
       );
+
+      // A genuinely new inbound DM (not a webhook retry) means the customer is
+      // actively re-engaging. Reset the per-thread auto-reply hard-stop counters so a
+      // long-lived conversation isn't permanently locked out of auto-reply once it has
+      // crossed maxAutoReplies. The cap still protects against AI-to-AI loops, because
+      // those have no inbound message between replies to trigger this reset.
+      if (pushResult.modifiedCount > 0) {
+        await resetAutoReplyCountersForNewInbound(Interaction, {
+          platformId: threadPlatformId,
+          organization: organizationId
+        });
+      }
 
       let interaction = await Interaction.findOne({
         platformId: threadPlatformId,

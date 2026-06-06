@@ -5,7 +5,7 @@ const logger = require('../config/logger');
 const instagramService = require('../integrations/meta/instagramService');
 const { emitToOrg } = require('../utils/socketEmitter');
 const cacheService = require('../services/cacheService');
-const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const { isThreadStyleDm, resetAutoReplyCountersForNewInbound } = require('../utils/interactionThreadDm');
 const { generateChatRef } = require('../utils/chatRefHelper');
 const { resolveContact, normalizeAuthorForPlatform } = require('../services/contactService');
 const instagramWebhookService = require('../services/webhook/instagramWebhookService');
@@ -591,7 +591,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
       if (attachmentType) incomingMsg.attachmentType = attachmentType;
       if (igPostMediaId) incomingMsg.igPostMediaId = igPostMediaId;
-      await Interaction.updateOne(
+      const _igDmPush = await Interaction.updateOne(
         { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
         {
           $push: {
@@ -602,6 +602,11 @@ async function handleInstagramWebhook(payload, organizationId) {
           }
         }
       );
+
+      // New inbound DM (not a webhook retry) → reset auto-reply hard-stop counters.
+      if (_igDmPush.modifiedCount > 0) {
+        await resetAutoReplyCountersForNewInbound(Interaction, { platformId: threadPlatformId });
+      }
 
       const interaction = await Interaction.findOne({ platformId: threadPlatformId });
 
@@ -963,6 +968,12 @@ async function handleFacebookWebhook(payload, organizationId) {
         updateOps,
         { upsert: true, new: true }
       );
+
+      // New inbound DM → reset the auto-reply hard-stop counters so a long-lived
+      // conversation isn't permanently locked out of auto-reply once it crosses
+      // maxAutoReplies. (Bot loops never reach here — no inbound between replies.)
+      await resetAutoReplyCountersForNewInbound(Interaction, { platformId: threadPlatformId });
+
       return interaction;
     }
 
@@ -1195,7 +1206,7 @@ async function handleWhatsAppWebhook(payload, organizationId) {
       );
 
       // Append this message to the thread's message list; guard against duplicate mids
-      await Interaction.updateOne(
+      const _liDmPush = await Interaction.updateOne(
         { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
         {
           $push: {
@@ -1206,6 +1217,11 @@ async function handleWhatsAppWebhook(payload, organizationId) {
           }
         }
       );
+
+      // New inbound DM (not a webhook retry) → reset auto-reply hard-stop counters.
+      if (_liDmPush.modifiedCount > 0) {
+        await resetAutoReplyCountersForNewInbound(Interaction, { platformId: threadPlatformId });
+      }
 
       const interaction = await Interaction.findOne({ platformId: threadPlatformId });
       return interaction;
