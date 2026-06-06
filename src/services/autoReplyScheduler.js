@@ -124,7 +124,7 @@ class AutoReplyScheduler {
   /**
    * Queue immediate auto-reply job (webhook-triggered)
    */
-  async queueImmediateAutoReply(interactionId, organizationId, delayMinutes = 1) {
+  async queueImmediateAutoReply(interactionId, organizationId, fallbackSeconds = 60) {
     try {
       const organization = await Organization.findById(organizationId);
       
@@ -194,7 +194,7 @@ class AutoReplyScheduler {
         return false;
       }
 
-      const delayMs = computeReplyDelayMs(settings, { fallbackMinutes: delayMinutes ?? 1 });
+      const delayMs = computeReplyDelayMs(settings, { fallbackSeconds: fallbackSeconds ?? 60 });
 
       const mid = interaction.metadata?.lastMid;
       const autoReplyJobId =
