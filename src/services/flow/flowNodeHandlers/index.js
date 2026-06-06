@@ -128,23 +128,37 @@ async function handleWhatsAppInteractive(node, ctx) {
     return;
   }
 
-  const record = (content, messageType) => {
+  const record = (content, messageType, attachment = null) => {
     if (!interaction?._id) return Promise.resolve();
     return recordAutomationReply({
       interactionId: interaction._id,
       organizationId,
       content,
-      messageType
+      messageType,
+      attachmentUrl: attachment?.url || null,
+      attachmentType: attachment?.type || null
     }).catch(() => {});
   };
 
   switch (node.type) {
     case 'action.send_media': {
+      const waType = config.mediaType || 'image';
       await whatsappService.sendMediaByUrl(
-        conn, recipient, config.mediaType || 'image', config.mediaUrl,
+        conn, recipient, waType, config.mediaUrl,
         config.caption || '', config.filename || ''
       );
-      await record(config.caption || `[${config.mediaType || 'media'}]`, config.mediaType || 'media');
+      // Map WhatsApp media type → inbox attachment type so the inbox renders the
+      // actual file (image/video/audio/file) instead of an "[image]" placeholder.
+      const attachmentType =
+        waType === 'document' ? 'file' : waType === 'sticker' ? 'image' : waType;
+      // When there's no caption, use a placeholder the inbox hides once it sees
+      // the attachment (it suppresses exactly "[image]"/"[video]"/"[audio]"/"[file]").
+      const mediaContent = config.caption?.trim() || `[${attachmentType}]`;
+      await record(
+        mediaContent,
+        waType,
+        { url: config.mediaUrl, type: attachmentType }
+      );
       break;
     }
     case 'action.send_location': {
