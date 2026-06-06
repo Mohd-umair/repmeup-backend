@@ -193,6 +193,22 @@ exports.updateOrganization = async (req, res, next) => {
       });
     }
 
+    // Handle per-channel automation mode (workflow_only | ai_only | hybrid)
+    if (req.body.automationModeByChannel !== undefined) {
+      const VALID_MODES = ['workflow_only', 'ai_only', 'hybrid'];
+      const CHANNELS = ['whatsapp', 'instagram', 'facebook'];
+      if (!organization.automationModeByChannel) {
+        organization.automationModeByChannel = {};
+      }
+      CHANNELS.forEach(ch => {
+        const val = req.body.automationModeByChannel[ch];
+        if (val !== undefined && VALID_MODES.includes(val)) {
+          organization.automationModeByChannel[ch] = val;
+        }
+      });
+      organization.markModified('automationModeByChannel');
+    }
+
     await organization.save();
 
     // Update scheduled jobs after saving (so we have the updated organization)

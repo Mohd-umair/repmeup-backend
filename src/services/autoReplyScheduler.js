@@ -153,12 +153,23 @@ class AutoReplyScheduler {
 
       const Interaction = require('../models/Interaction');
       const interaction = await Interaction.findById(interactionId).select(
-        'replies status platform type platformId metadata.lastMid'
+        'replies status platform type platformId metadata.lastMid metadata.flowHandled'
       );
 
       if (!interaction) {
         logger.info(`⚠️  [Auto-Reply Queue] Interaction ${interactionId} not found`);
         return false;
+      }
+
+      // Workflow-first: if a flow owns this conversation, AI fallback stands down
+      // (unless the channel is explicitly AI-only).
+      if (interaction.metadata?.flowHandled === true) {
+        const replyEngineService = require('./replyEngineService');
+        const mode = replyEngineService.getChannelMode(organization, interaction.platform);
+        if (mode !== 'ai_only') {
+          logger.info(`⚠️  [Auto-Reply Queue] Skipping — workflow owns interaction ${interactionId} (mode: ${mode})`);
+          return false;
+        }
       }
 
       const threadDm = isThreadStyleDm(interaction);

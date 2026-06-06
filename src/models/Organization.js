@@ -276,11 +276,28 @@ const organizationSchema = new mongoose.Schema({
     }
   },
 
-  /** Unified flow builder runtime mode: legacy | hybrid | flows_only */
+  /**
+   * @deprecated Use `automationModeByChannel` instead. Retained for back-compat:
+   * replyEngineService falls back to this when a channel mode is unset
+   * (legacy→ai_only, flows_only→workflow_only, hybrid→hybrid).
+   */
   automationFlowMode: {
     type: String,
     enum: ['legacy', 'hybrid', 'flows_only'],
     default: 'hybrid'
+  },
+
+  /**
+   * Per-channel automation mode. The Workflow (Flow) Builder is the core engine;
+   * AI is subordinate (AI nodes inside flows + fallback when no flow matches).
+   *   - workflow_only : only flows run; no AI fallback
+   *   - ai_only       : flows skipped; AI auto-reply handles messages
+   *   - hybrid        : flows run; AI fills the gap only when no flow took the conversation
+   */
+  automationModeByChannel: {
+    whatsapp:  { type: String, enum: ['workflow_only', 'ai_only', 'hybrid'], default: 'hybrid' },
+    instagram: { type: String, enum: ['workflow_only', 'ai_only', 'hybrid'], default: 'hybrid' },
+    facebook:  { type: String, enum: ['workflow_only', 'ai_only', 'hybrid'], default: 'hybrid' }
   },
 
   // Instagram Comment-to-DM selling automation

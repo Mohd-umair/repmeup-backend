@@ -683,27 +683,75 @@ async function processIncomingMessage(change, connection, rawPayload) {
     logger.error('[WhatsApp] Socket emit failed', { error: socketErr.message });
   }
 
-  // ── AI pipeline + auto-reply queue (respects triggerMode/platforms/types) ──
-  try {
-    await aiQueue.add(
-      { interactionId: savedInteraction._id },
-      {
-        attempts: 3,
-        backoff: 2000,
-        jobId: `ai-${savedInteraction._id}-${mid}`
-      }
-    );
-    const queued = await autoReplyScheduler.queueImmediateAutoReply(
-      savedInteraction._id.toString(),
-      organizationId
-    );
-    if (queued) {
-      logger.info('[WhatsApp] AI + auto-reply queued', {
-        interactionId: String(savedInteraction._id)
+  // ── Workflow-first routing → AI fallback (per-channel automation mode) ──────
+  // Flows are the core engine; AI runs only as a fallback when no flow took the
+  // conversation (and only when the channel mode allows it).
+  const replyEngineService = require('../replyEngineService');
+  const organization = connection.organization;
+
+  let flowHandled = false;
+  const { runFlows, runAiFallback } = replyEngineService.decide({
+    organization,
+    platform: 'whatsapp',
+    flowHandled: false
+  });
+
+  if (runFlows) {
+    try {
+      const flowTriggerRouter = require('../flow/flowTriggerRouter');
+      const eventType = md.type === 'order' ? 'whatsapp.order' : 'whatsapp.message';
+      const flowResult = await flowTriggerRouter.route({
+        organizationId,
+        platform: 'whatsapp',
+        eventType,
+        interaction: savedInteraction,
+        payload: {
+          content: savedInteraction.content,
+          text: savedInteraction.content,
+          postback: savedInteraction.metadata?.postback || savedInteraction.metadata?.buttonPayload
+        }
       });
+      flowHandled = !!flowResult.handled;
+      if (flowHandled) {
+        logger.info('[WhatsApp] Automation flow handled message', {
+          interactionId: String(savedInteraction._id),
+          enrollments: flowResult.enrollments.length
+        });
+      }
+    } catch (flowErr) {
+      logger.warn('[WhatsApp] Flow routing error (non-fatal)', { error: flowErr.message });
     }
-  } catch (queueError) {
-    logger.error('[WhatsApp] Failed to queue AI/auto-reply', { error: queueError.message });
+  }
+
+  // AI fallback only when the mode allows it AND no flow owned the conversation.
+  if (runAiFallback && !flowHandled) {
+    try {
+      await aiQueue.add(
+        { interactionId: savedInteraction._id },
+        {
+          attempts: 3,
+          backoff: 2000,
+          jobId: `ai-${savedInteraction._id}-${mid}`
+        }
+      );
+      const queued = await autoReplyScheduler.queueImmediateAutoReply(
+        savedInteraction._id.toString(),
+        organizationId
+      );
+      if (queued) {
+        logger.info('[WhatsApp] AI fallback + auto-reply queued', {
+          interactionId: String(savedInteraction._id)
+        });
+      }
+    } catch (queueError) {
+      logger.error('[WhatsApp] Failed to queue AI/auto-reply', { error: queueError.message });
+    }
+  } else {
+    logger.info('[WhatsApp] AI fallback skipped', {
+      interactionId: String(savedInteraction._id),
+      runAiFallback,
+      flowHandled
+    });
   }
 }
 

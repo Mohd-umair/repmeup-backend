@@ -331,6 +331,74 @@ async function handleAction(node, ctx) {
       }
       break;
     }
+    case 'action.ai_detect_intent': {
+      const saveAs = (config.saveAs && String(config.saveAs).trim()) || 'intent';
+      const text = String(interaction?.content || '').trim();
+      let intent = 'other';
+      if (text) {
+        const candidates = Array.isArray(config.intents)
+          ? config.intents.map((s) => String(s).trim()).filter(Boolean)
+          : [];
+        if (candidates.length) {
+          // Custom label set — classify into one of the author's intents.
+          const replyGenerationService = require('../../ai/replyGenerationService');
+          const system = `You are an intent classifier. Read the customer message and respond with ONLY one label from this list (lowercase, no punctuation): ${candidates.join(', ')}. If none clearly fit, respond with "other".`;
+          try {
+            const raw = await replyGenerationService.generateText(system, `Message: "${text}"`, {
+              temperature: 0, maxTokens: 12, feature: 'flow_ai_node'
+            });
+            const got = String(raw || '').toLowerCase().replace(/[^a-z0-9_ ]/g, '').trim();
+            intent = candidates.find((c) => c.toLowerCase() === got) || (got === 'other' ? 'other' : (candidates.find((c) => got.includes(c.toLowerCase())) || 'other'));
+          } catch (err) {
+            logger.warn('[FlowHandler] ai_detect_intent failed (fallback "other")', { error: err.message });
+          }
+        } else {
+          // Open-ended — reuse the coarse classifier.
+          const intentClassificationService = require('../../ai/intentClassificationService');
+          intent = await intentClassificationService.detectIntent(text);
+        }
+      }
+      return {
+        status: 'continue',
+        variables: { [saveAs]: intent },
+        nextNodeId: pickEdge(ctx.edges)?.target
+      };
+    }
+    case 'action.ai_extract': {
+      const saveAs = (config.saveAs && String(config.saveAs).trim()) || 'extracted';
+      const fields = Array.isArray(config.fields)
+        ? config.fields.map((f) => String(f).trim()).filter(Boolean)
+        : [];
+      const text = String(interaction?.content || '').trim();
+      let extracted = {};
+      if (text && fields.length) {
+        const replyGenerationService = require('../../ai/replyGenerationService');
+        const system = `You extract structured data from a customer message. Return ONLY a JSON object (no markdown, no commentary) with exactly these keys: ${fields.join(', ')}. Use a concise string value for each key. If a value is not present in the message, use an empty string "".`;
+        try {
+          const raw = await replyGenerationService.generateText(system, `Message: "${text}"`, {
+            temperature: 0, maxTokens: 300, feature: 'flow_ai_node'
+          });
+          const match = String(raw || '').match(/\{[\s\S]*\}/);
+          if (match) {
+            const parsed = JSON.parse(match[0]);
+            // Keep only the requested fields, coerced to strings.
+            for (const f of fields) {
+              extracted[f] = parsed[f] == null ? '' : String(parsed[f]);
+            }
+          }
+        } catch (err) {
+          logger.warn('[FlowHandler] ai_extract failed (empty result)', { error: err.message });
+        }
+      }
+      // Save the whole object, plus each field individually for easy condition checks.
+      const variables = { [saveAs]: extracted };
+      for (const f of fields) variables[f] = extracted[f] ?? '';
+      return {
+        status: 'continue',
+        variables,
+        nextNodeId: pickEdge(ctx.edges)?.target
+      };
+    }
     case 'action.assign_bucket': {
       if (config.bucketId && interaction?._id) {
         const Interaction = require('../../../models/Interaction');
