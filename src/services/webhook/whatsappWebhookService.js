@@ -30,6 +30,7 @@
 const Interaction = require('../../models/Interaction');
 const PlatformConnection = require('../../models/PlatformConnection');
 const { generateChatRef } = require('../../utils/chatRefHelper');
+const { resetAutoReplyCountersForNewInbound } = require('../../utils/interactionThreadDm');
 const { emitToOrg } = require('../../utils/socketEmitter');
 const { resolveContact, normalizeAuthorForPlatform } = require('../contactService');
 const logger = require('../../config/logger');
@@ -288,15 +289,10 @@ async function upsertWhatsAppThread({
   // crossed maxAutoReplies. The cap still protects against AI-to-AI loops, because
   // those have no inbound message between replies to trigger this reset.
   if (pushResult.modifiedCount > 0) {
-    await Interaction.updateOne(
-      { platformId: threadPlatformId, organization: organizationId },
-      {
-        $set: {
-          autoReplyCount: 0,
-          'escalationMetadata.sameTopicReplies': 0
-        }
-      }
-    );
+    await resetAutoReplyCountersForNewInbound(Interaction, {
+      platformId: threadPlatformId,
+      organization: organizationId
+    });
   }
 
   const interaction = await Interaction.findOne({
