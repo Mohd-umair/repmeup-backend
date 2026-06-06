@@ -568,32 +568,47 @@ function aggregateTopInteractions(matchFilter, limit = 5) {
         _id: '$metadata.postId',
         platform: { $first: '$platform' },
         postUrl: { $first: '$metadata.postUrl' },
-        interactionMediaUrl: { $first: '$metadata.mediaUrl' },
         commentCount: { $sum: 1 },
         totalLikes: { $sum: { $ifNull: ['$engagement.likes', 0] } },
         totalViews: { $sum: { $ifNull: ['$engagement.views', 0] } },
         positiveCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] } },
         negativeCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] } },
         neutralCount: { $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] } },
-        latestDate: { $max: '$platformCreatedAt' },
-        latestContent: { $first: '$content' }
+        latestDate: { $max: '$platformCreatedAt' }
       }
     },
-    { $sort: { commentCount: -1 } },
-    { $limit: limit },
+    // Inner-join the published post so the row represents a real *post*, not a
+    // comment thread. Rows whose postId has no matching published ScheduledPost
+    // are dropped — this is what guarantees "posts only, not comments".
     {
       $lookup: {
         from: 'scheduledposts',
-        localField: '_id',
-        foreignField: 'platformPostId',
+        let: { pid: '$_id' },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$platformPostId', '$$pid'] },
+                  { $eq: ['$status', 'published'] }
+                ]
+              }
+            }
+          },
+          { $project: { content: 1, mediaUrl: 1, mediaStoragePaths: 1, platformPostUrl: 1 } }
+        ],
         as: 'scheduledPost'
       }
     },
-    { $unwind: { path: '$scheduledPost', preserveNullAndEmptyArrays: true } },
+    // No preserveNull → inner join: only interactions tied to a real post pass.
+    { $unwind: '$scheduledPost' },
+    { $sort: { commentCount: -1 } },
+    { $limit: limit },
     {
       $project: {
         platform: 1,
-        postUrl: 1,
+        // Prefer the post's own canonical URL, fall back to the one on the comment.
+        postUrl: { $ifNull: ['$scheduledPost.platformPostUrl', '$postUrl'] },
         commentCount: 1,
         totalLikes: 1,
         totalViews: 1,
@@ -601,9 +616,14 @@ function aggregateTopInteractions(matchFilter, limit = 5) {
         negativeCount: 1,
         neutralCount: 1,
         latestDate: 1,
-        latestContent: 1,
+        // Content + image come strictly from the post — never from a comment.
         postContent: '$scheduledPost.content',
-        postMediaUrl: { $ifNull: ['$scheduledPost.mediaUrl', '$interactionMediaUrl'] }
+        postMediaUrl: {
+          $ifNull: [
+            '$scheduledPost.mediaUrl',
+            { $arrayElemAt: ['$scheduledPost.mediaStoragePaths', 0] }
+          ]
+        }
       }
     }
   ]);
@@ -1073,7 +1093,7 @@ function assembleDashboardDto(inputs) {
     },
     topInteractions: (topInteractions || []).map((t) => {
       const dominant = t.positiveCount >= t.negativeCount ? 'positive' : 'negative';
-      const rawContent = t.postContent || t.latestContent || '';
+      const rawContent = t.postContent || '';
       return {
         postId: t._id,
         platform: t.platform,
