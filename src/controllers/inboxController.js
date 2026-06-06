@@ -1760,40 +1760,27 @@ exports.getAuthorAvatar = async (req, res, next) => {
       const token = await resolveEaaToken();
       if (!token) {
         // No EAA token available — Instagram Direct Login cannot fetch customer profiles
-        logger.warn('[inboxController] IG avatar: no EAA token available', { userId, pageId: pageId || null });
         return res.status(404).json({ success: false, error: 'No EAA token available for Instagram', useDefault: true });
       }
-      const tokenKind = token.startsWith('IGAA') ? 'IGAA' : (token.startsWith('EAA') ? 'EAA' : 'other');
 
-      // Step 1: resolve the CDN URL via the shared profile resolver, which tries
-      // multiple field sets (profile_pic / profile_picture_url) across both
-      // graph.facebook.com and graph.instagram.com — far more robust than a
-      // single fields=profile_pic call (which silently returns nothing on the
-      // graph host that doesn't expose that exact field name).
+      // Step 1: resolve the CDN URL via fields=profile_pic (avoids /picture silhouette redirect)
       try {
-        const instagramService = require('../integrations/meta/instagramService');
-        const profile = await instagramService._fetchInstagramUserProfile(token, userId);
-        const cdnUrl = profile?.profile_pic || profile?.profile_picture_url;
+        const profileRes = await axios.get(`${GRAPH}/${userId}`, {
+          params: { fields: 'profile_pic', access_token: token },
+          timeout: 8000
+        });
+        const cdnUrl = profileRes.data?.profile_pic;
         if (cdnUrl && cdnUrl.startsWith('http')) {
           await streamImage(cdnUrl);
           return;
         }
-        logger.warn('[inboxController] IG avatar: profile resolved but no picture URL', {
-          userId, tokenKind, hasProfile: !!profile, fields: profile ? Object.keys(profile) : []
-        });
-      } catch (e) {
-        logger.warn('[inboxController] IG avatar: profile fetch threw', { userId, tokenKind, error: e.message });
-      }
+      } catch (_) { /* fall through */ }
 
       // Step 2: fallback — /picture redirect endpoint
       try {
         await streamImage(`${GRAPH}/${userId}/picture?type=normal&access_token=${encodeURIComponent(token)}`);
         return;
-      } catch (e) {
-        const code = e.response?.data?.error?.code;
-        const msg = e.response?.data?.error?.message || e.message;
-        logger.warn('[inboxController] IG avatar: /picture fallback failed', { userId, tokenKind, code, msg: String(msg).slice(0, 120) });
-      }
+      } catch (_) { /* fall through */ }
 
       return res.status(404).json({ success: false, error: 'Avatar not available', useDefault: true });
     }
