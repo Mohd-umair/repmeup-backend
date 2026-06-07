@@ -215,7 +215,9 @@ const platformConnectionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
-  }
+  },
+  /** True for the display-only demo connection seeded into a trial workspace. */
+  seeded: { type: Boolean, default: false }
 }, {
   timestamps: true
 });

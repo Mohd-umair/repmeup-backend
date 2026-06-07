@@ -157,7 +157,10 @@ const whatsappCampaignSchema = new mongoose.Schema(
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
-    }
+    },
+
+    /** True for the demo/sample campaign seeded into a trial workspace (display-only). */
+    seeded: { type: Boolean, default: false }
   },
   { timestamps: true }
 );

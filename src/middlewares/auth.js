@@ -29,6 +29,28 @@ function rehydrateUserIds(user) {
   return user;
 }
 
+/**
+ * Endpoints a LOCKED demo workspace may still call — everything needed to render
+ * the "trial ended" screen and complete a purchase. Matched against req.originalUrl
+ * (the full path, e.g. /api/subscription/limits or /api/v1/razorpay/...), so it is
+ * robust to the dual /api + /api/v1 mounting and to nested routers.
+ */
+const DEMO_UNLOCKED_PATH_PATTERNS = [
+  '/subscription',   // view plan/limits, upgrade
+  '/plans',          // list purchasable plans
+  '/razorpay',       // create + verify payment
+  '/entitlements',   // resolve current entitlements
+  '/auth/me',        // who am I (renders the shell)
+  '/auth/logout',    // sign out
+  '/auth/demo-login' // re-entry attempt
+];
+
+function isDemoUnlockedPath(originalUrl) {
+  const url = String(originalUrl || '').split('?')[0];
+  return DEMO_UNLOCKED_PATH_PATTERNS.some((p) => url.includes(p));
+}
+exports.isDemoUnlockedPath = isDemoUnlockedPath;
+
 // Protect routes - verify JWT token
 exports.protect = async (req, res, next) => {
   try {
@@ -97,6 +119,21 @@ exports.protect = async (req, res, next) => {
           success: false,
           error: 'User account is deactivated'
         });
+      }
+
+      // Demo trial lock: when a demo workspace's trial has expired it is locked
+      // (data retained). We block normal API access with UPGRADE_REQUIRED but
+      // still allow the endpoints needed to render the lock screen and purchase
+      // a plan (subscription/billing, plans, auth/me, logout). The check is cheap:
+      // it reads the denormalized flag on the already-populated organization.
+      if (user.organization && user.organization.demo && user.organization.demo.lockedAt) {
+        if (!isDemoUnlockedPath(req.originalUrl)) {
+          return res.status(403).json({
+            success: false,
+            code: 'UPGRADE_REQUIRED',
+            error: 'Your demo trial has ended. Purchase a plan to continue — all your data is safe.'
+          });
+        }
       }
 
       // Attach user to request

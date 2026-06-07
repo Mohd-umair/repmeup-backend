@@ -2,6 +2,7 @@ const superAdminService = require('../services/superAdminService');
 const Transaction = require('../models/Transaction');
 const aiUsageReportService = require('../services/aiUsageReportService');
 const userActivityLogService = require('../services/userActivityLogService');
+const demoWorkspaceService = require('../services/demoWorkspaceService');
 
 /**
  * GET /api/super-admin/plans
@@ -407,6 +408,105 @@ exports.listTransactions = async (req, res, next) => {
       }
     });
   } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/demo-workspaces
+ * Create a full-featured demo/trial workspace for a prospect.
+ * Body: { prospect: { name, email, company?, phone? }, planId?, trialDays? }
+ *
+ * Returns login credentials + a magic link the team can share. The workspace is
+ * a real tenant; when the prospect purchases, it becomes their production
+ * account with no data migration.
+ */
+exports.createDemoWorkspace = async (req, res, next) => {
+  try {
+    const { prospect, planId, trialDays } = req.body || {};
+    if (!prospect || !prospect.email) {
+      return res.status(400).json({ success: false, error: 'prospect.email is required' });
+    }
+
+    const result = await demoWorkspaceService.createDemoWorkspace({
+      prospect,
+      planId,
+      trialDays: trialDays != null ? Number(trialDays) : undefined,
+      actorUserId: req.user._id
+    });
+
+    // Build the magic link from the configured frontend URL.
+    const base = (process.env.FRONTEND_URL || 'http://localhost:4200').split(',')[0].trim().replace(/\/$/, '');
+    const magicLink = `${base}/demo-login?token=${result.magicLinkToken}`;
+
+    res.status(201).json({
+      success: true,
+      message: 'Demo workspace created successfully',
+      data: {
+        organizationId: String(result.organization._id),
+        organizationName: result.organization.name,
+        userId: String(result.user._id),
+        loginEmail: result.user.email,
+        provisionalPassword: result.provisionalPassword,
+        magicLink,
+        trialEndsAt: result.trialEndsAt,
+        planId: result.subscription.planId,
+        planName: result.subscription.planName
+      }
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, error: error.message });
+    }
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/demo-workspaces
+ * List demo workspaces with live trial status. Query: status?, page?, limit?
+ */
+exports.listDemoWorkspaces = async (req, res, next) => {
+  try {
+    const data = await demoWorkspaceService.listDemoWorkspaces(req.query);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/demo-workspaces/:organizationId/extend
+ * Body: { days }. Extends (and unlocks) a demo trial.
+ */
+exports.extendDemoTrial = async (req, res, next) => {
+  try {
+    const { days } = req.body || {};
+    const result = await demoWorkspaceService.extendTrial(req.params.organizationId, days);
+    res.status(200).json({ success: true, data: { trialEndsAt: result.trialEndsAt }, message: 'Trial extended successfully' });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/demo-workspaces/:organizationId/convert
+ * Body: { planId }. Converts the demo to a paid plan IN PLACE (no migration).
+ */
+exports.convertDemoWorkspace = async (req, res, next) => {
+  try {
+    const { planId } = req.body || {};
+    if (!planId) return res.status(400).json({ success: false, error: 'planId is required' });
+    const result = await demoWorkspaceService.convertToPaid(req.params.organizationId, planId, req.user._id);
+    res.status(200).json({
+      success: true,
+      data: { planId: result.subscription.planId, planName: result.subscription.planName, status: result.subscription.status },
+      message: 'Demo workspace converted to a paid plan'
+    });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
     next(error);
   }
 };

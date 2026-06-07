@@ -14,7 +14,9 @@ const {
   voiceCallQueue,
   campaignSendQueue,
   campaignInboxQueue,
-  flowTickQueue
+  flowTickQueue,
+  kbCrawlQueue,
+  demoExpiryQueue
 } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
@@ -27,6 +29,8 @@ const renewGmailWatches = require('./jobs/renewGmailWatches');
 const renewOutlookSubscriptions = require('./jobs/renewOutlookSubscriptions');
 const processVoiceCall = require('./jobs/processVoiceCall');
 const processFlowTick = require('./jobs/processFlowTick');
+const processKbCrawl = require('./jobs/processKbCrawl');
+const processDemoExpiry = require('./jobs/processDemoExpiry');
 const campaignConfig = require('./config/campaignConfig');
 const { registerCampaignWorkers } = require('./workers/registerCampaignWorkers');
 const logger = require('./config/logger');
@@ -36,6 +40,7 @@ const WEBHOOK_CONCURRENCY = parseInt(process.env.WEBHOOK_CONCURRENCY) || 10;
 const AI_CONCURRENCY = parseInt(process.env.AI_CONCURRENCY) || 10;
 const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
 const BRAND_ANALYSIS_CONCURRENCY = parseInt(process.env.BRAND_ANALYSIS_CONCURRENCY) || 2;
+const KB_CRAWL_CONCURRENCY = parseInt(process.env.KB_CRAWL_CONCURRENCY) || 2;
 const EMAIL_WEBHOOK_CONCURRENCY = parseInt(process.env.EMAIL_WEBHOOK_CONCURRENCY) || 5;
 const IMAP_POLL_CONCURRENCY = parseInt(process.env.IMAP_POLL_CONCURRENCY) || 3;
 const VOICE_CALL_CONCURRENCY = parseInt(process.env.VOICE_CALL_CONCURRENCY) || 4;
@@ -89,6 +94,32 @@ async function startWorker() {
       return await processBrandAnalysis(job);
     });
     logger.info('[Worker] brand-analysis processor started', { concurrency: BRAND_ANALYSIS_CONCURRENCY });
+
+    // Knowledge-base website crawl (crawl + per-page AI summarize → KB entries)
+    kbCrawlQueue.process(KB_CRAWL_CONCURRENCY, async (job) => {
+      logger.debug('[Worker:kb-crawl] picked up job', { jobId: job.id });
+      return await processKbCrawl(job);
+    });
+    logger.info('[Worker] kb-crawl processor started', { concurrency: KB_CRAWL_CONCURRENCY });
+
+    // Demo-trial expiry: run daily to lock demo workspaces past their trial.
+    // Guard against duplicate repeat jobs on worker restart.
+    demoExpiryQueue.process(1, async () => {
+      return await processDemoExpiry();
+    });
+    const demoRepeatables = await demoExpiryQueue.getRepeatableJobs();
+    const demoAlreadyScheduled = demoRepeatables.some(j => j.id && j.id.includes('demo-expiry-repeat'));
+    if (!demoAlreadyScheduled) {
+      await demoExpiryQueue.add({}, {
+        repeat: { every: 24 * 60 * 60 * 1000 }, // daily
+        jobId: 'demo-expiry-repeat',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] demo-expiry repeat job registered (daily)');
+    } else {
+      logger.info('[Worker] demo-expiry repeat job already exists — skipping registration');
+    }
+    logger.info('[Worker] demo-expiry processor started (daily)');
 
     // Email webhook processor (Gmail Pub/Sub + Outlook Graph)
     emailWebhookQueue.process(EMAIL_WEBHOOK_CONCURRENCY, async (job) => {

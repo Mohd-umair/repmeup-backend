@@ -13,7 +13,9 @@ const {
   voiceCallQueue,
   campaignSendQueue,
   campaignInboxQueue,
-  flowTickQueue
+  flowTickQueue,
+  kbCrawlQueue,
+  demoExpiryQueue
 } = require('./queue');
 
 const serverAdapter = new ExpressAdapter();
@@ -32,6 +34,8 @@ createBullBoard({
     new BullAdapter(campaignSendQueue),
     new BullAdapter(campaignInboxQueue),
     new BullAdapter(flowTickQueue),
+    new BullAdapter(kbCrawlQueue),
+    new BullAdapter(demoExpiryQueue),
     new BullAdapter(syncQueue),         // dormant — see docs/queues.md
     new BullAdapter(notificationQueue)  // dormant — see docs/queues.md
   ],
