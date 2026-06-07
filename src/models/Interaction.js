@@ -289,6 +289,8 @@ const interactionSchema = new mongoose.Schema({
   
   // Metadata
   metadata: {
+    /** True for demo/sample interactions seeded into a trial workspace. */
+    seeded: { type: Boolean, default: false },
     // For social posts
     postId: String,
     postUrl: String,

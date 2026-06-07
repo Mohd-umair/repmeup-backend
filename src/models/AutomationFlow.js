@@ -58,7 +58,9 @@ const automationFlowSchema = new mongoose.Schema({
     converted: { type: Number, default: 0 },
     failed: { type: Number, default: 0 }
   },
-  isBlueprint: { type: Boolean, default: false, index: true }
+  isBlueprint: { type: Boolean, default: false, index: true },
+  /** True for demo/sample flows seeded into a trial workspace. */
+  seeded: { type: Boolean, default: false }
 }, { timestamps: true });
 
 automationFlowSchema.index({ organization: 1, status: 1 });

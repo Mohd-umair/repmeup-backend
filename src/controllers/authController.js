@@ -78,9 +78,47 @@ exports.login = async (req, res, next) => {
       }
     });
   } catch (error) {
-    res.status(401).json({
+    res.status(error.statusCode || 401).json({
       success: false,
-      error: error.message
+      error: error.message,
+      code: error.code || undefined
+    });
+  }
+};
+
+// @desc    Magic-link login for demo prospects (no password)
+// @route   POST /api/auth/demo-login
+// @access  Public
+exports.demoLogin = async (req, res, next) => {
+  try {
+    const { token: magicToken } = req.body;
+    const result = await authService.demoLogin(magicToken);
+
+    const orgId = result.user.organization?._id || result.user.organization;
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: orgId,
+      action: 'login',
+      path: '/api/auth/demo-login',
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        user: result.user,
+        token: result.token,
+        refreshToken: result.refreshToken
+      }
+    });
+  } catch (error) {
+    res.status(error.statusCode || 401).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined
     });
   }
 };

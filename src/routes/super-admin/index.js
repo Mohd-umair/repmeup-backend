@@ -66,6 +66,13 @@ router.get('/ai-usage/records/:id', superAdminController.getAiUsageRecordById);
 router.get('/ai-usage/records', superAdminController.getAiUsageRecords);
 router.get('/ai-usage', superAdminController.getAiUsage);
 router.get('/organizations', superAdminController.listOrganizations);
+
+// Demo / Trial workspaces — one-click create a full-featured demo for a prospect.
+router.post('/demo-workspaces', superAdminController.createDemoWorkspace);
+router.get('/demo-workspaces', superAdminController.listDemoWorkspaces);
+router.post('/demo-workspaces/:organizationId/extend', superAdminController.extendDemoTrial);
+router.post('/demo-workspaces/:organizationId/convert', superAdminController.convertDemoWorkspace);
+
 router.post(
   '/organizations/:organizationId/users',
   superAdminController.createOrganizationUser

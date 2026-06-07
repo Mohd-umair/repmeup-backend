@@ -58,7 +58,9 @@ const responseTemplateSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
-  }
+  },
+  /** True for demo/sample templates seeded into a trial workspace. */
+  seeded: { type: Boolean, default: false }
 }, {
   timestamps: true
 });

@@ -215,6 +215,15 @@ class AuthService {
         );
       }
 
+      // Block sign-in to a demo workspace whose trial has expired (locked).
+      // Data is retained; purchasing unlocks the same workspace.
+      if (await this._isWorkspaceLocked(user.organization)) {
+        const err = new Error('Your demo trial has ended. Purchase a plan to continue — all your data is safe.');
+        err.code = 'UPGRADE_REQUIRED';
+        err.statusCode = 403;
+        throw err;
+      }
+
       user.lastLogin = new Date();
       await user.save();
 
@@ -236,6 +245,84 @@ class AuthService {
     } catch (error) {
       throw error;
     }
+  }
+
+  /**
+   * Is the given organization a demo workspace whose trial has expired (locked)?
+   * Cheap check: prefers the denormalized `organization.demo.lockedAt`, falling
+   * back to the authoritative Subscription.demoStatus only when needed.
+   * @param {object|string} organization Populated org doc (preferred) or org id.
+   */
+  async _isWorkspaceLocked(organization) {
+    if (!organization) return false;
+    // Fast path: denormalized flag on the (already-populated) org document.
+    if (organization.demo) {
+      if (organization.demo.lockedAt) return true;
+      if (organization.demo.isDemo !== true) return false; // not a demo → never locked
+    }
+    // Authoritative fallback (e.g. org passed as id, or denormalized flag absent).
+    const orgId = organization._id || organization;
+    const Subscription = require('../models/Subscription');
+    const sub = await Subscription.findOne({ organization: orgId })
+      .select('isDemo demoStatus')
+      .lean();
+    return !!(sub && sub.isDemo && sub.demoStatus === 'locked');
+  }
+
+  /**
+   * Magic-link login for demo prospects. Consumes a one-time token (hashed on the
+   * user as `demoMagicToken`) and issues a normal JWT session — no password needed.
+   * @param {string} rawToken The plaintext token from the magic link.
+   */
+  async demoLogin(rawToken) {
+    if (!rawToken || typeof rawToken !== 'string') {
+      const err = new Error('Invalid or missing demo login token');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const hashed = crypto.createHash('sha256').update(rawToken.trim()).digest('hex');
+    const user = await User.findOne({
+      demoMagicToken: hashed,
+      demoMagicTokenExpires: { $gt: new Date() }
+    })
+      .select('+demoMagicToken +demoMagicTokenExpires')
+      .populate('organization')
+      .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
+
+    if (!user) {
+      const err = new Error('This demo link is invalid or has expired.');
+      err.statusCode = 401;
+      throw err;
+    }
+    if (user.deletedAt || !user.isActive) {
+      const err = new Error('This demo account is no longer available.');
+      err.statusCode = 401;
+      throw err;
+    }
+
+    // Locked trial → cannot enter via magic link either; must purchase.
+    if (await this._isWorkspaceLocked(user.organization)) {
+      const err = new Error('Your demo trial has ended. Purchase a plan to continue — all your data is safe.');
+      err.code = 'UPGRADE_REQUIRED';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    user.lastLogin = new Date();
+    await user.save();
+
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    const userObj = user.toJSON();
+    const effectiveGroup = await this._resolveEffectiveGroup(user);
+    if (!userObj.group && effectiveGroup) {
+      userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+    }
+    userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
+
+    return { user: userObj, token, refreshToken };
   }
 
   /**

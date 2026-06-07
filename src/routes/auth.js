@@ -9,6 +9,8 @@ const riscController = require('../controllers/riscController');
 // Public routes
 router.post('/register', validateRegistration, authController.register);
 router.post('/login', validateLogin, authController.login);
+// Magic-link login for demo prospects (no password)
+router.post('/demo-login', authController.demoLogin);
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password', authController.resetPassword);
 

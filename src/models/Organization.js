@@ -30,6 +30,27 @@ const organizationSchema = new mongoose.Schema({
   orderCounter: { type: Number, default: 1000 },
   complaintCounter: { type: Number, default: 1000 },
   reviewCounter: { type: Number, default: 1000 },
+
+  // ── Demo / Trial workspace ────────────────────────────────────────────────
+  // A demo workspace is a REAL tenant put on a full-featured trial. On purchase
+  // it becomes the production account with zero data migration (the same
+  // Subscription doc is mutated by the normal upgrade/payment path).
+  // The authoritative trial state lives on the Subscription model; these fields
+  // are denormalized prospect/admin metadata for the super-admin demo console.
+  demo: {
+    isDemo: { type: Boolean, default: false, index: true },
+    prospect: {
+      name:    { type: String, trim: true, default: '' },
+      email:   { type: String, trim: true, lowercase: true, default: '' },
+      company: { type: String, trim: true, default: '' },
+      phone:   { type: String, trim: true, default: '' }
+    },
+    createdViaSuperAdmin: { type: Boolean, default: false },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    seededAt:  { type: Date },
+    lockedAt:  { type: Date },     // set when the trial expires and the workspace is locked
+    convertedAt: { type: Date }    // set when the prospect purchases a paid plan
+  },
   size: {
     type: String,
     enum: ['', '1-10', '11-50', '51-200', '201-500', '501-1000', '1000+', 'small', 'medium', 'large', 'enterprise'],

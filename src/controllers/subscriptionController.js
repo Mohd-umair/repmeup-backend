@@ -9,6 +9,27 @@ const { buildPublicPlanCard } = require('../services/planPresentationService');
 const { cancelRazorpaySubscription } = require('./razorpayController');
 
 /**
+ * Build the demo/trial status block for the limits payload.
+ * Returns null for normal (non-demo) workspaces so the frontend can simply check
+ * `data.trial` truthiness to decide whether to show trial UI.
+ */
+function buildTrialStatus(subscription) {
+  if (!subscription || !subscription.isDemo) return null;
+  const now = Date.now();
+  const endsAt = subscription.trialEndsAt ? new Date(subscription.trialEndsAt).getTime() : null;
+  const msLeft = endsAt != null ? endsAt - now : null;
+  const daysRemaining = msLeft != null ? Math.max(0, Math.ceil(msLeft / (24 * 60 * 60 * 1000))) : null;
+  return {
+    isDemo: true,
+    demoStatus: subscription.demoStatus || 'trialing',   // trialing | locked | converted
+    locked: subscription.demoStatus === 'locked',
+    trialEndsAt: subscription.trialEndsAt ?? null,
+    daysRemaining,
+    expired: msLeft != null ? msLeft <= 0 : false
+  };
+}
+
+/**
  * @desc    Get subscription limits and usage for organization
  * @route   GET /api/subscription/limits
  * @access  Private
@@ -151,7 +172,10 @@ exports.getLimits = async (req, res, next) => {
             changedAt: h.changedAt,
             reason: h.reason || null
           }))
-        }
+        },
+        // Demo/trial status — drives the prospect trial banner + lock screen.
+        // Null for normal (non-demo) workspaces.
+        trial: buildTrialStatus(subscription)
       }
     });
   } catch (error) {

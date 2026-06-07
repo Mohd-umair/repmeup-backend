@@ -173,7 +173,23 @@ const subscriptionSchema = new mongoose.Schema({
   cancelAtPeriodEnd: {
     type: Boolean,
     default: false
-  }
+  },
+
+  // ── Demo / Trial workspace ────────────────────────────────────────────────
+  // When isDemo=true the subscription is running on a full-featured trial that
+  // can be converted to a paid plan IN PLACE (no migration). `trialEndsAt`
+  // above governs expiry. `demoStatus` is the demo lifecycle state:
+  //   trialing  → active trial, full features
+  //   locked    → trial expired; data retained, access gated until purchase
+  //   converted → prospect purchased; now a normal paid subscription
+  isDemo: { type: Boolean, default: false, index: true },
+  demoStatus: {
+    type: String,
+    enum: ['trialing', 'locked', 'converted'],
+    default: undefined
+  },
+  lockedAt: { type: Date },
+  convertedAt: { type: Date }
 }, {
   timestamps: true
 });

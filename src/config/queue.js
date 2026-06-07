@@ -44,6 +44,13 @@ const campaignInboxQueue = new Queue('campaign-inbox', {
 
 const flowTickQueue = new Queue('flow-tick', queueOptions);
 
+// Knowledge-base website crawl — long-running (crawl + per-page AI summarize).
+// Low concurrency in the worker; one job can take minutes for a large site.
+const kbCrawlQueue = new Queue('kb-crawl', queueOptions);
+
+// Demo-trial expiry — a lightweight daily repeat job that locks expired demos.
+const demoExpiryQueue = new Queue('demo-expiry', queueOptions);
+
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
 // Kept in place so existing Bull Board dashboards and imports keep working.
@@ -80,7 +87,9 @@ const queues = [
   voiceCallQueue,
   campaignSendQueue,
   campaignInboxQueue,
-  flowTickQueue
+  flowTickQueue,
+  kbCrawlQueue,
+  demoExpiryQueue
 ];
 
 queues.forEach(queue => {
@@ -126,5 +135,7 @@ module.exports = {
   campaignSendQueue,
   campaignInboxQueue,
   flowTickQueue,
+  kbCrawlQueue,
+  demoExpiryQueue,
   queueConfig
 };

@@ -94,6 +94,12 @@ const userSchema = new mongoose.Schema({
   // Email OTP login (6-digit, expires in 10 minutes)
   loginOtpCode: { type: String, select: false },
   loginOtpExpires: { type: Date, select: false },
+
+  // Demo prospect magic-link login: SHA-256 hash of a one-time token the prospect
+  // clicks to auto-login to their demo workspace (no password needed up front).
+  demoMagicToken: { type: String, select: false },
+  demoMagicTokenExpires: { type: Date, select: false },
+
   lastLogin: Date,
   preferences: {
     notifications: {
@@ -134,7 +140,9 @@ const userSchema = new mongoose.Schema({
   metadata: {
     signupSource: String,
     signupIp: String,
-    deviceInfo: String
+    deviceInfo: String,
+    /** True for the auto-created admin of a demo/trial workspace. */
+    isDemoProspect: { type: Boolean, default: false }
   },
   risc: {
     googleSignInDisabled: {

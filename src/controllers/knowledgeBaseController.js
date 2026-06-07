@@ -110,6 +110,11 @@ const contentSummarizerService = require('../services/contentSummarizerService')
 const aiCreditService = require('../services/aiCreditService');
 const entitlementsService = require('../services/entitlementsService');
 const { FEATURE_KEYS } = require('../config/featureCatalog');
+const KbCrawlJob = require('../models/KbCrawlJob');
+const { kbCrawlQueue, queueConfig } = require('../config/queue');
+
+/** Hard ceiling on pages a single crawl may fetch (also bounded by plan/KB cap). */
+const KB_CRAWL_MAX_PAGES = 25;
 
 /**
  * Helper: enforce the org-wide KB entry cap (boolean+limit feature `kb.entries.max`).
@@ -570,6 +575,136 @@ exports.createURLKnowledgeBase = async (req, res) => {
       success: false, error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
+  }
+};
+
+/**
+ * Create knowledge base from an ENTIRE website (crawl internal pages).
+ * POST /api/knowledge-base/url/crawl
+ *
+ * Long-running: enqueues a background Bull job and returns a crawlJobId the
+ * client polls via GET /url/crawl/:jobId. One KB entry is created per page so
+ * the AI reply engine's $text search can surface the most relevant page.
+ */
+exports.createCrawlKnowledgeBase = async (req, res) => {
+  const kbOrgId = req.user.organization._id || req.user.organization;
+  try {
+    // Same plan gate as single-URL ingestion + must have entry capacity.
+    await entitlementsService.assert(kbOrgId, FEATURE_KEYS.KB_UPLOAD_URL);
+    await assertKbEntryCapAvailable(kbOrgId);
+
+    const {
+      url, titlePrefix, category, tags, priority,
+      focus = 'overview', targetWordCount, targetTagCount, maxPages
+    } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ success: false, error: 'URL is required' });
+    }
+
+    // Validate the URL up-front so the user gets an immediate error (not after enqueue).
+    try {
+      webScraperService._validateURL(url);
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || 'Invalid URL' });
+    }
+
+    // Clamp pages to the platform ceiling and remaining KB capacity.
+    const requestedPages = parseInt(maxPages, 10) || KB_CRAWL_MAX_PAGES;
+    const q = await entitlementsService.quota(kbOrgId, FEATURE_KEYS.KB_ENTRIES_MAX);
+    let cappedPages = Math.min(Math.max(1, requestedPages), KB_CRAWL_MAX_PAGES);
+    if (!q.isUnlimited) {
+      const used = await KnowledgeBase.countDocuments({ organization: kbOrgId });
+      cappedPages = Math.min(cappedPages, Math.max(0, q.limit - used));
+    }
+    if (cappedPages < 1) {
+      return res.status(402).json({
+        success: false, code: 'QUOTA_EXCEEDED',
+        error: "You've reached your knowledge base entries limit. Upgrade to add more."
+      });
+    }
+
+    const crawlJob = await KbCrawlJob.create({
+      organization: kbOrgId,
+      createdBy: req.user._id,
+      startUrl: url,
+      maxPages: cappedPages,
+      status: 'queued',
+      options: {
+        titlePrefix: titlePrefix || undefined,
+        category: category || 'website',
+        tags: Array.isArray(tags) ? tags : [],
+        priority: priority || 1,
+        focus,
+        targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
+        targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
+      }
+    });
+
+    await kbCrawlQueue.add(
+      { crawlJobId: String(crawlJob._id) },
+      { ...queueConfig, attempts: 1 } // crawl is non-idempotent (creates entries) → no auto-retry
+    );
+
+    return res.status(202).json({
+      success: true,
+      data: {
+        crawlJobId: String(crawlJob._id),
+        status: crawlJob.status,
+        maxPages: cappedPages
+      },
+      message: 'Website crawl started. Pages will be added to your knowledge base as they are processed.'
+    });
+  } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false, code: error.code, error: error.message,
+        featureKey: error.featureKey, meta: error.meta
+      });
+    }
+    console.error('Create crawl knowledge base error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to start website crawl. Please try again.' });
+  }
+};
+
+/**
+ * Poll the status of a website crawl.
+ * GET /api/knowledge-base/url/crawl/:jobId
+ */
+exports.getCrawlStatus = async (req, res) => {
+  try {
+    const kbOrgId = req.user.organization._id || req.user.organization;
+    const job = await KbCrawlJob.findOne({ _id: req.params.jobId, organization: kbOrgId })
+      .select('status startUrl maxPages pagesFound pagesProcessed entriesCreated currentUrl creditsUsed errors error startedAt finishedAt createdAt')
+      .lean();
+
+    if (!job) {
+      return res.status(404).json({ success: false, error: 'Crawl job not found' });
+    }
+
+    const isDone = ['completed', 'failed', 'partial'].includes(job.status);
+    return res.json({
+      success: true,
+      data: {
+        crawlJobId: String(job._id),
+        status: job.status,
+        done: isDone,
+        startUrl: job.startUrl,
+        maxPages: job.maxPages,
+        pagesFound: job.pagesFound,
+        pagesProcessed: job.pagesProcessed,
+        entriesCreated: job.entriesCreated,
+        currentUrl: job.currentUrl,
+        creditsUsed: job.creditsUsed,
+        errors: job.errors || [],
+        error: job.error || '',
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt
+      }
+    });
+  } catch (error) {
+    console.error('Get crawl status error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch crawl status' });
   }
 };
 
