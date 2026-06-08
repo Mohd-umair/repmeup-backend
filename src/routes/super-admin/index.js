@@ -70,6 +70,7 @@ router.get('/organizations', superAdminController.listOrganizations);
 // Demo / Trial workspaces — one-click create a full-featured demo for a prospect.
 router.post('/demo-workspaces', superAdminController.createDemoWorkspace);
 router.get('/demo-workspaces', superAdminController.listDemoWorkspaces);
+router.patch('/demo-workspaces/:organizationId', superAdminController.updateDemoWorkspace);
 router.post('/demo-workspaces/:organizationId/extend', superAdminController.extendDemoTrial);
 router.post('/demo-workspaces/:organizationId/convert', superAdminController.convertDemoWorkspace);
 

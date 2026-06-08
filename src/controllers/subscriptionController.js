@@ -120,7 +120,13 @@ exports.getLimits = async (req, res, next) => {
 
     const orgId = req.user.organization._id;
     const ent = await entitlementsService.getEntitlements(orgId);
-    const resolvedLimits = ent.limits;
+    const resolvedLimits = { ...ent.limits };
+
+    // Per-demo AI-credit cap overrides the (unlimited) plan limit for display +
+    // enforcement parity with aiCreditService.checkCredits.
+    if (subscription.isDemo && subscription.demoCreditsCap != null && subscription.demoCreditsCap >= 0) {
+      resolvedLimits.maxAICreditsPerMonth = subscription.demoCreditsCap;
+    }
 
     const canConnectMore =
       resolvedLimits.maxAccounts === -1 ||
@@ -153,7 +159,12 @@ exports.getLimits = async (req, res, next) => {
         status: subscription.status,
         limits: {
           ...resolvedLimits,
-          maxAICreditsPerMonth: resolvedLimits.maxAICreditsPerMonth || 500
+          // Keep -1 (unlimited) and an explicit demo cap (incl. 0) intact;
+          // only fall back to 500 when the value is truly absent.
+          maxAICreditsPerMonth:
+            resolvedLimits.maxAICreditsPerMonth == null
+              ? 500
+              : resolvedLimits.maxAICreditsPerMonth
         },
         usage: subscription.usage,
         canConnectMore,
