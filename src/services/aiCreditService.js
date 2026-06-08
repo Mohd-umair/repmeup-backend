@@ -25,11 +25,16 @@ class AICreditService {
       const [entitlements, subscription] = await Promise.all([
         entitlementsService.getEntitlements(organizationId),
         Subscription.findOne({ organization: organizationId })
-          .select('usage.aiCreditsThisMonth')
+          .select('usage.aiCreditsThisMonth isDemo demoCreditsCap')
           .lean()
       ]);
 
-      const limit = entitlements.limits.maxAICreditsPerMonth ?? 0;
+      let limit = entitlements.limits.maxAICreditsPerMonth ?? 0;
+      // Per-demo override: a demo workspace with a set cap uses that instead of
+      // the (unlimited) plan limit, so demos can be individually capped.
+      if (subscription?.isDemo && subscription.demoCreditsCap != null && subscription.demoCreditsCap >= 0) {
+        limit = subscription.demoCreditsCap;
+      }
       const isUnlimited = limit === -1;
       const currentUsage = subscription?.usage?.aiCreditsThisMonth ?? 0;
 

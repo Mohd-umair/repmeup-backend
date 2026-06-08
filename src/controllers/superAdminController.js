@@ -423,7 +423,7 @@ exports.listTransactions = async (req, res, next) => {
  */
 exports.createDemoWorkspace = async (req, res, next) => {
   try {
-    const { prospect, planId, trialDays } = req.body || {};
+    const { prospect, planId, trialDays, aiCreditsCap } = req.body || {};
     if (!prospect || !prospect.email) {
       return res.status(400).json({ success: false, error: 'prospect.email is required' });
     }
@@ -432,6 +432,8 @@ exports.createDemoWorkspace = async (req, res, next) => {
       prospect,
       planId,
       trialDays: trialDays != null ? Number(trialDays) : undefined,
+      // null/'' → unlimited; a number → cap. Undefined leaves it default (unlimited).
+      aiCreditsCap: aiCreditsCap === '' || aiCreditsCap == null ? null : Number(aiCreditsCap),
       actorUserId: req.user._id
     });
 
@@ -504,6 +506,51 @@ exports.convertDemoWorkspace = async (req, res, next) => {
       success: true,
       data: { planId: result.subscription.planId, planName: result.subscription.planName, status: result.subscription.status },
       message: 'Demo workspace converted to a paid plan'
+    });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+    next(error);
+  }
+};
+
+/**
+ * PATCH /api/super-admin/demo-workspaces/:organizationId
+ * Update a demo workspace's prospect details and/or trial length.
+ * Body: { name?, email?, company?, phone?, trialDays? }
+ * Changing the email also updates the prospect's login email; trialDays resets
+ * the trial to end that many days from now (and unlocks it).
+ */
+exports.updateDemoWorkspace = async (req, res, next) => {
+  try {
+    const { name, email, company, phone, trialDays, aiCreditsCap } = req.body || {};
+    // Only forward keys that were actually provided (partial update).
+    const prospect = {};
+    if (name !== undefined) prospect.name = name;
+    if (email !== undefined) prospect.email = email;
+    if (company !== undefined) prospect.company = company;
+    if (phone !== undefined) prospect.phone = phone;
+
+    const opts = {};
+    if (trialDays !== undefined && trialDays !== null && trialDays !== '') {
+      opts.trialDays = Number(trialDays);
+    }
+    // aiCreditsCap is intentionally forwarded even when '' (=> unlimited) so the
+    // admin can clear a cap; only `undefined` means "leave unchanged".
+    if (aiCreditsCap !== undefined) {
+      opts.aiCreditsCap = aiCreditsCap;
+    }
+
+    if (Object.keys(prospect).length === 0 && opts.trialDays === undefined && opts.aiCreditsCap === undefined) {
+      return res.status(400).json({ success: false, error: 'No fields to update' });
+    }
+
+    const result = await demoWorkspaceService.updateDemoProspect(req.params.organizationId, prospect, opts);
+    res.status(200).json({
+      success: true,
+      data: result,
+      message: result.loginEmailChanged
+        ? 'Prospect updated. Login email changed.'
+        : (result.trialEndsAt ? 'Demo workspace updated. Trial period changed.' : 'Prospect details updated')
     });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });

@@ -26,14 +26,23 @@ const DEFAULT_TRIAL_DAYS = 30;
 class DemoWorkspaceService {
   /**
    * Resolve the plan whose entitlements a demo should run on during the trial.
-   * Prefers an explicit planId; otherwise the highest-tier active public plan
-   * (so prospects experience the full product). Falls back to 'free'.
+   * Order of preference:
+   *   1. An explicit planId, if the caller passed one.
+   *   2. The dedicated full-access 'demo' plan (every feature enabled, unlimited).
+   *   3. The highest-tier active public plan (legacy fallback).
+   *   4. 'free'.
+   * The 'demo' plan is preferred because real tier plans may legitimately disable
+   * some features; a demo must showcase everything. Seed it via
+   * `node src/scripts/seedDemoPlan.js`.
    */
   async _resolveTrialPlan(planId) {
     if (planId) {
       const plan = await Plan.getByPlanId(planId);
       if (plan) return plan;
     }
+    const demoPlan = await Plan.findOne({ planId: 'demo', isActive: true }).exec();
+    if (demoPlan) return demoPlan;
+
     const top = await Plan.findOne({ isActive: true, isPublic: true })
       .sort({ tier: -1 })
       .exec();
@@ -46,13 +55,20 @@ class DemoWorkspaceService {
    *
    * @param {Object} params
    * @param {Object} params.prospect          { name, email, company?, phone? } — email is required.
-   * @param {string} [params.planId]          Plan to mirror during trial (default: top tier).
+   * @param {string} [params.planId]          Plan to mirror during trial (default: the full-access 'demo' plan).
    * @param {number} [params.trialDays]       Trial length in days (default 30).
+   * @param {number|null} [params.aiCreditsCap] Per-demo monthly AI-credit cap; null/undefined = unlimited.
    * @param {import('mongoose').Types.ObjectId|string} [params.actorUserId] Super-admin who created it.
    * @returns {Promise<{ organization, user, subscription, provisionalPassword, magicLinkToken, trialEndsAt }>}
    */
   async createDemoWorkspace(params = {}) {
-    const { prospect = {}, planId, trialDays, actorUserId } = params;
+    const { prospect = {}, planId, trialDays, aiCreditsCap, actorUserId } = params;
+
+    // Normalize the optional credit cap (>= 0 → cap; otherwise unlimited).
+    const creditsCap =
+      aiCreditsCap != null && Number.isFinite(Number(aiCreditsCap)) && Number(aiCreditsCap) >= 0
+        ? Math.floor(Number(aiCreditsCap))
+        : null;
 
     const email = String(prospect.email || '').toLowerCase().trim();
     const name = String(prospect.name || '').trim();
@@ -152,6 +168,7 @@ class DemoWorkspaceService {
         trialEndsAt,
         isDemo: true,
         demoStatus: 'trialing',
+        demoCreditsCap: creditsCap,
         usage: { activeUsers: 1 },
         planHistory: [{
           planId: plan.planId,
@@ -369,7 +386,7 @@ class DemoWorkspaceService {
 
     const [subs, total] = await Promise.all([
       Subscription.find(subFilter)
-        .select('organization planId planName status demoStatus trialEndsAt lockedAt convertedAt createdAt')
+        .select('organization planId planName status demoStatus trialEndsAt lockedAt convertedAt createdAt demoCreditsCap')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -398,6 +415,7 @@ class DemoWorkspaceService {
         demoStatus: s.demoStatus || 'trialing',
         trialEndsAt: s.trialEndsAt || null,
         daysRemaining,
+        aiCreditsCap: s.demoCreditsCap ?? null,   // null = unlimited
         lockedAt: s.lockedAt || org.demo?.lockedAt || null,
         convertedAt: s.convertedAt || org.demo?.convertedAt || null,
         seededAt: org.demo?.seededAt || null,
@@ -406,6 +424,148 @@ class DemoWorkspaceService {
     });
 
     return { items, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  }
+
+  /**
+   * Update a demo workspace's prospect details (name / email / company / phone)
+   * and, optionally, the trial length. Email changes also update the linked
+   * prospect User's login email (collision-guarded). When `trialDays` is given,
+   * the trial is reset to end `trialDays` from now (and unlocked if it was
+   * locked) — same effect as extendTrial().
+   *
+   * @param {import('mongoose').Types.ObjectId|string} organizationId
+   * @param {Object} prospect { name?, email?, company?, phone? } — partial; only provided keys are applied.
+   * @param {Object} [opts] { trialDays?: number, aiCreditsCap?: number|null } —
+   *   trialDays (>0) resets the trial; aiCreditsCap sets the per-demo credit cap
+   *   (null/'' = unlimited, >=0 = capped); omit a key to leave it unchanged.
+   * @returns {Promise<{ organizationId: string, prospect: Object, loginEmailChanged: boolean, trialEndsAt: Date|null }>}
+   */
+  async updateDemoProspect(organizationId, prospect = {}, opts = {}) {
+    const org = await Organization.findById(organizationId);
+    if (!org || !org.demo?.isDemo) {
+      const err = new Error('Demo workspace not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    org.demo.prospect = org.demo.prospect || {};
+    let loginEmailChanged = false;
+
+    // Email: validate, ensure uniqueness, and sync the prospect User's login email.
+    if (prospect.email !== undefined) {
+      const email = String(prospect.email || '').toLowerCase().trim();
+      if (!email) {
+        const err = new Error('Prospect email cannot be empty');
+        err.statusCode = 400;
+        throw err;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        const err = new Error('Prospect email is invalid');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const prospectUser = await User.findOne({
+        organization: organizationId,
+        'metadata.isDemoProspect': true
+      });
+
+      if (prospectUser && prospectUser.email !== email) {
+        // Guard: another user must not already own the new email.
+        const clash = await User.findOne({ email, _id: { $ne: prospectUser._id } }).select('_id').lean();
+        if (clash) {
+          const err = new Error('A user with this email already exists');
+          err.statusCode = 409;
+          throw err;
+        }
+        prospectUser.email = email;
+        await prospectUser.save();
+        loginEmailChanged = true;
+      }
+      org.demo.prospect.email = email;
+    }
+
+    if (prospect.name !== undefined) org.demo.prospect.name = String(prospect.name || '').trim();
+    if (prospect.company !== undefined) org.demo.prospect.company = String(prospect.company || '').trim();
+    if (prospect.phone !== undefined) org.demo.prospect.phone = String(prospect.phone || '').trim();
+
+    // Optional trial reset: set trialEndsAt to now + trialDays, and unlock.
+    let newTrialEndsAt = null;
+    if (opts.trialDays !== undefined && opts.trialDays !== null) {
+      const days = Number(opts.trialDays);
+      if (!Number.isFinite(days) || days <= 0) {
+        const err = new Error('Trial length must be a positive number of days');
+        err.statusCode = 400;
+        throw err;
+      }
+      const sub = await Subscription.findOne({ organization: organizationId, isDemo: true });
+      if (!sub) {
+        const err = new Error('No demo subscription found for this organization');
+        err.statusCode = 404;
+        throw err;
+      }
+      if (sub.demoStatus === 'converted') {
+        const err = new Error('This workspace has already been converted to a paid plan');
+        err.statusCode = 409;
+        throw err;
+      }
+
+      const base = new Date();
+      newTrialEndsAt = new Date(base.getTime() + Math.floor(days) * 24 * 60 * 60 * 1000);
+      sub.trialEndsAt = newTrialEndsAt;
+      sub.demoStatus = 'trialing';
+      sub.status = 'trialing';
+      sub.lockedAt = undefined;
+      await sub.save();
+
+      // Unlock the org fast-path flag + refresh the magic-link expiry window.
+      if (org.demo.lockedAt) org.demo.lockedAt = undefined;
+      await User.updateOne(
+        { organization: organizationId, 'metadata.isDemoProspect': true },
+        { $set: { demoMagicTokenExpires: newTrialEndsAt } }
+      );
+      try { await entitlementsService.invalidateEntitlements(organizationId); } catch (_) { /* non-fatal */ }
+    }
+
+    // Optional AI-credit cap update. Pass `aiCreditsCap: null` to clear (unlimited),
+    // or a number >= 0 to cap. Leave the key absent to keep the current value.
+    let creditsCapChanged = false;
+    if (opts.aiCreditsCap !== undefined) {
+      const raw = opts.aiCreditsCap;
+      let cap;
+      if (raw === null || raw === '') {
+        cap = null; // unlimited
+      } else {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) {
+          const err = new Error('AI credit cap must be 0 or a positive number (or empty for unlimited)');
+          err.statusCode = 400;
+          throw err;
+        }
+        cap = Math.floor(n);
+      }
+      await Subscription.updateOne(
+        { organization: organizationId, isDemo: true },
+        { $set: { demoCreditsCap: cap } }
+      );
+      creditsCapChanged = true;
+    }
+
+    org.markModified('demo.prospect');
+    await org.save();
+
+    logger.info('[DemoWorkspace] prospect updated', {
+      orgId: String(organizationId),
+      loginEmailChanged,
+      trialChanged: newTrialEndsAt != null,
+      creditsCapChanged
+    });
+    return {
+      organizationId: String(organizationId),
+      prospect: org.demo.prospect,
+      loginEmailChanged,
+      trialEndsAt: newTrialEndsAt
+    };
   }
 
   /** Generate a readable but strong provisional password (e.g. "Demo-7F3K9XQ2"). */

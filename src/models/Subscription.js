@@ -189,7 +189,15 @@ const subscriptionSchema = new mongoose.Schema({
     default: undefined
   },
   lockedAt: { type: Date },
-  convertedAt: { type: Date }
+  convertedAt: { type: Date },
+
+  /**
+   * Per-demo monthly AI-credit cap. Overrides the plan's (unlimited) credit
+   * limit for THIS demo only, so each demo can be capped individually.
+   * null / undefined = no demo cap (falls back to the plan limit, i.e. unlimited
+   * on the demo plan). Only meaningful when isDemo === true.
+   */
+  demoCreditsCap: { type: Number, default: null }
 }, {
   timestamps: true
 });
