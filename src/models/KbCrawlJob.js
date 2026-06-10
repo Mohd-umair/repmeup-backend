@@ -24,6 +24,9 @@ const kbCrawlJobSchema = new mongoose.Schema({
   startUrl: { type: String, required: true, trim: true },
   maxPages: { type: Number, default: 25, min: 1, max: 100 },
 
+  /** User-selected page URLs to import (discovery → checkbox flow). */
+  selectedUrls: [{ type: String, trim: true }],
+
   status: {
     type: String,
     enum: ['queued', 'crawling', 'completed', 'failed', 'partial'],

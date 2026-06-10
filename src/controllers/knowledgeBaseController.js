@@ -584,6 +584,61 @@ exports.createURLKnowledgeBase = async (req, res) => {
 };
 
 /**
+ * Discover internal URLs on a website (no AI, no KB writes).
+ * POST /api/knowledge-base/url/discover
+ *
+ * Returns a list the client shows with checkboxes; user picks pages, then
+ * POST /url/crawl with selectedUrls.
+ */
+exports.discoverWebsiteUrls = async (req, res) => {
+  const kbOrgId = req.user.organization._id || req.user.organization;
+  try {
+    await entitlementsService.assert(kbOrgId, FEATURE_KEYS.KB_UPLOAD_URL);
+
+    const { url, maxPages } = req.body;
+    if (!url) {
+      return res.status(400).json({ success: false, error: 'URL is required' });
+    }
+
+    try {
+      webScraperService._validateURL(url);
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || 'Invalid URL' });
+    }
+
+    const requestedPages = parseInt(maxPages, 10) || KB_CRAWL_MAX_PAGES;
+    const cappedPages = Math.min(Math.max(1, requestedPages), KB_CRAWL_MAX_PAGES);
+
+    const result = await webScraperService.discoverInternalUrls(url, {
+      maxPages: cappedPages
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        startUrl: result.startUrl,
+        urls: result.urls,
+        totalFound: result.totalFound,
+        maxPages: cappedPages
+      },
+      message: `Found ${result.totalFound} internal page(s). Select which ones to import.`
+    });
+  } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false, code: error.code, error: error.message,
+        featureKey: error.featureKey, meta: error.meta
+      });
+    }
+    console.error('Discover website URLs error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to discover website pages. Please try again.'
+    });
+  }
+};
+
+/**
  * Create knowledge base from an ENTIRE website (crawl internal pages).
  * POST /api/knowledge-base/url/crawl
  *
@@ -600,39 +655,48 @@ exports.createCrawlKnowledgeBase = async (req, res) => {
 
     const {
       url, titlePrefix, category, tags, priority,
-      focus = 'overview', targetWordCount, targetTagCount, maxPages
+      focus = 'overview', targetWordCount, targetTagCount,
+      selectedUrls: rawSelectedUrls
     } = req.body;
 
     if (!url) {
       return res.status(400).json({ success: false, error: 'URL is required' });
     }
 
-    // Validate the URL up-front so the user gets an immediate error (not after enqueue).
     try {
       webScraperService._validateURL(url);
     } catch (e) {
       return res.status(400).json({ success: false, error: e.message || 'Invalid URL' });
     }
 
-    // Clamp pages to the platform ceiling and remaining KB capacity.
-    const requestedPages = parseInt(maxPages, 10) || KB_CRAWL_MAX_PAGES;
-    const q = await entitlementsService.quota(kbOrgId, FEATURE_KEYS.KB_ENTRIES_MAX);
-    let cappedPages = Math.min(Math.max(1, requestedPages), KB_CRAWL_MAX_PAGES);
-    if (!q.isUnlimited) {
-      cappedPages = Math.min(cappedPages, Math.max(0, q.limit - q.used));
+    const selectedUrls = webScraperService.filterSameSiteUrls(url, rawSelectedUrls);
+    if (!selectedUrls.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'Select at least one page to import. Use Discover pages first.'
+      });
     }
-    if (cappedPages < 1) {
+
+    const q = await entitlementsService.quota(kbOrgId, FEATURE_KEYS.KB_ENTRIES_MAX);
+    let importCount = selectedUrls.length;
+    if (!q.isUnlimited) {
+      importCount = Math.min(importCount, Math.max(0, q.limit - q.used));
+    }
+    if (importCount < 1) {
       return res.status(402).json({
         success: false, code: 'QUOTA_EXCEEDED',
         error: "You've reached your knowledge base entries limit. Upgrade to add more."
       });
     }
 
+    const urlsToImport = selectedUrls.slice(0, importCount);
+
     const crawlJob = await KbCrawlJob.create({
       organization: kbOrgId,
       createdBy: req.user._id,
       startUrl: url,
-      maxPages: cappedPages,
+      maxPages: urlsToImport.length,
+      selectedUrls: urlsToImport,
       status: 'queued',
       options: {
         titlePrefix: titlePrefix || undefined,
@@ -647,7 +711,7 @@ exports.createCrawlKnowledgeBase = async (req, res) => {
 
     await kbCrawlQueue.add(
       { crawlJobId: String(crawlJob._id) },
-      { ...queueConfig, attempts: 1 } // crawl is non-idempotent (creates entries) → no auto-retry
+      { ...queueConfig, attempts: 1 }
     );
 
     return res.status(202).json({
@@ -655,9 +719,10 @@ exports.createCrawlKnowledgeBase = async (req, res) => {
       data: {
         crawlJobId: String(crawlJob._id),
         status: crawlJob.status,
-        maxPages: cappedPages
+        maxPages: urlsToImport.length,
+        selectedCount: urlsToImport.length
       },
-      message: 'Website crawl started. Pages will be added to your knowledge base as they are processed.'
+      message: `Import started for ${urlsToImport.length} selected page(s).`
     });
   } catch (error) {
     if (error?.name === 'EntitlementError') {

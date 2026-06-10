@@ -32,6 +32,9 @@ router.post('/pdf', knowledgeBaseController.upload.single('file'), knowledgeBase
 // Create knowledge base from a single URL (homepage only)
 router.post('/url', knowledgeBaseController.createURLKnowledgeBase);
 
+// Discover internal URLs on a website (no AI — returns a pick list for the user)
+router.post('/url/discover', knowledgeBaseController.discoverWebsiteUrls);
+
 // Create knowledge base by crawling the ENTIRE website (internal pages)
 router.post('/url/crawl', knowledgeBaseController.createCrawlKnowledgeBase);
 

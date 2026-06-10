@@ -318,6 +318,120 @@ class WebScraperService {
   }
 
   /**
+   * Fetch a page and return its title + same-site internal links (no content extraction).
+   * Used for the URL-discovery step before the user picks pages to import.
+   * @private
+   */
+  async _fetchPageMeta(url) {
+    this._validateURL(url);
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': this.userAgent,
+        'Accept': 'text/html,application/xhtml+xml'
+      },
+      timeout: this.defaultTimeout,
+      maxContentLength: this.maxContentLength,
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 400
+    });
+
+    const contentType = String(response.headers['content-type'] || '');
+    if (contentType && !contentType.includes('html')) {
+      return { url, title: url, links: [] };
+    }
+
+    const $ = cheerio.load(response.data);
+    return {
+      url,
+      title: this._extractTitle($) || url,
+      links: this._extractInternalLinks($, url)
+    };
+  }
+
+  /**
+   * Discover internal same-site URLs without scraping full page content.
+   * Returns metadata the UI can show in a checkbox list.
+   *
+   * @param {string} startUrl
+   * @param {Object} [options]
+   * @param {number} [options.maxPages=25]
+   * @param {number} [options.maxDepth=3]
+   * @returns {Promise<{ urls: Array<{url:string,title:string,depth:number}>, startUrl: string, totalFound: number }>}
+   */
+  async discoverInternalUrls(startUrl, options = {}) {
+    const maxPages = Math.max(1, Math.min(options.maxPages || 25, 100));
+    const maxDepth = Math.max(0, options.maxDepth ?? 3);
+
+    this._validateURL(startUrl);
+    const normalizedStart = this._normalizeUrl(startUrl, startUrl) || startUrl;
+
+    const visited = new Set();
+    const queued = new Set([normalizedStart]);
+    const queue = [{ url: normalizedStart, depth: 0 }];
+    const discovered = [];
+    let fetched = false;
+
+    while (queue.length > 0 && discovered.length < maxPages) {
+      const { url, depth } = queue.shift();
+      if (visited.has(url)) continue;
+      visited.add(url);
+
+      if (fetched && this.crawlDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, this.crawlDelayMs));
+      }
+
+      let meta;
+      try {
+        meta = await this._fetchPageMeta(url);
+      } catch (err) {
+        if (!fetched && url === normalizedStart) {
+          throw new Error(`Failed to discover pages: ${err.message}`);
+        }
+        continue;
+      }
+      fetched = true;
+
+      discovered.push({
+        url: this._normalizeUrl(meta.url, normalizedStart) || meta.url,
+        title: (meta.title || meta.url).slice(0, 300),
+        depth
+      });
+
+      if (depth < maxDepth) {
+        for (const link of meta.links || []) {
+          if (queued.size >= maxPages * 4) break;
+          if (!visited.has(link) && !queued.has(link)) {
+            queued.add(link);
+            queue.push({ url: link, depth: depth + 1 });
+          }
+        }
+      }
+    }
+
+    if (discovered.length === 0) {
+      throw new Error('No pages found on this website.');
+    }
+
+    return { urls: discovered, startUrl: normalizedStart, totalFound: discovered.length };
+  }
+
+  /**
+   * Normalize and keep only same-site URLs (for user-selected import lists).
+   */
+  filterSameSiteUrls(startUrl, urls = []) {
+    if (!Array.isArray(urls)) return [];
+    const out = new Set();
+    for (const raw of urls) {
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+      const normalized = this._normalizeUrl(raw.trim(), startUrl);
+      if (normalized && this._isSameSite(normalized, startUrl)) {
+        out.add(normalized);
+      }
+    }
+    return Array.from(out);
+  }
+
+  /**
    * Crawl a website starting from `startUrl`, breadth-first, same-site only.
    * Returns successfully-scraped pages (each is a full scrape() result).
    *
