@@ -669,11 +669,34 @@ exports.createCrawlKnowledgeBase = async (req, res) => {
       return res.status(400).json({ success: false, error: e.message || 'Invalid URL' });
     }
 
-    const selectedUrls = webScraperService.filterSameSiteUrls(url, rawSelectedUrls);
+    // Accept any valid http/https URL from the user's selection. These URLs
+    // already passed the same-site filter during the /url/discover step, so
+    // re-filtering here against the start URL is redundant and can erroneously
+    // reject all URLs in edge cases (e.g. normalisation differences). We still
+    // validate that each entry is a parseable http/https URL for safety.
+    if (!Array.isArray(rawSelectedUrls) || rawSelectedUrls.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Select at least one page to import. Use "Discover pages" first, then choose which pages to import.'
+      });
+    }
+
+    const selectedUrls = rawSelectedUrls
+      .filter((u) => {
+        if (typeof u !== 'string' || !u.trim()) return false;
+        try {
+          const parsed = new URL(u.trim());
+          return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch (_) {
+          return false;
+        }
+      })
+      .map((u) => u.trim());
+
     if (!selectedUrls.length) {
       return res.status(400).json({
         success: false,
-        error: 'Select at least one page to import. Use Discover pages first.'
+        error: 'None of the selected URLs are valid. Please use "Discover pages" again and select valid pages to import.'
       });
     }
 
