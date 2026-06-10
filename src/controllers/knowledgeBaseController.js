@@ -125,18 +125,20 @@ const KB_CRAWL_MAX_PAGES = 25;
 async function assertKbEntryCapAvailable(organizationId) {
   const q = await entitlementsService.quota(organizationId, FEATURE_KEYS.KB_ENTRIES_MAX);
   if (q.isUnlimited) return;
-  // Use live count (not the bucket) — KB has no monthly reset, deletions count.
-  const KnowledgeBase = require('../models/KnowledgeBase');
-  const current = await KnowledgeBase.countDocuments({ organization: organizationId });
-  if (current >= q.limit) {
-    const err = new Error(`You've reached your knowledge base entries limit (${current}/${q.limit}). Upgrade to add more.`);
+  if (q.used >= q.limit) {
+    const err = new Error(`You've reached your knowledge base entries limit (${q.used}/${q.limit}). Upgrade to add more.`);
     err.name = 'EntitlementError';
     err.statusCode = 402;
     err.code = 'QUOTA_EXCEEDED';
     err.featureKey = FEATURE_KEYS.KB_ENTRIES_MAX;
-    err.meta = { limit: q.limit, used: current };
+    err.meta = { limit: q.limit, used: q.used };
     throw err;
   }
+}
+
+async function invalidateKbEntitlements(orgId) {
+  const id = orgId?._id ?? orgId;
+  if (id) await entitlementsService.invalidateEntitlements(id);
 }
 
 // Configure multer for file uploads
@@ -310,6 +312,7 @@ exports.createManualKnowledgeBase = async (req, res) => {
     });
 
     await knowledgeBase.save();
+    await invalidateKbEntitlements(orgId);
 
     res.status(201).json({
       success: true,
@@ -376,6 +379,7 @@ exports.createPDFKnowledgeBase = async (req, res) => {
     });
 
     await knowledgeBase.save();
+    await invalidateKbEntitlements(orgId);
 
     res.status(201).json({
       success: true,
@@ -505,6 +509,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
     });
 
     await knowledgeBase.save();
+    await invalidateKbEntitlements(kbOrgId);
 
     // Step 5: Deduct actual AI credits used
     const actualWordCount = summaryData.summary.trim().split(/\s+/).length;
@@ -614,8 +619,7 @@ exports.createCrawlKnowledgeBase = async (req, res) => {
     const q = await entitlementsService.quota(kbOrgId, FEATURE_KEYS.KB_ENTRIES_MAX);
     let cappedPages = Math.min(Math.max(1, requestedPages), KB_CRAWL_MAX_PAGES);
     if (!q.isUnlimited) {
-      const used = await KnowledgeBase.countDocuments({ organization: kbOrgId });
-      cappedPages = Math.min(cappedPages, Math.max(0, q.limit - used));
+      cappedPages = Math.min(cappedPages, Math.max(0, q.limit - q.used));
     }
     if (cappedPages < 1) {
       return res.status(402).json({
@@ -790,6 +794,7 @@ exports.deleteKnowledgeBase = async (req, res) => {
     }
 
     await knowledgeBase.deleteOne();
+    await invalidateKbEntitlements(req.user.organization);
 
     res.json({
       success: true,

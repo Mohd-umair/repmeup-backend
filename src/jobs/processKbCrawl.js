@@ -16,8 +16,7 @@ const logger = require('../config/logger');
 async function remainingKbCapacity(organizationId) {
   const q = await entitlementsService.quota(organizationId, FEATURE_KEYS.KB_ENTRIES_MAX);
   if (q.isUnlimited) return Infinity;
-  const used = await KnowledgeBase.countDocuments({ organization: organizationId });
-  return Math.max(0, q.limit - used);
+  return Math.max(0, q.limit - q.used);
 }
 
 /**
@@ -191,6 +190,10 @@ async function processKbCrawl(job) {
   crawlJob.error = finalStatus === 'failed' ? 'No pages could be summarized into knowledge base entries.' : '';
   crawlJob.finishedAt = new Date();
   await crawlJob.save();
+
+  if (createdIds.length > 0) {
+    await entitlementsService.invalidateEntitlements(organizationId);
+  }
 
   logger.info('[KbCrawl] done', {
     crawlJobId: String(crawlJobId),
