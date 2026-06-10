@@ -70,7 +70,7 @@ function toObjectId(id) {
  * @param {string[]} [filters.status]
  */
 function buildMatchFilter(organizationId, filters = {}) {
-  const { startDate, endDate, platforms, types, sentiment, status } = filters;
+  const { startDate, endDate, platforms, types, sentiment, status, connectionIds } = filters;
   const f = {
     organization: toObjectId(organizationId),
     platformCreatedAt: { $gte: startDate, $lte: endDate }
@@ -79,6 +79,9 @@ function buildMatchFilter(organizationId, filters = {}) {
   if (types?.length) f.type = { $in: types };
   if (sentiment?.length) f.sentiment = { $in: sentiment };
   if (status?.length) f.status = { $in: status };
+  if (connectionIds?.length) {
+    f.platformConnection = { $in: connectionIds.map((id) => toObjectId(id)) };
+  }
   return f;
 }
 
