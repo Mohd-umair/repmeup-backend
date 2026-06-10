@@ -26,6 +26,7 @@
 const Organization = require('../models/Organization');
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
+const KnowledgeBase = require('../models/KnowledgeBase');
 const cacheService = require('./cacheService');
 const bucketService = require('./bucketService');
 const logger = require('../config/logger');
@@ -61,6 +62,30 @@ const LEGACY_LIMIT_TO_KEY = {
 const KEY_TO_LEGACY_LIMIT = Object.fromEntries(
   Object.entries(LEGACY_LIMIT_TO_KEY).map(([field, key]) => [key, field])
 );
+
+/**
+ * Limit features whose `used` value must reflect live DB rows (not buckets).
+ * KB entries can be deleted, so bucket counters would drift.
+ */
+const LIVE_COUNT_FEATURE_KEYS = new Set([
+  FEATURE_KEYS.KB_ENTRIES_MAX
+]);
+
+async function getLiveUsedCount(organizationId, featureKey) {
+  if (featureKey === FEATURE_KEYS.KB_ENTRIES_MAX) {
+    return KnowledgeBase.countDocuments({ organization: organizationId });
+  }
+  return null;
+}
+
+/** Merge subscription.usageBuckets (plain object or Map) into a plain object. */
+function normalizeUsageBuckets(raw) {
+  if (!raw) return {};
+  if (typeof raw.entries === 'function') {
+    return Object.fromEntries(raw.entries());
+  }
+  return { ...raw };
+}
 
 /** Map legacy `Subscription.usage.*` → feature keys (for read-side back-compat). */
 const LEGACY_USAGE_TO_KEY = {
@@ -229,6 +254,16 @@ async function resolveFromDb(organizationId) {
       : (HARD_DEFAULTS.limits[legacyField] ?? -1);
   }
 
+  const usageBuckets = normalizeUsageBuckets(subscription?.usageBuckets);
+  for (const featureKey of LIVE_COUNT_FEATURE_KEYS) {
+    const liveUsed = await getLiveUsedCount(organizationId, featureKey);
+    usageBuckets[featureKey] = {
+      ...(usageBuckets[featureKey] || {}),
+      used: liveUsed,
+      periodStart: usageBuckets[featureKey]?.periodStart || null
+    };
+  }
+
   return {
     source: plan ? (subscription?.planId ? 'subscription' : 'default-free') : 'hard-default',
     planId: plan?.planId || HARD_DEFAULTS.planId,
@@ -238,7 +273,7 @@ async function resolveFromDb(organizationId) {
     keys,   // new shape
     features: plan?.features || HARD_DEFAULTS.features,
     usage: subscription?.usage || mapLegacyOrgUsage(organization?.usage || {}),
-    usageBuckets: subscription?.usageBuckets || {},
+    usageBuckets,
     status: subscription?.status || (organization?.subscription?.status || 'trial'),
     isActive: ['active', 'trialing', 'trial'].includes(
       subscription?.status || organization?.subscription?.status || 'trial'
@@ -318,7 +353,10 @@ async function quota(organizationId, featureKey) {
 
   const limit = ent.keys[featureKey]?.limit ?? catalogEntry.defaultValue ?? -1;
   const isUnlimited = limit === -1;
-  const used = bucket.used ?? 0;
+  let used = bucket.used ?? 0;
+  if (LIVE_COUNT_FEATURE_KEYS.has(featureKey)) {
+    used = await getLiveUsedCount(organizationId, featureKey);
+  }
   const remaining = isUnlimited ? Infinity : Math.max(0, limit - used);
 
   return {
