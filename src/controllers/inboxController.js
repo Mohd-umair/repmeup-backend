@@ -1126,7 +1126,7 @@ exports.updateChatOpen = async (req, res, next) => {
 exports.getStats = async (req, res, next) => {
   try {
     const orgId = req.user.organization._id;
-    const { platform } = req.query;
+    const { platform, connectionId } = req.query;
 
     // Active platform connections scope what counts toward inbox stats.
     const activeConnections = await fetchInboxActiveConnections(orgId);
@@ -1134,7 +1134,8 @@ exports.getStats = async (req, res, next) => {
     const matchStage = inboxQueryService.buildStatsMatchStage({
       orgId,
       platform,
-      activeConnections
+      activeConnections,
+      connectionId
     });
     const slaCutoff = new Date(Date.now() - SLA_THRESHOLD_MS);
     const pipeline = inboxQueryService.buildStatsAggregationPipeline({ matchStage, slaCutoff });
@@ -1969,15 +1970,12 @@ exports.getBucketView = async (req, res) => {
   try {
     const IntentBucket = require('../models/IntentBucket');
     const orgId = req.user.organization._id;
-    const { limit = 20, platform, type, sentiment, status, search, dateFrom, dateTo, chatOpen } = req.query;
+    const { limit = 20, platform, type, sentiment, status, search, dateFrom, dateTo, chatOpen, connectionId } = req.query;
     const safeLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 50);
 
-    const activeConnections = await PlatformConnection.find({
-      organization: orgId,
-      status: 'connected'
-    }).select('_id platform').lean();
+    const activeConnections = await fetchInboxActiveConnections(orgId);
 
-    const visibilityFilter = buildPlatformConnectionVisibilityFilter(activeConnections);
+    const visibilityFilter = buildPlatformConnectionVisibilityFilter(activeConnections, connectionId);
 
     const baseMatch = {
       organization: orgId,

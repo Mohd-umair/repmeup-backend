@@ -1,7 +1,10 @@
+const mongoose = require('mongoose');
 const analyticsService = require('../services/analyticsService');
 const exportService = require('../services/exportService');
 const cacheService = require('../services/cacheService');
 const logger = require('../config/logger');
+const PlatformConnection = require('../models/PlatformConnection');
+const { INBOX_ACTIVE_CONNECTION_STATUSES } = require('../services/inbox/inboxConnectionScope');
 
 /**
  * Analytics Controller — thin HTTP + cache layer.
@@ -54,6 +57,25 @@ function resolveDateRange(dateRange) {
   return { startDate, endDate, defaulted: true };
 }
 
+/**
+ * Resolve optional connectionId from request body to connectionIds for analytics filters.
+ * Invalid or foreign IDs are ignored (all-accounts behavior).
+ */
+async function resolveAnalyticsConnectionIds(connectionId, organizationId) {
+  if (connectionId == null || String(connectionId).trim() === '') return undefined;
+  const idStr = String(connectionId).trim();
+  if (!mongoose.Types.ObjectId.isValid(idStr)) return undefined;
+  const oid = new mongoose.Types.ObjectId(idStr);
+  const exists = await PlatformConnection.exists({
+    _id: oid,
+    organization: organizationId,
+    isActive: true,
+    status: { $in: INBOX_ACTIVE_CONNECTION_STATUSES }
+  });
+  if (!exists) return undefined;
+  return [oid];
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Endpoints
 // ═══════════════════════════════════════════════════════════════════════════
@@ -61,11 +83,12 @@ function resolveDateRange(dateRange) {
 exports.getDashboard = async (req, res, next) => {
   try {
     const organizationId = req.user.organization._id;
-    const { dateRange, platforms, types, sentiment, status } = req.body;
+    const { dateRange, platforms, types, sentiment, status, connectionId } = req.body;
     const { startDate, endDate } = resolveDateRange(dateRange);
+    const connectionIds = await resolveAnalyticsConnectionIds(connectionId, organizationId);
 
     const cacheKey = cacheService.analyticsHashKey(organizationId, 'dashboard', {
-      startDate, endDate, platforms, types, sentiment, status
+      startDate, endDate, platforms, types, sentiment, status, connectionId: connectionId || ''
     });
     const cached = await cacheService.get(cacheKey);
     if (cached) {
@@ -74,7 +97,7 @@ exports.getDashboard = async (req, res, next) => {
 
     const dashboard = await analyticsService.getDashboardData(
       organizationId,
-      { startDate, endDate, platforms, types, sentiment, status },
+      { startDate, endDate, platforms, types, sentiment, status, connectionIds },
       { preset: dateRange?.preset }
     );
 
@@ -237,11 +260,12 @@ exports.getAgentAnalytics = async (req, res, next) => {
 exports.getEngagementAnalytics = async (req, res, next) => {
   try {
     const organizationId = req.user.organization._id;
-    const { dateRange, platforms } = req.body;
+    const { dateRange, platforms, connectionId } = req.body;
     const { startDate, endDate } = resolveDateRange(dateRange);
+    const connectionIds = await resolveAnalyticsConnectionIds(connectionId, organizationId);
 
     const cacheKey = cacheService.analyticsHashKey(organizationId, 'engagement', {
-      startDate, endDate, platforms
+      startDate, endDate, platforms, connectionId: connectionId || ''
     });
     const cached = await cacheService.get(cacheKey);
     if (cached) {
@@ -249,7 +273,7 @@ exports.getEngagementAnalytics = async (req, res, next) => {
     }
 
     const payload = await analyticsService.getEngagementAnalyticsData(
-      organizationId, { startDate, endDate, platforms }
+      organizationId, { startDate, endDate, platforms, connectionIds }
     );
 
     await cacheService.set(cacheKey, payload, ANALYTICS_TTL_SECONDS);

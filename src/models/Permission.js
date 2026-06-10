@@ -2,7 +2,8 @@ const mongoose = require('mongoose');
 
 const CATEGORIES = [
   'inbox', 'analytics', 'users', 'settings', 'integrations',
-  'knowledge_base', 'posts', 'media', 'organization', 'billing'
+  'knowledge_base', 'posts', 'media', 'organization', 'billing',
+  'accounts'
 ];
 
 const ACTIONS = ['create', 'read', 'update', 'delete', 'manage', 'export', 'assign'];

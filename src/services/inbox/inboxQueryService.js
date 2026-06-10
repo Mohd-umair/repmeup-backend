@@ -26,6 +26,7 @@
 
 'use strict';
 
+const mongoose = require('mongoose');
 const { shadowDmExclusionCondition } = require('./commentDmThreadLinkService');
 
 // ─── constants ──────────────────────────────────────────────────────────────
@@ -119,14 +120,37 @@ function resolvePagination({ page, limit }) {
  * same org.
  *
  * If there are zero active connections, returns `{ _id: { $in: [] } }`.
+ *
+ * When `connectionId` is provided, narrows to that single active connection only
+ * (org-scoped — foreign/invalid IDs yield an empty set). Legacy rows with a
+ * null/missing `platformConnection` are excluded in selected-account mode.
  */
-function buildVisibilityFilter(activeConnections) {
+function buildVisibilityFilter(activeConnections, connectionId = null) {
   const list = Array.isArray(activeConnections) ? activeConnections : [];
   const activeConnectionIds = list.map((c) => c._id);
   const activePlatforms = [...new Set(list.map((c) => c.platform))];
   if (!activeConnectionIds.length || !activePlatforms.length) {
     return { _id: { $in: [] } };
   }
+
+  if (connectionId != null && String(connectionId).trim() !== '') {
+    const idStr = String(connectionId).trim();
+    if (!mongoose.Types.ObjectId.isValid(idStr)) {
+      throw new InboxQueryError('Invalid connectionId', { code: 'INVALID_CONNECTION_ID' });
+    }
+    const oid = new mongoose.Types.ObjectId(idStr);
+    const conn = list.find((c) => String(c._id) === String(oid));
+    if (!conn) {
+      return { _id: { $in: [] } };
+    }
+    return {
+      $and: [
+        { platform: conn.platform },
+        { platformConnection: oid }
+      ]
+    };
+  }
+
   return {
     $and: [
       { platform: { $in: activePlatforms } },
@@ -240,6 +264,7 @@ function buildListFilter({ user, query = {}, activeConnections = [] }) {
     dateFrom,
     dateTo,
     chatOpen,
+    connectionId,
     page = 1,
     limit = DEFAULT_PAGE_SIZE,
     sortBy = DEFAULT_SORT_FIELD,
@@ -296,7 +321,7 @@ function buildListFilter({ user, query = {}, activeConnections = [] }) {
   });
 
   // Build ancillary conditions for the top-level $and.
-  const visibilityFilter = buildVisibilityFilter(activeConnections);
+  const visibilityFilter = buildVisibilityFilter(activeConnections, connectionId);
   const searchCondition = buildSearchCondition(search);
 
   const agentCondition = user.role === 'agent'
@@ -363,7 +388,8 @@ function buildListFilter({ user, query = {}, activeConnections = [] }) {
     dateFrom: dateFrom ? String(dateFrom) : '',
     dateTo: dateTo ? String(dateTo) : '',
     intentBucket: intentBucket ? String(intentBucket) : '',
-    chatOpen: chatOpen != null && chatOpen !== '' ? String(chatOpen) : ''
+    chatOpen: chatOpen != null && chatOpen !== '' ? String(chatOpen) : '',
+    connectionId: connectionId ? String(connectionId).trim() : ''
   };
 
   return {
@@ -383,11 +409,11 @@ function buildListFilter({ user, query = {}, activeConnections = [] }) {
  * Build the $match stage for the stats aggregation.
  * Mirrors the list's visibility + parent-only rules.
  */
-function buildStatsMatchStage({ orgId, platform, activeConnections = [] }) {
+function buildStatsMatchStage({ orgId, platform, activeConnections = [], connectionId = null }) {
   if (!orgId) {
     throw new InboxQueryError('Missing organization context', { code: 'NO_ORG_CONTEXT' });
   }
-  const visibilityFilter = buildVisibilityFilter(activeConnections);
+  const visibilityFilter = buildVisibilityFilter(activeConnections, connectionId);
   const matchStage = {
     organization: orgId,
     $and: [

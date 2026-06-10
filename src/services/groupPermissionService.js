@@ -331,6 +331,7 @@ class GroupPermissionService {
       { name: 'Connect Platforms', code: 'integrations.connect', category: 'integrations', actions: ['create'] },
       { name: 'Disconnect Platforms', code: 'integrations.disconnect', category: 'integrations', actions: ['delete'] },
       { name: 'Manage Integrations', code: 'integrations.manage', category: 'integrations', actions: ['manage'] },
+      { name: 'Switch Connected Accounts', code: 'accounts.switch', category: 'accounts', actions: ['read'] },
 
       { name: 'View Knowledge Base', code: 'knowledge_base.read', category: 'knowledge_base', actions: ['read'] },
       { name: 'Create KB Entries', code: 'knowledge_base.create', category: 'knowledge_base', actions: ['create'] },
@@ -392,7 +393,7 @@ class GroupPermissionService {
         description: 'Manage inbox, posts, analytics, and knowledge base',
         permissionCodes: [
           'inbox.read', 'inbox.reply', 'inbox.assign', 'inbox.archive',
-          'analytics.read', 'analytics.export',
+          'analytics.read', 'analytics.export', 'accounts.switch',
           'posts.read', 'posts.create', 'posts.update', 'posts.publish',
           'media.upload', 'media.read',
           'knowledge_base.read', 'knowledge_base.create', 'knowledge_base.update',
