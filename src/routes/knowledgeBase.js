@@ -29,14 +29,16 @@ router.post('/manual', validateKnowledgeBaseManual, knowledgeBaseController.crea
 // Create knowledge base from PDF
 router.post('/pdf', knowledgeBaseController.upload.single('file'), knowledgeBaseController.createPDFKnowledgeBase);
 
-// Create knowledge base from a single URL (homepage only)
-router.post('/url', knowledgeBaseController.createURLKnowledgeBase);
-
 // Discover internal URLs on a website (no AI — returns a pick list for the user)
+// MUST be registered before '/url' so Express matches the more-specific path first.
 router.post('/url/discover', knowledgeBaseController.discoverWebsiteUrls);
 
 // Create knowledge base by crawling the ENTIRE website (internal pages)
+// MUST be registered before '/url' for the same reason.
 router.post('/url/crawl', knowledgeBaseController.createCrawlKnowledgeBase);
+
+// Create knowledge base from a single URL (homepage only) — catch-all, keep last.
+router.post('/url', knowledgeBaseController.createURLKnowledgeBase);
 
 // Update knowledge base entry
 router.put('/:id', validateKnowledgeBaseUpdate, knowledgeBaseController.updateKnowledgeBase);
