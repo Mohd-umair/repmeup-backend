@@ -216,8 +216,11 @@ async function getOrderDetail(orgId, orderId) {
     chatSnippet,
     lineItems: (order.lineItems || []).map((li) => ({
       name: li.name || li.product?.name || 'Item',
+      sku: li.product?.sku || li.retailerId || null,
+      image: (Array.isArray(li.product?.images) && li.product.images[0]) || null,
       qty: li.qty,
-      unitPrice: formatMoney(li.unitPrice, li.currency || order.currency)
+      unitPrice: formatMoney(li.unitPrice, li.currency || order.currency),
+      lineTotal: formatMoney((li.unitPrice || 0) * (li.qty || 1), li.currency || order.currency)
     })),
     actions: {
       canMarkShipped: order.status === 'paid',
