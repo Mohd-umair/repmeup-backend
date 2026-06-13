@@ -41,6 +41,17 @@ exports.getOrderDetail = async (req, res, next) => {
   }
 };
 
+// GET /inbox/ops/orders/by-interaction/:interactionId → lightweight order ref for deep-linking
+exports.getOrderByInteraction = async (req, res, next) => {
+  try {
+    const data = await orderOps.getOrderByInteraction(orgId(req), req.params.interactionId);
+    if (!data) return res.status(404).json({ success: false, error: 'No order linked to this conversation' });
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.createOrder = async (req, res, next) => {
   try {
     const result = await orderOps.createOrder(orgId(req), req.body);

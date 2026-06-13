@@ -50,6 +50,7 @@ async function _handleOrderMessage({ message, connection, organizationId, savedI
   try {
     const CommerceOrder = require('../../models/CommerceOrder');
     const Product = require('../../models/Product');
+    const { assignOrderDisplayRef } = require('../../utils/opsRefHelper');
 
     const order = message.order || {};
     const catalog_id = order.catalog_id;
@@ -60,11 +61,13 @@ async function _handleOrderMessage({ message, connection, organizationId, savedI
       return null;
     }
 
-    // Resolve products from our DB by retailer_id (sku or product._id string)
-    const retailerIds = product_items.map((i) => i.retailer_id).filter(Boolean);
+    // Meta sends `product_retailer_id` on order webhooks; tolerate `retailer_id` too.
+    const ridOf = (i) => i.product_retailer_id || i.retailer_id;
+
+    // Resolve products from our DB by retailer id (catalog retailer_id = our sku or _id string)
+    const retailerIds = product_items.map(ridOf).filter(Boolean);
     const dbProducts = await Product.find({
       organization: organizationId,
-      isActive: true,
       $or: [
         { sku: { $in: retailerIds } },
         { _id: { $in: retailerIds.filter((id) => /^[a-f\d]{24}$/i.test(id)) } }
@@ -77,40 +80,67 @@ async function _handleOrderMessage({ message, connection, organizationId, savedI
       productByRetailerId[p._id.toString()] = p;
     });
 
-    const lineItems = product_items.map((item) => {
-      const dbProduct = productByRetailerId[item.retailer_id];
-      return {
-        product: dbProduct?._id,
-        retailerId: item.retailer_id,
-        name: dbProduct?.name || item.retailer_id,
-        qty: item.quantity || 1,
-        unitPrice: item.item_price ? item.item_price / 100 : dbProduct?.price,
-        currency: item.currency || dbProduct?.currency || 'AED'
-      };
-    }).filter((li) => li.product || li.retailerId);
+    // lineItem.product is schema-required, so only matched products become line items.
+    // Unmatched retailer ids are still counted in the total and recorded in notes so the
+    // order is never silently dropped.
+    const lineItems = [];
+    const unmatched = [];
+    let totalAmount = 0;
+    let currency = null;
 
-    const totalAmount = lineItems.reduce((sum, li) => sum + ((li.unitPrice || 0) * li.qty), 0);
+    for (const item of product_items) {
+      const rid = ridOf(item);
+      const qty = Number(item.quantity) || 1;
+      // Meta order webhooks send item_price in MAJOR currency units (e.g. 150 = ₹150), not cents.
+      const metaPrice = item.item_price != null && item.item_price !== ''
+        ? Number(item.item_price) : undefined;
+      const dbProduct = rid ? productByRetailerId[rid] : undefined;
+      const unitPrice = (metaPrice != null && !Number.isNaN(metaPrice)) ? metaPrice : dbProduct?.price;
 
-    const buyerPhone = String(message.from);
+      if (unitPrice != null) totalAmount += unitPrice * qty;
+      if (!currency) currency = item.currency || dbProduct?.currency || null;
+
+      if (dbProduct) {
+        lineItems.push({
+          product: dbProduct._id,
+          retailerId: rid,
+          name: dbProduct.name || rid,
+          qty,
+          unitPrice,
+          currency: item.currency || dbProduct.currency || 'INR'
+        });
+      } else if (rid) {
+        unmatched.push(`${rid} ×${qty}`);
+      }
+    }
+
+    currency = currency || 'INR';
+    const buyerPhone = String(message.from || savedInteraction?.author?.platformId || '');
+    const buyerName = (savedInteraction?.author?.name && savedInteraction.author.name !== buyerPhone)
+      ? savedInteraction.author.name : undefined;
 
     const commerceOrder = await CommerceOrder.create(
       await assignOrderDisplayRef(organizationId, {
         organization: organizationId,
         channel: 'whatsapp',
-        status: 'cart_started',
+        status: 'payment_pending',
         lineItems,
         totalAmount: +totalAmount.toFixed(2),
-        currency: lineItems[0]?.currency || 'AED',
+        currency,
         whatsappMessageId: message.id,
         metaOrderId: catalog_id ? `${catalog_id}_${message.id}` : undefined,
         buyerPhone,
+        buyerName,
+        notes: unmatched.length ? `Unmatched catalog items: ${unmatched.join(', ')}` : undefined,
         sourceInteraction: savedInteraction?._id
       })
     );
 
     logger.info('[WhatsApp] CommerceOrder created from native cart', {
       orderId: commerceOrder._id.toString(),
-      lineItems: lineItems.length,
+      displayRef: commerceOrder.displayRef,
+      matchedItems: lineItems.length,
+      unmatched: unmatched.length,
       total: totalAmount,
       organizationId
     });

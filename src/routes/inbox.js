@@ -53,6 +53,7 @@ router.get('/whatsapp-media', inboxController.getWhatsAppMedia);
 // ── Inbox Operations (orders, complaints, reviews) ─────────────────────────
 router.get('/ops/orders', inboxOpsController.listOrders);
 router.get('/ops/orders/stats', inboxOpsController.getOrderStats);
+router.get('/ops/orders/by-interaction/:interactionId', inboxOpsController.getOrderByInteraction);
 router.post('/ops/orders', inboxOpsController.createOrder);
 router.get('/ops/orders/:id', inboxOpsController.getOrderDetail);
 router.patch('/ops/orders/:id/status', inboxOpsController.updateOrderStatus);

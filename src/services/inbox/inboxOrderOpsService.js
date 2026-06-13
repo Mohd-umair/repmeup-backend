@@ -228,6 +228,21 @@ async function getOrderDetail(orgId, orderId) {
   };
 }
 
+/**
+ * Resolve the most recent order linked to an inbox interaction.
+ * Powers the "Order placed" chip deep-link from the inbox → Order Management.
+ * Returns a lightweight ref (or null) — the page fetches full detail by id.
+ */
+async function getOrderByInteraction(orgId, interactionId) {
+  if (!/^[a-f\d]{24}$/i.test(String(interactionId || ''))) return null;
+  const order = await CommerceOrder.findOne({ organization: orgId, sourceInteraction: interactionId })
+    .sort({ createdAt: -1 })
+    .select('_id displayRef status')
+    .lean();
+  if (!order) return null;
+  return { id: order._id.toString(), displayRef: order.displayRef || null, status: order.status };
+}
+
 async function updateOrderStatus(orgId, orderId, status, notes) {
   const order = await CommerceOrder.findOne({ _id: orderId, organization: orgId });
   if (!order) return { error: 'not_found' };
@@ -307,6 +322,7 @@ module.exports = {
   listOrders,
   getOrderStats,
   getOrderDetail,
+  getOrderByInteraction,
   updateOrderStatus,
   createOrder,
   VALID_STATUS_TRANSITIONS,
