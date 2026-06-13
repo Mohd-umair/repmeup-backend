@@ -1,6 +1,7 @@
 const { sendTextForInteraction } = require('../flowMessageService');
 const Organization = require('../../../models/Organization');
 const logger = require('../../../config/logger');
+const flowTemplateService = require('../flowTemplateService');
 
 const TRUE_BRANCHES = ['yes', 'true', 'match', 'matched'];
 const FALSE_BRANCHES = ['no', 'false', 'nomatch', 'unmatched', 'else', 'default'];
@@ -80,6 +81,87 @@ function isWithinBusinessHours(config = {}) {
 }
 
 /**
+ * Seconds remaining until the flow's quiet-hours window ends.
+ * Returns 0 when "now" (in the flow timezone) is outside quiet hours.
+ * Handles overnight windows (e.g. 22:00 → 08:00).
+ *
+ * @param {object} settings  flow.settings ({ quietHoursStart, quietHoursEnd, timezone })
+ * @returns {number} seconds to wait (0 = continue now)
+ */
+function secondsUntilQuietHoursEnd(settings = {}) {
+  const start = toMinutes(settings.quietHoursStart);
+  const end = toMinutes(settings.quietHoursEnd);
+  if (start == null || end == null || start === end) return 0; // not configured
+
+  const tz = settings.timezone || 'Asia/Kolkata';
+  let nowMin;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour12: false, hour: '2-digit', minute: '2-digit'
+    }).formatToParts(new Date());
+    const get = (t) => parts.find((p) => p.type === t)?.value;
+    nowMin = Number(get('hour')) * 60 + Number(get('minute'));
+  } catch {
+    const d = new Date();
+    nowMin = d.getHours() * 60 + d.getMinutes();
+  }
+
+  const inWindow = start <= end
+    ? (nowMin >= start && nowMin < end)
+    : (nowMin >= start || nowMin < end); // overnight
+  if (!inWindow) return 0;
+
+  // Minutes until `end` (accounting for overnight wrap).
+  let minsLeft = end - nowMin;
+  if (minsLeft <= 0) minsLeft += 24 * 60;
+  return minsLeft * 60;
+}
+
+/**
+ * Per-contact, per-node daily rate-limit gate.
+ *
+ * Returns `true` (take the "yes"/continue branch) while the contact is under the
+ * configured `maxPerDay` for this flow node, and increments the counter. Returns
+ * `false` once the cap is hit. Backed by Redis with a 25h TTL; **fails open**
+ * (returns true) if Redis is unavailable so a cache outage never blocks
+ * customer messaging.
+ *
+ * @param {object} ctx   handler context (organizationId, flow, enrollment, node)
+ * @param {object} config  node config ({ maxPerDay })
+ * @returns {Promise<boolean>}
+ */
+async function checkRateLimit(ctx, config) {
+  const max = Number(config?.maxPerDay);
+  if (!Number.isFinite(max) || max <= 0) return true; // no cap configured
+
+  const contactId = ctx.enrollment?.platformUserId
+    || ctx.interaction?.author?.platformId
+    || '';
+  if (!contactId) return true; // can't identify contact → don't block
+
+  try {
+    const { getRedisClient } = require('../../../config/redis');
+    const redis = getRedisClient();
+    if (!redis) return true;
+
+    const day = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    const flowId = ctx.flow?._id || ctx.flow?.id || 'flow';
+    const nodeId = ctx.node?.id || 'node';
+    const key = `flow:ratelimit:${ctx.organizationId}:${flowId}:${nodeId}:${contactId}:${day}`;
+
+    const count = await redis.incrBy(key, 1);
+    if (count === 1) {
+      // First hit today — expire shortly after the day rolls over (25h).
+      await redis.expire(key, 25 * 60 * 60);
+    }
+    return count <= max;
+  } catch (err) {
+    logger.warn('[FlowHandler] dedup_rate_limit check failed (fail-open)', { error: err.message });
+    return true;
+  }
+}
+
+/**
  * Resolve a true/false condition to the correct outgoing edge.
  * Honors yes/no (and synonyms) labels; falls back to first/second edge by order.
  */
@@ -114,7 +196,13 @@ async function resolveProductRetailerId(organizationId, productId) {
  * when possible. Throws on hard failures so the node is marked failed.
  */
 async function handleWhatsAppInteractive(node, ctx) {
-  const { config = {} } = node;
+  // Interpolate {{tokens}} in all user-visible copy before sending.
+  const tplContext = flowTemplateService.buildContext(ctx.interaction, ctx.enrollment?.variables);
+  const render = (v) => (typeof v === 'string' ? flowTemplateService.render(v, { context: tplContext }) : v);
+  const config = { ...(node.config || {}) };
+  for (const key of ['bodyText', 'headerText', 'footerText', 'caption', 'buttonText', 'name', 'address']) {
+    if (typeof config[key] === 'string') config[key] = render(config[key]);
+  }
   const { organizationId, interaction, enrollment } = ctx;
   const messageService = require('../flowMessageService');
   const whatsappService = require('../../../integrations/whatsapp/whatsappService');
@@ -274,7 +362,10 @@ async function handleAction(node, ctx) {
   switch (node.type) {
     case 'action.send_text': {
       if (!config.text?.trim()) throw new Error('Send text: message is empty');
-      await sendTextForInteraction(ctx.interaction, organizationId, config.text);
+      const text = flowTemplateService.render(config.text, {
+        interaction, variables: enrollment?.variables
+      });
+      await sendTextForInteraction(ctx.interaction, organizationId, text);
       break;
     }
     case 'action.send_template': {
@@ -284,17 +375,164 @@ async function handleAction(node, ctx) {
       const recipient = interaction?.author?.platformId || enrollment?.platformUserId;
       if (conn && recipient && config.templateName) {
         const whatsappService = require('../../../integrations/whatsapp/whatsappService');
+        // Interpolate {{tokens}} in each positional variable value before send.
+        const tplContext = flowTemplateService.buildContext(interaction, enrollment?.variables);
+        const renderedVars = {};
+        if (config.variables && typeof config.variables === 'object') {
+          for (const [k, v] of Object.entries(config.variables)) {
+            renderedVars[k] = typeof v === 'string'
+              ? flowTemplateService.render(v, { context: tplContext })
+              : v;
+          }
+        }
         await whatsappService.sendTemplateMessage(
           conn,
           recipient,
           config.templateName,
           config.templateLanguage || 'en',
-          buildTemplateComponents(config.variables)
+          buildTemplateComponents(renderedVars)
         );
       } else {
         logger.warn('[FlowHandler] send_template skipped', {
           hasConn: !!conn, hasRecipient: !!recipient, templateName: config.templateName
         });
+      }
+      break;
+    }
+    case 'action.send_generic_template': {
+      // Instagram/Facebook generic (card) template DM with optional buttons.
+      const messageService = require('../flowMessageService');
+      const platform = interaction?.platform === 'facebook' ? 'facebook' : 'instagram';
+      const conn = await messageService.getConnection(organizationId, platform);
+      const recipient = interaction?.author?.platformId || enrollment?.platformUserId;
+      if (!conn || !recipient) {
+        logger.warn('[FlowHandler] send_generic_template skipped', {
+          hasConn: !!conn, hasRecipient: !!recipient, platform
+        });
+        break;
+      }
+      const tplContext = flowTemplateService.buildContext(interaction, enrollment?.variables);
+      const render = (v) => (typeof v === 'string' ? flowTemplateService.render(v, { context: tplContext }) : '');
+      const title = render(config.title).slice(0, 80) || 'Hello';
+      const subtitle = render(config.subtitle).slice(0, 80);
+      const element = { title };
+      if (subtitle) element.subtitle = subtitle;
+      const imageUrl = String(config.imageUrl || '').trim();
+      if (/^https:\/\//i.test(imageUrl)) element.image_url = imageUrl;
+      const rawButtons = Array.isArray(config.buttons) ? config.buttons : [];
+      const buttons = rawButtons
+        .map((b) => {
+          const label = render(b?.label || b?.title).slice(0, 20);
+          const url = String(b?.url || '').trim();
+          if (!label || !/^https:\/\//i.test(url)) return null;
+          return { type: 'web_url', title: label, url };
+        })
+        .filter(Boolean)
+        .slice(0, 3);
+      if (buttons.length) element.buttons = buttons;
+
+      const instagramService = require('../../../integrations/meta/instagramService');
+      const pageId = conn.platformData?.pageId || conn.platformData?.instagramBusinessAccountId;
+      await instagramService.sendGenericTemplateMessage(
+        recipient, element, conn.accessToken, pageId, conn.platformData?.connectionType
+      );
+      const { recordAutomationReply } = require('../../inbox/inboxAutomationReplyService');
+      if (interaction?._id) {
+        await recordAutomationReply({
+          interactionId: interaction._id,
+          organizationId,
+          content: subtitle ? `${title} — ${subtitle}` : title,
+          messageType: 'instagram_generic_template',
+          attachmentUrl: element.image_url || null
+        }).catch(() => {});
+      }
+      break;
+    }
+    case 'action.send_catalog_product': {
+      // Alias of send_product: send a single WhatsApp catalog product card.
+      const messageService = require('../flowMessageService');
+      const { conn, recipient } = await messageService.resolveWhatsAppTarget(organizationId, interaction, enrollment);
+      if (!conn || !recipient) {
+        logger.warn('[FlowHandler] send_catalog_product skipped (no conn/recipient)');
+        break;
+      }
+      if (!config.productId) throw new Error('Send catalog product: productId is required');
+      const whatsappCatalogService = require('../../../integrations/whatsapp/whatsappCatalogService');
+      const catalogId = await whatsappCatalogService.getLinkedCatalogId(conn);
+      const retailerId = await resolveProductRetailerId(organizationId, config.productId);
+      if (!catalogId || !retailerId) {
+        throw new Error('Send catalog product: catalog or product could not be resolved');
+      }
+      const bodyText = flowTemplateService.render(config.bodyText || '', {
+        interaction, variables: enrollment?.variables
+      });
+      await whatsappCatalogService.sendProductMessage(conn, recipient, catalogId, retailerId, bodyText);
+      if (interaction?._id) {
+        const { recordAutomationReply } = require('../../inbox/inboxAutomationReplyService');
+        await recordAutomationReply({
+          interactionId: interaction._id, organizationId,
+          content: bodyText || '[product]', messageType: 'interactive'
+        }).catch(() => {});
+      }
+      break;
+    }
+    case 'action.create_order': {
+      // Create an intent/cart CommerceOrder for the contact from a configured product.
+      if (!config.productId) {
+        logger.warn('[FlowHandler] create_order skipped: no productId');
+        break;
+      }
+      const Product = require('../../../models/Product');
+      const product = await Product.findOne({ _id: config.productId, organization: organizationId })
+        .select('name price currency sku')
+        .lean();
+      if (!product) {
+        logger.warn('[FlowHandler] create_order skipped: product not found', { productId: config.productId });
+        break;
+      }
+      const CommerceOrder = require('../../../models/CommerceOrder');
+      const { assignOrderDisplayRef } = require('../../../utils/opsRefHelper');
+      const platform = interaction?.platform === 'whatsapp' ? 'whatsapp' : 'instagram';
+      const buyerId = interaction?.author?.platformId || enrollment?.platformUserId || '';
+      const lineItems = [{
+        product: product._id,
+        retailerId: (product.sku && String(product.sku).trim()) || String(product._id),
+        name: product.name,
+        qty: 1,
+        unitPrice: product.price,
+        currency: product.currency || 'AED'
+      }];
+      const order = await CommerceOrder.create(
+        await assignOrderDisplayRef(organizationId, {
+          organization: organizationId,
+          channel: platform,
+          status: 'intent',
+          lineItems,
+          totalAmount: +Number(product.price || 0).toFixed(2),
+          currency: product.currency || 'AED',
+          contact: interaction?.contact || enrollment?.contact || undefined,
+          sourceInteraction: interaction?._id,
+          ...(platform === 'whatsapp' ? { buyerPhone: buyerId } : { instagramUserId: buyerId })
+        })
+      );
+      return {
+        status: 'continue',
+        variables: { orderId: String(order._id), orderRef: order.displayRef || '' },
+        nextNodeId: pickEdge(ctx.edges)?.target
+      };
+    }
+    case 'action.link_comment_thread': {
+      // Persist the link between a public comment and the resulting DM thread so
+      // analytics/inbox can correlate them. Stored on the interaction metadata.
+      if (interaction?._id) {
+        const Interaction = require('../../../models/Interaction');
+        await Interaction.updateOne(
+          { _id: interaction._id },
+          { $set: {
+            'metadata.linkedCommentId': interaction.metadata?.commentId || interaction.parentId || interaction.platformId,
+            'metadata.flowLinkedThread': true
+          } }
+        ).catch((err) => logger.warn('[FlowHandler] link_comment_thread failed', { error: err.message }));
       }
       break;
     }
@@ -316,9 +554,12 @@ async function handleAction(node, ctx) {
         const conn = await require('../flowMessageService').getConnection(organizationId, 'instagram');
         if (conn) {
           const instagramService = require('../../../integrations/meta/instagramService');
+          const text = flowTemplateService.render(config.text, {
+            interaction, variables: enrollment?.variables
+          });
           await instagramService.replyToComment(
             interaction.platformId,
-            config.text,
+            text,
             conn.accessToken,
             conn.platformData?.connectionType
           );
@@ -435,12 +676,22 @@ async function handleAction(node, ctx) {
       }
       break;
     }
-    case 'action.set_variable':
+    case 'action.set_variable': {
+      const varKey = String(config.key || '').trim();
+      if (!varKey) {
+        logger.warn('[FlowHandler] set_variable skipped: empty key');
+        return { status: 'continue', nextNodeId: pickEdge(ctx.edges)?.target };
+      }
+      // Interpolate the value so you can compose variables (e.g. "{{name}} (VIP)").
+      const value = typeof config.value === 'string'
+        ? flowTemplateService.render(config.value, { interaction, variables: enrollment?.variables })
+        : config.value;
       return {
         status: 'continue',
-        variables: { [config.key]: config.value },
+        variables: { [varKey]: value },
         nextNodeId: pickEdge(ctx.edges)?.target
       };
+    }
     case 'action.set_stage': {
       const SalesConversationState = require('../../../models/SalesConversationState');
       if (interaction?.author?.platformId) {
@@ -550,6 +801,12 @@ async function handleCondition(node, ctx) {
       match = isWithinBusinessHours(config);
       break;
     }
+    case 'condition.dedup_rate_limit': {
+      // True (yes branch) while under the per-contact daily cap; increments the
+      // counter only when allowed so the gate is idempotent per pass.
+      match = await checkRateLimit(ctx, config);
+      break;
+    }
     default:
       match = true;
   }
@@ -583,8 +840,16 @@ async function handleWait(node, ctx) {
       const sec = Number(config.timeoutSec) || 86400;
       return { status: 'waiting', delaySec: sec, nextRunAt: new Date(Date.now() + sec * 1000) };
     }
-    case 'wait.quiet_hours':
-      return { status: 'waiting', delaySec: 3600, nextRunAt: new Date(Date.now() + 3600 * 1000) };
+    case 'wait.quiet_hours': {
+      // If we're currently inside the flow's quiet-hours window, park until it
+      // ends; otherwise continue immediately.
+      const settings = ctx.flow?.settings || {};
+      const sec = secondsUntilQuietHoursEnd(settings);
+      if (sec <= 0) {
+        return { status: 'continue', nextNodeId: pickEdge(ctx.edges)?.target };
+      }
+      return { status: 'waiting', delaySec: sec, nextRunAt: new Date(Date.now() + sec * 1000) };
+    }
     default:
       return { status: 'continue', nextNodeId: pickEdge(ctx.edges)?.target };
   }

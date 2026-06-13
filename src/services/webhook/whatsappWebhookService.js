@@ -712,7 +712,8 @@ async function processIncomingMessage(change, connection, rawPayload) {
   if (runFlows) {
     try {
       const flowTriggerRouter = require('../flow/flowTriggerRouter');
-      const eventType = md.type === 'order' ? 'whatsapp.order' : 'whatsapp.message';
+      const isOrder = md.type === 'order' || md.rawMessage?.type === 'order';
+      const eventType = isOrder ? 'whatsapp.order' : 'whatsapp.message';
       const flowResult = await flowTriggerRouter.route({
         organizationId,
         platform: 'whatsapp',
@@ -721,6 +722,8 @@ async function processIncomingMessage(change, connection, rawPayload) {
         payload: {
           content: savedInteraction.content,
           text: savedInteraction.content,
+          // A native WhatsApp cart order webhook is a freshly "created" order.
+          orderEvent: isOrder ? 'created' : undefined,
           postback: savedInteraction.metadata?.postback || savedInteraction.metadata?.buttonPayload
         }
       });

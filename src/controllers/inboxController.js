@@ -1207,7 +1207,7 @@ exports.suggestReply = async (req, res, next) => {
       success: true,
       data,
       credits,
-      message: 'AI reply generated successfully'
+      message: 'Reppy reply generated successfully'
     });
   } catch (err) {
     if (err instanceof InboxAiError) return respondInboxAiError(res, err);
@@ -1229,7 +1229,7 @@ exports.aiAssist = async (req, res, next) => {
       success: true,
       data,
       credits,
-      message: 'AI assistance generated successfully'
+      message: 'Reppy assistance generated successfully'
     });
   } catch (err) {
     if (err instanceof InboxAiError) return respondInboxAiError(res, err);

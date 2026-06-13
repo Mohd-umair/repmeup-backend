@@ -562,6 +562,9 @@ interactionSchema.index({ organization: 1, platformId: 1 }, { unique: true });
 interactionSchema.index({ organization: 1, createdAt: -1 });
 interactionSchema.index({ organization: 1, status: 1 });
 interactionSchema.index({ organization: 1, platform: 1, createdAt: -1 });
+// Supports flow first-message / new-lead detection (count prior inbound by sender)
+// and per-contact thread lookups by platform-scoped author id.
+interactionSchema.index({ organization: 1, platform: 1, 'author.platformId': 1 });
 interactionSchema.index({ organization: 1, sentiment: 1 });
 interactionSchema.index({ assignedTo: 1, status: 1 });
 interactionSchema.index({ 'metadata.postId': 1 });

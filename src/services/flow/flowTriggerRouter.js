@@ -9,6 +9,7 @@ const EVENT_TO_TRIGGER = {
   'whatsapp.message': ['trigger.keyword', 'trigger.first_message', 'trigger.new_lead'],
   'whatsapp.order': ['trigger.order_event'],
   'facebook.message': ['trigger.keyword', 'trigger.first_message'],
+  'facebook.dm': ['trigger.keyword', 'trigger.first_message', 'trigger.new_lead'],
   'facebook.comment': ['trigger.keyword'],
   'instagram.comment': ['trigger.ig_comment'],
   'instagram.story_reply': ['trigger.ig_story_reply'],
@@ -17,6 +18,10 @@ const EVENT_TO_TRIGGER = {
   'instagram.postback': ['trigger.ig_postback']
 };
 
+/**
+ * Synchronous trigger gate: event-type allow-list + config filters that need no
+ * database access (keywords, postback payload, order event).
+ */
 function matchesTrigger(node, eventType, payload = {}) {
   if (!isTriggerType(node.type)) return false;
   const allowed = EVENT_TO_TRIGGER[eventType] || [];
@@ -34,6 +39,36 @@ function matchesTrigger(node, eventType, payload = {}) {
   }
   if (node.type === 'trigger.order_event' && config.event) {
     if (payload.orderEvent !== config.event) return false;
+  }
+  return true;
+}
+
+/**
+ * Async qualifiers that require DB lookups (first contact / new lead detection).
+ * Runs only after the cheap synchronous gate passes.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function qualifiesTrigger(node, { organizationId, platform, interaction }) {
+  const platformUserId = interaction?.author?.platformId || '';
+
+  if (node.type === 'trigger.first_message' || node.type === 'trigger.new_lead') {
+    if (!platformUserId) return true; // can't determine history → don't block
+    try {
+      const Interaction = require('../../models/Interaction');
+      // Count prior inbound interactions from this contact (excluding the
+      // current one). Zero prior == genuinely the first message / new lead.
+      const priorCount = await Interaction.countDocuments({
+        organization: organizationId,
+        platform,
+        'author.platformId': platformUserId,
+        _id: { $ne: interaction?._id }
+      });
+      return priorCount === 0;
+    } catch (err) {
+      logger.warn('[FlowTriggerRouter] first_message/new_lead check failed (allow)', { error: err.message });
+      return true;
+    }
   }
   return true;
 }
@@ -79,7 +114,7 @@ class FlowTriggerRouter {
 
       // Reply-resume pass: any inbound message from a contact parked at a `wait.user_reply`
       // node continues the reply branch, regardless of whether it re-matches the trigger.
-      const isReplyEvent = /\.(message|dm)$/.test(eventType);
+      const isReplyEvent = /\.(message|dm|postback)$/.test(eventType);
       if (isReplyEvent && platformUserIdTop) {
         const waiting = await FlowEnrollment.find({
           organization: organizationId,
@@ -103,6 +138,10 @@ class FlowTriggerRouter {
         if (resumedFlowIds.has(String(flow._id))) continue;
         const triggerNode = (flow.nodes || []).find((n) => matchesTrigger(n, eventType, { ...payload, content: interaction?.content, text: interaction?.content }));
         if (!triggerNode) continue;
+
+        // Async qualifiers (first message / new lead detection).
+        const qualifies = await qualifiesTrigger(triggerNode, { organizationId, platform, interaction });
+        if (!qualifies) continue;
 
         const startNodeId = flowExecutorService.getStartNodeId(flow);
         if (!startNodeId) continue;

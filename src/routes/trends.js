@@ -114,7 +114,7 @@ router.get('/industry', async (req, res) => {
     // ── Credit gate (only for fresh AI calls) ─────────────────────────────────
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      return res.status(503).json({ success: false, message: 'AI features are not configured.' });
+      return res.status(503).json({ success: false, message: 'Reppy AI features are not configured.' });
     }
 
     const creditCheck = await aiCreditService.checkCredits(orgId, TREND_CREDIT_COST);
@@ -166,7 +166,7 @@ Make trends feel current and actionable, not generic.`;
       if (!Array.isArray(data)) throw new Error('Not an array');
     } catch {
       console.error('[Trends] Failed to parse OpenAI response:', raw.slice(0, 200));
-      return res.status(502).json({ success: false, message: 'Could not parse trend data from AI.' });
+      return res.status(502).json({ success: false, message: 'Could not parse trend data from Reppy.' });
     }
 
     // Normalise and cap at 6

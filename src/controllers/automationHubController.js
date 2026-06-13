@@ -71,19 +71,19 @@ exports.getHubOverview = async (req, res, next) => {
       {
         id: 'ai-replies',
         label: 'AI Auto Replies',
-        description: 'Reply instantly to DMs, comments, stories and mentions using AI.',
+        description: 'Reply instantly to DMs, comments, stories and mentions using Reppy.',
         icon: 'fas fa-comment-dots',
         route: '/app/automation/ai-replies',
         active: org?.autoReplySettings?.enabled ?? false
       },
-      {
-        id: 'growth',
-        label: 'Growth Automation',
-        description: 'Convert comments to DM, gain followers and drive more sales.',
-        icon: 'fas fa-seedling',
-        route: '/app/automation/growth',
-        active: (org?.commentToDmSettings?.enabled || org?.commentFollowInviteSettings?.enabled || org?.salesFlowSettings?.enabled || org?.storyToDmSettings?.enabled) ?? false
-      },
+      // {
+      //   id: 'growth',
+      //   label: 'Growth Automation',
+      //   description: 'Convert comments to DM, gain followers and drive more sales.',
+      //   icon: 'fas fa-seedling',
+      //   route: '/app/automation/growth',
+      //   active: (org?.commentToDmSettings?.enabled || org?.commentFollowInviteSettings?.enabled || org?.salesFlowSettings?.enabled || org?.storyToDmSettings?.enabled) ?? false
+      // },
       {
         id: 'flow-builder',
         label: 'Flow Builder',
@@ -92,30 +92,30 @@ exports.getHubOverview = async (req, res, next) => {
         route: '/app/automation/flows',
         active: activeWaFlow > 0
       },
-      {
-        id: 'reviews',
-        label: 'Review Collection',
-        description: 'Automatically collect more positive reviews and build trust.',
-        icon: 'fas fa-star',
-        route: '/app/automation/reviews',
-        active: reviewSettings?.enabled === true
-      },
-      {
-        id: 'retargeting',
-        label: 'Retargeting',
-        description: 'Re-engage interested users and convert them to loyal customers.',
-        icon: 'fas fa-bullseye',
-        route: '/app/automation/retargeting',
-        active: activeRetargeting > 0
-      },
-      {
-        id: 'escalation',
-        label: 'Human Escalation',
-        description: 'Smartly transfer complex conversations to your team or agents.',
-        icon: 'fas fa-headset',
-        route: '/app/automation/escalation',
-        active: org?.escalationSettings?.enabled ?? true
-      }
+      // {
+      //   id: 'reviews',
+      //   label: 'Review Collection',
+      //   description: 'Automatically collect more positive reviews and build trust.',
+      //   icon: 'fas fa-star',
+      //   route: '/app/automation/reviews',
+      //   active: reviewSettings?.enabled === true
+      // },
+      // {
+      //   id: 'retargeting',
+      //   label: 'Retargeting',
+      //   description: 'Re-engage interested users and convert them to loyal customers.',
+      //   icon: 'fas fa-bullseye',
+      //   route: '/app/automation/retargeting',
+      //   active: activeRetargeting > 0
+      // },
+      // {
+      //   id: 'escalation',
+      //   label: 'Human Escalation',
+      //   description: 'Smartly transfer complex conversations to your team or agents.',
+      //   icon: 'fas fa-headset',
+      //   route: '/app/automation/escalation',
+      //   active: org?.escalationSettings?.enabled ?? true
+      // }
     ];
 
     // ── Top performers by platform ────────────────────────────────────────────

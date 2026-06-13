@@ -67,7 +67,7 @@ function buildWelcomeSignupEmail(opts) {
             <td style="padding:32px 40px 24px 40px;background-color:#0B0B0B;">
               <p style="margin:0 0 4px 0;font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;color:#D8FF00;text-transform:uppercase;letter-spacing:0.14em;">Welcome aboard</p>
               <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:26px;line-height:1.2;font-weight:800;color:#FFFFFF;">Hi ${firstName}, you're in.</h1>
-              <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.55;color:#9CA3AF;">Your ${appName} account is ready. Manage every comment, DM, and review from one place — with AI that matches your brand.</p>
+              <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.55;color:#9CA3AF;">Your ${appName} account is ready. Manage every comment, DM, and review from one place — with Reppy that matches your brand.</p>
             </td>
           </tr>
           <!-- CTA -->
@@ -104,7 +104,7 @@ function buildWelcomeSignupEmail(opts) {
                   <td style="vertical-align:top;width:36px;padding:0 0 16px 0;">
                     <span style="display:inline-block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:8px;background-color:#F0FDF4;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:bold;color:#166534;">3</span>
                   </td>
-                  <td style="padding:0 0 16px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.55;color:#4B5563;"><strong style="color:#111827;">Open the inbox</strong> — Reply faster with AI suggestions and team assignments.</td>
+                  <td style="padding:0 0 16px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.55;color:#4B5563;"><strong style="color:#111827;">Open the inbox</strong> — Reply faster with Reppy suggestions and team assignments.</td>
                 </tr>
               </table>
             </td>

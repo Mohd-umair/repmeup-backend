@@ -308,7 +308,7 @@ const FLOW_NODE_CATALOG = [
   }),
   node('action.ai_reply', 'action', 'AI reply', CHANNELS, {
     icon: 'fas fa-robot',
-    description: 'Generate and send an AI reply.',
+    description: 'Generate and send a Reppy reply.',
     defaultConfig: { tone: 'friendly' },
     fields: [{
       key: 'tone', type: 'select', label: 'Tone', options: ['professional', 'friendly', 'casual'],

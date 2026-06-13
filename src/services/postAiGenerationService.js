@@ -765,7 +765,7 @@ async function generateVariantImage({
       userId,
       organizationId,
       tags: ['ai-generated', 'content-studio'],
-      description: `AI generated for: ${topic.substring(0, 80)}`
+      description: `Reppy generated for: ${topic.substring(0, 80)}`
     });
 
     await aiCreditService.deductCredits(
