@@ -129,7 +129,7 @@ const CATALOG = [
   {
     key: FEATURE_KEYS.CREDITS_AUTO_REPLY,
     label: 'Auto-reply credits / month',
-    description: 'Credits consumed each time the AI sends an automated reply.',
+    description: 'Credits consumed each time Reppy sends an automated reply.',
     category: 'limits',
     kind: 'limit',
     defaultValue: -1,
@@ -140,7 +140,7 @@ const CATALOG = [
   {
     key: FEATURE_KEYS.CREDITS_POST_CREATION,
     label: 'Post creation credits / month',
-    description: 'Credits consumed each time the AI helps generate a post.',
+    description: 'Credits consumed each time Reppy helps generate a post.',
     category: 'limits',
     kind: 'limit',
     defaultValue: -1,
@@ -150,8 +150,8 @@ const CATALOG = [
   },
   {
     key: FEATURE_KEYS.CREDITS_AI_GENERAL,
-    label: 'General AI credits / month',
-    description: 'Catch-all bucket for AI ops not covered by post or auto-reply (KB, summaries).',
+    label: 'General Reppy credits / month',
+    description: 'Catch-all bucket for Reppy AI ops not covered by post or auto-reply (KB, summaries).',
     category: 'limits',
     kind: 'limit',
     defaultValue: -1,
@@ -254,8 +254,8 @@ const CATALOG = [
   },
   {
     key: FEATURE_KEYS.POSTS_AI_VARIANTS_MAX,
-    label: 'AI variants per generation',
-    description: 'How many alternative drafts AI can generate at once.',
+    label: 'Reppy AI variants per generation',
+    description: 'How many alternative drafts Reppy can generate at once.',
     category: 'posts',
     kind: 'limit',
     defaultValue: -1,
@@ -291,8 +291,8 @@ const CATALOG = [
   // ── Automation / analytics / agents ───────────────────────────────────────
   {
     key: FEATURE_KEYS.AUTO_REPLY_ENABLED,
-    label: 'Auto-reply (AI) enabled',
-    description: 'Master switch for the AI auto-reply feature.',
+    label: 'Auto-reply (Reppy AI) enabled',
+    description: 'Master switch for the Reppy AI auto-reply feature.',
     category: 'automation',
     kind: 'boolean',
     defaultValue: true,
@@ -309,7 +309,7 @@ const CATALOG = [
   },
   {
     key: FEATURE_KEYS.AGENTS_ENABLED,
-    label: 'AI agents (multi-agent flows)',
+    label: 'Reppy AI agents (multi-agent flows)',
     category: 'automation',
     kind: 'boolean',
     defaultValue: true,
@@ -319,8 +319,8 @@ const CATALOG = [
   // ── Voice IVR ─────────────────────────────────────────────────────────────
   {
     key: FEATURE_KEYS.VOICE_IVR_ENABLED,
-    label: 'AI Voice IVR',
-    description: 'AI phone calling, voice agents, and call analytics for automation teams.',
+    label: 'Reppy AI Voice IVR',
+    description: 'Reppy AI phone calling, voice agents, and call analytics for automation teams.',
     category: 'automation',
     kind: 'boolean',
     defaultValue: true,
@@ -349,8 +349,8 @@ const CATALOG = [
   },
   {
     key: FEATURE_KEYS.COMMERCE_AI_ASSIST_ENABLED,
-    label: 'AI Commerce Assist',
-    description: 'AI-powered product suggestions and sales replies in the inbox.',
+    label: 'Reppy AI Commerce Assist',
+    description: 'Reppy-powered product suggestions and sales replies in the inbox.',
     category: 'commerce',
     kind: 'boolean',
     defaultValue: true,
@@ -358,8 +358,8 @@ const CATALOG = [
   },
   {
     key: FEATURE_KEYS.COMMERCE_AUTONOMOUS_AGENT,
-    label: 'Autonomous AI Sales Agent',
-    description: 'Allow AI to auto-send product messages and handle sales without agent intervention.',
+    label: 'Autonomous Reppy AI Sales Agent',
+    description: 'Allow Reppy to auto-send product messages and handle sales without agent intervention.',
     category: 'commerce',
     kind: 'boolean',
     defaultValue: false,

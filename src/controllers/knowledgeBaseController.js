@@ -545,7 +545,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
         },
         creditsUsed: actualCost
       },
-      message: 'Knowledge base created from URL with AI summary successfully'
+      message: 'Knowledge base created from URL with Reppy summary successfully'
     });
   } catch (error) {
     if (error?.name === 'EntitlementError') {

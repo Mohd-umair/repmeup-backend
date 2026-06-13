@@ -107,6 +107,7 @@ module.exports = async function processWebhook(job) {
       if (organizationId) {
         try {
           const flowTriggerRouter = require('../services/flow/flowTriggerRouter');
+          const postbackPayload = interaction.metadata?.postback || interaction.metadata?.buttonPayload;
           let eventType = `${interaction.platform}.${interaction.type}`;
           if (interaction.platform === 'instagram' && interaction.type === 'comment') {
             eventType = 'instagram.comment';
@@ -119,8 +120,13 @@ module.exports = async function processWebhook(job) {
               interaction.metadata.storyTriggerType === 'story_mention'
                 ? 'instagram.story_mention'
                 : 'instagram.story_reply';
+          } else if (interaction.platform === 'instagram' && interaction.type === 'dm' && postbackPayload) {
+            // A DM carrying a button payload is a postback click, not free text.
+            eventType = 'instagram.postback';
           } else if (interaction.platform === 'instagram' && interaction.type === 'dm') {
             eventType = 'instagram.dm';
+          } else if (interaction.platform === 'facebook' && interaction.type === 'dm') {
+            eventType = 'facebook.dm';
           } else if (interaction.platform === 'whatsapp') {
             eventType = 'whatsapp.message';
           }
