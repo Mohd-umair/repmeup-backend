@@ -566,12 +566,58 @@ async function handleAction(node, ctx) {
         country: order.shipping?.country || 'India'
       };
       await order.save();
+
+      // Remember the address on the customer's Contact so repeat orders only need a
+      // one-tap confirm (no re-asking). Non-fatal.
+      try {
+        const Contact = require('../../../models/Contact');
+        const contactId = order.contact || interaction?.contact;
+        const set = { shippingAddress: address, shipping: order.shipping, shippingUpdatedAt: new Date() };
+        if (contactId) {
+          await Contact.updateOne({ _id: contactId, organization: organizationId }, { $set: set });
+        } else {
+          const phone = order.buyerPhone || interaction?.author?.platformId;
+          if (phone) {
+            await Contact.updateOne(
+              { organization: organizationId, $or: [{ primaryPhone: phone }, { 'channels.platformUserId': phone }] },
+              { $set: set }
+            );
+          }
+        }
+      } catch (e) {
+        logger.debug('[FlowHandler] save_shipping_address: contact update skipped', { error: e.message });
+      }
+
       logger.info('[FlowHandler] save_shipping_address: saved to order', {
         orderId: String(order._id), pincode: pin || undefined
       });
       return {
         status: 'continue',
         variables: { orderId: String(order._id), delivery_address: address },
+        nextNodeId: pickEdge(ctx.edges)?.target
+      };
+    }
+    case 'action.load_saved_address': {
+      // Load the customer's remembered address into {{saved_address}} so the flow can
+      // offer a one-tap confirm instead of re-asking. Empty when none on file.
+      const Contact = require('../../../models/Contact');
+      let contact = null;
+      if (interaction?.contact) {
+        contact = await Contact.findById(interaction.contact).select('shippingAddress').lean();
+      }
+      if (!contact) {
+        const phone = interaction?.author?.platformId || enrollment?.platformUserId;
+        if (phone) {
+          contact = await Contact.findOne({
+            organization: organizationId,
+            $or: [{ primaryPhone: phone }, { 'channels.platformUserId': phone }]
+          }).select('shippingAddress').lean();
+        }
+      }
+      const saved = (contact?.shippingAddress && String(contact.shippingAddress).trim()) || '';
+      return {
+        status: 'continue',
+        variables: { saved_address: saved },
         nextNodeId: pickEdge(ctx.edges)?.target
       };
     }
