@@ -73,6 +73,38 @@ async function qualifiesTrigger(node, { organizationId, platform, interaction })
   return true;
 }
 
+/**
+ * Build interpolation variables describing the order that just triggered the flow,
+ * so blueprints (e.g. Checkout) can say "We've received your order: 2× X. Total ₹300."
+ * Reads the CommerceOrder linked to this interaction. Non-fatal — returns {}.
+ */
+async function buildOrderVars(organizationId, interaction) {
+  try {
+    if (!interaction?._id) return {};
+    const CommerceOrder = require('../../models/CommerceOrder');
+    const { formatMoney } = require('../inbox/inboxOpsFormatters');
+    const order = await CommerceOrder.findOne({
+      organization: organizationId,
+      sourceInteraction: interaction._id,
+      status: { $nin: ['cancelled', 'refunded', 'returned', 'delivered'] }
+    }).sort({ createdAt: -1 }).lean();
+    if (!order || !(order.lineItems || []).length) return {};
+
+    const items = order.lineItems.map((li) => `${li.qty || 1}× ${li.name || 'item'}`).join(', ');
+    const total = order.totalAmount != null ? formatMoney(order.totalAmount, order.currency) : '';
+    return {
+      order_ref: order.displayRef || '',
+      order_summary: items,
+      order_total: total,
+      // Ready-to-embed sentence (empty when there's no order, so copy still reads well).
+      order_summary_line: `We’ve received your order: ${items}.${total ? ` Total ${total}.` : ''}`
+    };
+  } catch (err) {
+    logger.debug('[FlowTriggerRouter] buildOrderVars failed (non-fatal)', { error: err.message });
+    return {};
+  }
+}
+
 class FlowTriggerRouter {
   /**
    * Whether flows should run for this org+channel, per the per-channel automation
@@ -107,6 +139,11 @@ class FlowTriggerRouter {
       }).lean();
 
       if (!flows.length) return { handled: false, enrollments: [] };
+
+      // Order-event flows (e.g. Checkout blueprint) get order details as variables.
+      const orderVars = eventType === 'whatsapp.order'
+        ? await buildOrderVars(organizationId, interaction)
+        : {};
 
       const enrollments = [];
       const platformUserIdTop = interaction?.author?.platformId || payload.platformUserId || '';
@@ -170,7 +207,7 @@ class FlowTriggerRouter {
           contact: interaction?.contact,
           interaction: interaction?._id,
           currentNodeId: startNodeId,
-          variables: { triggerEvent: eventType },
+          variables: { triggerEvent: eventType, ...orderVars },
           status: 'active'
         });
 

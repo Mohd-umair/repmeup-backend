@@ -57,6 +57,7 @@ router.get('/ops/orders/by-interaction/:interactionId', inboxOpsController.getOr
 router.post('/ops/orders', inboxOpsController.createOrder);
 router.get('/ops/orders/:id', inboxOpsController.getOrderDetail);
 router.patch('/ops/orders/:id/status', inboxOpsController.updateOrderStatus);
+router.patch('/ops/orders/:id/shipping', inboxOpsController.updateOrderShipping);
 
 router.get('/ops/complaints', inboxOpsController.listComplaints);
 router.get('/ops/complaints/stats', inboxOpsController.getComplaintStats);
