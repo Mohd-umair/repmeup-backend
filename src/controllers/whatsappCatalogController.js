@@ -586,11 +586,23 @@ exports.sendProductMessage = async (req, res, next) => {
       return res.status(502).json({ success: false, error: 'Failed to send product message via WhatsApp.' });
     }
 
-    // Persist reply entry so it appears in inbox timeline
+    // Persist reply entry so it appears in inbox timeline, with a rich product
+    // preview (image + price) so the inbox can render a product card.
     const fullInteraction = await Interaction.findById(interactionId);
     if (fullInteraction) {
       const replyContent = bodyText || `[Product: ${product.name}]`;
-      await fullInteraction.addReply(replyContent, req.user._id, result.messageId, false);
+      const productPreview = {
+        productId: product._id.toString(),
+        name: product.name,
+        image: Array.isArray(product.images) && product.images.length ? product.images[0] : null,
+        price: product.price ?? null,
+        currency: product.currency || 'INR',
+        sku: product.sku || null
+      };
+      await fullInteraction.addReply(
+        replyContent, req.user._id, result.messageId, false,
+        null, null, null, null, null, null, productPreview
+      );
     }
 
     return res.json({ success: true, data: { messageId: result.messageId } });

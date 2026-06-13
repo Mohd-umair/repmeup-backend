@@ -435,7 +435,11 @@ const interactionSchema = new mongoose.Schema({
     deliveryStatusAt: { type: Date, default: undefined },
 
     /** Rich preview for outbound WhatsApp Cloud API templates (inbox display) */
-    whatsappTemplatePreview: { type: mongoose.Schema.Types.Mixed, default: undefined }
+    whatsappTemplatePreview: { type: mongoose.Schema.Types.Mixed, default: undefined },
+
+    /** Rich product card for outbound catalog product messages (inbox display):
+     *  { productId, name, image, price, currency, sku } */
+    productPreview: { type: mongoose.Schema.Types.Mixed, default: undefined }
   }],
   
   responseCount: {
@@ -618,7 +622,8 @@ interactionSchema.methods.addReply = function(
   attachmentUrl = null, attachmentType = null,
   confidence = null, messageType = null,
   whatsappTemplatePreview = null,
-  deliveryStatus = null
+  deliveryStatus = null,
+  productPreview = null
 ) {
   const reply = {
     content,
@@ -633,6 +638,9 @@ interactionSchema.methods.addReply = function(
   if (messageType != null) reply.messageType = messageType;
   if (whatsappTemplatePreview && typeof whatsappTemplatePreview === 'object') {
     reply.whatsappTemplatePreview = whatsappTemplatePreview;
+  }
+  if (productPreview && typeof productPreview === 'object') {
+    reply.productPreview = productPreview;
   }
   if (deliveryStatus) {
     reply.deliveryStatus = deliveryStatus;
