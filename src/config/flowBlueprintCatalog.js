@@ -48,12 +48,16 @@ const CHECKOUT_BLUEPRINT = {
       position: { x: 280, y: 320 }, config: { timeoutSec: 86400 }
     },
     {
-      id: 's1', type: 'action.set_variable', label: 'Save delivery address',
+      id: 's1', type: 'action.set_variable', label: 'Capture address',
       position: { x: 140, y: 460 }, config: { key: 'delivery_address', value: '{{message}}' }
     },
     {
+      id: 's2', type: 'action.save_shipping_address', label: 'Save address to order',
+      position: { x: 140, y: 600 }, config: { addressVar: 'delivery_address' }
+    },
+    {
       id: 'a2', type: 'action.send_text', label: 'Confirm order',
-      position: { x: 140, y: 600 },
+      position: { x: 140, y: 740 },
       config: {
         text:
           'Perfect! ✅ Your order {{order_ref}} is confirmed and will be dispatched to:\n'
@@ -63,7 +67,7 @@ const CHECKOUT_BLUEPRINT = {
     },
     {
       id: 'e1', type: 'control.end', label: 'Done',
-      position: { x: 140, y: 740 }, config: {}
+      position: { x: 140, y: 880 }, config: {}
     },
     {
       id: 'a3', type: 'action.send_text', label: 'Address reminder',
@@ -84,7 +88,8 @@ const CHECKOUT_BLUEPRINT = {
     { id: 'a1-w1', source: 'a1', target: 'w1' },
     { id: 'w1-s1', source: 'w1', target: 's1', label: 'reply' },
     { id: 'w1-a3', source: 'w1', target: 'a3', label: 'timeout' },
-    { id: 's1-a2', source: 's1', target: 'a2' },
+    { id: 's1-s2', source: 's1', target: 's2' },
+    { id: 's2-a2', source: 's2', target: 'a2' },
     { id: 'a2-e1', source: 'a2', target: 'e1' },
     { id: 'a3-e2', source: 'a3', target: 'e2' }
   ]

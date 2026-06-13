@@ -521,6 +521,60 @@ async function handleAction(node, ctx) {
         nextNodeId: pickEdge(ctx.edges)?.target
       };
     }
+    case 'action.save_shipping_address': {
+      // Persist the address the customer replied with onto the order linked to this
+      // conversation, so it shows prefilled in Order Management.
+      const CommerceOrder = require('../../../models/CommerceOrder');
+      const srcKey = (config.addressVar && String(config.addressVar).trim()) || 'delivery_address';
+      let address = enrollment?.variables?.[srcKey];
+      if (address == null || String(address).trim() === '') address = interaction?.content || '';
+      address = String(address || '').trim();
+      if (!address) {
+        logger.debug('[FlowHandler] save_shipping_address: no address captured');
+        break;
+      }
+
+      // Prefer a captured order id; otherwise the active order on this thread.
+      const orderId = enrollment?.variables?.orderId;
+      const order = await CommerceOrder.findOne(
+        orderId
+          ? { _id: orderId, organization: organizationId }
+          : {
+              organization: organizationId,
+              sourceInteraction: interaction?._id,
+              status: { $nin: ['cancelled', 'refunded', 'returned', 'delivered'] }
+            }
+      ).sort({ createdAt: -1 });
+      if (!order) {
+        logger.debug('[FlowHandler] save_shipping_address: no order linked to conversation');
+        break;
+      }
+
+      // Keep the verbatim text the customer sent, and lift a 6-digit pincode into the
+      // structured field so the OMS drawer + edit modal are prefilled.
+      const pin = (address.match(/\b(\d{6})\b/) || [])[1] || '';
+      const line1 = (pin ? address.replace(pin, '') : address).replace(/^[\s,]+|[\s,]+$/g, '').trim();
+      order.shippingAddress = address;
+      order.shipping = {
+        name: order.shipping?.name || order.buyerName || interaction?.author?.name || '',
+        phone: order.shipping?.phone || order.buyerPhone || '',
+        line1: line1 || address,
+        line2: order.shipping?.line2 || '',
+        city: order.shipping?.city || '',
+        state: order.shipping?.state || '',
+        pincode: pin || order.shipping?.pincode || '',
+        country: order.shipping?.country || 'India'
+      };
+      await order.save();
+      logger.info('[FlowHandler] save_shipping_address: saved to order', {
+        orderId: String(order._id), pincode: pin || undefined
+      });
+      return {
+        status: 'continue',
+        variables: { orderId: String(order._id), delivery_address: address },
+        nextNodeId: pickEdge(ctx.edges)?.target
+      };
+    }
     case 'action.link_comment_thread': {
       // Persist the link between a public comment and the resulting DM thread so
       // analytics/inbox can correlate them. Stored on the interaction metadata.
