@@ -47,22 +47,30 @@ async function seedGlobalBlueprints() {
 }
 
 async function installActiveCopy(orgId) {
-  // Avoid duplicate installs.
-  const existing = await AutomationFlow.findOne({
-    organization: orgId, isBlueprint: false, name: { $regex: '^Checkout' }
-  });
-  if (existing) {
-    console.log(`  • org ${orgId} already has a checkout flow (${existing._id}, status=${existing.status})`);
-    return existing;
-  }
-  const copy = await AutomationFlow.create({
-    organization: orgId,
-    name: CHECKOUT_BLUEPRINT.name,
+  const bpShape = {
     description: CHECKOUT_BLUEPRINT.description,
     channels: CHECKOUT_BLUEPRINT.channels,
     entryNodeId: CHECKOUT_BLUEPRINT.entryNodeId,
     nodes: CHECKOUT_BLUEPRINT.nodes,
-    edges: CHECKOUT_BLUEPRINT.edges,
+    edges: CHECKOUT_BLUEPRINT.edges
+  };
+
+  // Refresh an existing checkout flow to the latest node graph (so flows imported
+  // before the save-address step get the fix), and ensure it's active.
+  const existing = await AutomationFlow.findOne({
+    organization: orgId, isBlueprint: false, name: { $regex: '^Checkout' }
+  });
+  if (existing) {
+    Object.assign(existing, bpShape, { status: 'active', version: (existing.version || 1) + 1 });
+    await existing.save();
+    console.log(`  ✓ refreshed existing checkout flow in org ${orgId} → ${existing._id} (now ${existing.nodes.length} nodes, active)`);
+    return existing;
+  }
+
+  const copy = await AutomationFlow.create({
+    organization: orgId,
+    name: CHECKOUT_BLUEPRINT.name,
+    ...bpShape,
     status: 'active',
     version: 1,
     isBlueprint: false

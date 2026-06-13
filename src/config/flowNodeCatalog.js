@@ -368,6 +368,14 @@ const FLOW_NODE_CATALOG = [
       { key: 'value', type: 'string', label: 'Value', required: true, default: '1' }
     ]
   }),
+  node('action.save_shipping_address', 'action', 'Save shipping address', ['whatsapp', 'instagram'], {
+    icon: 'fas fa-location-dot',
+    description: "Save the customer's replied address onto their order so it shows prefilled in Order Management.",
+    defaultConfig: { addressVar: 'delivery_address' },
+    fields: [
+      { key: 'addressVar', type: 'string', label: 'Address variable', default: 'delivery_address', hint: "Flow variable holding the captured address. Falls back to the customer's latest reply." }
+    ]
+  }),
   node('action.set_stage', 'action', 'Set sales stage', ['instagram'], {
     icon: 'fas fa-flag',
     description: 'Update sales conversation stage.',
