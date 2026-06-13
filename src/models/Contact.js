@@ -15,6 +15,18 @@ const channelSchema = new mongoose.Schema({
   addedAt: { type: Date, default: Date.now }
 }, { _id: false });
 
+/** Remembered delivery address so repeat orders only need a one-tap confirm. */
+const contactShippingSchema = new mongoose.Schema({
+  name:    { type: String, trim: true },
+  phone:   { type: String, trim: true },
+  line1:   { type: String, trim: true },
+  line2:   { type: String, trim: true },
+  city:    { type: String, trim: true },
+  state:   { type: String, trim: true },
+  pincode: { type: String, trim: true },
+  country: { type: String, trim: true, default: 'India' }
+}, { _id: false });
+
 const contactSchema = new mongoose.Schema({
   organization: {
     type: mongoose.Schema.Types.ObjectId,
@@ -31,6 +43,11 @@ const contactSchema = new mongoose.Schema({
 
   tags: [{ type: String, trim: true }],
   notes: { type: String, trim: true, default: null },
+
+  // Remembered delivery address (verbatim + structured) for repeat-order confirm.
+  shippingAddress: { type: String, trim: true, default: null },
+  shipping: { type: contactShippingSchema, default: undefined },
+  shippingUpdatedAt: { type: Date, default: null },
 
   aiInsights: {
     intent: { type: String, default: null },

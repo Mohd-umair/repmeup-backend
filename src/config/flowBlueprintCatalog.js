@@ -5,93 +5,114 @@
  * ----------------------
  * Code-defined, version-controlled flow blueprints seeded as GLOBAL blueprints
  * (`organization: null`, `isBlueprint: true`). Global blueprints surface in every
- * org's "Blueprints" tab (see automationFlowController.listFlows) and any org can
- * import one via `duplicateFlow`, then publish it to make it run.
+ * org's "Blueprints" tab (automationFlowController.listFlows) and any org imports one
+ * via duplicateFlow, then publishes it to run.
  *
- * These run through the same engine as user flows (flowTriggerRouter →
- * flowExecutorService → flowNodeHandlers). The Checkout blueprint fires on the
- * `whatsapp.order` event (trigger.order_event, event: 'created') — i.e. the moment
- * a customer places a WhatsApp native-cart order — which makes it the workflow-only
- * counterpart to the AI order acknowledgement.
+ * Checkout — fires on the `whatsapp.order` event the instant a customer places a
+ * WhatsApp native-cart order (workflow-only path; no AI). It:
+ *   1. thanks the customer + shows what they ordered
+ *   2. loads any address remembered on their contact
+ *      • returning customer → one-tap "confirm your saved address?" buttons
+ *          - Yes  → reuse the saved address
+ *          - New  → ask for a fresh address
+ *      • first-time customer → ask for the address
+ *   3. saves the chosen address onto the order AND remembers it on the contact
+ *      (action.save_shipping_address) so the next order is one tap.
  *
- * Interpolation tokens available at run time (see flowTemplateService + the order
- * enrichment in flowTriggerRouter):
- *   {{name}} {{first_name}} {{message}}            — author + latest inbound text
+ * Interpolation tokens at run time (flowTemplateService + flowTriggerRouter):
+ *   {{name}} {{first_name}} {{message}}
  *   {{order_ref}} {{order_summary}} {{order_total}} {{order_summary_line}}
+ *   {{saved_address}} {{delivery_address}}
  */
+
+const CONFIRM_TEXT =
+  'Perfect! ✅ Your order {{order_ref}} is confirmed and will be delivered to:\n'
+  + '{{delivery_address}}\n\n'
+  + 'Thank you for shopping with us — we’ll notify you as soon as it ships! 🙌';
+
+const ASK_ADDRESS_TEXT =
+  'Please reply with your full delivery address — house/flat no., area & landmark, '
+  + 'city, and pincode. 🏠';
 
 const CHECKOUT_BLUEPRINT = {
   name: 'Checkout — confirm order & collect address',
   description:
-    'Fires the instant a customer places a WhatsApp catalog order: thanks them, '
-    + 'shows what they ordered, asks for their delivery address, captures it, and '
-    + 'confirms. The workflow-only checkout path — no AI required.',
+    'Fires the instant a customer places a WhatsApp catalog order. Thanks them, '
+    + 'and — for returning customers — offers a one-tap confirm of their saved '
+    + 'delivery address (or capture a new one). Remembers the address per customer '
+    + 'so repeat orders never ask again. The workflow-only checkout path.',
   channels: ['whatsapp'],
   entryNodeId: 't1',
   nodes: [
-    {
-      id: 't1', type: 'trigger.order_event', label: 'On order placed',
-      position: { x: 280, y: 40 }, config: { event: 'created' }
-    },
-    {
-      id: 'a1', type: 'action.send_text', label: 'Thank you + ask address',
-      position: { x: 280, y: 180 },
+    { id: 't1', type: 'trigger.order_event', label: 'On order placed', position: { x: 320, y: 20 }, config: { event: 'created' } },
+
+    { id: 'A0', type: 'action.send_text', label: 'Thank you', position: { x: 320, y: 140 },
+      config: { text: 'Thank you for your order! 🛒 {{order_summary_line}}' } },
+
+    { id: 'L1', type: 'action.load_saved_address', label: 'Load saved address', position: { x: 320, y: 250 }, config: {} },
+
+    { id: 'C1', type: 'condition.variable', label: 'Has saved address?', position: { x: 320, y: 360 },
+      config: { key: 'saved_address', operator: 'neq', value: '' } },
+
+    // ── Returning customer: confirm the saved address ────────────────────────
+    { id: 'CB1', type: 'action.send_buttons', label: 'Confirm saved address', position: { x: 120, y: 480 },
       config: {
-        text:
-          'Thank you for your order! 🛒 {{order_summary_line}}\n\n'
-          + 'To get it delivered, please reply with your full delivery address — '
-          + 'house/flat no., area & landmark, city, and pincode. 🏠'
-      }
-    },
-    {
-      id: 'w1', type: 'wait.user_reply', label: 'Wait for address',
-      position: { x: 280, y: 320 }, config: { timeoutSec: 86400 }
-    },
-    {
-      id: 's1', type: 'action.set_variable', label: 'Capture address',
-      position: { x: 140, y: 460 }, config: { key: 'delivery_address', value: '{{message}}' }
-    },
-    {
-      id: 's2', type: 'action.save_shipping_address', label: 'Save address to order',
-      position: { x: 140, y: 600 }, config: { addressVar: 'delivery_address' }
-    },
-    {
-      id: 'a2', type: 'action.send_text', label: 'Confirm order',
-      position: { x: 140, y: 740 },
-      config: {
-        text:
-          'Perfect! ✅ Your order {{order_ref}} is confirmed and will be dispatched to:\n'
-          + '{{delivery_address}}\n\n'
-          + 'Thank you for shopping with us — we’ll notify you as soon as it ships! 🙌'
-      }
-    },
-    {
-      id: 'e1', type: 'control.end', label: 'Done',
-      position: { x: 140, y: 880 }, config: {}
-    },
-    {
-      id: 'a3', type: 'action.send_text', label: 'Address reminder',
-      position: { x: 440, y: 460 },
-      config: {
-        text:
-          'No rush! 😊 Whenever you’re ready, just reply here with your delivery '
-          + 'address and we’ll complete your order.'
-      }
-    },
-    {
-      id: 'e2', type: 'control.end', label: 'Done (no reply)',
-      position: { x: 440, y: 600 }, config: {}
-    }
+        bodyText: 'Deliver this order to your saved address?\n\n{{saved_address}}',
+        headerText: '', footerText: '',
+        buttons: [
+          { id: 'addr_yes', title: '✅ Yes, ship here' },
+          { id: 'addr_new', title: '✏️ New address' }
+        ]
+      } },
+    { id: 'CB2', type: 'wait.user_reply', label: 'Wait for choice', position: { x: 120, y: 600 }, config: { timeoutSec: 86400 } },
+    { id: 'CB3', type: 'condition.reply_contains', label: 'Chose "Yes"?', position: { x: 120, y: 720 },
+      config: { keywords: ['yes', 'ship here', 'correct', 'confirm', '✅', '👍'] } },
+    { id: 'CB4', type: 'action.set_variable', label: 'Use saved address', position: { x: 40, y: 840 },
+      config: { key: 'delivery_address', value: '{{saved_address}}' } },
+
+    // ── New / first-time: ask for the address ────────────────────────────────
+    { id: 'A1', type: 'action.send_text', label: 'Ask for address', position: { x: 520, y: 480 },
+      config: { text: ASK_ADDRESS_TEXT } },
+    { id: 'A2', type: 'wait.user_reply', label: 'Wait for address', position: { x: 520, y: 600 }, config: { timeoutSec: 86400 } },
+    { id: 'A3', type: 'action.set_variable', label: 'Capture address', position: { x: 520, y: 720 },
+      config: { key: 'delivery_address', value: '{{message}}' } },
+
+    // ── Shared: persist + confirm ────────────────────────────────────────────
+    { id: 'S1', type: 'action.save_shipping_address', label: 'Save address', position: { x: 280, y: 960 },
+      config: { addressVar: 'delivery_address' } },
+    { id: 'F1', type: 'action.send_text', label: 'Confirm order', position: { x: 280, y: 1080 },
+      config: { text: CONFIRM_TEXT } },
+    { id: 'e1', type: 'control.end', label: 'Done', position: { x: 280, y: 1200 }, config: {} },
+
+    // ── Timeout: gentle reminder ─────────────────────────────────────────────
+    { id: 'R1', type: 'action.send_text', label: 'Address reminder', position: { x: 760, y: 720 },
+      config: { text: 'No rush! 😊 Whenever you’re ready, just reply here with your delivery address and we’ll complete your order.' } },
+    { id: 'e2', type: 'control.end', label: 'Done (no reply)', position: { x: 760, y: 840 }, config: {} }
   ],
   edges: [
-    { id: 't1-a1', source: 't1', target: 'a1' },
-    { id: 'a1-w1', source: 'a1', target: 'w1' },
-    { id: 'w1-s1', source: 'w1', target: 's1', label: 'reply' },
-    { id: 'w1-a3', source: 'w1', target: 'a3', label: 'timeout' },
-    { id: 's1-s2', source: 's1', target: 's2' },
-    { id: 's2-a2', source: 's2', target: 'a2' },
-    { id: 'a2-e1', source: 'a2', target: 'e1' },
-    { id: 'a3-e2', source: 'a3', target: 'e2' }
+    { id: 't1-A0', source: 't1', target: 'A0' },
+    { id: 'A0-L1', source: 'A0', target: 'L1' },
+    { id: 'L1-C1', source: 'L1', target: 'C1' },
+
+    { id: 'C1-CB1', source: 'C1', target: 'CB1', label: 'yes' },
+    { id: 'C1-A1',  source: 'C1', target: 'A1',  label: 'no' },
+
+    { id: 'CB1-CB2', source: 'CB1', target: 'CB2' },
+    { id: 'CB2-CB3', source: 'CB2', target: 'CB3', label: 'reply' },
+    { id: 'CB2-R1',  source: 'CB2', target: 'R1',  label: 'timeout' },
+    { id: 'CB3-CB4', source: 'CB3', target: 'CB4', label: 'yes' },
+    { id: 'CB3-A1',  source: 'CB3', target: 'A1',  label: 'no' },
+    { id: 'CB4-S1',  source: 'CB4', target: 'S1' },
+
+    { id: 'A1-A2', source: 'A1', target: 'A2' },
+    { id: 'A2-A3', source: 'A2', target: 'A3', label: 'reply' },
+    { id: 'A2-R1', source: 'A2', target: 'R1', label: 'timeout' },
+    { id: 'A3-S1', source: 'A3', target: 'S1' },
+
+    { id: 'S1-F1', source: 'S1', target: 'F1' },
+    { id: 'F1-e1', source: 'F1', target: 'e1' },
+
+    { id: 'R1-e2', source: 'R1', target: 'e2' }
   ]
 };
 
