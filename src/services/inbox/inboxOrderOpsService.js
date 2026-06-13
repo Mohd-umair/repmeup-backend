@@ -16,15 +16,51 @@ const {
 } = require('./inboxOpsFormatters');
 
 const VALID_STATUS_TRANSITIONS = {
-  intent: ['product_sent', 'cancelled'],
-  product_sent: ['cart_started', 'payment_pending', 'cancelled'],
-  cart_started: ['payment_pending', 'cancelled'],
-  payment_pending: ['paid', 'cancelled'],
-  paid: ['shipped', 'cancelled'],
-  shipped: ['delivered', 'cancelled'],
-  delivered: [],
-  cancelled: []
+  pending:          ['confirmed', 'payment_pending', 'paid', 'cancelled'],
+  confirmed:        ['payment_pending', 'paid', 'processing', 'cancelled'],
+  payment_pending:  ['paid', 'cancelled'],
+  paid:             ['processing', 'dispatched', 'cancelled'],
+  processing:       ['dispatched', 'cancelled'],
+  dispatched:       ['out_for_delivery', 'delivered', 'cancelled'],
+  out_for_delivery: ['delivered', 'cancelled'],
+  delivered:        ['returned'],
+  returned:         ['refunded'],
+  refunded:         [],
+  cancelled:        [],
+  // legacy entry points route into the canonical flow
+  intent:           ['confirmed', 'payment_pending', 'paid', 'cancelled'],
+  product_sent:     ['confirmed', 'payment_pending', 'paid', 'cancelled'],
+  cart_started:     ['confirmed', 'payment_pending', 'paid', 'cancelled'],
+  shipped:          ['out_for_delivery', 'delivered', 'cancelled']
 };
+
+/** status → the timestamp field stamped when an order enters it. */
+const STATUS_TIMESTAMP = {
+  confirmed: 'confirmedAt',
+  paid: 'paidAt',
+  processing: 'processingAt',
+  dispatched: 'dispatchedAt',
+  shipped: 'shippedAt',
+  out_for_delivery: 'outForDeliveryAt',
+  delivered: 'deliveredAt',
+  cancelled: 'cancelledAt',
+  returned: 'returnedAt',
+  refunded: 'refundedAt'
+};
+
+/** List tabs → the underlying statuses they include. */
+const TAB_STATUS = {
+  pending: ['pending', 'intent', 'product_sent', 'cart_started', 'confirmed'],
+  payment_pending: ['payment_pending'],
+  paid: ['paid'],
+  processing: ['processing'],
+  dispatched: ['dispatched', 'shipped', 'out_for_delivery'],
+  delivered: ['delivered'],
+  cancelled: ['cancelled'],
+  returns: ['returned', 'refunded']
+};
+
+const REVENUE_STATUSES = ['paid', 'processing', 'dispatched', 'shipped', 'out_for_delivery', 'delivered'];
 
 function startOfToday() {
   const d = new Date();
@@ -42,11 +78,7 @@ function buildListFilter(orgId, query) {
   const filter = { organization: orgId };
   const { status, channel, search, from, to, tab } = query;
 
-  if (tab === 'paid') filter.status = 'paid';
-  else if (tab === 'payment_pending') filter.status = 'payment_pending';
-  else if (tab === 'shipped') filter.status = 'shipped';
-  else if (tab === 'delivered') filter.status = 'delivered';
-  else if (tab === 'cancelled') filter.status = 'cancelled';
+  if (tab && tab !== 'all' && TAB_STATUS[tab]) filter.status = { $in: TAB_STATUS[tab] };
   else if (status) filter.status = status;
 
   if (channel) filter.channel = channel;
@@ -92,17 +124,41 @@ function mapOrderRow(order) {
 }
 
 function buildTimeline(order) {
-  const events = [];
-  const push = (event, at, pending = false) => {
-    if (at || pending) events.push({ event, at: at || null, atLabel: at ? formatDateLabel(at) : 'Pending', pending });
-  };
-  push(`Order placed via ${CHANNEL_LABELS[order.channel] || order.channel}`, order.createdAt);
-  if (order.paidAt) push('Payment confirmed', order.paidAt);
-  if (order.shippedAt) push('Order shipped', order.shippedAt);
-  if (order.deliveredAt) push('Order delivered', order.deliveredAt);
-  if (order.status === 'cancelled') push('Order cancelled', order.updatedAt);
-  if (order.status === 'paid' && !order.shippedAt) push('Awaiting warehouse processing', null, true);
-  if (order.status === 'shipped' && !order.deliveredAt) push('Awaiting delivery confirmation', null, true);
+  const events = [{
+    event: `Order placed via ${CHANNEL_LABELS[order.channel] || order.channel}`,
+    at: order.createdAt,
+    atLabel: formatDateLabel(order.createdAt),
+    pending: false
+  }];
+
+  if (order.statusHistory && order.statusHistory.length) {
+    order.statusHistory.forEach((h) => {
+      const label = ORDER_STATUS_LABELS[h.status] || h.status;
+      events.push({
+        event: h.note ? `${label} — ${h.note}` : label,
+        at: h.at,
+        atLabel: formatDateLabel(h.at),
+        pending: false
+      });
+    });
+  } else {
+    // Legacy orders (no statusHistory) — derive from lifecycle timestamps.
+    const legacy = [
+      ['confirmedAt', 'Confirmed'], ['paidAt', 'Payment confirmed'], ['processingAt', 'Processing'],
+      ['dispatchedAt', 'Dispatched'], ['shippedAt', 'Dispatched'], ['outForDeliveryAt', 'Out for Delivery'],
+      ['deliveredAt', 'Delivered'], ['cancelledAt', 'Cancelled'], ['returnedAt', 'Returned'], ['refundedAt', 'Refunded']
+    ];
+    legacy.forEach(([f, label]) => {
+      if (order[f]) events.push({ event: label, at: order[f], atLabel: formatDateLabel(order[f]), pending: false });
+    });
+  }
+
+  // Hint at the next forward step (skip terminal/negative transitions).
+  const next = (VALID_STATUS_TRANSITIONS[order.status] || [])
+    .find((s) => !['cancelled', 'returned', 'refunded'].includes(s));
+  if (next) {
+    events.push({ event: `Next: ${ORDER_STATUS_LABELS[next] || next}`, at: null, atLabel: 'Pending', pending: true });
+  }
   return events;
 }
 
@@ -154,14 +210,16 @@ async function getOrderStats(orgId, query = {}) {
           { $count: 'n' }
         ],
         revenueClosed: [
-          { $match: { status: { $in: ['paid', 'shipped', 'delivered'] } } },
+          { $match: { status: { $in: REVENUE_STATUSES } } },
           { $group: { _id: null, total: { $sum: { $ifNull: ['$totalAmount', 0] } } } }
         ],
-        pendingPayment: [{ $match: { status: 'payment_pending' } }, { $count: 'n' }],
-        shippedToday: [
-          { $match: { status: 'shipped', shippedAt: { $gte: todayStart } } },
+        pendingPayment: [{ $match: { status: { $in: ['pending', 'payment_pending', 'cart_started', 'confirmed'] } } }, { $count: 'n' }],
+        dispatchedToday: [
+          { $match: { status: { $in: ['dispatched', 'shipped', 'out_for_delivery'] }, dispatchedAt: { $gte: todayStart } } },
           { $count: 'n' }
-        ]
+        ],
+        deliveredCount: [{ $match: { status: 'delivered' } }, { $count: 'n' }],
+        byStatus: [{ $group: { _id: '$status', n: { $sum: 1 } } }]
       }
     }
   ]);
@@ -171,13 +229,23 @@ async function getOrderStats(orgId, query = {}) {
   const yesterday = pick(facet.yesterdayOrders);
   const deltaPct = yesterday > 0 ? Math.round(((today - yesterday) / yesterday) * 100) : today > 0 ? 100 : 0;
 
+  // Per-tab counts for the list tab badges.
+  const byStatus = {};
+  (facet.byStatus || []).forEach((r) => { byStatus[r._id] = r.n; });
+  const statusCounts = { all: pick(facet.totalOrders) };
+  for (const [tab, statuses] of Object.entries(TAB_STATUS)) {
+    statusCounts[tab] = statuses.reduce((sum, s) => sum + (byStatus[s] || 0), 0);
+  }
+
   return {
     totalOrders: pick(facet.totalOrders),
     revenueClosed: pick(facet.revenueClosed),
     pendingPayment: pick(facet.pendingPayment),
-    shippedToday: pick(facet.shippedToday),
+    shippedToday: pick(facet.dispatchedToday),
+    deliveredCount: pick(facet.deliveredCount),
     ordersToday: today,
-    deltaVsYesterdayPct: deltaPct
+    deltaVsYesterdayPct: deltaPct,
+    statusCounts
   };
 }
 
@@ -210,8 +278,15 @@ async function getOrderDetail(orgId, orderId) {
     ...mapOrderRow(order),
     customer,
     payment,
+    paymentMethod: order.paymentMethod || null,
     shippingAddress: order.shippingAddress || '—',
-    tracking: order.notes?.includes('tracking') ? order.notes : 'Not yet assigned',
+    shipping: order.shipping || null,
+    tracking: order.tracking || null,
+    cancellationReason: order.cancellationReason || null,
+    returnReason: order.returnReason || null,
+    refund: order.refund?.at
+      ? { amount: formatMoney(order.refund.amount, order.currency), reference: order.refund.reference || null, atLabel: formatDateLabel(order.refund.at) }
+      : null,
     timeline: buildTimeline(order),
     chatSnippet,
     lineItems: (order.lineItems || []).map((li) => ({
@@ -246,7 +321,15 @@ async function getOrderByInteraction(orgId, interactionId) {
   return { id: order._id.toString(), displayRef: order.displayRef || null, status: order.status };
 }
 
-async function updateOrderStatus(orgId, orderId, status, notes) {
+/**
+ * Advance an order through the lifecycle, applying status-specific extras:
+ *  - dispatched → extra.tracking { courier, trackingNumber, trackingUrl }
+ *  - cancelled / returned → extra.reason
+ *  - paid → extra.paymentMethod / extra.paymentRef
+ *  - refunded → extra.refund { amount, reference }
+ * Stamps the matching timestamp and appends to statusHistory.
+ */
+async function updateOrderStatus(orgId, orderId, status, extra = {}) {
   const order = await CommerceOrder.findOne({ _id: orderId, organization: orgId });
   if (!order) return { error: 'not_found' };
 
@@ -255,18 +338,69 @@ async function updateOrderStatus(orgId, orderId, status, notes) {
     return { error: `Cannot transition from '${order.status}' to '${status}'` };
   }
 
+  const now = new Date();
+  const trim = (v) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
   order.status = status;
-  if (notes) order.notes = notes;
-  if (status === 'paid') order.paidAt = new Date();
-  if (status === 'shipped') order.shippedAt = new Date();
-  if (status === 'delivered') order.deliveredAt = new Date();
-  await order.save();
 
+  const tsField = STATUS_TIMESTAMP[status];
+  if (tsField && !order[tsField]) order[tsField] = now;
+  if (status === 'dispatched' && !order.shippedAt) order.shippedAt = now; // legacy mirror
+
+  if (status === 'dispatched' && extra.tracking) {
+    order.tracking = {
+      courier: trim(extra.tracking.courier),
+      trackingNumber: trim(extra.tracking.trackingNumber),
+      trackingUrl: trim(extra.tracking.trackingUrl)
+    };
+  }
+  if (status === 'cancelled') order.cancellationReason = trim(extra.reason) || order.cancellationReason;
+  if (status === 'returned') order.returnReason = trim(extra.reason) || order.returnReason;
+  if (status === 'paid') {
+    if (trim(extra.paymentMethod)) order.paymentMethod = trim(extra.paymentMethod);
+    if (trim(extra.paymentRef)) order.paymentRef = trim(extra.paymentRef);
+  }
+  if (status === 'refunded') {
+    const amt = extra.refund?.amount != null && extra.refund.amount !== '' ? Number(extra.refund.amount) : order.totalAmount;
+    order.refund = { amount: Number.isNaN(amt) ? undefined : amt, reference: trim(extra.refund?.reference), at: now };
+  }
+  if (trim(extra.note)) order.notes = trim(extra.note);
+
+  order.statusHistory.push({
+    status,
+    at: now,
+    note: trim(extra.reason) || trim(extra.note) || undefined,
+    byName: trim(extra.byName) || undefined
+  });
+
+  await order.save();
+  return { order: await getOrderDetail(orgId, orderId) };
+}
+
+/** Edit the structured shipping address + buyer details on an order. */
+async function updateOrderShipping(orgId, orderId, body = {}) {
+  const order = await CommerceOrder.findOne({ _id: orderId, organization: orgId });
+  if (!order) return { error: 'not_found' };
+
+  const s = body.shipping || {};
+  const t = (v) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  order.shipping = {
+    name: t(s.name), phone: t(s.phone), line1: t(s.line1), line2: t(s.line2),
+    city: t(s.city), state: t(s.state), pincode: t(s.pincode), country: t(s.country) || 'India'
+  };
+  if (body.buyerName !== undefined) order.buyerName = t(body.buyerName);
+  if (body.buyerPhone !== undefined) order.buyerPhone = t(body.buyerPhone);
+
+  // Keep the flattened free-text mirror in sync for legacy display.
+  const flat = [order.shipping.line1, order.shipping.line2, order.shipping.city, order.shipping.state, order.shipping.pincode, order.shipping.country]
+    .filter(Boolean).join(', ');
+  if (flat) order.shippingAddress = flat;
+
+  await order.save();
   return { order: await getOrderDetail(orgId, orderId) };
 }
 
 async function createOrder(orgId, body) {
-  const { channel = 'manual', lineItems = [], buyerName, buyerPhone, shippingAddress, notes } = body;
+  const { channel = 'manual', lineItems = [], buyerName, buyerPhone, shippingAddress, shipping, notes, status } = body;
 
   if (!lineItems.length) {
     return { error: 'At least one product is required' };
@@ -304,17 +438,28 @@ async function createOrder(orgId, body) {
 
   const totalAmount = +builtItems.reduce((sum, li) => sum + li.unitPrice * li.qty, 0).toFixed(2);
 
+  const initialStatus = status && VALID_STATUS_TRANSITIONS[status] !== undefined ? status : 'pending';
+  const t = (v) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const structured = shipping && typeof shipping === 'object'
+    ? {
+        name: t(shipping.name), phone: t(shipping.phone), line1: t(shipping.line1), line2: t(shipping.line2),
+        city: t(shipping.city), state: t(shipping.state), pincode: t(shipping.pincode), country: t(shipping.country) || 'India'
+      }
+    : undefined;
+
   const payload = await assignOrderDisplayRef(orgId, {
     organization: orgId,
     channel,
-    status: 'payment_pending',
+    status: initialStatus,
     lineItems: builtItems,
     totalAmount,
     currency: builtItems[0]?.currency || 'INR',
-    buyerName: buyerName?.trim() || undefined,
-    buyerPhone: buyerPhone?.trim() || undefined,
-    shippingAddress: shippingAddress?.trim() || undefined,
-    notes: notes?.trim() || undefined
+    buyerName: t(buyerName),
+    buyerPhone: t(buyerPhone),
+    shippingAddress: t(shippingAddress),
+    shipping: structured,
+    notes: t(notes),
+    statusHistory: [{ status: initialStatus, at: new Date(), note: 'Order created' }]
   });
 
   const order = await CommerceOrder.create(payload);
@@ -327,8 +472,10 @@ module.exports = {
   getOrderDetail,
   getOrderByInteraction,
   updateOrderStatus,
+  updateOrderShipping,
   createOrder,
   VALID_STATUS_TRANSITIONS,
+  TAB_STATUS,
   buildListFilter,
   mapOrderRow
 };

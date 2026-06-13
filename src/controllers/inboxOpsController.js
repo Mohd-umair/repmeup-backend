@@ -66,8 +66,26 @@ exports.createOrder = async (req, res, next) => {
 
 exports.updateOrderStatus = async (req, res, next) => {
   try {
-    const { status, notes } = req.body;
-    const result = await orderOps.updateOrderStatus(orgId(req), req.params.id, status, notes);
+    const { status, note, notes, reason, tracking, refund, paymentMethod, paymentRef } = req.body;
+    const actor = req.user?.firstName ? `${req.user.firstName} ${req.user.lastName || ''}`.trim() : undefined;
+    const extra = { note: note ?? notes, reason, tracking, refund, paymentMethod, paymentRef, byName: actor };
+    const result = await orderOps.updateOrderStatus(orgId(req), req.params.id, status, extra);
+    if (result.error === 'not_found') {
+      return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+    if (result.error) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+    res.json({ success: true, data: result.order });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// PATCH /inbox/ops/orders/:id/shipping → edit structured shipping address + buyer details
+exports.updateOrderShipping = async (req, res, next) => {
+  try {
+    const result = await orderOps.updateOrderShipping(orgId(req), req.params.id, req.body);
     if (result.error === 'not_found') {
       return res.status(404).json({ success: false, error: 'Order not found' });
     }

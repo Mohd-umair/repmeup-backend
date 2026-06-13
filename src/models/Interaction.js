@@ -203,7 +203,11 @@ const interactionSchema = new mongoose.Schema({
       'ai_confidence',
       'intent_routing',
       'ai_unresolvable',
-      'ai_no_kb_fallback'
+      'ai_no_kb_fallback',
+      // Flow builder escalation node
+      'automation',
+      // AI auto-reply fallback paths
+      'ai_fallback'
     ]
   },
   escalationMetadata: {

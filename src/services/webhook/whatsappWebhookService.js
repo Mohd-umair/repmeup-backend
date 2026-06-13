@@ -123,7 +123,7 @@ async function _handleOrderMessage({ message, connection, organizationId, savedI
       await assignOrderDisplayRef(organizationId, {
         organization: organizationId,
         channel: 'whatsapp',
-        status: 'payment_pending',
+        status: 'pending',
         lineItems,
         totalAmount: +totalAmount.toFixed(2),
         currency,
@@ -132,7 +132,8 @@ async function _handleOrderMessage({ message, connection, organizationId, savedI
         buyerPhone,
         buyerName,
         notes: unmatched.length ? `Unmatched catalog items: ${unmatched.join(', ')}` : undefined,
-        sourceInteraction: savedInteraction?._id
+        sourceInteraction: savedInteraction?._id,
+        statusHistory: [{ status: 'pending', at: new Date(), note: 'Order placed via WhatsApp cart' }]
       })
     );
 

@@ -672,7 +672,7 @@ async function handleAction(node, ctx) {
           org,
           [config.reason || 'flow_escalation'],
           'automation'
-        ).catch(() => {});
+        ).catch((err) => logger.warn('[FlowHandler] escalate_human failed', { error: err.message, interactionId: fullInteraction._id }));
       }
       break;
     }

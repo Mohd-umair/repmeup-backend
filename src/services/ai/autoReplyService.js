@@ -199,6 +199,37 @@ async function deductCreditsSafely(organizationId, operation, interaction, aiApi
 }
 
 /**
+ * For order-aware replies: if this thread has a recent active order, build a
+ * compact context string from its line items (e.g. "ORDER ORD-1006 (just placed
+ * via WhatsApp): 2× New Product (₹150 each). Total ₹300.") so the AI acknowledges
+ * the order instead of re-asking which product / quantity. Non-fatal — returns ''.
+ */
+async function buildOrderContext(interaction, organizationId) {
+  try {
+    const CommerceOrder = require('../../models/CommerceOrder');
+    const { formatMoney } = require('../inbox/inboxOpsFormatters');
+    const order = await CommerceOrder.findOne({
+      sourceInteraction: interaction._id,
+      organization: organizationId,
+      status: { $nin: ['cancelled', 'refunded', 'returned', 'delivered'] }
+    }).sort({ createdAt: -1 }).lean();
+    if (!order || !(order.lineItems || []).length) return '';
+
+    const items = order.lineItems.map((li) => {
+      const qty = li.qty || 1;
+      const each = li.unitPrice != null ? ` (${formatMoney(li.unitPrice, li.currency || order.currency)} each)` : '';
+      return `${qty}× ${li.name || 'Item'}${each}`;
+    }).join(', ');
+    const total = order.totalAmount != null ? ` Total ${formatMoney(order.totalAmount, order.currency)}.` : '';
+    const ref = order.displayRef ? `ORDER ${order.displayRef}` : 'ORDER';
+    return `${ref} (just placed via WhatsApp): ${items}.${total}`;
+  } catch (err) {
+    logger.debug('[Auto-Reply] buildOrderContext failed (non-fatal)', { error: err.message });
+    return '';
+  }
+}
+
+/**
  * End-to-end auto-reply generation. See module header for return-shape contract.
  */
 async function generateAutoReply(interaction, organizationId, organizationSettings = {}) {
@@ -262,6 +293,10 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
       organizationSettings?.toObject?.()?.autoReplySettings ||
       {};
 
+    // Order-aware context: lets the AI acknowledge a placed order + ask for the
+    // delivery address instead of re-asking which product / quantity.
+    const orderContext = await buildOrderContext(interaction, organizationId);
+
     // Layer 2: LLM also returns a `resolvable` flag for human-routing decisions.
     const { result: response, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
@@ -273,7 +308,8 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
         replyGenerationService.generateResponseOpenAI(interaction, organizationId, null, {
           withSelfAssessment: true,
           autoReplyTone: arSettings.tone || 'balanced',
-          autoReplyToneCustom: arSettings.toneCustomText || ''
+          autoReplyToneCustom: arSettings.toneCustomText || '',
+          orderContext
         })
     );
 

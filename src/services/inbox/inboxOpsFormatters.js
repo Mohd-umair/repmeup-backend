@@ -14,25 +14,39 @@ const CHANNEL_LABELS = {
 };
 
 const ORDER_STATUS_LABELS = {
+  pending: 'Pending',
   intent: 'Intent',
   product_sent: 'Product Sent',
   cart_started: 'Cart Started',
+  confirmed: 'Confirmed',
   payment_pending: 'Awaiting Payment',
   paid: 'Paid',
-  shipped: 'Shipped',
+  processing: 'Processing',
+  dispatched: 'Dispatched',
+  shipped: 'Dispatched',
+  out_for_delivery: 'Out for Delivery',
   delivered: 'Delivered',
-  cancelled: 'Cancelled'
+  cancelled: 'Cancelled',
+  returned: 'Returned',
+  refunded: 'Refunded'
 };
 
 const ORDER_STATUS_TONE = {
+  pending: 'warning',
   intent: 'neutral',
   product_sent: 'info',
   cart_started: 'info',
+  confirmed: 'info',
   payment_pending: 'warning',
   paid: 'success',
+  processing: 'info',
+  dispatched: 'info',
   shipped: 'info',
+  out_for_delivery: 'info',
   delivered: 'success',
-  cancelled: 'danger'
+  cancelled: 'danger',
+  returned: 'warning',
+  refunded: 'neutral'
 };
 
 const COMPLAINT_STATUS_LABELS = {
@@ -130,15 +144,20 @@ function lineItemsSummary(lineItems = []) {
   return `${name}${qty}${extra}`;
 }
 
+const PAID_STATUSES = ['paid', 'processing', 'dispatched', 'shipped', 'out_for_delivery', 'delivered'];
+
 function paymentLabelForOrder(order) {
-  if (order.status === 'paid' || order.status === 'shipped' || order.status === 'delivered') {
-    return { label: 'PAID', tone: 'success' };
+  if (order.refundedAt || order.status === 'refunded') {
+    return { label: 'REFUNDED', tone: 'neutral' };
   }
-  if (order.status === 'payment_pending' || order.status === 'cart_started') {
-    return { label: 'PENDING', tone: 'warning' };
+  if (order.paidAt || PAID_STATUSES.includes(order.status)) {
+    return { label: 'PAID', tone: 'success' };
   }
   if (order.status === 'cancelled') {
     return { label: 'CANCELLED', tone: 'danger' };
+  }
+  if (['pending', 'payment_pending', 'cart_started', 'confirmed'].includes(order.status)) {
+    return { label: 'PENDING', tone: 'warning' };
   }
   return { label: '—', tone: 'neutral' };
 }

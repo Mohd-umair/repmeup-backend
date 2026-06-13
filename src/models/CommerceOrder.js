@@ -27,6 +27,33 @@ const lineItemSchema = new mongoose.Schema({
   currency: { type: String, default: 'INR', trim: true }
 }, { _id: false });
 
+/** Structured shipping address (parsed from chat or edited by an agent). */
+const shippingSchema = new mongoose.Schema({
+  name:    { type: String, trim: true },
+  phone:   { type: String, trim: true },
+  line1:   { type: String, trim: true },
+  line2:   { type: String, trim: true },
+  city:    { type: String, trim: true },
+  state:   { type: String, trim: true },
+  pincode: { type: String, trim: true },
+  country: { type: String, trim: true, default: 'India' }
+}, { _id: false });
+
+/** Shipment tracking captured at dispatch. */
+const trackingSchema = new mongoose.Schema({
+  courier:        { type: String, trim: true },
+  trackingNumber: { type: String, trim: true },
+  trackingUrl:    { type: String, trim: true }
+}, { _id: false });
+
+/** Append-only audit of every status change (powers the order timeline). */
+const statusEventSchema = new mongoose.Schema({
+  status: { type: String, trim: true },
+  at:     { type: Date, default: Date.now },
+  note:   { type: String, trim: true },
+  byName: { type: String, trim: true }
+}, { _id: false });
+
 const commerceOrderSchema = new mongoose.Schema({
   organization: {
     type: mongoose.Schema.Types.ObjectId,
@@ -45,19 +72,28 @@ const commerceOrderSchema = new mongoose.Schema({
 
   // ── Status lifecycle ───────────────────────────────────────────────────────
   /**
-   * intent          → AI/automation detected purchase intent, no message sent yet
-   * product_sent    → Product card sent via WhatsApp catalog or IG DM
-   * cart_started    → Customer added item to WhatsApp native cart
-   * payment_pending → Payment link sent / awaiting confirmation
-   * paid            → Payment confirmed
-   * shipped         → Order shipped
-   * delivered       → Customer received order
-   * cancelled       → Order cancelled at any stage
+   * Full e-commerce lifecycle:
+   *   pending          → new order placed, awaiting merchant action
+   *   confirmed        → merchant accepted the order
+   *   payment_pending  → awaiting payment
+   *   paid             → payment confirmed
+   *   processing       → being packed / prepared
+   *   dispatched       → handed to courier (tracking captured)
+   *   out_for_delivery → with the delivery agent
+   *   delivered        → customer received the order
+   *   cancelled        → cancelled at any open stage (reason captured)
+   *   returned         → customer returned a delivered order (reason captured)
+   *   refunded         → money returned to the customer
+   * Legacy (kept for old records): intent, product_sent, cart_started, shipped.
    */
   status: {
     type: String,
-    enum: ['intent', 'product_sent', 'cart_started', 'payment_pending', 'paid', 'shipped', 'delivered', 'cancelled'],
-    default: 'product_sent',
+    enum: [
+      'pending', 'intent', 'product_sent', 'cart_started', 'confirmed',
+      'payment_pending', 'paid', 'processing', 'dispatched', 'shipped',
+      'out_for_delivery', 'delivered', 'cancelled', 'returned', 'refunded'
+    ],
+    default: 'pending',
     index: true
   },
 
@@ -95,17 +131,42 @@ const commerceOrderSchema = new mongoose.Schema({
 
   // ── Payment ────────────────────────────────────────────────────────────────
   paymentRef: { type: String, trim: true },
+  paymentMethod: { type: String, trim: true }, // e.g. 'cod', 'razorpay', 'upi', 'card'
   /** Total order value (may be null until cart is confirmed) */
   totalAmount: { type: Number, min: 0 },
   currency: { type: String, default: 'INR', trim: true },
+
+  // ── Lifecycle timestamps ───────────────────────────────────────────────────
+  confirmedAt: { type: Date },
   paidAt: { type: Date },
-  shippedAt: { type: Date },
+  processingAt: { type: Date },
+  dispatchedAt: { type: Date },
+  shippedAt: { type: Date }, // legacy alias of dispatchedAt
+  outForDeliveryAt: { type: Date },
   deliveredAt: { type: Date },
+  cancelledAt: { type: Date },
+  returnedAt: { type: Date },
+  refundedAt: { type: Date },
+
+  // ── Fulfilment ─────────────────────────────────────────────────────────────
+  tracking: { type: trackingSchema, default: undefined },
+  cancellationReason: { type: String, trim: true },
+  returnReason: { type: String, trim: true },
+  refund: {
+    amount:    { type: Number, min: 0 },
+    reference: { type: String, trim: true },
+    at:        { type: Date }
+  },
 
   // ── Buyer details from WA native cart ─────────────────────────────────────
   buyerName: { type: String, trim: true },
   buyerPhone: { type: String, trim: true },
+  /** Free-text address (legacy / as received). Structured address in `shipping`. */
   shippingAddress: { type: String, trim: true },
+  shipping: { type: shippingSchema, default: undefined },
+
+  // ── Audit ──────────────────────────────────────────────────────────────────
+  statusHistory: { type: [statusEventSchema], default: [] },
 
   // ── Meta data ──────────────────────────────────────────────────────────────
   notes: { type: String, trim: true },

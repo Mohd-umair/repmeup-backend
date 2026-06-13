@@ -163,8 +163,18 @@ function buildAutoReplyToneAddon(tone, customText) {
   return AUTO_REPLY_TONE_PRESETS[key] || AUTO_REPLY_TONE_PRESETS.balanced;
 }
 
-function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '', autoReplyToneAddon = '') {
+function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '', autoReplyToneAddon = '', orderContext = '') {
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
+  const orderBlock = (orderContext && String(orderContext).trim())
+    ? `
+
+ACTIVE ORDER (the customer JUST placed this — this is their latest intent, treat it as the priority):
+${String(orderContext).trim()}
+- Acknowledge the order warmly and confirm the item(s) and total back to the customer.
+- Do NOT ask which product they want or what quantity — those are ALREADY specified in the order above. Re-asking is wrong.
+- Then ask the customer to share their delivery address (house/flat, area/landmark, city, pincode) so the order can be processed.
+- Keep it concise and friendly (2–3 sentences).`
+    : '';
   const continuity = transcript
     ? `
 
@@ -189,6 +199,7 @@ ${transcript}`
 - If you don't have enough information, acknowledge it professionally
 - Do not make promises you can't keep
 - Match the tone to the platform (casual for social media, professional for reviews)
+${orderBlock}
 ${continuity}
 ${bucketContext ? `\n${bucketContext}` : ''}
 ${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
@@ -233,7 +244,7 @@ function rethrowOpenAIReplyError(error) {
  * it can fully resolve the query. Returns parsed JSON or the raw text on
  * parse failure.
  */
-async function callSelfAssessment(interaction, baseGuidelines, conversationTranscript) {
+async function callSelfAssessment(interaction, baseGuidelines, conversationTranscript, orderContext = '') {
   const selfAssessSystemPrompt = `You are a professional customer service AI. Assess if you can fully resolve this query WITHOUT: private account data, real-time system data, or internal tools.
 
 ${baseGuidelines}
@@ -251,9 +262,16 @@ CRITICAL RULES — you MUST follow all of these:
 7. noReply true → reply field may be empty string "".`;
 
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
+  // WhatsApp native-cart orders arrive as the opaque placeholder "[Product order]".
+  // When we have the resolved order, describe the latest message as the real order so
+  // the model treats it as resolvable business intent instead of an unclear message.
+  const order = (orderContext && String(orderContext).trim()) || '';
+  const latestMessage = order
+    ? `the customer placed an order — ${order}`
+    : `"${interaction.content}"`;
   const userContent = transcript
-    ? `Recent conversation:\n${transcript}\n\nLatest customer message (prioritize replying to this): "${interaction.content}"\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`
-    : `Message: "${interaction.content}"\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`;
+    ? `Recent conversation:\n${transcript}\n\nLatest customer message (prioritize replying to this): ${latestMessage}\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`
+    : `Message: ${latestMessage}\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`;
 
   const response = await openaiClient.chatCompletion(
     {
@@ -328,12 +346,13 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
       arTone !== undefined && arTone !== null && String(arTone).length > 0
         ? buildAutoReplyToneAddon(arTone, arToneCustom)
         : '';
-    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript, toneAddon);
+    const orderContext = options.orderContext || '';
+    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript, toneAddon, orderContext);
 
     if (withSelfAssessment) {
       // NOTE: Layer 0 (messageIntentClassifier) already filters out 'closing' and 'gibberish'
       // messages before this AI call is made. Only 'small_talk' and 'business' messages reach here.
-      const { raw, parsed } = await callSelfAssessment(interaction, baseGuidelines, conversationTranscript);
+      const { raw, parsed } = await callSelfAssessment(interaction, baseGuidelines, conversationTranscript, orderContext);
 
       // Case 1 — ideal path: JSON parsed AND contains a customer-safe reply string.
       if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim().length > 0) {
@@ -443,9 +462,10 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
       };
     }
 
+    const stdLatest = orderContext ? `the customer placed an order — ${orderContext}` : `"${interaction.content}"`;
     const stdUserContent = (conversationTranscript && conversationTranscript.trim())
-      ? `Recent conversation:\n${conversationTranscript}\n\nLatest customer message:\n"${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
-      : `Customer message: "${interaction.content}"\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`;
+      ? `Recent conversation:\n${conversationTranscript}\n\nLatest customer message:\n${stdLatest}\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
+      : `Customer message: ${stdLatest}\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`;
 
     // Standard mode (no self-assessment)
     const systemPrompt = `You are a professional customer service representative. 

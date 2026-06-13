@@ -317,8 +317,12 @@ class EscalationService {
         if (agent) {
           console.log(`👤 [Escalation] Auto-assigned to agent: ${agent.firstName} ${agent.lastName}`);
           
-          // Send notification if enabled
-          if (organization.escalationSettings?.notifyAgents) {
+          // Send notification if enabled — check both the top-level field and the
+          // nested `notifications.notifyAgents` field saved by the Automation Hub UI.
+          const notify =
+            organization.escalationSettings?.notifyAgents ||
+            organization.escalationSettings?.notifications?.notifyAgents;
+          if (notify) {
             await this.notifyAgent(agent, interaction, organization);
           }
         }
@@ -378,6 +382,23 @@ class EscalationService {
 
       if (agent) {
         await interaction.assignTo(agent._id, null, 'escalation');
+
+        // Emit real-time update so the inbox assignment banner appears immediately.
+        try {
+          const { emitToOrg } = require('../../utils/socketEmitter');
+          const Interaction = require('../../models/Interaction');
+          const fresh = await Interaction.findById(interaction._id).lean();
+          if (fresh) {
+            emitToOrg(
+              String(fresh.organization),
+              'interaction_updated',
+              { interaction: fresh }
+            );
+          }
+        } catch (_emitErr) {
+          // Non-fatal — assignment already succeeded
+        }
+
         return agent;
       }
 
