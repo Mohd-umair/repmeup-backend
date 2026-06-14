@@ -316,7 +316,7 @@ class EscalationService {
         const agent = await this.assignToAgent(interaction, organization);
         if (agent) {
           console.log(`👤 [Escalation] Auto-assigned to agent: ${agent.firstName} ${agent.lastName}`);
-          
+
           // Send notification if enabled — check both the top-level field and the
           // nested `notifications.notifyAgents` field saved by the Automation Hub UI.
           const notify =
@@ -328,10 +328,27 @@ class EscalationService {
         }
       }
 
+      // Always refresh the inbox so the escalation/assignment shows live — even when
+      // the conversation was already assigned (auto-assign skipped) or autoAssign is off.
+      await this._emitInteractionUpdated(interaction._id);
+
       return interaction;
     } catch (error) {
       console.error('❌ [Escalation] Error escalating interaction:', error);
       throw error;
+    }
+  }
+
+  /** Emit a real-time inbox update for an interaction (escalation/assignment banner). */
+  async _emitInteractionUpdated(interactionId) {
+    try {
+      const { emitToOrg } = require('../utils/socketEmitter');
+      const fresh = await Interaction.findById(interactionId).lean();
+      if (fresh) {
+        emitToOrg(String(fresh.organization), 'interaction_updated', { interaction: fresh });
+      }
+    } catch (err) {
+      console.warn('[Escalation] interaction_updated emit failed (non-fatal):', err.message);
     }
   }
 
@@ -384,20 +401,7 @@ class EscalationService {
         await interaction.assignTo(agent._id, null, 'escalation');
 
         // Emit real-time update so the inbox assignment banner appears immediately.
-        try {
-          const { emitToOrg } = require('../../utils/socketEmitter');
-          const Interaction = require('../../models/Interaction');
-          const fresh = await Interaction.findById(interaction._id).lean();
-          if (fresh) {
-            emitToOrg(
-              String(fresh.organization),
-              'interaction_updated',
-              { interaction: fresh }
-            );
-          }
-        } catch (_emitErr) {
-          // Non-fatal — assignment already succeeded
-        }
+        await this._emitInteractionUpdated(interaction._id);
 
         return agent;
       }
