@@ -109,7 +109,8 @@ const CHECKOUT_BLUEPRINT = {
     { id: 'A2-R1', source: 'A2', target: 'R1', label: 'timeout' },
     { id: 'A3-S1', source: 'A3', target: 'S1' },
 
-    { id: 'S1-F1', source: 'S1', target: 'F1' },
+    { id: 'S1-F1', source: 'S1', target: 'F1', label: 'saved' },
+    { id: 'S1-A1', source: 'S1', target: 'A1', label: 'invalid' },
     { id: 'F1-e1', source: 'F1', target: 'e1' },
 
     { id: 'R1-e2', source: 'R1', target: 'e2' }

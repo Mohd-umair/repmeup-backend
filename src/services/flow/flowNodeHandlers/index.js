@@ -6,6 +6,30 @@ const flowTemplateService = require('../flowTemplateService');
 const TRUE_BRANCHES = ['yes', 'true', 'match', 'matched'];
 const FALSE_BRANCHES = ['no', 'false', 'nomatch', 'unmatched', 'else', 'default'];
 
+/** Quick-reply button titles that must never be mistaken for a typed address. */
+const BUTTON_TITLE_BLOCKLIST = new Set([
+  'yes', 'no', 'yes ship here', 'new address', 'use a new address',
+  'confirm', 'cancel', 'ship here', 'correct', 'use new address'
+]);
+
+/**
+ * Heuristic guard: is this free text plausibly a delivery address — and NOT a
+ * quick-reply button title (e.g. "✅ Yes, ship here") or other non-address reply?
+ * Real addresses almost always carry a house number or pincode; button titles do not.
+ */
+function isLikelyAddress(text) {
+  const raw = String(text || '').trim();
+  if (raw.length < 8) return false;
+  // Normalise: drop emoji/punctuation (keep word chars + spaces), collapse spaces.
+  const norm = raw.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (BUTTON_TITLE_BLOCKLIST.has(norm)) return false;
+  const words = raw.split(/\s+/).filter(Boolean).length;
+  const hasDigit = /\d/.test(raw);
+  if (hasDigit && words >= 2) return true;                        // house no / pincode present
+  if (!hasDigit && words >= 5 && /[,\n]/.test(raw)) return true;  // long descriptive address
+  return false;
+}
+
 /** Normalize an edge's branch label for comparison. */
 function edgeBranch(edge) {
   return String(edge?.label || edge?.condition?.branch || '').trim().toLowerCase();
@@ -526,12 +550,17 @@ async function handleAction(node, ctx) {
       // conversation, so it shows prefilled in Order Management.
       const CommerceOrder = require('../../../models/CommerceOrder');
       const srcKey = (config.addressVar && String(config.addressVar).trim()) || 'delivery_address';
-      let address = enrollment?.variables?.[srcKey];
-      if (address == null || String(address).trim() === '') address = interaction?.content || '';
-      address = String(address || '').trim();
+      let address = String(enrollment?.variables?.[srcKey] || '').trim();
+      // Fallback to the latest message ONLY when it is a typed reply — never a
+      // quick-reply/button tap (whose content is the button title, not an address).
       if (!address) {
-        logger.debug('[FlowHandler] save_shipping_address: no address captured');
-        break;
+        const isButtonTap = !!(interaction?.metadata?.buttonPayload || interaction?.metadata?.postback);
+        if (!isButtonTap) address = String(interaction?.content || '').trim();
+      }
+      // Reject button titles / non-address replies so we never save e.g. "✅ Yes, ship here".
+      if (!isLikelyAddress(address)) {
+        logger.info('[FlowHandler] save_shipping_address: ignored non-address reply', { sample: address.slice(0, 40) });
+        return { status: 'continue', variables: { address_invalid: true }, nextNodeId: pickEdge(ctx.edges, 'invalid')?.target };
       }
 
       // Prefer a captured order id; otherwise the active order on this thread.
@@ -593,13 +622,14 @@ async function handleAction(node, ctx) {
       });
       return {
         status: 'continue',
-        variables: { orderId: String(order._id), delivery_address: address },
-        nextNodeId: pickEdge(ctx.edges)?.target
+        variables: { orderId: String(order._id), delivery_address: address, address_invalid: false },
+        nextNodeId: pickEdge(ctx.edges, 'saved')?.target
       };
     }
     case 'action.load_saved_address': {
       // Load the customer's remembered address into {{saved_address}} so the flow can
-      // offer a one-tap confirm instead of re-asking. Empty when none on file.
+      // offer a one-tap confirm instead of re-asking. Empty when none on file — or when
+      // the stored value isn't a real address (defensively ignore corrupted data).
       const Contact = require('../../../models/Contact');
       let contact = null;
       if (interaction?.contact) {
@@ -614,7 +644,8 @@ async function handleAction(node, ctx) {
           }).select('shippingAddress').lean();
         }
       }
-      const saved = (contact?.shippingAddress && String(contact.shippingAddress).trim()) || '';
+      const stored = (contact?.shippingAddress && String(contact.shippingAddress).trim()) || '';
+      const saved = isLikelyAddress(stored) ? stored : '';
       return {
         status: 'continue',
         variables: { saved_address: saved },
@@ -996,4 +1027,4 @@ async function executeNodeHandler(ctx) {
   }
 }
 
-module.exports = { executeNodeHandler, pickEdge };
+module.exports = { executeNodeHandler, pickEdge, isLikelyAddress };

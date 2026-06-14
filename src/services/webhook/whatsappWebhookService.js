@@ -585,6 +585,10 @@ async function processIncomingMessage(change, connection, rawPayload) {
   if (md.location) {
     extraSet['metadata.location'] = md.location;
   }
+  // Persist the tapped button/list id so flows can branch on it and so address
+  // capture can distinguish a button tap from a typed address. Cleared (null) on a
+  // normal text message so a stale id from an earlier tap can't be misread.
+  extraSet['metadata.buttonPayload'] = md.buttonPayload || null;
 
   const msgExtra = {};
   if (md.mediaId) {
