@@ -93,6 +93,7 @@ async function buildOrderVars(organizationId, interaction) {
     const items = order.lineItems.map((li) => `${li.qty || 1}× ${li.name || 'item'}`).join(', ');
     const total = order.totalAmount != null ? formatMoney(order.totalAmount, order.currency) : '';
     return {
+      orderId: String(order._id),
       order_ref: order.displayRef || '',
       order_summary: items,
       order_total: total,

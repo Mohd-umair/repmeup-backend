@@ -397,6 +397,62 @@ class WhatsAppService {
   }
 
   /**
+   * Send a Meta order_details interactive message (Review & Pay).
+   * Requires WhatsApp Payments to be enabled for online payment methods.
+   * @param {Object} connection
+   * @param {string} to
+   * @param {Object} interactive  Full interactive object (type: order_details)
+   */
+  async sendOrderDetailsMessage(connection, to, interactive) {
+    const phoneNumberId = this._phoneNumberId(connection);
+    try {
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'interactive',
+          interactive
+        },
+        { headers: this._jsonHeaders(connection), timeout: 20000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send order details:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp order details');
+    }
+  }
+
+  /**
+   * Send a Meta order_details interactive message (Review & Pay).
+   * Requires WhatsApp Payments to be enabled for online payment methods.
+   * @param {Object} connection
+   * @param {string} to
+   * @param {Object} interactive  Full interactive object (type: order_details)
+   */
+  async sendOrderDetailsMessage(connection, to, interactive) {
+    const phoneNumberId = this._phoneNumberId(connection);
+    try {
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'interactive',
+          interactive
+        },
+        { headers: this._jsonHeaders(connection), timeout: 20000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send order details:', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp order details');
+    }
+  }
+
+  /**
    * Send a "View catalog" message exposing the entire linked catalog.
    * Uses interactive type `catalog_message`. The catalog shown is the one
    * linked to the WABA — no catalog_id is passed; Meta resolves it.

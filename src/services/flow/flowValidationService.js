@@ -103,27 +103,40 @@ class FlowValidationService {
 
   _hasCycle(nodes, edges) {
     const adj = new Map();
-    for (const n of nodes) adj.set(n.id, []);
+    const typeMap = new Map();
+    for (const n of nodes) {
+      adj.set(n.id, []);
+      typeMap.set(n.id, n.type);
+    }
     for (const e of edges) {
       if (adj.has(e.source)) adj.get(e.source).push(e.target);
     }
+
     const visited = new Set();
-    const stack = new Set();
+    const path = [];
+    const onPath = new Set();
 
     const dfs = (id) => {
-      if (stack.has(id)) return true;
+      if (onPath.has(id)) {
+        const cycleStart = path.lastIndexOf(id);
+        const cyclePath = path.slice(cycleStart);
+        const isGated = cyclePath.some((nid) => (typeMap.get(nid) || '').startsWith('wait.'));
+        return !isGated;
+      }
       if (visited.has(id)) return false;
       visited.add(id);
-      stack.add(id);
+      onPath.add(id);
+      path.push(id);
       for (const next of adj.get(id) || []) {
         if (dfs(next)) return true;
       }
-      stack.delete(id);
+      path.pop();
+      onPath.delete(id);
       return false;
     };
 
     for (const n of nodes) {
-      if (dfs(n.id)) return true;
+      if (!visited.has(n.id) && dfs(n.id)) return true;
     }
     return false;
   }
