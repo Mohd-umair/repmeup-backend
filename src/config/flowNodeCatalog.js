@@ -379,6 +379,36 @@ const FLOW_NODE_CATALOG = [
       { key: 'addressVar', type: 'string', label: 'Address variable', default: 'delivery_address', hint: "Flow variable holding the captured address. Falls back to the customer's latest reply." }
     ]
   }),
+  node('action.save_payment_method', 'action', 'Save payment method', ['whatsapp'], {
+    icon: 'fas fa-credit-card',
+    description: 'Capture the customer\'s chosen payment method from their button tap or reply and save it on the order.',
+    defaultConfig: { methodVar: 'payment_method' },
+    fields: [
+      { key: 'methodVar', type: 'string', label: 'Payment variable', default: 'payment_method', hint: 'Flow variable to store the resolved method (cod, upi, razorpay). Auto-detected from button payload when blank.' }
+    ]
+  }),
+  node('action.send_order_details', 'action', 'Send order details (Meta)', ['whatsapp'], {
+    icon: 'fas fa-file-invoice-dollar',
+    description: 'Send the official WhatsApp order_details message with line items and Review & Pay (UPI / gateway). Falls back to a text summary for COD.',
+    defaultConfig: {
+      bodyText: 'Review your order {{order_ref}} and complete payment.',
+      headerText: 'Order summary',
+      footerText: '',
+      goodsType: 'physical-goods',
+      upiVpa: '',
+      gatewayType: 'razorpay',
+      configurationName: 'default'
+    },
+    fields: [
+      { key: 'bodyText', type: 'textarea', label: 'Body', required: true, default: 'Review your order {{order_ref}} and complete payment.', hint: 'Supports {{order_ref}}, {{order_total}}, {{delivery_address}}.' },
+      { key: 'headerText', type: 'string', label: 'Header', default: 'Order summary', hint: 'Optional. Max 60 chars.' },
+      { key: 'footerText', type: 'string', label: 'Footer', default: '', hint: 'Optional. Max 60 chars.' },
+      { key: 'goodsType', type: 'select', label: 'Goods type', options: ['physical-goods', 'digital-goods'], default: 'physical-goods' },
+      { key: 'upiVpa', type: 'string', label: 'UPI VPA', default: '', hint: 'Merchant UPI id (e.g. store@upi). Required when customer picks UPI.' },
+      { key: 'gatewayType', type: 'select', label: 'Payment gateway', options: ['razorpay'], default: 'razorpay' },
+      { key: 'configurationName', type: 'string', label: 'Gateway config name', default: 'default', hint: 'Meta Payments configuration name from Business Manager.' }
+    ]
+  }),
   node('action.load_saved_address', 'action', 'Load saved address', ['whatsapp', 'instagram'], {
     icon: 'fas fa-address-book',
     description: 'Load the customer\'s remembered delivery address into {{saved_address}} (empty if none on file).',

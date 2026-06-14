@@ -626,6 +626,158 @@ async function handleAction(node, ctx) {
         nextNodeId: pickEdge(ctx.edges, 'saved')?.target
       };
     }
+    case 'action.save_payment_method': {
+      const CommerceOrder = require('../../../models/CommerceOrder');
+      const {
+        resolvePaymentMethod,
+        paymentLabel
+      } = require('../../../integrations/whatsapp/whatsappOrderDetailsHelper');
+
+      const varKey = (config.methodVar && String(config.methodVar).trim()) || 'payment_method';
+      let method = String(enrollment?.variables?.[varKey] || '').trim().toLowerCase();
+      if (!method) {
+        method = resolvePaymentMethod({
+          buttonPayload: interaction?.metadata?.buttonPayload || interaction?.metadata?.postback,
+          text: interaction?.content
+        });
+      }
+      if (!method) {
+        logger.info('[FlowHandler] save_payment_method: could not resolve method from reply');
+        return {
+          status: 'continue',
+          variables: { payment_invalid: true },
+          nextNodeId: pickEdge(ctx.edges, 'invalid')?.target
+        };
+      }
+
+      const orderId = enrollment?.variables?.orderId;
+      const order = await CommerceOrder.findOne(
+        orderId
+          ? { _id: orderId, organization: organizationId }
+          : {
+              organization: organizationId,
+              sourceInteraction: interaction?._id,
+              status: { $nin: ['cancelled', 'refunded', 'returned', 'delivered'] }
+            }
+      ).sort({ createdAt: -1 });
+
+      if (!order) {
+        logger.debug('[FlowHandler] save_payment_method: no order linked');
+        break;
+      }
+
+      order.paymentMethod = method;
+      await order.save();
+
+      const label = paymentLabel(method);
+      logger.info('[FlowHandler] save_payment_method: saved', { orderId: String(order._id), method });
+      return {
+        status: 'continue',
+        variables: {
+          orderId: String(order._id),
+          payment_method: method,
+          payment_method_label: label,
+          payment_invalid: false
+        },
+        nextNodeId: pickEdge(ctx.edges, 'saved')?.target || pickEdge(ctx.edges)?.target
+      };
+    }
+    case 'action.send_order_details': {
+      const CommerceOrder = require('../../../models/CommerceOrder');
+      const messageService = require('../flowMessageService');
+      const whatsappService = require('../../../integrations/whatsapp/whatsappService');
+      const {
+        buildOrderDetailsInteractive,
+        buildOrderSummaryText,
+        buildPaymentSettings
+      } = require('../../../integrations/whatsapp/whatsappOrderDetailsHelper');
+      const { recordAutomationReply } = require('../../inbox/inboxAutomationReplyService');
+
+      const orderId = enrollment?.variables?.orderId;
+      const order = await CommerceOrder.findOne(
+        orderId
+          ? { _id: orderId, organization: organizationId }
+          : {
+              organization: organizationId,
+              sourceInteraction: interaction?._id,
+              status: { $nin: ['cancelled', 'refunded', 'returned', 'delivered'] }
+            }
+      ).sort({ createdAt: -1 }).lean();
+
+      if (!order) {
+        logger.warn('[FlowHandler] send_order_details: no order found');
+        break;
+      }
+
+      const { conn, recipient } = await messageService.resolveWhatsAppTarget(organizationId, interaction, enrollment);
+      if (!conn || !recipient) {
+        logger.warn('[FlowHandler] send_order_details skipped: no WhatsApp target');
+        break;
+      }
+
+      const tplContext = flowTemplateService.buildContext(interaction, enrollment?.variables);
+      const render = (v) => (typeof v === 'string' ? flowTemplateService.render(v, { context: tplContext }) : v);
+      const paymentMethod = String(
+        enrollment?.variables?.payment_method || order.paymentMethod || ''
+      ).toLowerCase();
+      const deliveryAddress = enrollment?.variables?.delivery_address || order.shippingAddress || '';
+      const catalogId = conn.platformData?.catalogId || '';
+
+      const payOpts = {
+        upiVpa: render(config.upiVpa || ''),
+        gatewayType: config.gatewayType || 'razorpay',
+        configurationName: config.configurationName || 'default'
+      };
+
+      const useMetaOrderDetails = paymentMethod !== 'cod'
+        && buildPaymentSettings(paymentMethod, payOpts)?.length;
+
+      try {
+        if (useMetaOrderDetails) {
+          const interactive = buildOrderDetailsInteractive(order, {
+            bodyText: render(config.bodyText || 'Review your order and complete payment.'),
+            headerText: render(config.headerText || ''),
+            footerText: render(config.footerText || ''),
+            catalogId,
+            goodsType: config.goodsType || 'physical-goods',
+            paymentMethod,
+            ...payOpts,
+            referenceId: order.displayRef || String(order._id)
+          });
+          await whatsappService.sendOrderDetailsMessage(conn, recipient, interactive);
+          if (interaction?._id) {
+            await recordAutomationReply({
+              interactionId: interaction._id,
+              organizationId,
+              content: render(config.bodyText || '[Order details]'),
+              messageType: 'interactive'
+            }).catch(() => {});
+          }
+        } else {
+          const summary = buildOrderSummaryText(order, {
+            paymentMethodLabel: enrollment?.variables?.payment_method_label || paymentMethod,
+            deliveryAddress
+          });
+          await whatsappService.sendTextMessage(conn, recipient, summary);
+          if (interaction?._id) {
+            await recordAutomationReply({
+              interactionId: interaction._id,
+              organizationId,
+              content: summary,
+              messageType: 'text'
+            }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        logger.warn('[FlowHandler] send_order_details failed, sending text fallback', { error: err.message });
+        const fallback = buildOrderSummaryText(order, {
+          paymentMethodLabel: enrollment?.variables?.payment_method_label || paymentMethod,
+          deliveryAddress
+        });
+        await whatsappService.sendTextMessage(conn, recipient, fallback).catch(() => {});
+      }
+      break;
+    }
     case 'action.load_saved_address': {
       // Load the customer's remembered address into {{saved_address}} so the flow can
       // offer a one-tap confirm instead of re-asking. Empty when none on file — or when
