@@ -797,11 +797,23 @@ async function handleAction(node, ctx) {
       const Interaction = require('../../../models/Interaction');
       const fullInteraction = interaction?._id ? await Interaction.findById(interaction._id) : null;
       if (fullInteraction && org) {
+        const reason = config.reason && String(config.reason).trim();
+        // Tell the customer a human is taking over. Prefer an explicit handoff message;
+        // fall back to a non-placeholder reason, then the org's handoff template.
+        const handoffRaw = (config.message && String(config.message).trim())
+          || (reason && reason !== 'Needs human review' ? reason : '')
+          || (org.escalationSettings?.handoffMessageTemplate && String(org.escalationSettings.handoffMessageTemplate).trim())
+          || '';
+        if (handoffRaw) {
+          const text = flowTemplateService.render(handoffRaw, { interaction, variables: enrollment?.variables });
+          await sendTextForInteraction(interaction, organizationId, text)
+            .catch((err) => logger.warn('[FlowHandler] escalate handoff message failed', { error: err.message }));
+        }
         const escalationService = require('../../escalationService');
         await escalationService.escalateInteraction(
           fullInteraction,
           org,
-          [config.reason || 'flow_escalation'],
+          [reason || 'flow_escalation'],
           'automation'
         ).catch((err) => logger.warn('[FlowHandler] escalate_human failed', { error: err.message, interactionId: fullInteraction._id }));
       }

@@ -355,9 +355,12 @@ const FLOW_NODE_CATALOG = [
   }),
   node('action.escalate_human', 'action', 'Escalate to human', CHANNELS, {
     icon: 'fas fa-user-headset',
-    description: 'Hand off to a human agent.',
-    defaultConfig: { reason: 'Needs human review' },
-    fields: [{ key: 'reason', type: 'string', label: 'Reason', default: 'Needs human review' }]
+    description: 'Send a handoff message to the customer and hand the chat to a human agent.',
+    defaultConfig: { reason: 'Needs human review', message: '' },
+    fields: [
+      { key: 'message', type: 'textarea', label: 'Handoff message (to customer)', default: '', hint: "Sent to the customer, e.g. \"A team member will get back to you shortly.\" Leave blank to use your Escalation settings' handoff message." },
+      { key: 'reason', type: 'string', label: 'Reason (internal)', default: 'Needs human review', hint: 'Shown to agents — not sent to the customer.' }
+    ]
   }),
   node('action.set_variable', 'action', 'Set variable', CHANNELS, {
     icon: 'fas fa-code',
