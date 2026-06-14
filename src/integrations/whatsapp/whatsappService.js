@@ -609,6 +609,11 @@ class WhatsAppService {
           messageData.content = message.interactive?.button_reply?.title
             || message.interactive?.list_reply?.title
             || '[Interactive reply]';
+          // Capture the tapped option id so flows can branch on it AND so address
+          // capture can tell a button tap apart from a typed reply.
+          messageData.buttonPayload = message.interactive?.button_reply?.id
+            || message.interactive?.list_reply?.id
+            || undefined;
           break;
         case 'order':
           messageData.content = message.order?.text?.trim() || '[Product order]';
