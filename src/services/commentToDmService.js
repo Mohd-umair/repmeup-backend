@@ -656,6 +656,92 @@ async function sendProductPickerFlow(ctx) {
   );
 }
 
+/**
+ * Mirror an Instagram comment-to-DM product order into the omnichannel OMS
+ * (CommerceOrder) so it appears in Orders exactly like a WhatsApp order. Created
+ * the moment the customer commits to a specific product (single CTA sent, or a
+ * carousel pick). Best-effort + idempotent per (customer + product + post) so the
+ * single and carousel paths, and re-runs, never duplicate an order. Agents then
+ * progress its status in the OMS just like any other order.
+ *
+ * @returns {Promise<mongoose.Types.ObjectId|null>} the CommerceOrder id, or null
+ */
+async function syncCommerceOrderForIgProduct({
+  organizationId,
+  product,
+  instagramUserId,
+  commenterUsername = '',
+  commentInteractionId = null,
+  contactId = null,
+  postId
+}) {
+  try {
+    if (!product?._id) return null;
+    const CommerceOrder = require('../models/CommerceOrder');
+    const { assignOrderDisplayRef } = require('../utils/opsRefHelper');
+
+    const igUser = String(instagramUserId || '');
+
+    // Idempotent: one active order per customer + product + post.
+    const existing = await CommerceOrder.findOne({
+      organization: organizationId,
+      channel: 'instagram',
+      instagramUserId: igUser,
+      'lineItems.product': product._id,
+      sourcePostId: String(postId),
+      status: { $nin: ['cancelled', 'returned', 'refunded'] }
+    }).select('_id').lean();
+    if (existing) return existing._id;
+
+    const unitPrice = Number(product.price || 0);
+    const currency = product.currency || 'AED';
+    const lineItems = [{
+      product: product._id,
+      retailerId: (product.sku && String(product.sku).trim()) || String(product._id),
+      name: product.name,
+      qty: 1,
+      unitPrice,
+      currency
+    }];
+
+    const order = await CommerceOrder.create(
+      await assignOrderDisplayRef(organizationId, {
+        organization: organizationId,
+        channel: 'instagram',
+        status: 'intent',
+        lineItems,
+        totalAmount: +unitPrice.toFixed(2),
+        currency,
+        instagramUserId: igUser,
+        buyerName: commenterUsername || undefined,
+        contact: contactId || undefined,
+        sourceInteraction: commentInteractionId || undefined,
+        sourcePostId: postId ? String(postId) : undefined,
+        statusHistory: [{ status: 'intent', at: new Date(), note: 'Order started via Instagram comment-to-DM' }]
+      })
+    );
+
+    try {
+      const { emitToOrg } = require('../utils/socketEmitter');
+      emitToOrg(organizationId, 'commerce_order_created', {
+        order: order.toObject(),
+        interactionId: commentInteractionId ? String(commentInteractionId) : undefined
+      });
+    } catch (_) { /* socket optional */ }
+
+    svcLogger.info('[commentToDm] CommerceOrder created from IG comment-to-DM', {
+      orderId: String(order._id),
+      displayRef: order.displayRef,
+      productId: String(product._id),
+      organizationId
+    });
+    return order._id;
+  } catch (err) {
+    svcLogger.warn('[commentToDm] CommerceOrder sync failed (non-fatal)', { error: err.message });
+    return null;
+  }
+}
+
 async function sendSingleProductFlow(ctx) {
   const { interaction, organizationId, product, postId, commenterId, commenterUsername, accessToken, pageId, connType, orgDoc } = ctx;
   const sfSettings = orgDoc.salesFlowSettings || {};
@@ -694,6 +780,17 @@ async function sendSingleProductFlow(ctx) {
     commentInteractionId: interaction._id,
     orderToken,
     status: 'dm_sent'
+  });
+
+  // Mirror into the omnichannel OMS so it shows in Orders like a WhatsApp order.
+  await syncCommerceOrderForIgProduct({
+    organizationId,
+    product,
+    instagramUserId: commenterId,
+    commenterUsername,
+    commentInteractionId: interaction._id,
+    contactId: interaction.contact,
+    postId
   });
 
   await SalesConversationState.findOneAndUpdate(
@@ -820,6 +917,15 @@ async function completeProductSelection({
   state.candidateProductIds = [];
   state.lastStageAt = new Date();
   await state.save();
+
+  // Mirror into the omnichannel OMS so the picked product shows in Orders.
+  await syncCommerceOrderForIgProduct({
+    organizationId,
+    product,
+    instagramUserId,
+    commentInteractionId: state.commentInteractionId,
+    postId
+  });
 
   svcLogger.info('[commentToDm] Product selection completed', { instagramUserId, productId: product._id, postId });
   return { ok: true, productOrderId: productOrder._id };
