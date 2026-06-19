@@ -26,13 +26,31 @@ function recipientFor(interaction) {
 /** Dispatch a plain text message on the interaction's platform. */
 async function dispatchText(platform, conn, interaction, text) {
   const recipientId = recipientFor(interaction);
-  if (!recipientId) return { sent: false, reason: 'no_recipient' };
+  // A comment private reply is keyed by comment_id, not a recipient id, so it can
+  // proceed without one; every other path needs a resolved recipient.
+  if (!recipientId && interaction.type !== 'comment') return { sent: false, reason: 'no_recipient' };
 
   if (platform === 'instagram') {
-    const pageId = conn.platformData?.pageId || conn.platformData?.instagramBusinessAccountId;
-    await instagramService.sendMessage(
-      recipientId, text, conn.accessToken, pageId, false, instagramService._connectionType(conn)
-    );
+    const connType = instagramService._connectionType(conn);
+    // pageId resolution mirrors commentToDmService: IG-Login uses the scoped IG id,
+    // Facebook-Login uses the linked page id.
+    const pageId = connType === 'instagram_login'
+      ? (conn.metadata?.igLoginScopedId || conn.platformUserId)
+      : (conn.platformData?.pageId || conn.platformPageId || conn.platformUserId
+         || conn.platformData?.instagramBusinessAccountId);
+
+    // A public comment can't be DM'd with a normal message (the commenter never
+    // messaged us). Instagram requires a private reply keyed by comment_id
+    // (allowed once per comment, within a 7-day window).
+    if (interaction.type === 'comment') {
+      await instagramService.sendPrivateReply(
+        interaction.platformId, text, conn.accessToken, pageId, connType
+      );
+    } else {
+      await instagramService.sendMessage(
+        recipientId, text, conn.accessToken, pageId, false, connType
+      );
+    }
     return { sent: true };
   }
 
