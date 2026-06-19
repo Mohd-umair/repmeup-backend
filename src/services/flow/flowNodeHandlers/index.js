@@ -458,7 +458,7 @@ async function handleAction(node, ctx) {
       const instagramService = require('../../../integrations/meta/instagramService');
       const pageId = conn.platformData?.pageId || conn.platformData?.instagramBusinessAccountId;
       await instagramService.sendGenericTemplateMessage(
-        recipient, element, conn.accessToken, pageId, conn.platformData?.connectionType
+        recipient, element, conn.accessToken, pageId, instagramService._connectionType(conn)
       );
       const { recordAutomationReply } = require('../../inbox/inboxAutomationReplyService');
       if (interaction?._id) {
@@ -724,13 +724,16 @@ async function handleAction(node, ctx) {
       const catalogId = conn.platformData?.catalogId || '';
 
       const payOpts = {
-        upiVpa: render(config.upiVpa || ''),
         gatewayType: config.gatewayType || 'razorpay',
-        configurationName: config.configurationName || 'default'
+        configurationName: render(config.configurationName || 'default')
       };
 
       const useMetaOrderDetails = paymentMethod !== 'cod'
         && buildPaymentSettings(paymentMethod, payOpts)?.length;
+
+      const Organization = require('../../../models/Organization');
+      const org = await Organization.findById(organizationId).select('name profile.company').lean();
+      const importerName = org?.profile?.company || org?.name || 'Seller';
 
       try {
         if (useMetaOrderDetails) {
@@ -741,10 +744,18 @@ async function handleAction(node, ctx) {
             catalogId,
             goodsType: config.goodsType || 'physical-goods',
             paymentMethod,
+            importerName,
+            importerAddress: 'India',
             ...payOpts,
             referenceId: order.displayRef || String(order._id)
           });
           await whatsappService.sendOrderDetailsMessage(conn, recipient, interactive);
+          logger.info('[FlowHandler] send_order_details: Meta order_details sent', {
+            orderId: String(order._id),
+            referenceId: order.displayRef,
+            paymentMethod,
+            configurationName: payOpts.configurationName
+          });
           if (interaction?._id) {
             await recordAutomationReply({
               interactionId: interaction._id,
@@ -754,6 +765,11 @@ async function handleAction(node, ctx) {
             }).catch(() => {});
           }
         } else {
+          logger.warn('[FlowHandler] send_order_details: using text fallback (payments not configured or COD)', {
+            orderId: String(order._id),
+            paymentMethod,
+            configurationName: payOpts.configurationName
+          });
           const summary = buildOrderSummaryText(order, {
             paymentMethodLabel: enrollment?.variables?.payment_method_label || paymentMethod,
             deliveryAddress
@@ -769,7 +785,12 @@ async function handleAction(node, ctx) {
           }
         }
       } catch (err) {
-        logger.warn('[FlowHandler] send_order_details failed, sending text fallback', { error: err.message });
+        logger.warn('[FlowHandler] send_order_details failed, sending text fallback', {
+          error: err.message,
+          orderId: String(order._id),
+          paymentMethod,
+          configurationName: payOpts.configurationName
+        });
         const fallback = buildOrderSummaryText(order, {
           paymentMethodLabel: enrollment?.variables?.payment_method_label || paymentMethod,
           deliveryAddress
@@ -844,7 +865,7 @@ async function handleAction(node, ctx) {
             interaction.platformId,
             text,
             conn.accessToken,
-            conn.platformData?.connectionType
+            instagramService._connectionType(conn)
           );
         }
       }

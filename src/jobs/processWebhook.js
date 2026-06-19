@@ -667,7 +667,7 @@ async function handleInstagramWebhook(payload, organizationId) {
         const mediaId = comment.media?.id;
         let postUrl = null;
         if (mediaId && dmReceiverConnection?.accessToken) {
-          postUrl = await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mediaId);
+          postUrl = await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mediaId, instagramService._connectionType(dmReceiverConnection));
         }
 
         const updatePayload = {
@@ -771,7 +771,7 @@ async function handleInstagramWebhook(payload, organizationId) {
                 commentId: mention.comment_id || null,
                 postId: mention.media_id || null,
                 postUrl: mention.media_id && dmReceiverConnection?.accessToken
-                  ? await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mention.media_id)
+                  ? await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mention.media_id, instagramService._connectionType(dmReceiverConnection))
                   : null,
                 rawMention: mention
               }

@@ -2053,10 +2053,11 @@ class InstagramService {
    * e.g. "18104377792903993" → "https://www.instagram.com/p/DWfGl70lIGM/"
    * Returns null if the call fails or the ID is not a valid media.
    */
-  async fetchMediaPermalink(accessToken, mediaId) {
+  async fetchMediaPermalink(accessToken, mediaId, connectionType = null) {
     if (!accessToken || !mediaId) return null;
     try {
-      const response = await axios.get(`${this.baseUrl}/${mediaId}`, {
+      const apiBase = this._getApiBase(connectionType);
+      const response = await axios.get(`${apiBase}/${mediaId}`, {
         params: { fields: 'permalink', access_token: accessToken },
         timeout: 8000
       });
@@ -2069,6 +2070,43 @@ class InstagramService {
       console.warn(`[Instagram] fetchMediaPermalink failed for ${mediaId}:`, err?.response?.data?.error?.message || err.message);
     }
     return null;
+  }
+
+  /**
+   * Resolve a shared IG post/reel media id from DM webhooks to preview URLs + permalink.
+   * @param {string} accessToken
+   * @param {string} mediaId
+   * @param {string|null} connectionType
+   * @returns {Promise<{ id: string, mediaType: string|null, mediaUrl: string|null, thumbnailUrl: string|null, permalink: string|null, shortcode: string|null }|null>}
+   */
+  async fetchMediaPreview(accessToken, mediaId, connectionType = null) {
+    if (!accessToken || !mediaId) return null;
+    const apiBase = this._getApiBase(connectionType);
+    try {
+      const response = await axios.get(`${apiBase}/${mediaId}`, {
+        params: {
+          fields: 'id,media_type,media_url,thumbnail_url,permalink,shortcode',
+          access_token: accessToken
+        },
+        timeout: 8000
+      });
+      const d = response.data;
+      if (!d?.id) return null;
+      return {
+        id: String(d.id),
+        mediaType: d.media_type || null,
+        mediaUrl: d.media_url || null,
+        thumbnailUrl: d.thumbnail_url || d.media_url || null,
+        permalink: d.permalink || null,
+        shortcode: d.shortcode || null
+      };
+    } catch (err) {
+      console.warn(
+        `[Instagram] fetchMediaPreview failed for ${mediaId}:`,
+        err?.response?.data?.error?.message || err.message
+      );
+      return null;
+    }
   }
 }
 

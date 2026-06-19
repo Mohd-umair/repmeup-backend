@@ -2,7 +2,12 @@
 
 /**
  * Build Meta Cloud API `interactive.type = order_details` payloads from a CommerceOrder.
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api/payments-api/payments-in/checkout-button-templates
+ *
+ * India payments: Meta does NOT accept a raw UPI VPA in the message. You must link
+ * Razorpay/PayU in WhatsApp Business Manager and pass `configuration_name` here.
+ * The customer then picks UPI / WhatsApp Pay inside Meta's Review & Pay screen.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/payments-api
  */
 
 const OFFSET = 100;
@@ -14,8 +19,8 @@ function toMinor(amount) {
   return Math.round(n * OFFSET);
 }
 
-function amountObj(major) {
-  return { value: toMinor(major), offset: OFFSET };
+function amountObj(minor) {
+  return { value: Math.max(0, Math.round(minor)), offset: OFFSET };
 }
 
 const PAYMENT_METHOD_LABELS = {
@@ -47,120 +52,146 @@ function paymentLabel(method) {
 }
 
 /**
- * Build payment_settings array for Meta order_details from node/org config.
- * @param {string} method  cod | upi | razorpay
- * @param {object} opts
- * @param {string} [opts.upiVpa]
- * @param {string} [opts.gatewayType]
- * @param {string} [opts.configurationName]
+ * Meta India: online/UPI both use payment_gateway + configuration from Business Manager.
  * @returns {Array<object>|null}
  */
 function buildPaymentSettings(method, opts = {}) {
   if (method === 'cod') return null;
-  if (method === 'upi') {
-    const vpa = String(opts.upiVpa || '').trim();
-    if (!vpa) return null;
-    return [{ type: 'upi', upi: { vpa, purpose_code: '00' } }];
-  }
-  if (method === 'razorpay' || method === 'card' || method === 'online') {
+  if (method === 'upi' || method === 'razorpay' || method === 'card' || method === 'online') {
+    const configurationName = String(opts.configurationName || 'default').trim();
+    if (!configurationName) return null;
     return [{
       type: 'payment_gateway',
       payment_gateway: {
         type: String(opts.gatewayType || 'razorpay'),
-        configuration_name: String(opts.configurationName || 'default')
+        configuration_name: configurationName
       }
     }];
   }
   return null;
 }
 
+/** Required for physical-goods orders — built from saved shipping on the order. */
+function buildBeneficiaries(order) {
+  const ship = order.shipping || {};
+  const raw = order.shippingAddress || ship.line1 || '';
+  const pin = ship.pincode || (String(raw).match(/\b(\d{6})\b/) || [])[1] || '';
+  const line1 = (ship.line1 || raw || 'Delivery address').slice(0, 100);
+  return [{
+    name: (ship.name || order.buyerName || 'Customer').slice(0, 200),
+    address_line1: line1,
+    address_line2: (ship.line2 || '').slice(0, 100),
+    city: (ship.city || '').slice(0, 100),
+    state: (ship.state || '').slice(0, 100),
+    country: 'India',
+    postal_code: /^\d{6}$/.test(pin) ? pin : '110001'
+  }];
+}
+
 /**
  * Build the full interactive order_details object for the Messages API.
- * @param {object} order         CommerceOrder doc or lean object
- * @param {object} opts
- * @param {string} opts.bodyText
- * @param {string} [opts.headerText]
- * @param {string} [opts.footerText]
- * @param {string} [opts.catalogId]
- * @param {string} [opts.goodsType]  physical-goods | digital-goods
- * @param {string} [opts.paymentMethod]
- * @param {string} [opts.upiVpa]
- * @param {string} [opts.gatewayType]
- * @param {string} [opts.configurationName]
- * @param {string} [opts.referenceId]
  */
 function buildOrderDetailsInteractive(order, opts = {}) {
   const lineItems = order.lineItems || [];
-  const currency = String(order.currency || 'INR').toUpperCase();
-  const totalMajor = order.totalAmount != null
-    ? Number(order.totalAmount)
-    : lineItems.reduce((s, li) => s + (Number(li.unitPrice) || 0) * (Number(li.qty) || 1), 0);
+  const currency = 'INR';
+  const subtotalMajor = lineItems.reduce(
+    (s, li) => s + (Number(li.unitPrice) || 0) * (Number(li.qty) || 1),
+    order.totalAmount != null ? Number(order.totalAmount) : 0
+  );
+  const taxMinor = 0;
+  const shippingMinor = 0;
+  const discountMinor = 0;
+  const subtotalMinor = toMinor(subtotalMajor);
+  const totalMinor = subtotalMinor + taxMinor + shippingMinor - discountMinor;
+
+  const importerName = (opts.importerName || 'Seller').slice(0, 200);
+  const importerAddress = (opts.importerAddress || 'India').slice(0, 200);
 
   const items = lineItems.map((li) => {
     const unit = Number(li.unitPrice) || 0;
-    return {
-      retailer_id: String(li.retailerId || li.product || li.name || 'item'),
-      name: String(li.name || 'Item').slice(0, 100),
-      amount: amountObj(unit),
+    const row = {
+      retailer_id: String(li.retailerId || li.product || li.name || 'item').slice(0, 100),
+      name: String(li.name || 'Item').slice(0, 60),
+      amount: amountObj(toMinor(unit)),
       quantity: Math.max(1, Number(li.qty) || 1)
     };
+    if (!opts.catalogId) {
+      row.country_of_origin = 'India';
+      row.importer_name = importerName;
+      row.importer_address = importerAddress;
+    }
+    return row;
   });
 
   if (!items.length) {
-    items.push({
-      retailer_id: order.displayRef || 'order',
-      name: `Order ${order.displayRef || ''}`.trim(),
-      amount: amountObj(totalMajor),
+    const fallback = {
+      retailer_id: String(order.displayRef || 'order').slice(0, 100),
+      name: `Order ${order.displayRef || ''}`.trim().slice(0, 60),
+      amount: amountObj(totalMinor),
       quantity: 1
-    });
+    };
+    if (!opts.catalogId) {
+      fallback.country_of_origin = 'India';
+      fallback.importer_name = importerName;
+      fallback.importer_address = importerAddress;
+    }
+    items.push(fallback);
   }
 
-  const subtotalMajor = lineItems.reduce(
-    (s, li) => s + (Number(li.unitPrice) || 0) * (Number(li.qty) || 1),
-    totalMajor
-  );
-
   const paymentSettings = buildPaymentSettings(opts.paymentMethod, opts);
-  const referenceId = String(opts.referenceId || order.displayRef || order._id || Date.now()).slice(0, 35);
+  const referenceId = String(opts.referenceId || order.displayRef || order._id || Date.now())
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .slice(0, 35);
 
   const parameters = {
     reference_id: referenceId,
     type: opts.goodsType === 'digital-goods' ? 'digital-goods' : 'physical-goods',
     currency,
-    total_amount: amountObj(totalMajor),
+    total_amount: amountObj(totalMinor),
     order: {
       status: 'pending',
-      items
+      items,
+      subtotal: amountObj(subtotalMinor),
+      tax: { ...amountObj(taxMinor), description: 'Tax' },
+      shipping: { ...amountObj(shippingMinor), description: 'Shipping' },
+      discount: {
+        ...amountObj(discountMinor),
+        description: 'Discount',
+        discount_program_name: 'Discount'
+      }
     }
   };
 
   if (opts.catalogId) parameters.order.catalog_id = String(opts.catalogId);
-  parameters.order.subtotal = amountObj(subtotalMajor);
-  parameters.order.tax = { value: 0, offset: OFFSET, description: 'Tax' };
-  parameters.order.shipping = { value: 0, offset: OFFSET, description: 'Shipping' };
-  parameters.order.discount = { value: 0, offset: OFFSET, description: 'Discount', program_name: 'Discount' };
+
+  if (parameters.type === 'physical-goods') {
+    parameters.beneficiaries = buildBeneficiaries(order);
+  }
 
   if (paymentSettings?.length) {
     parameters.payment_settings = paymentSettings;
-    parameters.payment_type = opts.paymentMethod === 'upi' ? 'upi' : 'payment_gateway';
   }
 
   const interactive = {
     type: 'order_details',
-    body: { text: String(opts.bodyText || 'Review your order details below.') },
+    body: { text: String(opts.bodyText || 'Review your order details below.').slice(0, 1024) },
     action: {
       name: 'review_and_pay',
       parameters
     }
   };
 
-  if (opts.headerText) interactive.header = { type: 'text', text: String(opts.headerText).slice(0, 60) };
-  if (opts.footerText) interactive.footer = { text: String(opts.footerText).slice(0, 60) };
+  if (opts.headerText) {
+    interactive.header = { type: 'text', text: String(opts.headerText).slice(0, 60) };
+  }
+  if (opts.footerText) {
+    interactive.footer = { text: String(opts.footerText).slice(0, 60) };
+  }
 
   return interactive;
 }
 
-/** Plain-text fallback when COD is chosen or Meta payments are not configured. */
+/** Plain-text fallback when COD is chosen or Meta payments API rejects / is not configured. */
 function buildOrderSummaryText(order, opts = {}) {
   const ref = order.displayRef || '';
   const items = (order.lineItems || [])
@@ -169,12 +200,14 @@ function buildOrderSummaryText(order, opts = {}) {
   const total = order.totalAmount != null ? `${order.currency || 'INR'} ${order.totalAmount}` : '';
   const pay = opts.paymentMethodLabel ? `\n💳 Payment: ${opts.paymentMethodLabel}` : '';
   const addr = opts.deliveryAddress ? `\n📦 Deliver to:\n${opts.deliveryAddress}` : '';
+  const payNote = opts.paymentNote ? `\n\n${opts.paymentNote}` : '';
   return (
     `🧾 *Order ${ref}*\n\n`
     + (items ? `${items}\n\n` : '')
     + (total ? `*Total:* ${total}` : '')
     + pay
     + addr
+    + payNote
     + '\n\nThank you! We’ll confirm once payment is received.'
   );
 }
@@ -183,6 +216,7 @@ module.exports = {
   buildOrderDetailsInteractive,
   buildOrderSummaryText,
   buildPaymentSettings,
+  buildBeneficiaries,
   resolvePaymentMethod,
   paymentLabel,
   toMinor

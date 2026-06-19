@@ -31,7 +31,7 @@ async function dispatchText(platform, conn, interaction, text) {
   if (platform === 'instagram') {
     const pageId = conn.platformData?.pageId || conn.platformData?.instagramBusinessAccountId;
     await instagramService.sendMessage(
-      recipientId, text, conn.accessToken, pageId, false, conn.platformData?.connectionType
+      recipientId, text, conn.accessToken, pageId, false, instagramService._connectionType(conn)
     );
     return { sent: true };
   }

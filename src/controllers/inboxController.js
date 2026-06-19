@@ -22,6 +22,60 @@ const { mergeIncomingMessagePages, reconcileCommentDmThreadOnRead, getCtdAuthorP
 const { filterInboxReplies, isCampaignOnlyFailedThread } = require('../utils/campaignInboxFilter');
 const { fetchInboxActiveConnections } = require('../services/inbox/inboxConnectionScope');
 
+function instagramSharedMediaLabel(attachmentType) {
+  const t = String(attachmentType || '').toLowerCase();
+  if (t === 'ig_reel' || t === 'reel') return 'Shared Instagram reel';
+  if (t === 'story' || t === 'ig_story') return 'Shared Instagram story';
+  if (t === 'ig_post' || t === 'share') return 'Shared Instagram post';
+  return 'Shared Instagram media';
+}
+
+async function findDmIncomingMessage(orgId, interactionId, mid) {
+  const interaction = await Interaction.findOne({
+    _id: interactionId,
+    organization: orgId,
+    platform: { $in: ['facebook', 'instagram'] },
+    type: 'dm'
+  }).lean();
+  if (!interaction?.metadata?.incomingMessages) {
+    return { interaction: null, msg: null };
+  }
+  const msg = interaction.metadata.incomingMessages.find((m) => m.mid === mid);
+  return { interaction, msg: msg || null };
+}
+
+async function resolveInstagramDmConnection(orgId, interaction) {
+  const igAccountId = interaction.metadata?.instagramAccountId;
+  return PlatformConnection.findOne({
+    organization: orgId,
+    platform: 'instagram',
+    platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
+    status: 'connected',
+    isActive: true
+  }).select('accessToken metadata platformData platformUserId').lean();
+}
+
+async function resolveFacebookDmConnection(orgId, interaction) {
+  const pageId = interaction.metadata?.facebookPageId;
+  return PlatformConnection.findOne({
+    organization: orgId,
+    platform: 'facebook',
+    platformPageId: pageId,
+    status: 'connected',
+    isActive: true
+  }).select('accessToken metadata platformData platformUserId').lean();
+}
+
+async function proxyRemoteAttachmentUrl(url, accessToken, res) {
+  const fetchUrl = url.includes('?')
+    ? `${url}&access_token=${accessToken}`
+    : `${url}?access_token=${accessToken}`;
+  const imgRes = await axios.get(fetchUrl, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 10000 });
+  res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
+  res.set('Cache-Control', 'private, max-age=3600');
+  res.send(Buffer.from(imgRes.data));
+}
+
 const {
   InboxQueryError,
   SLA_THRESHOLD_MS,
@@ -1576,53 +1630,107 @@ exports.getAttachment = async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'interactionId and mid required' });
     }
     const orgId = req.user.organization._id;
-    const interaction = await Interaction.findOne({
-      _id: interactionId,
-      organization: orgId,
-      platform: { $in: ['facebook', 'instagram'] },
-      type: 'dm'
-    }).lean();
-    if (!interaction || !interaction.metadata?.incomingMessages) {
+    const { interaction, msg } = await findDmIncomingMessage(orgId, interactionId, mid);
+    if (!interaction || !msg) {
       return res.status(404).json({ success: false, error: 'Message not found' });
     }
-    const msg = interaction.metadata.incomingMessages.find(m => m.mid === mid);
-    if (!msg || !msg.attachmentUrl) {
-      return res.status(404).json({ success: false, error: 'Attachment not found' });
-    }
+
     let connection = null;
     if (interaction.platform === 'facebook') {
-      const pageId = interaction.metadata.facebookPageId;
-      connection = await PlatformConnection.findOne({
-        organization: orgId,
-        platform: 'facebook',
-        platformPageId: pageId,
-        status: 'connected',
-        isActive: true
-      }).select('accessToken').lean();
+      connection = await resolveFacebookDmConnection(orgId, interaction);
     } else if (interaction.platform === 'instagram') {
-      const igAccountId = interaction.metadata.instagramAccountId;
-      connection = await PlatformConnection.findOne({
-        organization: orgId,
-        platform: 'instagram',
-        platformUserId: { $in: [igAccountId, String(igAccountId)].filter(Boolean) },
-        status: 'connected',
-        isActive: true
-      }).select('accessToken').lean();
+      connection = await resolveInstagramDmConnection(orgId, interaction);
     }
-    if (!connection || !connection.accessToken) {
+    if (!connection?.accessToken) {
       return res.status(404).json({ success: false, error: 'Connection not found' });
     }
-    const url = msg.attachmentUrl.includes('?') ? `${msg.attachmentUrl}&access_token=${connection.accessToken}` : `${msg.attachmentUrl}?access_token=${connection.accessToken}`;
-    const imgRes = await axios.get(url, { responseType: 'arraybuffer', maxRedirects: 5, timeout: 10000 });
-    res.set('Content-Type', imgRes.headers['content-type'] || 'image/jpeg');
-    res.set('Cache-Control', 'private, max-age=3600');
-    res.send(Buffer.from(imgRes.data));
+
+    if (msg.attachmentUrl) {
+      await proxyRemoteAttachmentUrl(msg.attachmentUrl, connection.accessToken, res);
+      return;
+    }
+
+    if (interaction.platform === 'instagram' && msg.igPostMediaId) {
+      const instagramService = require('../integrations/meta/instagramService');
+      const preview = await instagramService.fetchMediaPreview(
+        connection.accessToken,
+        msg.igPostMediaId,
+        instagramService._connectionType(connection)
+      );
+      const sourceUrl = preview?.thumbnailUrl || preview?.mediaUrl;
+      if (sourceUrl) {
+        await proxyRemoteAttachmentUrl(sourceUrl, connection.accessToken, res);
+        return;
+      }
+    }
+
+    return res.status(404).json({ success: false, error: 'Attachment not found' });
   } catch (error) {
     if (error.response?.status === 404 || error.response?.status === 403) {
       return res.status(404).json({ success: false, error: 'Attachment not available' });
     }
     logger.error('[inboxController] getAttachment error', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to load attachment' });
+  }
+};
+
+/**
+ * @desc    Metadata for a shared Instagram post/reel/story in DM (permalink + label)
+ * @route   GET /api/inbox/instagram-shared-media?interactionId=...&mid=...
+ * @access  Private
+ */
+exports.getInstagramSharedMedia = async (req, res, next) => {
+  try {
+    const { interactionId, mid } = req.query;
+    if (!interactionId || !mid) {
+      return res.status(400).json({ success: false, error: 'interactionId and mid required' });
+    }
+    const orgId = req.user.organization._id;
+    const { interaction, msg } = await findDmIncomingMessage(orgId, interactionId, mid);
+    if (!interaction || interaction.platform !== 'instagram' || !msg) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+
+    const label = instagramSharedMediaLabel(msg.attachmentType);
+    const hasPreview = !!(msg.attachmentUrl || msg.igPostMediaId);
+
+    if (!msg.igPostMediaId && !msg.attachmentUrl) {
+      return res.json({
+        success: true,
+        data: { label, permalink: null, mediaType: msg.attachmentType || null, hasPreview: false }
+      });
+    }
+
+    const connection = await resolveInstagramDmConnection(orgId, interaction);
+    if (!connection?.accessToken) {
+      return res.json({
+        success: true,
+        data: { label, permalink: null, mediaType: msg.attachmentType || null, hasPreview }
+      });
+    }
+
+    let permalink = null;
+    let mediaType = msg.attachmentType || null;
+    if (msg.igPostMediaId) {
+      const instagramService = require('../integrations/meta/instagramService');
+      const preview = await instagramService.fetchMediaPreview(
+        connection.accessToken,
+        msg.igPostMediaId,
+        instagramService._connectionType(connection)
+      );
+      if (preview) {
+        permalink = preview.permalink || null;
+        mediaType = preview.mediaType || mediaType;
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: { label, permalink, mediaType, hasPreview }
+    });
+  } catch (error) {
+    logger.error('[inboxController] getInstagramSharedMedia error', { error: error.message });
+    next(error);
   }
 };
 
