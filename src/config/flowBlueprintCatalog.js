@@ -105,7 +105,6 @@ const CHECKOUT_BLUEPRINT = {
         bodyText: 'Review your items and complete payment for {{order_total}}.',
         footerText: 'Tap Review & Pay to continue',
         goodsType: 'physical-goods',
-        upiVpa: '',
         gatewayType: 'razorpay',
         configurationName: 'default'
       } },

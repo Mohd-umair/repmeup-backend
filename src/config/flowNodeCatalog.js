@@ -389,13 +389,12 @@ const FLOW_NODE_CATALOG = [
   }),
   node('action.send_order_details', 'action', 'Send order details (Meta)', ['whatsapp'], {
     icon: 'fas fa-file-invoice-dollar',
-    description: 'Send the official WhatsApp order_details message with line items and Review & Pay (UPI / gateway). Falls back to a text summary for COD.',
+    description: 'Sends Meta Review & Pay order_details. Requires WhatsApp Payments (India) + Razorpay linked in Business Manager — UPI is chosen by the customer inside WhatsApp, not via a VPA field here.',
     defaultConfig: {
       bodyText: 'Review your order {{order_ref}} and complete payment.',
       headerText: 'Order summary',
       footerText: '',
       goodsType: 'physical-goods',
-      upiVpa: '',
       gatewayType: 'razorpay',
       configurationName: 'default'
     },
@@ -404,9 +403,8 @@ const FLOW_NODE_CATALOG = [
       { key: 'headerText', type: 'string', label: 'Header', default: 'Order summary', hint: 'Optional. Max 60 chars.' },
       { key: 'footerText', type: 'string', label: 'Footer', default: '', hint: 'Optional. Max 60 chars.' },
       { key: 'goodsType', type: 'select', label: 'Goods type', options: ['physical-goods', 'digital-goods'], default: 'physical-goods' },
-      { key: 'upiVpa', type: 'string', label: 'UPI VPA', default: '', hint: 'Merchant UPI id (e.g. store@upi). Required when customer picks UPI.' },
-      { key: 'gatewayType', type: 'select', label: 'Payment gateway', options: ['razorpay'], default: 'razorpay' },
-      { key: 'configurationName', type: 'string', label: 'Gateway config name', default: 'default', hint: 'Meta Payments configuration name from Business Manager.' }
+      { key: 'gatewayType', type: 'select', label: 'Payment gateway', options: ['razorpay'], default: 'razorpay', hint: 'Must match the gateway linked in Meta Business Manager → Payments.' },
+      { key: 'configurationName', type: 'string', label: 'Gateway config name', required: true, default: 'default', hint: 'Exact payment configuration name from WhatsApp Manager → Payments (India). UPI VPA is configured there — not in this field.' }
     ]
   }),
   node('action.load_saved_address', 'action', 'Load saved address', ['whatsapp', 'instagram'], {

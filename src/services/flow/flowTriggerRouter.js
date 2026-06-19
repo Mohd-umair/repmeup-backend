@@ -44,31 +44,48 @@ function matchesTrigger(node, eventType, payload = {}) {
 }
 
 /**
+ * Whether this inbound event is the contact's first message on this channel.
+ *
+ * WhatsApp / IG / FB DMs append every inbound message to a single thread
+ * Interaction (`metadata.incomingMessages`). Counting Interaction documents
+ * by `author.platformId` therefore always returns 0 and re-triggers welcome
+ * flows on every reply.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function isFirstContactMessage({ organizationId, platform, interaction }) {
+  const platformUserId = interaction?.author?.platformId || '';
+  if (!platformUserId) return false;
+
+  const incoming = interaction?.metadata?.incomingMessages;
+  if (Array.isArray(incoming)) {
+    return incoming.length <= 1;
+  }
+
+  try {
+    const Interaction = require('../../models/Interaction');
+    const priorCount = await Interaction.countDocuments({
+      organization: organizationId,
+      platform,
+      'author.platformId': platformUserId,
+      _id: { $ne: interaction?._id }
+    });
+    return priorCount === 0;
+  } catch (err) {
+    logger.warn('[FlowTriggerRouter] isFirstContactMessage fallback failed (deny)', { error: err.message });
+    return false;
+  }
+}
+
+/**
  * Async qualifiers that require DB lookups (first contact / new lead detection).
  * Runs only after the cheap synchronous gate passes.
  *
  * @returns {Promise<boolean>}
  */
 async function qualifiesTrigger(node, { organizationId, platform, interaction }) {
-  const platformUserId = interaction?.author?.platformId || '';
-
   if (node.type === 'trigger.first_message' || node.type === 'trigger.new_lead') {
-    if (!platformUserId) return true; // can't determine history → don't block
-    try {
-      const Interaction = require('../../models/Interaction');
-      // Count prior inbound interactions from this contact (excluding the
-      // current one). Zero prior == genuinely the first message / new lead.
-      const priorCount = await Interaction.countDocuments({
-        organization: organizationId,
-        platform,
-        'author.platformId': platformUserId,
-        _id: { $ne: interaction?._id }
-      });
-      return priorCount === 0;
-    } catch (err) {
-      logger.warn('[FlowTriggerRouter] first_message/new_lead check failed (allow)', { error: err.message });
-      return true;
-    }
+    return isFirstContactMessage({ organizationId, platform, interaction });
   }
   return true;
 }
@@ -185,16 +202,22 @@ class FlowTriggerRouter {
         if (!startNodeId) continue;
 
         const platformUserId = interaction?.author?.platformId || payload.platformUserId || '';
-        const existing = await FlowEnrollment.findOne({
-          organization: organizationId,
-          flow: flow._id,
-          platformUserId,
-          status: { $in: ['active', 'waiting'] }
-        });
+        const isOneShotTrigger =
+          triggerNode.type === 'trigger.first_message' || triggerNode.type === 'trigger.new_lead';
+        const existing = await FlowEnrollment.findOne(
+          isOneShotTrigger
+            ? { organization: organizationId, flow: flow._id, platformUserId }
+            : {
+                organization: organizationId,
+                flow: flow._id,
+                platformUserId,
+                status: { $in: ['active', 'waiting'] }
+              }
+        );
 
         if (existing) {
-          // Already enrolled (active, or waiting on a timer/reply handled by the resume pass) —
-          // never start a duplicate enrollment for the same contact in the same flow.
+          // One-shot triggers never re-enroll the same contact. Other flows only block
+          // while an enrollment is still active or waiting on a timer/reply.
           enrollments.push(existing);
           continue;
         }
@@ -342,4 +365,8 @@ class FlowTriggerRouter {
   }
 }
 
-module.exports = new FlowTriggerRouter();
+const flowTriggerRouter = new FlowTriggerRouter();
+
+module.exports = flowTriggerRouter;
+module.exports.isFirstContactMessage = isFirstContactMessage;
+module.exports.qualifiesTrigger = qualifiesTrigger;

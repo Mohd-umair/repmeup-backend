@@ -47,6 +47,7 @@ router.get('/avatar/:platform/:userId', inboxController.getAuthorAvatar);
 
 // Get Facebook DM attachment (FB/IG) — must be before /:id
 router.get('/attachment', inboxController.getAttachment);
+router.get('/instagram-shared-media', inboxController.getInstagramSharedMedia);
 // WhatsApp incoming media (image/audio/video) — proxy with WABA token
 router.get('/whatsapp-media', inboxController.getWhatsAppMedia);
 

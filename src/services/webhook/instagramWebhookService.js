@@ -132,10 +132,18 @@ function buildInstagramDmAttachmentFields(message) {
     atts[0];
   const p = primary?.payload || {};
   const igPostMediaId =
-    p.ig_post_media_id || p.reel_media_id || p.media_id || null;
+    p.ig_post_media_id ||
+    p.reel_media_id ||
+    p.reel_video_id ||
+    p.ig_reel_media_id ||
+    p.media_id ||
+    null;
+  const rawType = lower(primary?.type || '');
+  const attachmentType =
+    rawType === 'reel' ? 'ig_reel' : (primary?.type || (igPostMediaId ? 'share' : 'file'));
   return {
-    attachmentType: primary?.type || 'file',
-    attachmentUrl: p.url || p.attachment_url || null,
+    attachmentType,
+    attachmentUrl: p.url || p.attachment_url || p.preview_url || null,
     igPostMediaId,
     shareTitle: typeof p.title === 'string' ? p.title : null
   };
@@ -144,9 +152,10 @@ function buildInstagramDmAttachmentFields(message) {
 /** Placeholder line for thread `content` and incomingMessages when there is no caption text. */
 function buildInstagramDmPlaceholderText(attachmentType, igPostMediaId) {
   const t = String(attachmentType || '').toLowerCase();
-  if (igPostMediaId) return '[Shared Instagram post]';
   if (t === 'ig_reel' || t === 'reel') return '[Shared Instagram reel]';
   if (t === 'story' || t === 'ig_story') return '[Shared Instagram story]';
+  if (t === 'ig_post' || t === 'share') return '[Shared Instagram post]';
+  if (igPostMediaId) return '[Shared Instagram post]';
   if (t === 'story_mention' || t === 'ig_story_mention') return '[Story mention]';
   if (attachmentType) return `[${attachmentType}]`;
   return '';
@@ -725,7 +734,7 @@ async function handleInstagramMessage(payload, organizationId) {
         const mediaId = comment.media?.id;
         let postUrl = null;
         if (mediaId && dmReceiverConnection?.accessToken) {
-          postUrl = await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mediaId);
+          postUrl = await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mediaId, instagramService._connectionType(dmReceiverConnection));
         }
 
         let linkedProductCount = 0;
@@ -841,7 +850,7 @@ async function handleInstagramMessage(payload, organizationId) {
                 commentId: mention.comment_id || null,
                 postId: mention.media_id || null,
                 postUrl: mention.media_id && dmReceiverConnection?.accessToken
-                  ? await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mention.media_id)
+                  ? await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mention.media_id, instagramService._connectionType(dmReceiverConnection))
                   : null,
                 rawMention: mention
               }
@@ -928,5 +937,6 @@ module.exports = {
   handleInstagramMessage,
   fetchInstagramAuthorProfile,
   extractStoryContext,
+  buildInstagramDmAttachmentFields,
   buildInstagramDmPlaceholderText
 };
