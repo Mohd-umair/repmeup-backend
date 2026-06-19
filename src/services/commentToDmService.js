@@ -70,142 +70,184 @@ async function processCommentForProduct(interaction, organizationId) {
       return;
     }
 
-    const postId = interaction.metadata?.postId;
-    if (!postId) {
-      svcLogger.info('[commentToDm] Skipping — no metadata.postId', { interactionId });
-      return;
-    }
-
-    let products = await resolveProductsForPost(interaction, organizationId, postId, settings);
-
-    if (!products.length) {
-      svcLogger.info('[commentToDm] Skipping — no product linked to post', { postId, organizationId });
-      return;
-    }
-
-    products = sortProductsForPost(products, postId);
-
-    // Unique text match (name/sku) on all linked products — skips picker when unambiguous.
-    const uniqueMatch = matchProductByCommentText(products, commentText);
-    const usePicker = !uniqueMatch && products.length > 1;
-
-    // Per-product keywords apply only to single-product path (not carousel picker).
-    const productsForSingle = filterProductsByPerProductKeywords(products, commentText);
-    const product = uniqueMatch || (productsForSingle.length === 1 ? productsForSingle[0] : null);
-
-    if (!usePicker && !product) {
-      svcLogger.info('[commentToDm] Skipping — no product matched after keyword filter', {
-        postId,
-        linkedCount: products.length
-      });
-      return;
-    }
-
-    svcLogger.info('[commentToDm] Product resolution', {
-      postId,
-      linkedCount: products.length,
-      usePicker,
-      uniqueMatchId: uniqueMatch?._id?.toString?.() || null,
-      productIds: products.map(p => String(p._id))
-    });
-
-    const commenterId = interaction.author?.platformId;
-    if (!commenterId) {
-      svcLogger.warn('[commentToDm] Skipping — no author.platformId', { interactionId });
-      return;
-    }
-
-    if (settings.deduplicateDms !== false) {
-      const skip = await shouldSkipDedup(organizationId, commenterId, postId);
-      if (skip) return;
-
-      const reserved = await reserveDedupSlot(
-        organizationId,
-        commenterId,
-        postId,
-        interaction._id,
-        usePicker
-      );
-      if (!reserved) return;
-    } else {
-      svcLogger.info('[commentToDm] Dedup decision', {
-        deduplicateDms: false,
-        commenterId,
-        postId,
-        skipped: false,
-        reason: 'dedup_disabled'
-      });
-    }
-
-    const orgDoc = await Organization.findById(organizationId).select('commentToDmSettings salesFlowSettings');
-    await resetDailyCounterIfNeeded(orgDoc);
-
-    const maxDms = orgDoc.commentToDmSettings.maxDmsPerDay || 200;
-    if (orgDoc.commentToDmSettings.dmsSentToday >= maxDms) {
-      svcLogger.warn('[commentToDm] Skipping — daily DM limit reached', { limit: maxDms });
-      return;
-    }
-
-    const connection = await resolveConnection(interaction, organizationId);
-    if (!connection) {
-      svcLogger.warn('[commentToDm] Skipping — no active Instagram connection', { organizationId });
-      return;
-    }
-
-    const { accessToken, pageId, connType } = connectionContext(connection);
-    const commenterUsername = interaction.author?.username || '';
-
-    await ensureCommentDmLink({
-      commentInteraction: interaction,
-      organizationId,
-      instagramUserId: commenterId,
-      platformConnection: connection,
-      postId
-    });
-
-    await postPublicStub(interaction, settings, commenterUsername, accessToken, connType, organizationId);
-
-    if (usePicker) {
-      await sendProductPickerFlow({
-        interaction,
-        organizationId,
-        products,
-        postId,
-        commenterId,
-        commenterUsername,
-        accessToken,
-        pageId,
-        connType,
-        orgDoc
-      });
-    } else {
-      await sendSingleProductFlow({
-        interaction,
-        organizationId,
-        product,
-        postId,
-        commenterId,
-        commenterUsername,
-        accessToken,
-        pageId,
-        connType,
-        orgDoc
-      });
-    }
-
-    orgDoc.commentToDmSettings.dmsSentToday += 1;
-    await orgDoc.save();
-
-    svcLogger.info('[commentToDm] Flow completed successfully', {
-      commenterId,
-      postId,
-      mode: usePicker ? 'product_picker' : 'single_product',
-      productId: product?._id,
-      dmsSentToday: orgDoc.commentToDmSettings.dmsSentToday
-    });
+    await sendPostLinkedProductsDM(interaction, organizationId, { settings, publicStub: true });
   } catch (err) {
     svcLogger.error('[commentToDm] Unhandled error', { error: err.message, stack: err.stack });
   }
+}
+
+/**
+ * Core: resolve the product(s) linked to a comment's post and DM the commenter —
+ * single product → CTA, multiple → carousel picker (private reply). Shared by the
+ * AI/auto path (`processCommentForProduct`, after its enabled + keyword gating) and
+ * the workflow flow node `action.send_post_products` (which gates via its own
+ * trigger/condition nodes).
+ *
+ * Does NOT check `commentToDmSettings.enabled` or trigger keywords — the caller gates.
+ * Dedup, daily DM caps, connection resolution and order records are reused as-is.
+ *
+ * @param {object}  interaction      Instagram comment interaction
+ * @param {string}  organizationId
+ * @param {object}  [opts]
+ * @param {object}  [opts.settings]        commentToDmSettings (loaded if omitted)
+ * @param {boolean} [opts.publicStub=true] also post the public comment-reply stub
+ * @returns {Promise<{sent:boolean, mode?:string, productId?:string|null, reason?:string}>}
+ */
+async function sendPostLinkedProductsDM(interaction, organizationId, opts = {}) {
+  if (!interaction || interaction.platform !== 'instagram' || interaction.type !== 'comment') {
+    return { sent: false, reason: 'not_ig_comment' };
+  }
+  const interactionId = interaction._id?.toString?.() || 'unknown';
+
+  let settings = opts.settings;
+  if (!settings) {
+    const orgLean = await Organization.findById(organizationId).select('commentToDmSettings').lean();
+    settings = orgLean?.commentToDmSettings || {};
+  }
+  const publicStub = opts.publicStub !== false;
+  const commentText = (interaction.content || '').toLowerCase();
+
+  const postId = interaction.metadata?.postId;
+  if (!postId) {
+    svcLogger.info('[commentToDm] Skipping — no metadata.postId', { interactionId });
+    return { sent: false, reason: 'no_post_id' };
+  }
+
+  let products = await resolveProductsForPost(interaction, organizationId, postId, settings);
+
+  if (!products.length) {
+    svcLogger.info('[commentToDm] Skipping — no product linked to post', { postId, organizationId });
+    return { sent: false, reason: 'no_linked_product' };
+  }
+
+  products = sortProductsForPost(products, postId);
+
+  // Unique text match (name/sku) on all linked products — skips picker when unambiguous.
+  const uniqueMatch = matchProductByCommentText(products, commentText);
+  const usePicker = !uniqueMatch && products.length > 1;
+
+  // Per-product keywords apply only to single-product path (not carousel picker).
+  const productsForSingle = filterProductsByPerProductKeywords(products, commentText);
+  const product = uniqueMatch || (productsForSingle.length === 1 ? productsForSingle[0] : null);
+
+  if (!usePicker && !product) {
+    svcLogger.info('[commentToDm] Skipping — no product matched after keyword filter', {
+      postId,
+      linkedCount: products.length
+    });
+    return { sent: false, reason: 'no_product_matched' };
+  }
+
+  svcLogger.info('[commentToDm] Product resolution', {
+    postId,
+    linkedCount: products.length,
+    usePicker,
+    uniqueMatchId: uniqueMatch?._id?.toString?.() || null,
+    productIds: products.map(p => String(p._id))
+  });
+
+  const commenterId = interaction.author?.platformId;
+  if (!commenterId) {
+    svcLogger.warn('[commentToDm] Skipping — no author.platformId', { interactionId });
+    return { sent: false, reason: 'no_commenter_id' };
+  }
+
+  if (settings.deduplicateDms !== false) {
+    const skip = await shouldSkipDedup(organizationId, commenterId, postId);
+    if (skip) return { sent: false, reason: 'deduped' };
+
+    const reserved = await reserveDedupSlot(
+      organizationId,
+      commenterId,
+      postId,
+      interaction._id,
+      usePicker
+    );
+    if (!reserved) return { sent: false, reason: 'dedup_conflict' };
+  } else {
+    svcLogger.info('[commentToDm] Dedup decision', {
+      deduplicateDms: false,
+      commenterId,
+      postId,
+      skipped: false,
+      reason: 'dedup_disabled'
+    });
+  }
+
+  const orgDoc = await Organization.findById(organizationId).select('commentToDmSettings salesFlowSettings');
+  await resetDailyCounterIfNeeded(orgDoc);
+
+  const maxDms = orgDoc.commentToDmSettings.maxDmsPerDay || 200;
+  if (orgDoc.commentToDmSettings.dmsSentToday >= maxDms) {
+    svcLogger.warn('[commentToDm] Skipping — daily DM limit reached', { limit: maxDms });
+    return { sent: false, reason: 'daily_limit' };
+  }
+
+  const connection = await resolveConnection(interaction, organizationId);
+  if (!connection) {
+    svcLogger.warn('[commentToDm] Skipping — no active Instagram connection', { organizationId });
+    return { sent: false, reason: 'no_connection' };
+  }
+
+  const { accessToken, pageId, connType } = connectionContext(connection);
+  const commenterUsername = interaction.author?.username || '';
+
+  await ensureCommentDmLink({
+    commentInteraction: interaction,
+    organizationId,
+    instagramUserId: commenterId,
+    platformConnection: connection,
+    postId
+  });
+
+  if (publicStub) {
+    await postPublicStub(interaction, settings, commenterUsername, accessToken, connType, organizationId);
+  }
+
+  if (usePicker) {
+    await sendProductPickerFlow({
+      interaction,
+      organizationId,
+      products,
+      postId,
+      commenterId,
+      commenterUsername,
+      accessToken,
+      pageId,
+      connType,
+      orgDoc
+    });
+  } else {
+    await sendSingleProductFlow({
+      interaction,
+      organizationId,
+      product,
+      postId,
+      commenterId,
+      commenterUsername,
+      accessToken,
+      pageId,
+      connType,
+      orgDoc
+    });
+  }
+
+  orgDoc.commentToDmSettings.dmsSentToday += 1;
+  await orgDoc.save();
+
+  svcLogger.info('[commentToDm] Flow completed successfully', {
+    commenterId,
+    postId,
+    mode: usePicker ? 'product_picker' : 'single_product',
+    productId: product?._id,
+    dmsSentToday: orgDoc.commentToDmSettings.dmsSentToday
+  });
+
+  return {
+    sent: true,
+    mode: usePicker ? 'product_picker' : 'single_product',
+    productId: product?._id ? String(product._id) : null
+  };
 }
 
 async function resolveProductsForPost(interaction, organizationId, postId, settings) {
@@ -850,6 +892,7 @@ function buildTemplate(template, vars) {
 
 module.exports = {
   processCommentForProduct,
+  sendPostLinkedProductsDM,
   completeProductSelection,
   buildTemplate,
   sendProductCtaDm,
