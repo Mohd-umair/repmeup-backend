@@ -306,6 +306,12 @@ const FLOW_NODE_CATALOG = [
       default: DEFAULT_PUBLIC_REPLY
     }]
   }),
+  node('action.send_post_products', 'action', "Send post's products", ['instagram'], {
+    icon: 'fas fa-box-open',
+    description: "DM the commenter the product(s) linked to this post — one product sends its detail/CTA, multiple send a carousel. Auto-resolves from the post; no setup needed. Use after an Instagram comment trigger.",
+    defaultConfig: {},
+    fields: []
+  }),
   node('action.ai_reply', 'action', 'AI reply', CHANNELS, {
     icon: 'fas fa-robot',
     description: 'Generate and send a Reppy reply.',

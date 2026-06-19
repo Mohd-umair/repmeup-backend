@@ -871,6 +871,21 @@ async function handleAction(node, ctx) {
       }
       break;
     }
+    case 'action.send_post_products': {
+      // Workflow-native equivalent of the AI comment-to-DM seller: resolve the
+      // product(s) linked to the commented post and DM the commenter — single
+      // product → CTA, multiple → carousel picker (private reply). Reuses the
+      // shared core in commentToDmService (dedup, daily caps, order records).
+      if (interaction?.platform === 'instagram' && interaction?.type === 'comment') {
+        const commentToDmService = require('../../commentToDmService');
+        await commentToDmService.sendPostLinkedProductsDM(interaction, organizationId, {
+          // The flow owns any public comment reply via its own reply_public_comment
+          // node, so don't post a second public stub here unless explicitly enabled.
+          publicStub: config.postPublicReply === true
+        });
+      }
+      break;
+    }
     case 'action.ai_reply': {
       const replyGenerationService = require('../../ai/replyGenerationService');
       const Interaction = require('../../../models/Interaction');
