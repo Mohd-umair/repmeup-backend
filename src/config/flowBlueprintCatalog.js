@@ -156,7 +156,49 @@ const CHECKOUT_BLUEPRINT = {
   ]
 };
 
-/** All global blueprints to seed. Add future blueprints here. */
-const BLUEPRINTS = [CHECKOUT_BLUEPRINT];
+/**
+ * Comment-to-DM — fires when someone comments on a product-linked Instagram post
+ * (workflow-only path; no AI). It:
+ *   1. posts a short public reply on the comment ("sent you a DM 📩")
+ *   2. DMs the commenter the product(s) linked to that post — one product sends its
+ *      detail/CTA, multiple send a carousel picker (action.send_post_products).
+ *
+ * The DM goes out as a private reply (allowed once per comment), and the product(s)
+ * are auto-resolved from the post — no per-flow product config needed. When the
+ * customer commits to a product, an order is recorded in the OMS automatically.
+ *
+ * Requires: the org's Instagram automation mode = workflow_only (or hybrid), the
+ * post linked to at least one Product, and Comment-to-DM enabled in settings.
+ */
+const COMMENT_TO_DM_BLUEPRINT = {
+  name: 'Comment to DM — send post products',
+  description:
+    'Fires when someone comments on a product-linked Instagram post. Posts a public '
+    + 'reply, then DMs the commenter the post’s product(s) — single product detail '
+    + 'or a multi-product carousel — and records the order in the OMS.',
+  channels: ['instagram'],
+  entryNodeId: 't1',
+  nodes: [
+    { id: 't1', type: 'trigger.ig_comment', label: 'On post comment', position: { x: 320, y: 20 },
+      // Empty keywords = trigger on every comment. Add purchase words (price, buy, link…) to narrow it.
+      config: { keywords: [] } },
 
-module.exports = { BLUEPRINTS, CHECKOUT_BLUEPRINT };
+    { id: 'r1', type: 'action.reply_public_comment', label: 'Public reply', position: { x: 320, y: 150 },
+      config: { text: 'Thanks {{username}}! 🙌 Just sent you a DM with the details 📩' } },
+
+    { id: 'p1', type: 'action.send_post_products', label: "DM post's products", position: { x: 320, y: 280 },
+      config: {} },
+
+    { id: 'e1', type: 'control.end', label: 'Done', position: { x: 320, y: 410 }, config: {} }
+  ],
+  edges: [
+    { id: 't1-r1', source: 't1', target: 'r1' },
+    { id: 'r1-p1', source: 'r1', target: 'p1' },
+    { id: 'p1-e1', source: 'p1', target: 'e1' }
+  ]
+};
+
+/** All global blueprints to seed. Add future blueprints here. */
+const BLUEPRINTS = [CHECKOUT_BLUEPRINT, COMMENT_TO_DM_BLUEPRINT];
+
+module.exports = { BLUEPRINTS, CHECKOUT_BLUEPRINT, COMMENT_TO_DM_BLUEPRINT };
