@@ -392,6 +392,24 @@ async function handleAction(node, ctx) {
       await sendTextForInteraction(ctx.interaction, organizationId, text);
       break;
     }
+    case 'action.offer_slots':
+    case 'action.book_appointment':
+    case 'action.reschedule_appointment':
+    case 'action.cancel_appointment': {
+      const apptFlow = require('../appointmentFlowActions');
+      const fn = {
+        'action.offer_slots': apptFlow.offerSlots,
+        'action.book_appointment': apptFlow.bookAppointment,
+        'action.reschedule_appointment': apptFlow.rescheduleAppointment,
+        'action.cancel_appointment': apptFlow.cancelAppointment
+      }[node.type];
+      const r = await fn(ctx);
+      return {
+        status: 'continue',
+        variables: r.variables || {},
+        nextNodeId: pickEdge(ctx.edges, r.branch)?.target
+      };
+    }
     case 'action.send_template': {
       if (!config.templateId && !config.templateName) throw new Error('Template id required');
       const messageService = require('../flowMessageService');

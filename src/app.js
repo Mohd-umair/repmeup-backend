@@ -199,6 +199,7 @@ const routeMap = [
   ['/campaigns',            './routes/campaigns'],
   ['/reports/number',       './routes/numberReports'],
   ['/commerce-orders',      './routes/commerceOrders'],
+  ['/appointments',         './routes/appointments'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];

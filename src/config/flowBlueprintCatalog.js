@@ -198,7 +198,73 @@ const COMMENT_TO_DM_BLUEPRINT = {
   ]
 };
 
-/** All global blueprints to seed. Add future blueprints here. */
-const BLUEPRINTS = [CHECKOUT_BLUEPRINT, COMMENT_TO_DM_BLUEPRINT];
+/**
+ * Appointment Booking — a WhatsApp keyword-triggered booking flow for service
+ * businesses (clinics, spas, salons). It greets the customer, offers the next
+ * available slots for a service, books the one they pick, and confirms — all
+ * recorded in Appointment Management (and synced to Google Calendar when set up).
+ *
+ * AFTER IMPORTING: open the "Offer slots" node and pick your Service (and,
+ * optionally, a specific Provider). Requires Instagram/WhatsApp automation mode =
+ * workflow_only or hybrid, plus at least one Service + Provider configured.
+ */
+const APPOINTMENT_BOOKING_BLUEPRINT = {
+  name: 'Book appointment — clinic/spa',
+  description:
+    'WhatsApp booking flow: greet → offer available slots for a service → book the '
+    + 'customer’s pick → confirm. After import, set the Service on the "Offer slots" node. '
+    + 'Bookings appear in Appointment Management.',
+  channels: ['whatsapp'],
+  entryNodeId: 't1',
+  nodes: [
+    { id: 't1', type: 'trigger.keyword', label: 'On "book"', position: { x: 320, y: 20 },
+      config: { keywords: ['book', 'appointment', 'booking', 'slot', 'schedule', 'appt'] } },
 
-module.exports = { BLUEPRINTS, CHECKOUT_BLUEPRINT, COMMENT_TO_DM_BLUEPRINT };
+    { id: 'a0', type: 'action.send_text', label: 'Greet', position: { x: 320, y: 140 },
+      config: { text: 'Happy to help you book! 📅 Let me check the next available times…' } },
+
+    { id: 'o1', type: 'action.offer_slots', label: 'Offer slots', position: { x: 320, y: 260 },
+      // ⚠️ Set serviceId after importing (pick your Service). providerId optional.
+      config: { serviceId: '', providerId: '', maxSlots: 6, days: 7,
+        bodyText: 'Here are the next available times — reply with the number you’d like:',
+        noSlotsText: 'Sorry, we’re fully booked right now. Please check back soon! 🙏' } },
+    { id: 'w1', type: 'wait.user_reply', label: 'Wait for pick', position: { x: 320, y: 380 },
+      config: { timeoutSec: 86400 } },
+
+    { id: 'b1', type: 'action.book_appointment', label: 'Book', position: { x: 320, y: 500 },
+      config: { confirmMode: 'auto' } },
+
+    { id: 'c1', type: 'action.send_text', label: 'Confirm', position: { x: 200, y: 620 },
+      config: { text: '✅ You’re booked! {{appointment_ref}}\n\n🗓️ {{service_name}} on {{appointment_when}}\nWe’ll send you a reminder. See you then! 🙌' } },
+    { id: 'e1', type: 'control.end', label: 'Done', position: { x: 200, y: 740 }, config: {} },
+
+    { id: 'f1', type: 'action.send_text', label: 'Slot gone — retry', position: { x: 460, y: 620 },
+      config: { text: 'Oops, that time was just taken. 😅 Here are fresh options:' } },
+
+    { id: 'n1', type: 'action.send_text', label: 'No slots', position: { x: 520, y: 380 },
+      config: { text: 'No problem — reply here anytime and we’ll get you booked. 🙏' } },
+    { id: 'e2', type: 'control.end', label: 'Done (no booking)', position: { x: 520, y: 500 }, config: {} },
+
+    { id: 'r1', type: 'action.send_text', label: 'Reminder', position: { x: 120, y: 500 },
+      config: { text: 'Still there? 😊 Reply with a number above whenever you’re ready to book.' } }
+  ],
+  edges: [
+    { id: 't1-a0', source: 't1', target: 'a0' },
+    { id: 'a0-o1', source: 'a0', target: 'o1' },
+    { id: 'o1-w1', source: 'o1', target: 'w1', label: 'offered' },
+    { id: 'o1-n1', source: 'o1', target: 'n1', label: 'none' },
+    { id: 'w1-b1', source: 'w1', target: 'b1', label: 'reply' },
+    { id: 'w1-r1', source: 'w1', target: 'r1', label: 'timeout' },
+    { id: 'b1-c1', source: 'b1', target: 'c1', label: 'booked' },
+    { id: 'b1-f1', source: 'b1', target: 'f1', label: 'failed' },
+    { id: 'c1-e1', source: 'c1', target: 'e1' },
+    { id: 'f1-o1', source: 'f1', target: 'o1' },
+    { id: 'n1-e2', source: 'n1', target: 'e2' },
+    { id: 'r1-e2', source: 'r1', target: 'e2' }
+  ]
+};
+
+/** All global blueprints to seed. Add future blueprints here. */
+const BLUEPRINTS = [CHECKOUT_BLUEPRINT, COMMENT_TO_DM_BLUEPRINT, APPOINTMENT_BOOKING_BLUEPRINT];
+
+module.exports = { BLUEPRINTS, CHECKOUT_BLUEPRINT, COMMENT_TO_DM_BLUEPRINT, APPOINTMENT_BOOKING_BLUEPRINT };

@@ -296,6 +296,51 @@ const FLOW_NODE_CATALOG = [
       { key: 'thumbnailProductId', type: 'product', label: 'Cover product', default: '', hint: 'Optional. The product shown as the catalog cover thumbnail. Defaults to the first catalog item.' }
     ]
   }),
+  // ── Appointment booking ────────────────────────────────────────────────────
+  node('trigger.appointment_event', 'trigger', 'Appointment event', ['whatsapp', 'instagram'], {
+    icon: 'fas fa-calendar-check',
+    description: 'Fires on an appointment lifecycle event (booked / reminder / cancelled). Use for confirmations & reminders.',
+    defaultConfig: { event: 'reminder' },
+    fields: [{
+      key: 'event', type: 'select', label: 'Event', options: ['booked', 'reminder', 'cancelled'], default: 'reminder'
+    }]
+  }),
+  node('action.offer_slots', 'action', 'Offer appointment slots', ['whatsapp', 'instagram'], {
+    icon: 'fas fa-clock',
+    description: "DM the customer the next available slots for a service (with any qualified provider, or a specific one). Pair with a 'Wait for reply' + 'Book appointment'.",
+    defaultConfig: { serviceId: '', providerId: '', bodyText: '', maxSlots: 6, days: 7 },
+    fields: [
+      { key: 'serviceId', type: 'service', label: 'Service', required: true, default: '' },
+      { key: 'providerId', type: 'provider', label: 'Provider', default: '', hint: 'Optional — leave empty to offer any available provider.' },
+      { key: 'maxSlots', type: 'number', label: 'Max slots', default: 6, hint: 'How many slots to list (1–10).' },
+      { key: 'days', type: 'number', label: 'Days ahead', default: 7, hint: 'How far ahead to search for slots.' },
+      { key: 'bodyText', type: 'textarea', label: 'Intro text', default: '', hint: 'Shown above the numbered slot list.' },
+      { key: 'noSlotsText', type: 'textarea', label: 'No-slots text', default: '', hint: 'Sent when nothing is available.' }
+    ]
+  }),
+  node('action.book_appointment', 'action', 'Book appointment', ['whatsapp', 'instagram'], {
+    icon: 'fas fa-calendar-plus',
+    description: "Book the slot the customer picked from 'Offer slots' (reads their numbered reply). Records it in Appointment Management. Branches: booked / failed.",
+    defaultConfig: { confirmMode: 'auto', serviceId: '' },
+    fields: [
+      { key: 'confirmMode', type: 'select', label: 'Confirmation', options: ['auto', 'manual'], default: 'auto', hint: '“auto” confirms instantly; “manual” marks it Requested for staff to confirm.' },
+      { key: 'serviceId', type: 'service', label: 'Service (fallback)', default: '', hint: 'Optional — used only if no service was captured by Offer slots.' }
+    ]
+  }),
+  node('action.reschedule_appointment', 'action', 'Reschedule appointment', ['whatsapp', 'instagram'], {
+    icon: 'fas fa-calendar-day',
+    description: "Move the customer's active appointment to the slot they picked from 'Offer slots'. Branches: done / failed / none.",
+    defaultConfig: {},
+    fields: []
+  }),
+  node('action.cancel_appointment', 'action', 'Cancel appointment', ['whatsapp', 'instagram'], {
+    icon: 'fas fa-calendar-xmark',
+    description: "Cancel the customer's active appointment on this conversation. Branches: done / none.",
+    defaultConfig: { reason: 'Cancelled by customer' },
+    fields: [
+      { key: 'reason', type: 'string', label: 'Cancellation reason', default: 'Cancelled by customer' }
+    ]
+  }),
   node('action.reply_public_comment', 'action', 'Reply public comment', ['instagram'], {
     icon: 'fas fa-reply',
     description: 'Post a public comment reply stub.',
