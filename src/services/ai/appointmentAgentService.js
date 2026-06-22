@@ -50,6 +50,42 @@ async function send(connection, to, message) {
   }
 }
 
+// Interactive-list row id prefixes (tapped id arrives as interaction.metadata.buttonPayload).
+const SVC_PREFIX = 'apptsvc';
+const SLOT_PREFIX = 'apptslot';
+
+function payloadValue(interaction, prefix) {
+  const p = interaction?.metadata?.buttonPayload;
+  if (typeof p === 'string' && p.startsWith(prefix + ':')) return p.slice(prefix.length + 1);
+  return null;
+}
+
+/** Services as a WhatsApp interactive list (tap to pick); text fallback on error. */
+async function sendServiceListAI(connection, to, services, head) {
+  try {
+    const wa = require('../../integrations/whatsapp/whatsappService');
+    const rows = services.slice(0, 10).map((s) => ({ id: `${SVC_PREFIX}:${s.id || s._id}`, title: String(s.name).slice(0, 24) }));
+    await wa.sendListMessage(connection, to, { bodyText: String(head).slice(0, 1024), buttonText: 'View services', sections: [{ title: 'Services', rows }] });
+  } catch (e) {
+    await send(connection, to, `${head}\n\n${services.map((s, i) => `${i + 1}. ${s.name}`).join('\n')}\n\nReply with the number.`);
+  }
+}
+
+/** Slots as a WhatsApp interactive list (tap to pick); text fallback on error. */
+async function sendSlotListAI(connection, to, offered, head) {
+  try {
+    const wa = require('../../integrations/whatsapp/whatsappService');
+    const rows = offered.slice(0, 10).map((s, i) => ({
+      id: `${SLOT_PREFIX}:${i + 1}`,
+      title: String(s.timeLabel || s.label).slice(0, 24),
+      description: String(s.date || s.label || '').slice(0, 72) || undefined
+    }));
+    await wa.sendListMessage(connection, to, { bodyText: String(head).slice(0, 1024), buttonText: 'View times', sections: [{ title: 'Available times', rows }] });
+  } catch (e) {
+    await send(connection, to, slotsMessage(offered, head));
+  }
+}
+
 function stateModel() {
   return require('../../models/AppointmentConversationState');
 }
@@ -79,7 +115,7 @@ async function offerAndStore({ organizationId, interaction, connection, senderId
     await clearOffer(organizationId, senderId);
     return;
   }
-  const offered = top.map((s, i) => ({ i: i + 1, startAt: s.startAt, providerId: s.providerId, providerName: s.providerName, label: `${s.timeLabel} · ${s.date}` }));
+  const offered = top.map((s, i) => ({ i: i + 1, startAt: s.startAt, providerId: s.providerId, providerName: s.providerName, timeLabel: s.timeLabel, date: s.date, label: `${s.timeLabel} · ${s.date}` }));
   await setOffer(organizationId, senderId, {
     stage: stage || 'awaiting_slot',
     serviceId: String(service._id),
@@ -89,9 +125,9 @@ async function offerAndStore({ organizationId, interaction, connection, senderId
     sourceInteraction: interaction?._id
   });
   const head = stage === 'awaiting_reschedule_slot'
-    ? `Sure — here are the next available times for ${service.name}:`
-    : `Here are the next available times for ${service.name}:`;
-  await send(connection, senderId, slotsMessage(offered, head));
+    ? `Sure — here are the next available times for ${service.name}, tap one:`
+    : `Here are the next available times for ${service.name}, tap one:`;
+  await sendSlotListAI(connection, senderId, offered, head);
 }
 
 /** Resolve a service the customer named, or the only active one. */
@@ -135,18 +171,26 @@ async function tryAutonomousBooking({ organizationId, senderId, text, connection
 
     const offer = await getOffer(organizationId, senderId);
 
-    // 1) Continuation of a pending offer (customer replied with a number).
+    // 1) Continuation of a pending offer (customer tapped a row or replied with a number).
     if (offer && offer.stage) {
       if (offer.stage === 'awaiting_service' && Array.isArray(offer.services)) {
+        // Tapped service row → its id IS the serviceId; else a typed number.
+        const tappedId = payloadValue(interaction, SVC_PREFIX);
         const idx = parseChoice(text, offer.services.length);
-        if (idx) {
+        const pickedId = tappedId || (idx ? offer.services[idx - 1].id : null);
+        if (pickedId) {
           const Service = require('../../models/Service');
-          const service = await Service.findOne({ _id: offer.services[idx - 1].id, organization: organizationId, isActive: true }).lean();
+          const service = await Service.findOne({ _id: pickedId, organization: organizationId, isActive: true }).lean();
           if (service) { await offerAndStore({ organizationId, interaction, connection, senderId, service }); return true; }
         }
+        // Fallback: not a valid service pick → re-show the list.
+        await sendServiceListAI(connection, senderId, offer.services, 'Sorry, I didn’t catch that. 🙏 Please tap a service:');
+        return true;
       }
       if ((offer.stage === 'awaiting_slot' || offer.stage === 'awaiting_reschedule_slot') && Array.isArray(offer.slots)) {
-        const idx = parseChoice(text, offer.slots.length);
+        const tapped = payloadValue(interaction, SLOT_PREFIX);
+        const n = tapped ? parseInt(tapped, 10) : parseChoice(text, offer.slots.length);
+        const idx = (n >= 1 && n <= offer.slots.length) ? n : null;
         if (idx) {
           const chosen = offer.slots[idx - 1];
           const appointmentService = require('../appointment/appointmentService');
@@ -181,6 +225,9 @@ async function tryAutonomousBooking({ organizationId, senderId, text, connection
             : `✅ You’re booked! ${r.appointment.displayRef}\n🗓️ ${r.appointment.serviceName} on ${r.appointment.whenLabel}\nWe’ll remind you. See you! 🙌`);
           return true;
         }
+        // Fallback: not a valid time pick → re-show the times.
+        await sendSlotListAI(connection, senderId, offer.slots, 'Sorry, I didn’t catch that. 🙏 Please tap a time:');
+        return true;
       }
     }
 
@@ -210,10 +257,10 @@ async function tryAutonomousBooking({ organizationId, senderId, text, connection
       const { service, services } = await resolveService(organizationId, text);
       if (!services.length) return false; // no services configured → let normal AI handle
       if (service) { await offerAndStore({ organizationId, interaction, connection, senderId, service }); return true; }
-      // Ambiguous → ask which service.
-      const list = services.slice(0, 8).map((sv, i) => ({ i: i + 1, id: String(sv._id), name: sv.name }));
+      // Ambiguous → ask which service (interactive list; tap to pick).
+      const list = services.slice(0, 10).map((sv, i) => ({ i: i + 1, id: String(sv._id), name: sv.name }));
       await setOffer(organizationId, senderId, { stage: 'awaiting_service', services: list, sourceInteraction: interaction?._id });
-      await send(connection, senderId, `Which service would you like to book?\n\n${list.map((x) => `${x.i}. ${x.name}`).join('\n')}\n\nReply with the number.`);
+      await sendServiceListAI(connection, senderId, list, 'Which service would you like to book?');
       return true;
     }
 

@@ -305,12 +305,21 @@ const FLOW_NODE_CATALOG = [
       key: 'event', type: 'select', label: 'Event', options: ['booked', 'reminder', 'cancelled'], default: 'reminder'
     }]
   }),
+  node('action.offer_services', 'action', 'Ask which service', ['whatsapp', 'instagram'], {
+    icon: 'fas fa-list-ul',
+    description: "List ALL your services and ask the customer to pick one — so a single flow handles every service. Follow with 'Wait for reply' → 'Offer appointment slots' (leave its Service empty).",
+    defaultConfig: { bodyText: 'Which service would you like to book?', noServicesText: '' },
+    fields: [
+      { key: 'bodyText', type: 'textarea', label: 'Question text', default: 'Which service would you like to book?', hint: 'Shown above the numbered service list.' },
+      { key: 'noServicesText', type: 'textarea', label: 'No-services text', default: '', hint: 'Sent when no services are available.' }
+    ]
+  }),
   node('action.offer_slots', 'action', 'Offer appointment slots', ['whatsapp', 'instagram'], {
     icon: 'fas fa-clock',
-    description: "DM the customer the next available slots for a service (with any qualified provider, or a specific one). Pair with a 'Wait for reply' + 'Book appointment'.",
+    description: "DM the customer the next available slots for a service. Pair with a 'Wait for reply' + 'Book appointment'. Leave Service empty to use the one the customer picked in 'Ask which service'.",
     defaultConfig: { serviceId: '', providerId: '', bodyText: '', maxSlots: 6, days: 7 },
     fields: [
-      { key: 'serviceId', type: 'service', label: 'Service', required: true, default: '' },
+      { key: 'serviceId', type: 'service', label: 'Service', default: '', hint: 'Leave empty for a multi-service flow (uses the service picked in "Ask which service"). Set it to lock this flow to one service.' },
       { key: 'providerId', type: 'provider', label: 'Provider', default: '', hint: 'Optional — leave empty to offer any available provider.' },
       { key: 'maxSlots', type: 'number', label: 'Max slots', default: 6, hint: 'How many slots to list (1–10).' },
       { key: 'days', type: 'number', label: 'Days ahead', default: 7, hint: 'How far ahead to search for slots.' },

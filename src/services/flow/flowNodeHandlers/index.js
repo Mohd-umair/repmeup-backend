@@ -392,12 +392,14 @@ async function handleAction(node, ctx) {
       await sendTextForInteraction(ctx.interaction, organizationId, text);
       break;
     }
+    case 'action.offer_services':
     case 'action.offer_slots':
     case 'action.book_appointment':
     case 'action.reschedule_appointment':
     case 'action.cancel_appointment': {
       const apptFlow = require('../appointmentFlowActions');
       const fn = {
+        'action.offer_services': apptFlow.offerServices,
         'action.offer_slots': apptFlow.offerSlots,
         'action.book_appointment': apptFlow.bookAppointment,
         'action.reschedule_appointment': apptFlow.rescheduleAppointment,
