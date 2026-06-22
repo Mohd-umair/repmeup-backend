@@ -15,7 +15,11 @@ const EVENT_TO_TRIGGER = {
   'instagram.story_reply': ['trigger.ig_story_reply'],
   'instagram.story_mention': ['trigger.ig_story_mention'],
   'instagram.dm': ['trigger.ig_dm', 'trigger.new_lead'],
-  'instagram.postback': ['trigger.ig_postback']
+  'instagram.postback': ['trigger.ig_postback'],
+  // Appointment lifecycle events emitted by the appointment system (Phase 4 reminders).
+  'appointment.booked': ['trigger.appointment_event'],
+  'appointment.reminder': ['trigger.appointment_event'],
+  'appointment.cancelled': ['trigger.appointment_event']
 };
 
 /**
@@ -39,6 +43,9 @@ function matchesTrigger(node, eventType, payload = {}) {
   }
   if (node.type === 'trigger.order_event' && config.event) {
     if (payload.orderEvent !== config.event) return false;
+  }
+  if (node.type === 'trigger.appointment_event' && config.event) {
+    if (payload.appointmentEvent !== config.event) return false;
   }
   return true;
 }
@@ -178,14 +185,33 @@ class FlowTriggerRouter {
           status: 'waiting',
           flow: { $in: flows.map((f) => f._id) }
         });
+        const now = new Date();
         for (const enr of waiting) {
           const flow = flows.find((f) => String(f._id) === String(enr.flow));
           const waitNode = flow && (flow.nodes || []).find((n) => n.id === enr.currentNodeId);
-          if (waitNode?.type === 'wait.user_reply') {
-            await this.resumeOnReply(enr, flow, interaction, organizationId);
-            resumedFlowIds.add(String(flow._id));
-            enrollments.push(enr);
+          if (waitNode?.type !== 'wait.user_reply') continue;
+
+          // Expiry guard: a reply that arrives AFTER the wait's own timeout window
+          // (nextRunAt) is not the awaited reply — the customer abandoned the flow
+          // and is starting a new conversation. Release the stale enrollment so the
+          // new message starts fresh instead of resuming the old flow. This runs on
+          // the inbound-message path, so it's robust even when the worker / flow-tick
+          // never fired the timeout. Tune the abandonment window via the wait node's
+          // "Timeout (seconds)".
+          if (enr.nextRunAt && enr.nextRunAt <= now) {
+            enr.status = 'dropped';
+            enr.nextRunAt = null;
+            await enr.save();
+            await this._markInteractionOwnership(interaction?._id, 'dropped').catch(() => {});
+            logger.info('[FlowTriggerRouter] stale wait released (abandoned flow)', {
+              enrollmentId: String(enr._id), flow: String(enr.flow)
+            });
+            continue; // do NOT resume; let fresh trigger matching run below
           }
+
+          await this.resumeOnReply(enr, flow, interaction, organizationId);
+          resumedFlowIds.add(String(flow._id));
+          enrollments.push(enr);
         }
       }
 

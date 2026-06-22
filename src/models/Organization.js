@@ -26,10 +26,11 @@ const organizationSchema = new mongoose.Schema({
     type: Number,
     default: 100
   },
-  /** Inbox ops display refs: ORD-2847, CMP-0041, REV-0088 */
+  /** Inbox ops display refs: ORD-2847, CMP-0041, REV-0088, APT-0128 */
   orderCounter: { type: Number, default: 1000 },
   complaintCounter: { type: Number, default: 1000 },
   reviewCounter: { type: Number, default: 1000 },
+  appointmentCounter: { type: Number, default: 100 },
 
   // ── Demo / Trial workspace ────────────────────────────────────────────────
   // A demo workspace is a REAL tenant put on a full-featured trial. On purchase
@@ -721,7 +722,35 @@ const organizationSchema = new mongoose.Schema({
 
   // ── Commerce Guardrails (Phase 2 groundwork) ─────────────────────────────
   autonomousCommerceEnabled: { type: Boolean, default: false },
-  autonomousCommerceMaxSendsPerUserPerDay: { type: Number, default: 3 }
+  autonomousCommerceMaxSendsPerUserPerDay: { type: Number, default: 3 },
+
+  // ── Appointment Booking ───────────────────────────────────────────────────
+  // Service businesses (clinics, spas) book appointments via flows or AI. Flow
+  // vs AI gating reuses automationModeByChannel; availability uses provider hours
+  // (falling back to businessHours) in defaultTimezone.
+  appointmentSettings: {
+    enabled: { type: Boolean, default: false },
+    /** Allow the AI agent to autonomously book appointments. */
+    aiBookingEnabled: { type: Boolean, default: false },
+    /** Slot grid granularity in minutes (e.g. 15 → :00, :15, :30, :45). */
+    slotGranularityMin: { type: Number, default: 15, min: 5 },
+    /** Earliest a customer may book from now (minutes). */
+    minNoticeMins: { type: Number, default: 120, min: 0 },
+    /** Furthest ahead a customer may book (days). */
+    maxAdvanceDays: { type: Number, default: 30, min: 1 },
+    /** When to remind before the appointment, in minutes (e.g. 1440=24h, 60=1h). */
+    reminderOffsetsMins: { type: [Number], default: [1440, 60] },
+    /** Auto-mark no_show this many minutes after start if not completed. */
+    noShowGraceMins: { type: Number, default: 20, min: 0 },
+    /** Default IANA tz when a provider has none set. */
+    defaultTimezone: { type: String, default: 'Asia/Kolkata' },
+    /** Per-customer/day cap on autonomous AI booking sends. */
+    aiMaxBookingsPerUserPerDay: { type: Number, default: 3 },
+    deposit: {
+      required: { type: Boolean, default: false },
+      amount: { type: Number, min: 0 }
+    }
+  }
 }, {
   timestamps: true
 });

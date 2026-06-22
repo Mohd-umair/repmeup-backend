@@ -5,13 +5,15 @@ const Organization = require('../models/Organization');
 const REF_PREFIX = Object.freeze({
   order: 'ORD',
   complaint: 'CMP',
-  review: 'REV'
+  review: 'REV',
+  appointment: 'APT'
 });
 
 const COUNTER_FIELD = Object.freeze({
   order: 'orderCounter',
   complaint: 'complaintCounter',
-  review: 'reviewCounter'
+  review: 'reviewCounter',
+  appointment: 'appointmentCounter'
 });
 
 /**
@@ -50,4 +52,19 @@ async function assignOrderDisplayRef(organizationId, orderFields = {}) {
   return { ...orderFields, orderNumber: number, displayRef };
 }
 
-module.exports = { generateOpsRef, assignOrderDisplayRef, REF_PREFIX, COUNTER_FIELD };
+/**
+ * Assign displayRef to a new Appointment payload (e.g. APT-128).
+ */
+async function assignAppointmentDisplayRef(organizationId, fields = {}) {
+  if (fields.displayRef) return fields;
+  const { number, displayRef } = await generateOpsRef(organizationId, 'appointment');
+  return { ...fields, appointmentNumber: number, displayRef };
+}
+
+module.exports = {
+  generateOpsRef,
+  assignOrderDisplayRef,
+  assignAppointmentDisplayRef,
+  REF_PREFIX,
+  COUNTER_FIELD
+};

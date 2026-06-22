@@ -51,6 +51,9 @@ const kbCrawlQueue = new Queue('kb-crawl', queueOptions);
 // Demo-trial expiry — a lightweight daily repeat job that locks expired demos.
 const demoExpiryQueue = new Queue('demo-expiry', queueOptions);
 
+// Appointment reminders + no-show sweep — a periodic scan (every ~10 min).
+const appointmentReminderQueue = new Queue('appointment-reminder', queueOptions);
+
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
 // Kept in place so existing Bull Board dashboards and imports keep working.
@@ -89,7 +92,8 @@ const queues = [
   campaignInboxQueue,
   flowTickQueue,
   kbCrawlQueue,
-  demoExpiryQueue
+  demoExpiryQueue,
+  appointmentReminderQueue
 ];
 
 queues.forEach(queue => {
@@ -137,5 +141,6 @@ module.exports = {
   flowTickQueue,
   kbCrawlQueue,
   demoExpiryQueue,
+  appointmentReminderQueue,
   queueConfig
 };

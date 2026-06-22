@@ -382,6 +382,14 @@ exports.seedMenus = async (req, res, next) => {
         requiresFeature: 'agents'
       },
       {
+        label: 'Appointments',
+        icon: 'fas fa-calendar-check',
+        route: '/app/appointments',
+        order: 7,
+        group: 'management',
+        requiredRoles: ['admin', 'manager']
+      },
+      {
         label: 'Settings',
         icon: 'fas fa-cog',
         route: '/app/settings',

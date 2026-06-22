@@ -658,6 +658,20 @@ async function processIncomingMessage(change, connection, rawPayload) {
     logger.debug('[WhatsApp] Commerce agent check failed (non-fatal)', { error: agentErr.message });
   }
 
+  // Autonomous appointment booking agent (opt-in per org: appointmentSettings.aiBookingEnabled)
+  try {
+    const { tryAutonomousBooking } = require('../ai/appointmentAgentService');
+    await tryAutonomousBooking({
+      organizationId,
+      senderId,
+      text: md.content || '',
+      connection,
+      interaction: savedInteraction
+    });
+  } catch (apptErr) {
+    logger.debug('[WhatsApp] Appointment agent check failed (non-fatal)', { error: apptErr.message });
+  }
+
   // WA keyword automation: auto-send product_list when message matches catalog keywords
   try {
     await _checkWaKeywordAutomation({

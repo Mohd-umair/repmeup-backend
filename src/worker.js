@@ -16,7 +16,8 @@ const {
   campaignInboxQueue,
   flowTickQueue,
   kbCrawlQueue,
-  demoExpiryQueue
+  demoExpiryQueue,
+  appointmentReminderQueue
 } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
@@ -31,6 +32,7 @@ const processVoiceCall = require('./jobs/processVoiceCall');
 const processFlowTick = require('./jobs/processFlowTick');
 const processKbCrawl = require('./jobs/processKbCrawl');
 const processDemoExpiry = require('./jobs/processDemoExpiry');
+const processAppointmentReminders = require('./jobs/processAppointmentReminders');
 const campaignConfig = require('./config/campaignConfig');
 const { registerCampaignWorkers } = require('./workers/registerCampaignWorkers');
 const logger = require('./config/logger');
@@ -118,6 +120,23 @@ async function startWorker() {
       logger.info('[Worker] demo-expiry repeat job registered (daily)');
     } else {
       logger.info('[Worker] demo-expiry repeat job already exists — skipping registration');
+    }
+
+    // Appointment reminders + no-show sweep: every 10 minutes.
+    appointmentReminderQueue.process(1, async () => {
+      return await processAppointmentReminders();
+    });
+    const apptRepeatables = await appointmentReminderQueue.getRepeatableJobs();
+    const apptAlreadyScheduled = apptRepeatables.some(j => j.id && j.id.includes('appointment-reminder-repeat'));
+    if (!apptAlreadyScheduled) {
+      await appointmentReminderQueue.add({}, {
+        repeat: { every: 10 * 60 * 1000 }, // every 10 min
+        jobId: 'appointment-reminder-repeat',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] appointment-reminder repeat job registered (every 10 min)');
+    } else {
+      logger.info('[Worker] appointment-reminder repeat job already exists — skipping registration');
     }
     logger.info('[Worker] demo-expiry processor started (daily)');
 
