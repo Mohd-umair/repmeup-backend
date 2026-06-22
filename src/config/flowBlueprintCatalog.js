@@ -211,48 +211,60 @@ const COMMENT_TO_DM_BLUEPRINT = {
 const APPOINTMENT_BOOKING_BLUEPRINT = {
   name: 'Book appointment — clinic/spa',
   description:
-    'WhatsApp booking flow: greet → offer available slots for a service → book the '
-    + 'customer’s pick → confirm. After import, set the Service on the "Offer slots" node. '
-    + 'Bookings appear in Appointment Management.',
+    'One WhatsApp flow for ALL services: greet → ask which service → offer that '
+    + 'service’s available slots → book the customer’s pick → confirm. No per-service '
+    + 'flow needed — it reads your services automatically. Bookings appear in '
+    + 'Appointment Management.',
   channels: ['whatsapp'],
   entryNodeId: 't1',
   nodes: [
     { id: 't1', type: 'trigger.keyword', label: 'On "book"', position: { x: 320, y: 20 },
       config: { keywords: ['book', 'appointment', 'booking', 'slot', 'schedule', 'appt'] } },
 
-    { id: 'a0', type: 'action.send_text', label: 'Greet', position: { x: 320, y: 140 },
-      config: { text: 'Happy to help you book! 📅 Let me check the next available times…' } },
+    { id: 'a0', type: 'action.send_text', label: 'Greet', position: { x: 320, y: 130 },
+      config: { text: 'Happy to help you book! 📅' } },
 
-    { id: 'o1', type: 'action.offer_slots', label: 'Offer slots', position: { x: 320, y: 260 },
-      // ⚠️ Set serviceId after importing (pick your Service). providerId optional.
+    { id: 's1', type: 'action.offer_services', label: 'Ask which service', position: { x: 320, y: 240 },
+      config: { bodyText: 'Which service would you like to book?',
+        noServicesText: 'Sorry, no services are available to book right now. Please try again later. 🙏' } },
+    { id: 'ws', type: 'wait.user_reply', label: 'Wait for service', position: { x: 320, y: 350 },
+      config: { timeoutSec: 3600 } },
+
+    { id: 'o1', type: 'action.offer_slots', label: 'Offer slots', position: { x: 320, y: 460 },
+      // serviceId empty → uses the service the customer picked above (multi-service).
       config: { serviceId: '', providerId: '', maxSlots: 6, days: 7,
         bodyText: 'Here are the next available times — reply with the number you’d like:',
-        noSlotsText: 'Sorry, we’re fully booked right now. Please check back soon! 🙏' } },
-    { id: 'w1', type: 'wait.user_reply', label: 'Wait for pick', position: { x: 320, y: 380 },
-      config: { timeoutSec: 86400 } },
+        noSlotsText: 'Sorry, we’re fully booked for that service right now. Please check back soon! 🙏' } },
+    { id: 'w1', type: 'wait.user_reply', label: 'Wait for slot', position: { x: 320, y: 570 },
+      config: { timeoutSec: 3600 } },
 
-    { id: 'b1', type: 'action.book_appointment', label: 'Book', position: { x: 320, y: 500 },
+    { id: 'b1', type: 'action.book_appointment', label: 'Book', position: { x: 320, y: 680 },
       config: { confirmMode: 'auto' } },
 
-    { id: 'c1', type: 'action.send_text', label: 'Confirm', position: { x: 200, y: 620 },
+    { id: 'c1', type: 'action.send_text', label: 'Confirm', position: { x: 200, y: 790 },
       config: { text: '✅ You’re booked! {{appointment_ref}}\n\n🗓️ {{service_name}} on {{appointment_when}}\nWe’ll send you a reminder. See you then! 🙌' } },
-    { id: 'e1', type: 'control.end', label: 'Done', position: { x: 200, y: 740 }, config: {} },
+    { id: 'e1', type: 'control.end', label: 'Done', position: { x: 200, y: 900 }, config: {} },
 
-    { id: 'f1', type: 'action.send_text', label: 'Slot gone — retry', position: { x: 460, y: 620 },
+    { id: 'f1', type: 'action.send_text', label: 'Slot gone — retry', position: { x: 480, y: 790 },
       config: { text: 'Oops, that time was just taken. 😅 Here are fresh options:' } },
 
-    { id: 'n1', type: 'action.send_text', label: 'No slots', position: { x: 520, y: 380 },
+    { id: 'n1', type: 'action.send_text', label: 'Nothing available', position: { x: 560, y: 350 },
       config: { text: 'No problem — reply here anytime and we’ll get you booked. 🙏' } },
-    { id: 'e2', type: 'control.end', label: 'Done (no booking)', position: { x: 520, y: 500 }, config: {} },
+    { id: 'e2', type: 'control.end', label: 'Done (no booking)', position: { x: 560, y: 460 }, config: {} },
 
-    { id: 'r1', type: 'action.send_text', label: 'Reminder', position: { x: 120, y: 500 },
-      config: { text: 'Still there? 😊 Reply with a number above whenever you’re ready to book.' } }
+    { id: 'r1', type: 'action.send_text', label: 'Reminder', position: { x: 120, y: 460 },
+      config: { text: 'Still there? 😊 Reply with a number above whenever you’re ready.' } }
   ],
   edges: [
     { id: 't1-a0', source: 't1', target: 'a0' },
-    { id: 'a0-o1', source: 'a0', target: 'o1' },
+    { id: 'a0-s1', source: 'a0', target: 's1' },
+    { id: 's1-ws', source: 's1', target: 'ws', label: 'offered' },
+    { id: 's1-n1', source: 's1', target: 'n1', label: 'none' },
+    { id: 'ws-o1', source: 'ws', target: 'o1', label: 'reply' },
+    { id: 'ws-r1', source: 'ws', target: 'r1', label: 'timeout' },
     { id: 'o1-w1', source: 'o1', target: 'w1', label: 'offered' },
-    { id: 'o1-n1', source: 'o1', target: 'n1', label: 'none' },
+    // Fallback: invalid service reply / no slots → re-ask which service.
+    { id: 'o1-s1', source: 'o1', target: 's1', label: 'none' },
     { id: 'w1-b1', source: 'w1', target: 'b1', label: 'reply' },
     { id: 'w1-r1', source: 'w1', target: 'r1', label: 'timeout' },
     { id: 'b1-c1', source: 'b1', target: 'c1', label: 'booked' },
