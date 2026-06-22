@@ -121,9 +121,17 @@ async function findActiveAppointment(organizationId, senderId, interaction) {
 async function tryAutonomousBooking({ organizationId, senderId, text, connection, interaction }) {
   try {
     const Organization = require('../../models/Organization');
-    const org = await Organization.findById(organizationId).select('appointmentSettings').lean();
+    const org = await Organization.findById(organizationId)
+      .select('appointmentSettings automationModeByChannel automationFlowMode').lean();
     const s = org?.appointmentSettings;
     if (!s?.enabled || !s?.aiBookingEnabled) return false;
+
+    // Respect the channel automation mode: the AI agent must NOT run when the
+    // channel is workflow_only (flows own the conversation there). It only fills
+    // in for ai_only / hybrid. Without this, AI booking competes with the flow.
+    const replyEngineService = require('../replyEngineService');
+    const mode = replyEngineService.getChannelMode(org, interaction?.platform || 'whatsapp');
+    if (mode === 'workflow_only') return false;
 
     const offer = await getOffer(organizationId, senderId);
 
