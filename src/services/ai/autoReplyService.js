@@ -215,6 +215,16 @@ async function buildOrderContext(interaction, organizationId) {
     }).sort({ createdAt: -1 }).lean();
     if (!order || !(order.lineItems || []).length) return '';
 
+    // Only nudge about this order while it still NEEDS a delivery address AND is
+    // recent. Otherwise every later "hi" / "ok" would re-trigger "share your
+    // address" — the exact loop the customer was hitting. Once the address is
+    // captured (by the AI, a flow, or an agent), the order drops out of context.
+    const hasAddress = !!(order.shippingAddress
+      || (order.shipping && (order.shipping.line1 || order.shipping.city || order.shipping.pincode)));
+    const ageMs = Date.now() - new Date(order.createdAt || Date.now()).getTime();
+    const isFresh = ageMs < 24 * 60 * 60 * 1000; // 24h
+    if (hasAddress || !isFresh) return '';
+
     const items = order.lineItems.map((li) => {
       const qty = li.qty || 1;
       const each = li.unitPrice != null ? ` (${formatMoney(li.unitPrice, li.currency || order.currency)} each)` : '';

@@ -406,10 +406,12 @@ async function handleAction(node, ctx) {
         'action.cancel_appointment': apptFlow.cancelAppointment
       }[node.type];
       const r = await fn(ctx);
+      // `end: true` lets the action terminate the flow (e.g. after too many invalid
+      // replies) regardless of edges, so the customer isn't stuck in a re-prompt loop.
       return {
         status: 'continue',
         variables: r.variables || {},
-        nextNodeId: pickEdge(ctx.edges, r.branch)?.target
+        nextNodeId: r.end ? undefined : pickEdge(ctx.edges, r.branch)?.target
       };
     }
     case 'action.send_template': {

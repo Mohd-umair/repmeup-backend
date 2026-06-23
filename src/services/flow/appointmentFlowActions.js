@@ -15,6 +15,9 @@ const logger = require('../../config/logger');
 
 const ACTIVE = ['requested', 'confirmed'];
 
+/** After this many invalid replies in a row, gracefully end the booking flow. */
+const MAX_APPT_MISSES = 2;
+
 /** Identify the customer from the interaction (channel-aware). */
 function customerFromInteraction(interaction) {
   const platform = interaction?.platform;
@@ -147,7 +150,7 @@ async function offerServices(ctx) {
   const head = (config.bodyText && config.bodyText.trim()) || 'Which service would you like to book?';
   await sendServiceList(organizationId, interaction, top, head);
 
-  return { variables: { offered_services: list, services_offered: list.length }, branch: 'offered' };
+  return { variables: { offered_services: list, services_offered: list.length, appt_misses: 0 }, branch: 'offered' };
 }
 
 /** Compute + DM the next available slots; remember them for the next reply. */
@@ -173,11 +176,18 @@ async function offerSlots(ctx) {
   }
   if (!serviceId) {
     // Fallback: the customer sent something other than a valid service pick.
+    // Cap the nudges so they aren't stuck getting "tap a service" on every message.
+    const misses = (enrollment?.variables?.appt_misses || 0) + 1;
+    if (misses > MAX_APPT_MISSES) {
+      await sendTextForInteraction(interaction, organizationId,
+        'No problem! 🙏 Message "book" whenever you’re ready and we’ll start over.').catch(() => {});
+      return { variables: { appt_misses: 0, slots_offered: 0 }, branch: 'none', end: true };
+    }
     await sendTextForInteraction(
       interaction, organizationId,
       config.invalidServiceText || 'Sorry, I didn’t catch that. 🙏 Please tap a service from the list above (or reply with its number).'
     ).catch(() => {});
-    return { variables: { slots_offered: 0, invalid_pick: true }, branch: 'none' };
+    return { variables: { appt_misses: misses, slots_offered: 0, invalid_pick: true }, branch: 'none' };
   }
 
   const maxSlots = Math.max(1, Math.min(10, Number(config.maxSlots) || 6));
@@ -206,7 +216,8 @@ async function offerSlots(ctx) {
       offered_slots: offered,
       offer_service_id: String(serviceId),
       appointment_service_id: String(serviceId),
-      slots_offered: offered.length
+      slots_offered: offered.length,
+      appt_misses: 0
     },
     branch: 'offered'
   };
@@ -231,12 +242,18 @@ async function bookAppointment(ctx) {
     chosen = { startAt: config.startAt, providerId: config.providerId };
   }
   if (!chosen || !serviceId) {
-    // Fallback: not a valid time pick — nudge the customer (the flow loops back to re-offer).
+    // Fallback: not a valid time pick. Cap nudges so they don't loop forever.
+    const misses = (vars.appt_misses || 0) + 1;
+    if (misses > MAX_APPT_MISSES) {
+      await sendTextForInteraction(interaction, organizationId,
+        'No problem! 🙏 Message "book" whenever you’re ready to try again.').catch(() => {});
+      return { variables: { appt_misses: 0, booking_error: 'gaveup' }, branch: 'failed', end: true };
+    }
     await sendTextForInteraction(
       interaction, organizationId,
       'Sorry, I didn’t catch that. 🙏 Please tap a time from the list above (or reply with its number).'
     ).catch(() => {});
-    return { variables: { booking_error: 'no_slot', invalid_pick: true }, branch: 'failed' };
+    return { variables: { appt_misses: misses, booking_error: 'no_slot', invalid_pick: true }, branch: 'failed' };
   }
 
   const cust = customerFromInteraction(interaction);
@@ -267,7 +284,8 @@ async function bookAppointment(ctx) {
       appointment_when: a.whenLabel,
       service_name: a.serviceName,
       provider_name: a.providerName,
-      offered_slots: null
+      offered_slots: null,
+      appt_misses: 0
     },
     branch: 'booked'
   };

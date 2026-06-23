@@ -644,45 +644,11 @@ async function processIncomingMessage(change, connection, rawPayload) {
     rawContact: md.contact || value.contacts?.[0] || {}
   });
 
-  // Phase 2: Autonomous commerce agent (opt-in per org, confidence-gated)
-  try {
-    const { tryAutonomousCommerceAction } = require('../ai/commerceAgentService');
-    await tryAutonomousCommerceAction({
-      organizationId,
-      senderId,
-      text: md.content || '',
-      connection,
-      interaction: savedInteraction
-    });
-  } catch (agentErr) {
-    logger.debug('[WhatsApp] Commerce agent check failed (non-fatal)', { error: agentErr.message });
-  }
-
-  // Autonomous appointment booking agent (opt-in per org: appointmentSettings.aiBookingEnabled)
-  try {
-    const { tryAutonomousBooking } = require('../ai/appointmentAgentService');
-    await tryAutonomousBooking({
-      organizationId,
-      senderId,
-      text: md.content || '',
-      connection,
-      interaction: savedInteraction
-    });
-  } catch (apptErr) {
-    logger.debug('[WhatsApp] Appointment agent check failed (non-fatal)', { error: apptErr.message });
-  }
-
-  // WA keyword automation: auto-send product_list when message matches catalog keywords
-  try {
-    await _checkWaKeywordAutomation({
-      textContent: md.content,
-      connection,
-      organizationId,
-      senderId
-    });
-  } catch (kwErr) {
-    logger.debug('[WhatsApp] Keyword automation check failed (non-fatal)', { error: kwErr.message });
-  }
+  // NOTE: the autonomous commerce agent, appointment agent, and WA keyword
+  // automation used to run HERE unconditionally — which made them fire even in
+  // workflow_only mode and stack up alongside flows (e.g. an order message
+  // appearing mid-appointment-flow on every reply). They now run inside the single
+  // AI gate below, so the channel automation mode is the only "who replies" rule.
 
   // Handle native WhatsApp cart order (type === 'order')
   if (md.type === 'order' || md.rawMessage?.type === 'order') {
@@ -788,31 +754,61 @@ async function processIncomingMessage(change, connection, rawPayload) {
     }
   }
 
-  // AI fallback only when the mode allows it AND no flow owned the conversation.
+  // ── AI layer (single gate) ─────────────────────────────────────────────────
+  // Every AI/commerce automation runs ONLY here, so the channel mode decides who
+  // replies: workflow_only → none of this runs (flows own it); hybrid → only when
+  // no flow took the conversation; ai_only → runs. Within the gate, the FIRST
+  // automation that answers suppresses the rest (no duplicate / conflicting replies).
   if (runAiFallback && !flowHandled) {
+    let aiHandled = false;
+    const agentArgs = { organizationId, senderId, text: md.content || '', connection, interaction: savedInteraction };
+
+    // 1) Appointment booking agent.
     try {
-      await aiQueue.add(
-        { interactionId: savedInteraction._id },
-        {
-          attempts: 3,
-          backoff: 2000,
-          jobId: `ai-${savedInteraction._id}-${mid}`
-        }
-      );
-      const queued = await autoReplyScheduler.queueImmediateAutoReply(
-        savedInteraction._id.toString(),
-        organizationId
-      );
-      if (queued) {
-        logger.info('[WhatsApp] AI fallback + auto-reply queued', {
-          interactionId: String(savedInteraction._id)
-        });
+      const { tryAutonomousBooking } = require('../ai/appointmentAgentService');
+      aiHandled = (await tryAutonomousBooking(agentArgs)) || aiHandled;
+    } catch (apptErr) {
+      logger.debug('[WhatsApp] Appointment agent check failed (non-fatal)', { error: apptErr.message });
+    }
+
+    // 2) Commerce agent + keyword automation (product suggestions on purchase intent).
+    if (!aiHandled) {
+      try {
+        const { tryAutonomousCommerceAction } = require('../ai/commerceAgentService');
+        const r = await tryAutonomousCommerceAction(agentArgs);
+        aiHandled = !!r || aiHandled;
+      } catch (agentErr) {
+        logger.debug('[WhatsApp] Commerce agent check failed (non-fatal)', { error: agentErr.message });
       }
-    } catch (queueError) {
-      logger.error('[WhatsApp] Failed to queue AI/auto-reply', { error: queueError.message });
+      if (!aiHandled) {
+        try {
+          await _checkWaKeywordAutomation({ textContent: md.content, connection, organizationId, senderId });
+        } catch (kwErr) {
+          logger.debug('[WhatsApp] Keyword automation check failed (non-fatal)', { error: kwErr.message });
+        }
+      }
+    }
+
+    // 3) Generic AI auto-reply — only if no agent already answered.
+    if (!aiHandled) {
+      try {
+        await aiQueue.add(
+          { interactionId: savedInteraction._id },
+          { attempts: 3, backoff: 2000, jobId: `ai-${savedInteraction._id}-${mid}` }
+        );
+        const queued = await autoReplyScheduler.queueImmediateAutoReply(
+          savedInteraction._id.toString(),
+          organizationId
+        );
+        if (queued) {
+          logger.info('[WhatsApp] AI fallback + auto-reply queued', { interactionId: String(savedInteraction._id) });
+        }
+      } catch (queueError) {
+        logger.error('[WhatsApp] Failed to queue AI/auto-reply', { error: queueError.message });
+      }
     }
   } else {
-    logger.info('[WhatsApp] AI fallback skipped', {
+    logger.info('[WhatsApp] AI skipped — workflow owns this channel/conversation', {
       interactionId: String(savedInteraction._id),
       runAiFallback,
       flowHandled

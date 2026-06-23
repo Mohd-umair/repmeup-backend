@@ -132,9 +132,11 @@ async function tryAutonomousCommerceAction({ organizationId, senderId, text, con
       productId: product._id.toString(),
       confidence
     });
+    return true; // handled → suppress the generic AI auto-reply
   } catch (err) {
     logger.warn('[commerceAgent] tryAutonomousCommerceAction failed (non-fatal)', { error: err.message });
   }
+  return false;
 }
 
 module.exports = { tryAutonomousCommerceAction, classifyCommerceIntent };

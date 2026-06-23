@@ -168,12 +168,12 @@ function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = 
   const orderBlock = (orderContext && String(orderContext).trim())
     ? `
 
-ACTIVE ORDER (the customer JUST placed this — this is their latest intent, treat it as the priority):
+ACTIVE ORDER (background context — the customer has this open order on this thread):
 ${String(orderContext).trim()}
-- Acknowledge the order warmly and confirm the item(s) and total back to the customer.
-- Do NOT ask which product they want or what quantity — those are ALREADY specified in the order above. Re-asking is wrong.
-- Then ask the customer to share their delivery address (house/flat, area/landmark, city, pincode) so the order can be processed.
-- Keep it concise and friendly (2–3 sentences).`
+- ALWAYS answer the customer's actual latest message directly and helpfully — that is the priority. If they greet ("hi"), greet back; if they ask a question, answer THAT question; do not reply with something unrelated.
+- Use the order above only as context (e.g. if they ask about their order/items/total/status, use these exact details). NEVER re-ask which product or what quantity — those are already specified.
+- A delivery address has not been captured yet, so AFTER answering their message you may add ONE short line asking them to share their full delivery address (house/flat, area/landmark, city, pincode). Ask at most once — never repeat it if they're talking about something else.
+- Keep it concise and friendly.`
     : '';
   const continuity = transcript
     ? `
