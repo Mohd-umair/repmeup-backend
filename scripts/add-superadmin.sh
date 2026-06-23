@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 # Add RepMeUp super_admin (admin panel logs in with email + password).
 #
-# Usage:
-#   chmod +x scripts/add-superadmin.sh   # once
-#   ./scripts/add-superadmin.sh admin@yourdomain.com 'StrongPasswordHere'
-#
-# Optional 3rd/4th args: first name, last name
+
 
 set -euo pipefail
 
