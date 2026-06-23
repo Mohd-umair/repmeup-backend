@@ -34,6 +34,9 @@ const appointmentConversationStateSchema = new mongoose.Schema({
   /** For reschedule: the appointment being moved. */
   appointmentId: { type: String, trim: true },
 
+  /** Consecutive invalid replies — used to give up gracefully (no endless re-prompts). */
+  misses: { type: Number, default: 0 },
+
   sourceInteraction: { type: mongoose.Schema.Types.ObjectId, ref: 'Interaction' },
 
   updatedAt: { type: Date, default: Date.now }

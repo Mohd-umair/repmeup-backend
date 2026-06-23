@@ -184,7 +184,7 @@ class FlowTriggerRouter {
           platformUserId: platformUserIdTop,
           status: 'waiting',
           flow: { $in: flows.map((f) => f._id) }
-        });
+        }).sort({ updatedAt: -1 }); // most-recent conversation first
         const now = new Date();
         for (const enr of waiting) {
           const flow = flows.find((f) => String(f._id) === String(enr.flow));
@@ -209,13 +209,21 @@ class FlowTriggerRouter {
             continue; // do NOT resume; let fresh trigger matching run below
           }
 
+          // Resume ONLY the most-recent waiting flow — the conversation the customer
+          // is actually in — so one reply never fires several parked flows at once.
           await this.resumeOnReply(enr, flow, interaction, organizationId);
           resumedFlowIds.add(String(flow._id));
           enrollments.push(enr);
+          break;
         }
       }
 
+      // If a parked flow resumed, it owns this reply — don't ALSO start other flows
+      // on the same message (that's what produced multiple replies at once).
+      const skipFreshTriggers = enrollments.length > 0;
+
       for (const flow of flows) {
+        if (skipFreshTriggers) break;
         if (resumedFlowIds.has(String(flow._id))) continue;
         const triggerNode = (flow.nodes || []).find((n) => matchesTrigger(n, eventType, { ...payload, content: interaction?.content, text: interaction?.content }));
         if (!triggerNode) continue;

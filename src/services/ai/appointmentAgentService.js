@@ -122,7 +122,8 @@ async function offerAndStore({ organizationId, interaction, connection, senderId
     serviceName: service.name,
     slots: offered,
     appointmentId: appointmentId ? String(appointmentId) : undefined,
-    sourceInteraction: interaction?._id
+    sourceInteraction: interaction?._id,
+    misses: 0
   });
   const head = stage === 'awaiting_reschedule_slot'
     ? `Sure — here are the next available times for ${service.name}, tap one:`
@@ -183,7 +184,13 @@ async function tryAutonomousBooking({ organizationId, senderId, text, connection
           const service = await Service.findOne({ _id: pickedId, organization: organizationId, isActive: true }).lean();
           if (service) { await offerAndStore({ organizationId, interaction, connection, senderId, service }); return true; }
         }
-        // Fallback: not a valid service pick → re-show the list.
+        // Fallback: not a valid service pick → re-show once or twice, then give up.
+        if ((offer.misses || 0) + 1 > 2) {
+          await clearOffer(organizationId, senderId);
+          await send(connection, senderId, 'No problem! 🙏 Message "book" whenever you’re ready and we’ll start over.');
+          return true;
+        }
+        await setOffer(organizationId, senderId, { misses: (offer.misses || 0) + 1 });
         await sendServiceListAI(connection, senderId, offer.services, 'Sorry, I didn’t catch that. 🙏 Please tap a service:');
         return true;
       }
@@ -225,7 +232,13 @@ async function tryAutonomousBooking({ organizationId, senderId, text, connection
             : `✅ You’re booked! ${r.appointment.displayRef}\n🗓️ ${r.appointment.serviceName} on ${r.appointment.whenLabel}\nWe’ll remind you. See you! 🙌`);
           return true;
         }
-        // Fallback: not a valid time pick → re-show the times.
+        // Fallback: not a valid time pick → re-show once or twice, then give up.
+        if ((offer.misses || 0) + 1 > 2) {
+          await clearOffer(organizationId, senderId);
+          await send(connection, senderId, 'No problem! 🙏 Message "book" whenever you’re ready to try again.');
+          return true;
+        }
+        await setOffer(organizationId, senderId, { misses: (offer.misses || 0) + 1 });
         await sendSlotListAI(connection, senderId, offer.slots, 'Sorry, I didn’t catch that. 🙏 Please tap a time:');
         return true;
       }
@@ -259,7 +272,7 @@ async function tryAutonomousBooking({ organizationId, senderId, text, connection
       if (service) { await offerAndStore({ organizationId, interaction, connection, senderId, service }); return true; }
       // Ambiguous → ask which service (interactive list; tap to pick).
       const list = services.slice(0, 10).map((sv, i) => ({ i: i + 1, id: String(sv._id), name: sv.name }));
-      await setOffer(organizationId, senderId, { stage: 'awaiting_service', services: list, sourceInteraction: interaction?._id });
+      await setOffer(organizationId, senderId, { stage: 'awaiting_service', services: list, sourceInteraction: interaction?._id, misses: 0 });
       await sendServiceListAI(connection, senderId, list, 'Which service would you like to book?');
       return true;
     }
