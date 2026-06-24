@@ -351,6 +351,15 @@ const interactionSchema = new mongoose.Schema({
     latitude: Number,
     longitude: Number,
     
+    // Interactive reply identifiers (WhatsApp / Facebook button taps, list selections)
+    // buttonPayload: the row/button id that was tapped (e.g. "apptsvc:<id>", "apptslot:2")
+    // postback: generic postback payload (Facebook Messenger, Instagram quick-replies)
+    // Both MUST be in the schema — Mongoose strict mode silently strips unknown paths
+    // in findOneAndUpdate, which previously caused interactive list selections to be
+    // invisible to flow handlers (payloadValue always returned null).
+    buttonPayload: String,
+    postback: String,
+
     // Additional context
     deviceType: String,
     appVersion: String,

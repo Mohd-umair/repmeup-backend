@@ -150,7 +150,22 @@ async function offerServices(ctx) {
   const head = (config.bodyText && config.bodyText.trim()) || 'Which service would you like to book?';
   await sendServiceList(organizationId, interaction, top, head);
 
-  return { variables: { offered_services: list, services_offered: list.length, appt_misses: 0 }, branch: 'offered' };
+  // Clear any previously resolved service/slot state so that a retry of the
+  // service picker (via the o1-s1 loop-back edge) starts with a clean slate.
+  // Without this, a stale appointment_service_id from an earlier offerSlots
+  // call would cause offerSlots to bypass the picker and send the slot list
+  // immediately, making the bot look like it sent multiple messages at once.
+  return {
+    variables: {
+      offered_services: list,
+      services_offered: list.length,
+      appt_misses: 0,
+      appointment_service_id: null,
+      offer_service_id: null,
+      offered_slots: null
+    },
+    branch: 'offered'
+  };
 }
 
 /** Compute + DM the next available slots; remember them for the next reply. */
@@ -242,17 +257,15 @@ async function bookAppointment(ctx) {
     chosen = { startAt: config.startAt, providerId: config.providerId };
   }
   if (!chosen || !serviceId) {
-    // Fallback: not a valid time pick. Cap nudges so they don't loop forever.
+    // Fallback: not a valid time pick. The 'failed' branch leads to f1 which
+    // re-offers available slots — do NOT send an extra nudge here or the
+    // customer receives two back-to-back messages at the same time.
     const misses = (vars.appt_misses || 0) + 1;
     if (misses > MAX_APPT_MISSES) {
       await sendTextForInteraction(interaction, organizationId,
         'No problem! 🙏 Message "book" whenever you’re ready to try again.').catch(() => {});
       return { variables: { appt_misses: 0, booking_error: 'gaveup' }, branch: 'failed', end: true };
     }
-    await sendTextForInteraction(
-      interaction, organizationId,
-      'Sorry, I didn’t catch that. 🙏 Please tap a time from the list above (or reply with its number).'
-    ).catch(() => {});
     return { variables: { appt_misses: misses, booking_error: 'no_slot', invalid_pick: true }, branch: 'failed' };
   }
 

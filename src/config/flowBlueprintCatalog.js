@@ -245,8 +245,10 @@ const APPOINTMENT_BOOKING_BLUEPRINT = {
       config: { text: '✅ You’re booked! {{appointment_ref}}\n\n🗓️ {{service_name}} on {{appointment_when}}\nWe’ll send you a reminder. See you then! 🙌' } },
     { id: 'e1', type: 'control.end', label: 'Done', position: { x: 200, y: 900 }, config: {} },
 
-    { id: 'f1', type: 'action.send_text', label: 'Slot gone — retry', position: { x: 480, y: 790 },
-      config: { text: 'Oops, that time was just taken. 😅 Here are fresh options:' } },
+    // Fired only when book_appointment returns branch:'failed' (invalid reply or slot taken).
+    // Re-offers the same slot list instead of asking which service again.
+    { id: 'f1', type: 'action.send_text', label: 'Booking failed — retry slots', position: { x: 480, y: 790 },
+      config: { text: 'Sorry, I couldn\'t book that. 🙏 Here are the available times again — tap one:' } },
 
     { id: 'n1', type: 'action.send_text', label: 'Nothing available', position: { x: 560, y: 350 },
       config: { text: 'No problem — reply here anytime and we’ll get you booked. 🙏' } },
