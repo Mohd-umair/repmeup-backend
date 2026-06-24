@@ -82,6 +82,9 @@ async function installActiveCopy(orgId, blueprint, nameRegex) {
   return copy;
 }
 
+module.exports = { seedGlobalBlueprints };
+
+if (require.main === module) {
 (async () => {
   await mongoose.connect(process.env.MONGODB_URI);
   try {
@@ -110,3 +113,4 @@ async function installActiveCopy(orgId, blueprint, nameRegex) {
     await mongoose.disconnect();
   }
 })();
+}

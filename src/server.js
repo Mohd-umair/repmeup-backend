@@ -83,6 +83,15 @@ async function startServer() {
     // This prevents double-processing when both server.js and worker.js are running.
     logger.info('Queue processors not started in server process — run worker.js separately.');
 
+    // Seed global flow blueprints (idempotent upsert — safe to run on every boot)
+    try {
+      const { seedGlobalBlueprints } = require('./scripts/seedCheckoutBlueprint');
+      await seedGlobalBlueprints();
+      logger.info('Flow blueprints seeded');
+    } catch (seedErr) {
+      logger.warn('Blueprint seeding failed (non-fatal):', seedErr.message);
+    }
+
     // Initialize auto-reply scheduler
     const autoReplyScheduler = require('./services/autoReplyScheduler');
     await autoReplyScheduler.initializeScheduledJobs();

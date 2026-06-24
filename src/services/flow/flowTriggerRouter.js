@@ -1,9 +1,14 @@
 const AutomationFlow = require('../../models/AutomationFlow');
 const FlowEnrollment = require('../../models/FlowEnrollment');
 const Organization = require('../../models/Organization');
+const Contact = require('../../models/Contact');
 const flowExecutorService = require('./flowExecutorService');
 const { isTriggerType } = require('../../config/flowNodeCatalog');
 const logger = require('../../config/logger');
+
+/** Keywords that signal a contact has opted out of automated messages (case-insensitive). */
+const OPT_OUT_KEYWORDS = new Set(['stop', 'unsubscribe', 'cancel', 'quit', 'opt out', 'optout']);
+const OPT_IN_KEYWORDS  = new Set(['start', 'subscribe', 'optin', 'opt in', 'yes']);
 
 const EVENT_TO_TRIGGER = {
   'whatsapp.message': ['trigger.keyword', 'trigger.first_message', 'trigger.new_lead'],
@@ -218,6 +223,44 @@ class FlowTriggerRouter {
         }
       }
 
+      // ── Opt-out / opt-in keyword detection ────────────────────────────────
+      // Check the inbound message for STOP/UNSUBSCRIBE/START before attempting
+      // any fresh trigger matching. This runs even when no flows were resumed.
+      if (platformUserIdTop && interaction?.content) {
+        const msgLower = String(interaction.content).trim().toLowerCase();
+        const isOptOut = OPT_OUT_KEYWORDS.has(msgLower);
+        const isOptIn  = OPT_IN_KEYWORDS.has(msgLower);
+        if (isOptOut || isOptIn) {
+          // Find contact by platform + platformUserId
+          const contactDoc = interaction?.contact
+            ? await Contact.findById(interaction.contact).select('_id flowsOptedOut').lean()
+            : await Contact.findOne({
+                organization: organizationId,
+                'channels.platform': platform,
+                'channels.platformUserId': platformUserIdTop
+              }).select('_id flowsOptedOut').lean();
+          if (contactDoc) {
+            await Contact.updateOne(
+              { _id: contactDoc._id },
+              isOptOut
+                ? { flowsOptedOut: true,  flowsOptedOutAt: new Date() }
+                : { flowsOptedOut: false, flowsOptedOutAt: null }
+            );
+            logger.info('[FlowTriggerRouter] contact opt-out updated', {
+              contactId: String(contactDoc._id), optedOut: isOptOut
+            });
+          }
+          // STOP means: cancel all waiting enrollments for this contact too.
+          if (isOptOut) {
+            await FlowEnrollment.updateMany(
+              { organization: organizationId, platform, platformUserId: platformUserIdTop, status: { $in: ['active', 'waiting'] } },
+              { status: 'dropped', lastError: 'Contact opted out (STOP)', nextRunAt: null }
+            );
+            return { handled: true, enrollments: [], optedOut: true };
+          }
+        }
+      }
+
       // If a parked flow resumed, it owns this reply — don't ALSO start other flows
       // on the same message (that's what produced multiple replies at once).
       const skipFreshTriggers = enrollments.length > 0;
@@ -256,6 +299,27 @@ class FlowTriggerRouter {
           continue;
         }
 
+        // Frequency cap: skip enrollment if the contact already received too many
+        // enrollments from this flow within the configured window.
+        const capExceeded = await this.checkFrequencyCap(flow, platformUserId, organizationId);
+        if (capExceeded) {
+          logger.info('[FlowTriggerRouter] frequency cap exceeded — skipping enrollment', {
+            flowId: String(flow._id), platformUserId
+          });
+          continue;
+        }
+
+        // Opt-out guard: never enroll a contact who has sent STOP.
+        if (interaction?.contact) {
+          const contactOptedOut = await Contact.findById(interaction.contact).select('flowsOptedOut').lean();
+          if (contactOptedOut?.flowsOptedOut) {
+            logger.info('[FlowTriggerRouter] skipping opted-out contact', {
+              flowId: String(flow._id), contactId: String(interaction.contact)
+            });
+            continue;
+          }
+        }
+
         const enrollment = await FlowEnrollment.create({
           organization: organizationId,
           flow: flow._id,
@@ -291,6 +355,9 @@ class FlowTriggerRouter {
         } else if (result.status === 'failed') {
           await AutomationFlow.updateOne({ _id: flow._id }, { $inc: { 'stats.failed': 1 } });
         }
+        if (result.converted) {
+          await AutomationFlow.updateOne({ _id: flow._id }, { $inc: { 'stats.converted': 1 } });
+        }
 
         await this._markInteractionOwnership(interaction?._id, result.status);
         enrollments.push(enrollment);
@@ -322,6 +389,9 @@ class FlowTriggerRouter {
     this._applyResult(enrollmentDoc, result);
     await enrollmentDoc.save();
     await this._recordTerminalStats(flow._id, result.status);
+    if (result.converted) {
+      await AutomationFlow.updateOne({ _id: flow._id }, { $inc: { 'stats.converted': 1 } });
+    }
     await this._markInteractionOwnership(interaction?._id || enrollmentDoc.interaction, result.status);
     return enrollmentDoc;
   }
@@ -357,6 +427,9 @@ class FlowTriggerRouter {
     this._applyResult(enrollmentDoc, result);
     await enrollmentDoc.save();
     await this._recordTerminalStats(flow._id, result.status);
+    if (result.converted) {
+      await AutomationFlow.updateOne({ _id: flow._id }, { $inc: { 'stats.converted': 1 } });
+    }
     await this._markInteractionOwnership(enrollmentDoc.interaction, result.status);
   }
 
@@ -395,6 +468,42 @@ class FlowTriggerRouter {
       await AutomationFlow.updateOne({ _id: flowId }, { $inc: { 'stats.completed': 1 } });
     } else if (status === 'failed') {
       await AutomationFlow.updateOne({ _id: flowId }, { $inc: { 'stats.failed': 1 } });
+    }
+  }
+
+  /**
+   * Check if the contact has exceeded the frequency cap configured on this flow.
+   * Returns true (cap exceeded — skip enrollment) when the contact already has
+   * >= frequencyCap completed/active/waiting enrollments in the cap window.
+   *
+   * @param {object} flow  lean AutomationFlow document
+   * @param {string} platformUserId
+   * @param {string|ObjectId} organizationId
+   * @returns {Promise<boolean>} true = skip enrollment
+   */
+  async checkFrequencyCap(flow, platformUserId, organizationId) {
+    try {
+      const cap = flow?.settings?.frequencyCap;
+      const windowDays = flow?.settings?.frequencyCapWindowDays || 1;
+
+      // 0 or missing = no cap
+      if (!cap || cap <= 0) return false;
+      if (!platformUserId) return false;
+
+      const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+
+      const count = await FlowEnrollment.countDocuments({
+        organization: organizationId,
+        flow: flow._id,
+        platformUserId,
+        status: { $in: ['active', 'waiting', 'completed'] },
+        createdAt: { $gte: since }
+      });
+
+      return count >= cap;
+    } catch (err) {
+      logger.warn('[FlowTriggerRouter] checkFrequencyCap failed (non-fatal, allowing enrollment)', { error: err.message });
+      return false;
     }
   }
 }

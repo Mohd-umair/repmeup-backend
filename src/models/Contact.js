@@ -57,7 +57,15 @@ const contactSchema = new mongoose.Schema({
   },
 
   lastInteractionAt: { type: Date, default: null },
-  isDeleted: { type: Boolean, default: false, index: true }
+  isDeleted: { type: Boolean, default: false, index: true },
+
+  /**
+   * WhatsApp opt-out flag — set to true when the contact sends STOP/UNSUBSCRIBE.
+   * When true, the FlowTriggerRouter skips new enrollments for this contact.
+   * Must be honoured to comply with WhatsApp Business Policy.
+   */
+  flowsOptedOut: { type: Boolean, default: false, index: true },
+  flowsOptedOutAt: { type: Date, default: null }
 }, {
   timestamps: true
 });

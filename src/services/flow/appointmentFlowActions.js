@@ -278,6 +278,7 @@ async function bookAppointment(ctx) {
 
   const a = result.appointment;
   return {
+    converted: true,
     variables: {
       appointment_id: a.id,
       appointment_ref: a.displayRef,

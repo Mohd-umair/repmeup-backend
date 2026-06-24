@@ -46,7 +46,7 @@ function node(type, category, label, channels, configSchema = {}) {
     return { ...f, default: defaultConfig[f.key] };
   });
 
-  return {
+  const entry = {
     type,
     category,
     label,
@@ -56,6 +56,13 @@ function node(type, category, label, channels, configSchema = {}) {
     configFields: fields,
     defaultConfig: configSchema.defaultConfig || {}
   };
+
+  if (configSchema.comingSoon) {
+    entry.comingSoon = true;
+    entry.comingSoonHint = configSchema.comingSoonHint || 'This trigger is coming soon and is not yet active.';
+  }
+
+  return entry;
 }
 
 const FLOW_NODE_CATALOG = [
@@ -95,7 +102,9 @@ const FLOW_NODE_CATALOG = [
     icon: 'fas fa-plug',
     description: 'External webhook payload.',
     defaultConfig: { secret: '' },
-    fields: [{ key: 'secret', type: 'string', label: 'Webhook secret', hint: 'Leave empty until you configure your webhook endpoint.', default: '' }]
+    fields: [{ key: 'secret', type: 'string', label: 'Webhook secret', hint: 'Leave empty until you configure your webhook endpoint.', default: '' }],
+    comingSoon: true,
+    comingSoonHint: 'Webhook trigger is not yet live. Flows using this trigger will not fire.'
   }),
   node('trigger.ig_comment', 'trigger', 'Instagram comment', ['instagram'], {
     icon: 'fab fa-instagram',
@@ -139,7 +148,9 @@ const FLOW_NODE_CATALOG = [
     icon: 'fas fa-play',
     description: 'Agent or API manually starts the flow.',
     defaultConfig: {},
-    fields: []
+    fields: [],
+    comingSoon: true,
+    comingSoonHint: 'Manual enroll trigger is not yet live. There is no API to start this flow manually.'
   }),
 
   // ── Actions ───────────────────────────────────────────────────────────────
@@ -303,7 +314,9 @@ const FLOW_NODE_CATALOG = [
     defaultConfig: { event: 'reminder' },
     fields: [{
       key: 'event', type: 'select', label: 'Event', options: ['booked', 'reminder', 'cancelled'], default: 'reminder'
-    }]
+    }],
+    comingSoon: true,
+    comingSoonHint: 'Appointment event trigger is not yet live. Flows using this trigger will not fire until fully wired.'
   }),
   node('action.offer_services', 'action', 'Ask which service', ['whatsapp', 'instagram'], {
     icon: 'fas fa-list-ul',

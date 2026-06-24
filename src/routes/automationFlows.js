@@ -14,6 +14,8 @@ router.get('/node-catalog', automationFlowController.getNodeCatalog);
 router.get('/', automationFlowController.listFlows);
 router.post('/', validateAutomationFlow, automationFlowController.createFlow);
 router.get('/:id/stats', automationFlowController.getFlowStats);
+router.get('/:id/enrollments', automationFlowController.listEnrollments);
+router.get('/:id/enrollments/:eid', automationFlowController.getEnrollment);
 router.post('/:id/validate', automationFlowController.validateFlow);
 router.post('/:id/test', automationFlowController.testFlow);
 router.post('/:id/publish', automationFlowController.publishFlow);
