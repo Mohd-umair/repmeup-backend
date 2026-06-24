@@ -170,6 +170,23 @@ async function tryAutonomousBooking({ organizationId, senderId, text, connection
     const mode = replyEngineService.getChannelMode(org, interaction?.platform || 'whatsapp');
     if (mode === 'workflow_only') return false;
 
+    // Safety net: if there is an active or waiting flow enrollment for this
+    // contact, the flow already owns the conversation. Never let the AI agent
+    // fire alongside it — doing so causes duplicate messages (e.g. both the
+    // flow's "Which service?" and the AI agent's "Which service?" landing at
+    // the same time). This guard runs even in hybrid mode so that a transient
+    // flow-routing error cannot cause the AI to double-send.
+    if (mode === 'hybrid' && senderId) {
+      const FlowEnrollment = require('../../models/FlowEnrollment');
+      const hasActiveEnrollment = await FlowEnrollment.exists({
+        organization: organizationId,
+        platform: interaction?.platform || 'whatsapp',
+        platformUserId: senderId,
+        status: { $in: ['active', 'waiting'] }
+      });
+      if (hasActiveEnrollment) return false;
+    }
+
     const offer = await getOffer(organizationId, senderId);
 
     // 1) Continuation of a pending offer (customer tapped a row or replied with a number).
