@@ -2,6 +2,7 @@
  * Automation Flow Controller — unified cross-channel flow builder API.
  */
 const AutomationFlow = require('../models/AutomationFlow');
+const FlowEnrollment = require('../models/FlowEnrollment');
 const flowValidationService = require('../services/flow/flowValidationService');
 const flowNodeDefaultsService = require('../services/flow/flowNodeDefaultsService');
 const entitlementsService = require('../services/entitlementsService');
@@ -240,16 +241,60 @@ exports.testFlow = async (req, res, next) => {
 
     const validation = flowValidationService.validate(flow);
     const flowExecutorService = require('../services/flow/flowExecutorService');
-    const steps = [];
-    for (const node of flow.nodes || []) {
-      steps.push({ nodeId: node.id, type: node.type, label: node.label || node.type });
+
+    const startNodeId = flowExecutorService.getStartNodeId(flow);
+
+    // Build a synthetic enrollment for dry-run execution
+    const syntheticEnrollment = {
+      _id: 'dryrun-0000',
+      organization: flow.organization,
+      flow: flow._id,
+      contact: null,
+      status: 'active',
+      currentNodeId: startNodeId,
+      variables: {},
+      history: [],
+      nextRunAt: null,
+      lastError: ''
+    };
+
+    let executionResult = null;
+    if (startNodeId) {
+      try {
+        executionResult = await flowExecutorService.runEnrollment({
+          enrollment: syntheticEnrollment,
+          flow,
+          interaction: null,
+          organizationId: flow.organization,
+          dryRun: true
+        });
+      } catch (execErr) {
+        logger.warn('[testFlow] dry-run execution error', { flowId: flow._id, error: execErr.message });
+        executionResult = { status: 'failed', lastError: execErr.message, history: [], variables: {} };
+      }
     }
+
+    // Build human-readable step list from execution history
+    const nodeMap = new Map((flow.nodes || []).map((n) => [n.id, n]));
+    const stepPreview = (executionResult?.history || []).map((h) => {
+      const n = nodeMap.get(h.nodeId);
+      return { nodeId: h.nodeId, type: n?.type || '', label: n?.label || h.nodeId, event: h.event };
+    });
+
+    // Include unvisited nodes as a fallback when there is no execution history (no trigger/edge)
+    const fallbackSteps = stepPreview.length === 0
+      ? (flow.nodes || []).map((n) => ({ nodeId: n.id, type: n.type, label: n.label || n.type, event: 'not_executed' }))
+      : [];
+
     return res.json({
       success: true,
       data: {
         validation,
-        startNodeId: flowExecutorService.getStartNodeId(flow),
-        stepPreview: steps
+        startNodeId,
+        simulationStatus: executionResult?.status || 'no_trigger',
+        lastError: executionResult?.lastError || '',
+        variables: executionResult?.variables || {},
+        stepPreview: stepPreview.length ? stepPreview : fallbackSteps
       }
     });
   } catch (err) {
@@ -279,6 +324,92 @@ exports.validateFlow = async (req, res, next) => {
     if (!body) return res.status(404).json({ success: false, error: 'Flow not found' });
     const validation = flowValidationService.validate(body);
     return res.json({ success: true, data: validation });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /:id/enrollments — paginated list of enrollments for a specific flow.
+ * Query: page (default 1), limit (default 20, max 100), status (filter)
+ */
+exports.listEnrollments = async (req, res, next) => {
+  try {
+    const flow = await AutomationFlow.findOne({
+      _id: req.params.id,
+      organization: req.user.organization._id
+    }).select('_id name').lean();
+    if (!flow) return res.status(404).json({ success: false, error: 'Flow not found' });
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+    const statusFilter = req.query.status;
+
+    const query = { flow: flow._id, organization: req.user.organization._id };
+    if (statusFilter && ['active', 'waiting', 'completed', 'failed', 'dropped'].includes(statusFilter)) {
+      query.status = statusFilter;
+    }
+
+    const [enrollments, total] = await Promise.all([
+      FlowEnrollment.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select('_id platform platformUserId contact status currentNodeId lastError createdAt updatedAt flowVersion')
+        .populate('contact', 'name phone email flowsOptedOut')
+        .lean(),
+      FlowEnrollment.countDocuments(query)
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        flow: { _id: flow._id, name: flow.name },
+        enrollments,
+        pagination: { page, limit, total, pages: Math.ceil(total / limit) }
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /:id/enrollments/:eid — full detail of a single enrollment including history.
+ */
+exports.getEnrollment = async (req, res, next) => {
+  try {
+    const flow = await AutomationFlow.findOne({
+      _id: req.params.id,
+      organization: req.user.organization._id
+    }).select('_id name nodes').lean();
+    if (!flow) return res.status(404).json({ success: false, error: 'Flow not found' });
+
+    const enrollment = await FlowEnrollment.findOne({
+      _id: req.params.eid,
+      flow: flow._id,
+      organization: req.user.organization._id
+    })
+      .populate('contact', 'name phone email flowsOptedOut')
+      .lean();
+    if (!enrollment) return res.status(404).json({ success: false, error: 'Enrollment not found' });
+
+    // Resolve node labels for the history entries so the client can display them.
+    const nodeMap = new Map((flow.nodes || []).map((n) => [n.id, n]));
+    const enrichedHistory = (enrollment.history || []).map((h) => {
+      const n = nodeMap.get(h.nodeId);
+      return { ...h, nodeLabel: n?.label || h.nodeId, nodeType: n?.type || '' };
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        ...enrollment,
+        history: enrichedHistory,
+        flow: { _id: flow._id, name: flow.name }
+      }
+    });
   } catch (err) {
     next(err);
   }

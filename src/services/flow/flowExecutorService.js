@@ -43,6 +43,7 @@ class FlowExecutorService {
     let nextRunAt = enrollment.nextRunAt;
     let lastError = enrollment.lastError || '';
     let resume = ctx.resume || null;
+    let converted = false;
     const history = [...(enrollment.history || [])];
     const variables = { ...(enrollment.variables || {}) };
 
@@ -100,6 +101,14 @@ class FlowExecutorService {
         });
 
         if (result.variables) Object.assign(variables, result.variables);
+        if (result.converted) converted = true;
+
+        // Non-fatal warnings (ai_reply failure, http_request timeout, etc.)
+        // are recorded in history but do NOT stop the flow.
+        if (result.warning) {
+          history.push({ nodeId: node.id, event: 'warning', note: result.warning, at: new Date() });
+          lastError = result.warning; // surface in UI without failing the enrollment
+        }
 
         if (result.status === 'waiting') {
           status = 'waiting';
@@ -125,9 +134,15 @@ class FlowExecutorService {
           status = 'completed';
         }
       } catch (err) {
-        logger.error('[FlowExecutor] node error', { nodeId: node.id, error: err.message });
-        status = 'failed';
-        lastError = err.message;
+        if (err.fatal) {
+          logger.error('[FlowExecutor] fatal node error — enrollment failed', { nodeId: node.id, error: err.message });
+          status = 'failed';
+          lastError = `[FATAL] ${err.message}`;
+        } else {
+          logger.error('[FlowExecutor] node error', { nodeId: node.id, error: err.message });
+          status = 'failed';
+          lastError = err.message;
+        }
         break;
       }
     }
@@ -143,7 +158,8 @@ class FlowExecutorService {
       nextRunAt: status === 'waiting' ? nextRunAt : null,
       lastError,
       history,
-      variables
+      variables,
+      converted
     };
   }
 

@@ -6,7 +6,8 @@ const {
   getContact,
   updateContact,
   deleteContact,
-  mergeContact
+  mergeContact,
+  toggleFlowOptOut
 } = require('../controllers/contactController');
 
 router.use(protect);
@@ -16,5 +17,6 @@ router.get('/:id', authorize('admin', 'manager', 'agent'), getContact);
 router.put('/:id', authorize('admin', 'manager'), updateContact);
 router.delete('/:id', authorize('admin', 'manager'), deleteContact);
 router.post('/:id/merge', authorize('admin', 'manager'), mergeContact);
+router.patch('/:id/flow-opt-out', authorize('admin', 'manager'), toggleFlowOptOut);
 
 module.exports = router;

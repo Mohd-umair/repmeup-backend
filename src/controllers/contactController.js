@@ -216,3 +216,32 @@ exports.mergeContact = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * PATCH /contacts/:id/flow-opt-out
+ * Manually toggle a contact's automated flow opt-out status.
+ * Body: { optedOut: boolean }
+ */
+exports.toggleFlowOptOut = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { optedOut } = req.body;
+    if (typeof optedOut !== 'boolean') {
+      return res.status(400).json({ success: false, error: '`optedOut` must be a boolean.' });
+    }
+
+    const contact = await Contact.findOneAndUpdate(
+      { _id: id, organization: req.user.organization, isDeleted: false },
+      optedOut
+        ? { flowsOptedOut: true,  flowsOptedOutAt: new Date() }
+        : { flowsOptedOut: false, flowsOptedOutAt: null },
+      { new: true, select: '_id primaryName flowsOptedOut flowsOptedOutAt' }
+    );
+    if (!contact) return res.status(404).json({ success: false, error: 'Contact not found.' });
+
+    return res.json({ success: true, data: contact });
+  } catch (error) {
+    logger.error('toggleFlowOptOut error', { error: error.message });
+    next(error);
+  }
+};

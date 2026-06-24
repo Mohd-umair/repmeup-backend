@@ -98,8 +98,20 @@ async function sendTextForInteraction(interaction, organizationId, text) {
     });
     return { sent: true };
   } catch (err) {
-    logger.warn('[flowMessageService] send failed', { error: err.message });
-    return { sent: false, reason: err.message };
+    // Surface token expiry and permission errors as fatal so the enrollment fails visibly.
+    const msg = String(err.message || '');
+    const isTokenExpired = /invalid oauth|token has expired|OAuthException|Error code 190/i.test(msg);
+    const isPermissionError = /permission/i.test(msg) && /Error code (10|200|230|299)/i.test(msg);
+    if (isTokenExpired) {
+      logger.error('[flowMessageService] expired token — fatal', { platform, error: msg });
+      return { sent: false, reason: 'expired_token', fatal: true, message: `${platform} access token has expired. Reconnect in Settings → Platforms.` };
+    }
+    if (isPermissionError) {
+      logger.error('[flowMessageService] permission error — fatal', { platform, error: msg });
+      return { sent: false, reason: 'permission_error', fatal: true, message: `${platform} permission denied. Reconnect in Settings → Platforms.` };
+    }
+    logger.warn('[flowMessageService] send failed', { error: msg });
+    return { sent: false, reason: msg };
   }
 }
 

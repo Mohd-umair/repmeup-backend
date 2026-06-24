@@ -233,11 +233,15 @@ async function handleWhatsAppInteractive(node, ctx) {
   const { recordAutomationReply } = require('../../inbox/inboxAutomationReplyService');
 
   const { conn, recipient } = await messageService.resolveWhatsAppTarget(organizationId, interaction, enrollment);
-  if (!conn || !recipient) {
-    logger.warn('[FlowHandler] whatsapp interactive skipped', {
-      type: node.type, hasConn: !!conn, hasRecipient: !!recipient
-    });
-    return;
+  if (!conn) {
+    const fatalErr = new Error('WhatsApp is not connected. Connect WhatsApp in Settings → Platforms before using messaging actions.');
+    fatalErr.fatal = true;
+    throw fatalErr;
+  }
+  if (!recipient) {
+    const fatalErr = new Error(`Cannot send WhatsApp message (${node.type}): contact has no WhatsApp ID.`);
+    fatalErr.fatal = true;
+    throw fatalErr;
   }
 
   const record = (content, messageType, attachment = null) => {
@@ -389,7 +393,16 @@ async function handleAction(node, ctx) {
       const text = flowTemplateService.render(config.text, {
         interaction, variables: enrollment?.variables
       });
-      await sendTextForInteraction(ctx.interaction, organizationId, text);
+      const sendResult = await sendTextForInteraction(ctx.interaction, organizationId, text);
+      if (sendResult && !sendResult.sent) {
+        if (sendResult.reason === 'no_connection' || sendResult.fatal) {
+          const fatalErr = new Error(sendResult.message || `Channel is not connected. Connect it in Settings → Platforms.`);
+          fatalErr.fatal = true;
+          throw fatalErr;
+        }
+        // Other non-fatal reasons (e.g. API rate limit) are logged but don't fail the enrollment.
+        logger.warn('[FlowHandler] send_text non-fatal send failure', { reason: sendResult.reason });
+      }
       break;
     }
     case 'action.offer_services':
@@ -410,6 +423,7 @@ async function handleAction(node, ctx) {
       // replies) regardless of edges, so the customer isn't stuck in a re-prompt loop.
       return {
         status: 'continue',
+        ...(r.converted ? { converted: true } : {}),
         variables: r.variables || {},
         nextNodeId: r.end ? undefined : pickEdge(ctx.edges, r.branch)?.target
       };
@@ -419,7 +433,22 @@ async function handleAction(node, ctx) {
       const messageService = require('../flowMessageService');
       const conn = await messageService.getConnection(organizationId, 'whatsapp');
       const recipient = interaction?.author?.platformId || enrollment?.platformUserId;
-      if (conn && recipient && config.templateName) {
+      if (!conn) {
+        const fatalErr = new Error('WhatsApp is not connected. Connect WhatsApp in Settings → Platforms.');
+        fatalErr.fatal = true;
+        throw fatalErr;
+      }
+      if (!recipient) {
+        const fatalErr = new Error('Cannot send template: contact has no WhatsApp ID.');
+        fatalErr.fatal = true;
+        throw fatalErr;
+      }
+      if (!config.templateName) {
+        const fatalErr = new Error('No WhatsApp template selected. Choose a template in the node settings.');
+        fatalErr.fatal = true;
+        throw fatalErr;
+      }
+      {
         const whatsappService = require('../../../integrations/whatsapp/whatsappService');
         // Interpolate {{tokens}} in each positional variable value before send.
         const tplContext = flowTemplateService.buildContext(interaction, enrollment?.variables);
@@ -438,10 +467,6 @@ async function handleAction(node, ctx) {
           config.templateLanguage || 'en',
           buildTemplateComponents(renderedVars)
         );
-      } else {
-        logger.warn('[FlowHandler] send_template skipped', {
-          hasConn: !!conn, hasRecipient: !!recipient, templateName: config.templateName
-        });
       }
       break;
     }
@@ -451,11 +476,15 @@ async function handleAction(node, ctx) {
       const platform = interaction?.platform === 'facebook' ? 'facebook' : 'instagram';
       const conn = await messageService.getConnection(organizationId, platform);
       const recipient = interaction?.author?.platformId || enrollment?.platformUserId;
-      if (!conn || !recipient) {
-        logger.warn('[FlowHandler] send_generic_template skipped', {
-          hasConn: !!conn, hasRecipient: !!recipient, platform
-        });
-        break;
+      if (!conn) {
+        const fatalErr = new Error(`${platform} is not connected. Connect it in Settings → Platforms.`);
+        fatalErr.fatal = true;
+        throw fatalErr;
+      }
+      if (!recipient) {
+        const fatalErr = new Error(`Cannot send template: contact has no ${platform} ID.`);
+        fatalErr.fatal = true;
+        throw fatalErr;
       }
       const tplContext = flowTemplateService.buildContext(interaction, enrollment?.variables);
       const render = (v) => (typeof v === 'string' ? flowTemplateService.render(v, { context: tplContext }) : '');
@@ -498,9 +527,15 @@ async function handleAction(node, ctx) {
       // Alias of send_product: send a single WhatsApp catalog product card.
       const messageService = require('../flowMessageService');
       const { conn, recipient } = await messageService.resolveWhatsAppTarget(organizationId, interaction, enrollment);
-      if (!conn || !recipient) {
-        logger.warn('[FlowHandler] send_catalog_product skipped (no conn/recipient)');
-        break;
+      if (!conn) {
+        const fatalErr = new Error('WhatsApp is not connected. Connect WhatsApp in Settings → Platforms.');
+        fatalErr.fatal = true;
+        throw fatalErr;
+      }
+      if (!recipient) {
+        const fatalErr = new Error('Cannot send catalog product: contact has no WhatsApp ID.');
+        fatalErr.fatal = true;
+        throw fatalErr;
       }
       if (!config.productId) throw new Error('Send catalog product: productId is required');
       const whatsappCatalogService = require('../../../integrations/whatsapp/whatsappCatalogService');
@@ -563,6 +598,7 @@ async function handleAction(node, ctx) {
       );
       return {
         status: 'continue',
+        converted: true,
         variables: { orderId: String(order._id), orderRef: order.displayRef || '' },
         nextNodeId: pickEdge(ctx.edges)?.target
       };
@@ -727,14 +763,21 @@ async function handleAction(node, ctx) {
       ).sort({ createdAt: -1 }).lean();
 
       if (!order) {
-        logger.warn('[FlowHandler] send_order_details: no order found');
+        // Not a fatal error — the order hasn't been created yet at this point in the flow.
+        logger.warn('[FlowHandler] send_order_details: no order found — skipping (non-fatal)');
         break;
       }
 
       const { conn, recipient } = await messageService.resolveWhatsAppTarget(organizationId, interaction, enrollment);
-      if (!conn || !recipient) {
-        logger.warn('[FlowHandler] send_order_details skipped: no WhatsApp target');
-        break;
+      if (!conn) {
+        const fatalErr = new Error('WhatsApp is not connected. Connect WhatsApp in Settings → Platforms.');
+        fatalErr.fatal = true;
+        throw fatalErr;
+      }
+      if (!recipient) {
+        const fatalErr = new Error('Cannot send order details: contact has no WhatsApp ID.');
+        fatalErr.fatal = true;
+        throw fatalErr;
       }
 
       const tplContext = flowTemplateService.buildContext(interaction, enrollment?.variables);
@@ -914,7 +957,14 @@ async function handleAction(node, ctx) {
       const fullInteraction = interaction?._id
         ? await Interaction.findById(interaction._id)
         : null;
-      if (fullInteraction) {
+      if (!fullInteraction) {
+        return {
+          status: 'continue',
+          warning: 'AI reply skipped — no interaction context available.',
+          nextNodeId: pickEdge(ctx.edges)?.target
+        };
+      }
+      try {
         const reply = await replyGenerationService.generateResponseOpenAI(
           fullInteraction,
           organizationId,
@@ -923,7 +973,20 @@ async function handleAction(node, ctx) {
         );
         if (reply?.content) {
           await sendTextForInteraction(fullInteraction, organizationId, reply.content);
+        } else {
+          return {
+            status: 'continue',
+            warning: 'AI reply generated no content — skipped.',
+            nextNodeId: pickEdge(ctx.edges)?.target
+          };
         }
+      } catch (aiErr) {
+        logger.warn('[FlowHandler] ai_reply failed', { error: aiErr.message });
+        return {
+          status: 'continue',
+          warning: `AI reply failed: ${aiErr.message}`,
+          nextNodeId: pickEdge(ctx.edges)?.target
+        };
       }
       break;
     }
@@ -1072,6 +1135,7 @@ async function handleAction(node, ctx) {
       if (config.url) {
         const axios = require('axios');
         const method = String(config.method || 'GET').toUpperCase();
+        let httpErr = null;
         const resp = await axios({
           method,
           url: config.url,
@@ -1079,9 +1143,17 @@ async function handleAction(node, ctx) {
           data: (method !== 'GET' && config.body && typeof config.body === 'object') ? config.body : undefined,
           timeout: 10000
         }).catch((err) => {
+          httpErr = err.message;
           logger.warn('[FlowHandler] http_request failed', { error: err.message, url: config.url });
           return null;
         });
+        if (httpErr) {
+          return {
+            status: 'continue',
+            warning: `HTTP request failed: ${httpErr}`,
+            nextNodeId: pickEdge(ctx.edges)?.target
+          };
+        }
         if (resp && config.saveAs) {
           return {
             status: 'continue',
