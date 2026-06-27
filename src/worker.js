@@ -17,7 +17,8 @@ const {
   flowTickQueue,
   kbCrawlQueue,
   demoExpiryQueue,
-  appointmentReminderQueue
+  appointmentReminderQueue,
+  publicAuditQueue
 } = require('./config/queue');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
@@ -31,6 +32,7 @@ const renewOutlookSubscriptions = require('./jobs/renewOutlookSubscriptions');
 const processVoiceCall = require('./jobs/processVoiceCall');
 const processFlowTick = require('./jobs/processFlowTick');
 const processKbCrawl = require('./jobs/processKbCrawl');
+const processGrowthAudit = require('./jobs/processGrowthAudit');
 const processDemoExpiry = require('./jobs/processDemoExpiry');
 const processAppointmentReminders = require('./jobs/processAppointmentReminders');
 const campaignConfig = require('./config/campaignConfig');
@@ -43,6 +45,7 @@ const AI_CONCURRENCY = parseInt(process.env.AI_CONCURRENCY) || 10;
 const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
 const BRAND_ANALYSIS_CONCURRENCY = parseInt(process.env.BRAND_ANALYSIS_CONCURRENCY) || 2;
 const KB_CRAWL_CONCURRENCY = parseInt(process.env.KB_CRAWL_CONCURRENCY) || 2;
+const PUBLIC_AUDIT_CONCURRENCY = parseInt(process.env.PUBLIC_AUDIT_CONCURRENCY) || 3;
 const EMAIL_WEBHOOK_CONCURRENCY = parseInt(process.env.EMAIL_WEBHOOK_CONCURRENCY) || 5;
 const IMAP_POLL_CONCURRENCY = parseInt(process.env.IMAP_POLL_CONCURRENCY) || 3;
 const VOICE_CALL_CONCURRENCY = parseInt(process.env.VOICE_CALL_CONCURRENCY) || 4;
@@ -103,6 +106,13 @@ async function startWorker() {
       return await processKbCrawl(job);
     });
     logger.info('[Worker] kb-crawl processor started', { concurrency: KB_CRAWL_CONCURRENCY });
+
+    // Public Growth Intelligence audit — lead-magnet, no-auth, fan-out to 3 providers
+    publicAuditQueue.process(PUBLIC_AUDIT_CONCURRENCY, async (job) => {
+      logger.debug('[Worker:public-audit] picked up job', { jobId: job.id });
+      return await processGrowthAudit(job);
+    });
+    logger.info('[Worker] public-audit processor started', { concurrency: PUBLIC_AUDIT_CONCURRENCY });
 
     // Demo-trial expiry: run daily to lock demo workspaces past their trial.
     // Guard against duplicate repeat jobs on worker restart.
@@ -256,7 +266,8 @@ async function startWorker() {
           voiceCallQueue.close(),
           campaignSendQueue.close(),
           campaignInboxQueue.close(),
-          flowTickQueue.close()
+          flowTickQueue.close(),
+          publicAuditQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

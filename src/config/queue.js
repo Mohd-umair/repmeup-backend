@@ -51,6 +51,10 @@ const kbCrawlQueue = new Queue('kb-crawl', queueOptions);
 // Demo-trial expiry — a lightweight daily repeat job that locks expired demos.
 const demoExpiryQueue = new Queue('demo-expiry', queueOptions);
 
+// Public Growth Intelligence audit — no-auth, prospect-facing lead magnet.
+// Lower concurrency: each job fans out to 3 external providers (IG/FB/Google).
+const publicAuditQueue = new Queue('public-audit', queueOptions);
+
 // Appointment reminders + no-show sweep — a periodic scan (every ~10 min).
 const appointmentReminderQueue = new Queue('appointment-reminder', queueOptions);
 
@@ -93,7 +97,8 @@ const queues = [
   flowTickQueue,
   kbCrawlQueue,
   demoExpiryQueue,
-  appointmentReminderQueue
+  appointmentReminderQueue,
+  publicAuditQueue
 ];
 
 queues.forEach(queue => {
@@ -142,5 +147,6 @@ module.exports = {
   kbCrawlQueue,
   demoExpiryQueue,
   appointmentReminderQueue,
+  publicAuditQueue,
   queueConfig
 };
