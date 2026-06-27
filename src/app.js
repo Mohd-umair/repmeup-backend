@@ -156,6 +156,8 @@ app.use('/admin/queues', bullBoardAdapter.getRouter());
 // new integrations should use /api/v1/.
 const routeMap = [
   ['/public',         './routes/public'],
+  ['/public/growth-audit', './routes/growthAudit'],
+  ['/growth-intelligence', './routes/growthIntelligence'],
   ['/contact',        './routes/contact'],
   ['/demo',           './routes/demo'],
   ['/auth',           './routes/auth'],
