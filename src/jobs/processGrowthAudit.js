@@ -3,7 +3,7 @@
  *
  * Pattern mirrors processKbCrawl.js:
  *   1. Load GrowthAudit doc
- *   2. Run all three providers in parallel (Promise.allSettled — partial failure allowed)
+ *   2. Run only the providers the user submitted (IG / FB / Google URLs)
  *   3. Score via auditScoringService (includes OpenAI AI Recommendations)
  *   4. Save full result + set status = done | partial | failed
  */
@@ -26,47 +26,49 @@ async function processGrowthAudit(job) {
   audit.startedAt = new Date();
   await audit.save();
 
+  const platforms = {
+    instagram: !!audit.igHandle,
+    facebook: !!audit.fbPageUrl,
+    google: !!audit.googleQuery
+  };
+
   logger.info('[GrowthAudit] starting', {
     auditId: String(auditId),
     igHandle: audit.igHandle,
-    industry: audit.industry
+    industry: audit.industry,
+    platforms
   });
 
-  // ── Fan out to all three providers in parallel ──────────────────────────────
-  const [igResult, fbResult, googleResult] = await Promise.allSettled([
-    audit.igHandle
-      ? fetchInstagram(audit.igHandle)
-      : Promise.resolve({}),
-    audit.fbPageUrl
-      ? fetchFacebook(audit.fbPageUrl)
-      : Promise.resolve({}),
-    audit.googleQuery
-      ? fetchGoogle(audit.googleQuery)
-      : Promise.resolve({})
-  ]);
+  // ── Only scrape platforms the user provided ─────────────────────────────────
+  const providerTasks = [];
+  if (platforms.instagram) {
+    providerTasks.push({ key: 'ig', run: () => fetchInstagram(audit.igHandle) });
+  }
+  if (platforms.facebook) {
+    providerTasks.push({ key: 'fb', run: () => fetchFacebook(audit.fbPageUrl) });
+  }
+  if (platforms.google) {
+    providerTasks.push({ key: 'google', run: () => fetchGoogle(audit.googleQuery) });
+  }
 
-  const rawData = {
-    ig:     igResult.status     === 'fulfilled' ? igResult.value     : {},
-    fb:     fbResult.status     === 'fulfilled' ? fbResult.value     : {},
-    google: googleResult.status === 'fulfilled' ? googleResult.value : {}
-  };
+  const settled = await Promise.allSettled(providerTasks.map(t => t.run()));
 
+  const rawData = { ig: {}, fb: {}, google: {} };
   const failedProviders = [];
-  if (igResult.status === 'rejected') {
-    logger.warn('[GrowthAudit] Instagram provider failed', { auditId, error: igResult.reason?.message });
-    failedProviders.push('instagram');
-  }
-  if (fbResult.status === 'rejected') {
-    logger.warn('[GrowthAudit] Facebook provider failed', { auditId, error: fbResult.reason?.message });
-    failedProviders.push('facebook');
-  }
-  if (googleResult.status === 'rejected') {
-    logger.warn('[GrowthAudit] Google provider failed', { auditId, error: googleResult.reason?.message });
-    failedProviders.push('google');
-  }
 
-  // All providers failed — mark failed and stop
-  if (failedProviders.length === 3) {
+  settled.forEach((result, i) => {
+    const { key } = providerTasks[i];
+    if (result.status === 'fulfilled') {
+      rawData[key] = result.value;
+    } else {
+      const label = key === 'ig' ? 'instagram' : key === 'fb' ? 'facebook' : 'google';
+      logger.warn(`[GrowthAudit] ${label} provider failed`, { auditId, error: result.reason?.message });
+      failedProviders.push(label);
+    }
+  });
+
+  // All requested providers failed — mark failed and stop
+  if (failedProviders.length > 0 && failedProviders.length === providerTasks.length) {
     audit.status = 'failed';
     audit.errorMessage = 'All data providers failed. Please try again shortly.';
     audit.completedAt = new Date();
@@ -82,7 +84,8 @@ async function processGrowthAudit(job) {
       rawData,
       audit.industry || 'general',
       audit.avgOrderValue || 0,
-      audit.businessName || ''
+      audit.businessName || '',
+      platforms
     );
   } catch (scoreErr) {
     logger.error('[GrowthAudit] scoring failed', { auditId, error: scoreErr.message });

@@ -61,6 +61,8 @@ function formatAudit(audit, fullAccess = false) {
     businessName:audit.businessName,
     industry:    audit.industry,
     igHandle:    audit.igHandle,
+    fbPageUrl:   audit.fbPageUrl,
+    googleQuery: audit.googleQuery,
     errorMessage:audit.errorMessage,
     leadCaptured:audit.leadCaptured,
     createdAt:   audit.createdAt
@@ -72,14 +74,17 @@ function formatAudit(audit, fullAccess = false) {
     base.revenueLeakFormula = audit.modules?.revenueLeak?.formula || '';
     base.unansweredBuying = audit.modules?.revenueLeak?.unansweredBuying || 0;
 
-    // Teaser metrics visible before lead capture
-    base.teaser = {
-      igReplyRate: audit.modules?.socialPresence?.igReplyRate,
-      googleRating: audit.modules?.reputation?.google?.rating,
-      googleReviews: audit.modules?.reputation?.google?.totalReviews,
-      googleReplyRate: audit.modules?.reputation?.google?.ownerReplyRate,
-      buyingIntentCount: audit.modules?.socialPresence?.igBuyingIntentCount
-    };
+    // Teaser metrics visible before lead capture (only for audited platforms)
+    base.teaser = {};
+    if (audit.igHandle) {
+      base.teaser.igReplyRate = audit.modules?.socialPresence?.igReplyRate;
+      base.teaser.buyingIntentCount = audit.modules?.socialPresence?.igBuyingIntentCount;
+    }
+    if (audit.googleQuery) {
+      base.teaser.googleRating = audit.modules?.reputation?.google?.rating;
+      base.teaser.googleReviews = audit.modules?.reputation?.google?.totalReviews;
+      base.teaser.googleReplyRate = audit.modules?.reputation?.google?.ownerReplyRate;
+    }
 
     if (fullAccess) {
       base.modules         = audit.modules;
@@ -117,14 +122,16 @@ router.post('/', createLimiter, async (req, res) => {
       avgOrderValue
     } = req.body;
 
-    if (!igHandle && !googleQuery) {
+    if (!igHandle?.trim() && !fbPageUrl?.trim() && !googleQuery?.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'At least an Instagram handle or Google business name is required.'
+        error: 'At least one platform is required (Instagram, Facebook, or Google).'
       });
     }
 
     const normalizedHandle = (igHandle || '').replace(/^@/, '').trim().toLowerCase();
+    const normalizedFbUrl = (fbPageUrl || '').trim();
+    const normalizedGoogleQuery = (googleQuery || '').trim();
     const normalizedIndustry = (industry || 'general').toLowerCase();
 
     // Deduplicate: return cached audit if a completed one exists for same handle in last 48h
@@ -145,8 +152,8 @@ router.post('/', createLimiter, async (req, res) => {
 
     const auditDoc = new GrowthAudit({
       igHandle:      normalizedHandle || undefined,
-      fbPageUrl:     fbPageUrl?.trim() || undefined,
-      googleQuery:   googleQuery?.trim() || undefined,
+      fbPageUrl:     normalizedFbUrl || undefined,
+      googleQuery:   normalizedGoogleQuery || undefined,
       businessName:  businessName?.trim() || normalizedHandle || 'Your Business',
       industry:      normalizedIndustry,
       avgOrderValue: parseFloat(avgOrderValue) || 0,
