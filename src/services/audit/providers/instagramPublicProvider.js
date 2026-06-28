@@ -12,11 +12,9 @@
  *   stock, order, buy, purchase, delivery, cod, book, contact
  */
 
-const axios = require('axios');
 const logger = require('../../../config/logger');
 const { mockInstagram } = require('./mockProvider');
-
-const APIFY_BASE = 'https://api.apify.com/v2';
+const { runApifyActor } = require('./apifyRunner');
 
 const BUYING_INTENT_PATTERNS = [
   /price|rate|cost|how much|kitna|kitni/i,
@@ -31,24 +29,6 @@ const BUYING_INTENT_PATTERNS = [
 function hasBuyingIntent(text) {
   if (!text) return false;
   return BUYING_INTENT_PATTERNS.some(re => re.test(text));
-}
-
-/**
- * Run an Apify actor synchronously and return the dataset items.
- * Uses the "Run actor synchronously and get dataset items" endpoint.
- */
-async function runApifyActor(actorId, input, timeoutSecs = 60) {
-  const token = process.env.APIFY_TOKEN;
-  const resp = await axios.post(
-    `${APIFY_BASE}/acts/${actorId}/run-sync-get-dataset-items`,
-    input,
-    {
-      params: { token, timeout: timeoutSecs },
-      timeout: (timeoutSecs + 10) * 1000,
-      headers: { 'Content-Type': 'application/json' }
-    }
-  );
-  return Array.isArray(resp.data) ? resp.data : [];
 }
 
 /**
@@ -67,7 +47,7 @@ async function fetchInstagram(igHandle) {
 
   try {
     // Apify instagram-scraper actor: apify/instagram-scraper
-    const items = await runApifyActor('apify/instagram-scraper', {
+    const items = await runApifyActor('apify~instagram-scraper', {
       directUrls: [`https://www.instagram.com/${handle}/`],
       resultsType: 'posts',
       resultsLimit: 20,
