@@ -56,39 +56,47 @@ function normRating(rating, benchmarkRating) {
 
 // ── M1 — Social Presence ─────────────────────────────────────────────────────
 
-function computeSocialPresence(igRaw, fbRaw) {
-  return {
-    igFollowers:         igRaw.followers || 0,
-    igPosts:             igRaw.posts || 0,
-    igComments:          igRaw.comments || 0,
-    igReplies:           igRaw.replies || 0,
-    igReplyRate:         Math.round(igRaw.replyRate || 0),
-    igBuyingIntentCount: igRaw.buyingIntentCount || 0,
-    igUnansweredBuying:  igRaw.unansweredBuying || 0,
-    igPostingGaps:       !!igRaw.postingGaps,
-    igAvgEngagement:     igRaw.avgEngagement || 0,
-    fbPosts:             fbRaw.posts || 0,
-    fbComments:          fbRaw.comments || 0,
-    fbReplies:           fbRaw.replies || 0,
-    fbReplyRate:         Math.round(fbRaw.replyRate || 0)
-  };
+function computeSocialPresence(igRaw, fbRaw, platforms = {}) {
+  const result = {};
+  if (platforms.instagram) {
+    result.igFollowers         = igRaw.followers || 0;
+    result.igPosts             = igRaw.posts || 0;
+    result.igComments          = igRaw.comments || 0;
+    result.igReplies           = igRaw.replies || 0;
+    result.igReplyRate         = Math.round(igRaw.replyRate || 0);
+    result.igBuyingIntentCount = igRaw.buyingIntentCount || 0;
+    result.igUnansweredBuying  = igRaw.unansweredBuying || 0;
+    result.igPostingGaps       = !!igRaw.postingGaps;
+    result.igAvgEngagement     = igRaw.avgEngagement || 0;
+  }
+  if (platforms.facebook) {
+    result.fbPosts     = fbRaw.posts || 0;
+    result.fbComments  = fbRaw.comments || 0;
+    result.fbReplies   = fbRaw.replies || 0;
+    result.fbReplyRate = Math.round(fbRaw.replyRate || 0);
+  }
+  return result;
 }
 
 // ── M2 — Reputation ──────────────────────────────────────────────────────────
 
-function computeReputation(googleRaw, fbRaw) {
-  return {
-    google: {
-      rating:            googleRaw.rating || 0,
-      totalReviews:      googleRaw.totalReviews || 0,
-      ownerReplyRate:    Math.round(googleRaw.ownerReplyRate || 0),
-      unansweredNegative:googleRaw.unansweredNegative || 0
-    },
-    facebook: {
-      rating:            fbRaw.rating || 0,
-      commentReplyRate:  Math.round(fbRaw.replyRate || 0)
-    }
-  };
+function computeReputation(googleRaw, fbRaw, platforms = {}) {
+  const result = {};
+  if (platforms.google) {
+    result.google = {
+      rating:             googleRaw.rating || 0,
+      totalReviews:       googleRaw.totalReviews || 0,
+      ownerReplyRate:     Math.round(googleRaw.ownerReplyRate || 0),
+      unansweredNegative: googleRaw.unansweredNegative || 0
+    };
+  }
+  if (platforms.facebook) {
+    result.facebook = {
+      rating:           fbRaw.rating || 0,
+      commentReplyRate: Math.round(fbRaw.replyRate || 0)
+    };
+  }
+  return result;
 }
 
 // ── M4 — Revenue Leak ─────────────────────────────────────────────────────────
@@ -107,51 +115,52 @@ function computeRevenueLeak(socialPresence, avgOrderValue, conversionRate) {
 
 // ── M9 — Opportunity Calculator ───────────────────────────────────────────────
 
-function computeOpportunityCalc(socialPresence, reputation, benchmarks, avgOrderValue, conversionRate) {
+function computeOpportunityCalc(socialPresence, reputation, benchmarks, avgOrderValue, conversionRate, platforms = {}) {
   const items = [];
 
-  // Opportunity 1: Improve Instagram comment reply rate
-  const currentIgReply = socialPresence.igReplyRate || 0;
-  const benchIgReply = benchmarks.commentReplyRate || 75;
-  if (currentIgReply < benchIgReply) {
-    const upliftFraction = ((benchIgReply - currentIgReply) / 100) * 0.38;
-    items.push({
-      metric: 'Comment Reply Rate',
-      currentValue: currentIgReply,
-      improvedValue: benchIgReply,
-      unit: '%',
-      upliftLabel: `+${Math.round(upliftFraction * 100)}% Lead Conversions`,
-      upliftFraction: +upliftFraction.toFixed(2)
-    });
+  if (platforms.instagram) {
+    const currentIgReply = socialPresence.igReplyRate || 0;
+    const benchIgReply = benchmarks.commentReplyRate || 75;
+    if (currentIgReply < benchIgReply) {
+      const upliftFraction = ((benchIgReply - currentIgReply) / 100) * 0.38;
+      items.push({
+        metric: 'Comment Reply Rate',
+        currentValue: currentIgReply,
+        improvedValue: benchIgReply,
+        unit: '%',
+        upliftLabel: `+${Math.round(upliftFraction * 100)}% Lead Conversions`,
+        upliftFraction: +upliftFraction.toFixed(2)
+      });
+    }
+
+    const unanswered = socialPresence.igUnansweredBuying || 0;
+    if (unanswered > 5) {
+      const revenueGain = Math.round(unanswered * conversionRate * avgOrderValue);
+      items.push({
+        metric: 'Buying Intent Comments Answered',
+        currentValue: Math.round((socialPresence.igBuyingIntentCount - unanswered) / Math.max(socialPresence.igBuyingIntentCount, 1) * 100),
+        improvedValue: benchmarks.buyingIntentReplyRate || 88,
+        unit: '%',
+        upliftLabel: `+₹${revenueGain.toLocaleString('en-IN')}/month Revenue`,
+        upliftFraction: +((benchmarks.buyingIntentReplyRate - 20) / 100).toFixed(2)
+      });
+    }
   }
 
-  // Opportunity 2: Improve Google review response rate
-  const currentGoogleReply = reputation.google?.ownerReplyRate || 0;
-  const benchGoogleReply = benchmarks.reviewReplyRate || 80;
-  if (currentGoogleReply < benchGoogleReply) {
-    const ratingUplift = Math.round((benchGoogleReply - currentGoogleReply) / 100 * 0.3 * 10) / 10;
-    items.push({
-      metric: 'Google Review Response Rate',
-      currentValue: currentGoogleReply,
-      improvedValue: benchGoogleReply,
-      unit: '%',
-      upliftLabel: `+${ratingUplift} Star Rating (estimated)`,
-      upliftFraction: ratingUplift / 5
-    });
-  }
-
-  // Opportunity 3: Buying intent response → revenue
-  const unanswered = socialPresence.igUnansweredBuying || 0;
-  if (unanswered > 5) {
-    const revenueGain = Math.round(unanswered * conversionRate * avgOrderValue);
-    items.push({
-      metric: 'Buying Intent Comments Answered',
-      currentValue: Math.round((socialPresence.igBuyingIntentCount - unanswered) / Math.max(socialPresence.igBuyingIntentCount, 1) * 100),
-      improvedValue: benchmarks.buyingIntentReplyRate || 88,
-      unit: '%',
-      upliftLabel: `+₹${revenueGain.toLocaleString('en-IN')}/month Revenue`,
-      upliftFraction: +((benchmarks.buyingIntentReplyRate - 20) / 100).toFixed(2)
-    });
+  if (platforms.google) {
+    const currentGoogleReply = reputation.google?.ownerReplyRate || 0;
+    const benchGoogleReply = benchmarks.reviewReplyRate || 80;
+    if (currentGoogleReply < benchGoogleReply) {
+      const ratingUplift = Math.round((benchGoogleReply - currentGoogleReply) / 100 * 0.3 * 10) / 10;
+      items.push({
+        metric: 'Google Review Response Rate',
+        currentValue: currentGoogleReply,
+        improvedValue: benchGoogleReply,
+        unit: '%',
+        upliftLabel: `+${ratingUplift} Star Rating (estimated)`,
+        upliftFraction: ratingUplift / 5
+      });
+    }
   }
 
   return items;
@@ -159,28 +168,45 @@ function computeOpportunityCalc(socialPresence, reputation, benchmarks, avgOrder
 
 // ── Conversation Score ─────────────────────────────────────────────────────────
 
-function computeConversationScore(socialPresence, reputation, benchmarks) {
-  const igReplyContrib     = normRate(socialPresence.igReplyRate, benchmarks.commentReplyRate) * WEIGHTS.igReplyRate;
-  const fbReplyContrib     = normRate(socialPresence.fbReplyRate, benchmarks.commentReplyRate) * WEIGHTS.fbReplyRate;
-  const googleReplyContrib = normRate(reputation.google?.ownerReplyRate, benchmarks.reviewReplyRate) * WEIGHTS.googleReplyRate;
-  const googleRatingContrib= normRating(reputation.google?.rating, benchmarks.avgRating) * WEIGHTS.googleRating;
+function computeConversationScore(socialPresence, reputation, benchmarks, platforms = {}) {
+  let sum = 0;
+  let totalWeight = 0;
 
-  const totalBuying = socialPresence.igBuyingIntentCount || 1;
-  const answeredBuying = totalBuying - (socialPresence.igUnansweredBuying || 0);
-  const buyingRate = (answeredBuying / totalBuying) * 100;
-  const buyingContrib = normRate(buyingRate, benchmarks.buyingIntentReplyRate) * WEIGHTS.buyingIntentHandled;
+  if (platforms.instagram) {
+    sum += normRate(socialPresence.igReplyRate, benchmarks.commentReplyRate) * WEIGHTS.igReplyRate;
+    totalWeight += WEIGHTS.igReplyRate;
 
-  const postingContrib = socialPresence.igPostingGaps ? 0 : WEIGHTS.postingConsistency;
+    const totalBuying = socialPresence.igBuyingIntentCount || 1;
+    const answeredBuying = totalBuying - (socialPresence.igUnansweredBuying || 0);
+    const buyingRate = (answeredBuying / totalBuying) * 100;
+    sum += normRate(buyingRate, benchmarks.buyingIntentReplyRate) * WEIGHTS.buyingIntentHandled;
+    totalWeight += WEIGHTS.buyingIntentHandled;
 
-  const raw = (igReplyContrib + fbReplyContrib + googleReplyContrib + googleRatingContrib + buyingContrib + postingContrib) * 100;
-  return Math.round(clamp(raw, 0, 100));
+    sum += socialPresence.igPostingGaps ? 0 : WEIGHTS.postingConsistency;
+    totalWeight += WEIGHTS.postingConsistency;
+  }
+
+  if (platforms.facebook) {
+    sum += normRate(socialPresence.fbReplyRate, benchmarks.commentReplyRate) * WEIGHTS.fbReplyRate;
+    totalWeight += WEIGHTS.fbReplyRate;
+  }
+
+  if (platforms.google) {
+    sum += normRate(reputation.google?.ownerReplyRate, benchmarks.reviewReplyRate) * WEIGHTS.googleReplyRate;
+    totalWeight += WEIGHTS.googleReplyRate;
+    sum += normRating(reputation.google?.rating, benchmarks.avgRating) * WEIGHTS.googleRating;
+    totalWeight += WEIGHTS.googleRating;
+  }
+
+  if (totalWeight === 0) return 0;
+  return Math.round(clamp((sum / totalWeight) * 100, 0, 100));
 }
 
 // ── M8 — AI Recommendations ──────────────────────────────────────────────────
 
-async function generateAIRecommendations({ businessName, industry, socialPresence, reputation, revenueLeak, score, grade, benchmarks }) {
+async function generateAIRecommendations({ businessName, industry, socialPresence, reputation, revenueLeak, score, grade, benchmarks, platforms = {} }) {
   if (!openaiClient.hasApiKey()) {
-    return defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks);
+    return defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks, platforms);
   }
 
   const systemPrompt = `You are RepMeUp AI, a Growth Intelligence consultant for Indian businesses. You write brutally honest, data-driven growth recommendations for D2C and SMB brands.
@@ -199,21 +225,31 @@ Return ONLY a valid JSON array (no markdown, no explanations):
   { "rank": 3, "title": "...", "explanation": "...", "expectedImpact": "...", "feature": "..." }
 ]`;
 
+  const platformLines = [];
+  if (platforms.instagram) {
+    platformLines.push(`Instagram:
+- Reply rate: ${socialPresence.igReplyRate}% (industry benchmark: ${benchmarks.commentReplyRate}%)
+- Buying-intent comments: ${socialPresence.igBuyingIntentCount} total, ${socialPresence.igUnansweredBuying} UNANSWERED
+- Posting gaps: ${socialPresence.igPostingGaps ? 'Yes — missing days in last 30 days' : 'No'}`);
+  }
+  if (platforms.google) {
+    platformLines.push(`Google Reviews:
+- Rating: ${reputation.google?.rating}/5 (${reputation.google?.totalReviews} reviews)
+- Owner reply rate: ${reputation.google?.ownerReplyRate}% (benchmark: ${benchmarks.reviewReplyRate}%)
+- Unanswered negative reviews: ${reputation.google?.unansweredNegative}`);
+  }
+  if (platforms.facebook) {
+    platformLines.push(`Facebook:
+- Comment reply rate: ${socialPresence.fbReplyRate}% (benchmark: ${benchmarks.commentReplyRate}%)`);
+  }
+
   const userPrompt = `Analyse this business and write 3 ranked growth recommendations:
 
 Business: ${businessName || 'this business'}
 Industry: ${industry}
 Conversation Score: ${score}/100 (Grade: ${grade})
 
-Instagram:
-- Reply rate: ${socialPresence.igReplyRate}% (industry benchmark: ${benchmarks.commentReplyRate}%)
-- Buying-intent comments: ${socialPresence.igBuyingIntentCount} total, ${socialPresence.igUnansweredBuying} UNANSWERED
-- Posting gaps: ${socialPresence.igPostingGaps ? 'Yes — missing days in last 30 days' : 'No'}
-
-Google Reviews:
-- Rating: ${reputation.google?.rating}/5 (${reputation.google?.totalReviews} reviews)
-- Owner reply rate: ${reputation.google?.ownerReplyRate}% (benchmark: ${benchmarks.reviewReplyRate}%)
-- Unanswered negative reviews: ${reputation.google?.unansweredNegative}
+${platformLines.join('\n\n')}
 
 Revenue Leak: ₹${revenueLeak.number?.toLocaleString('en-IN')}/month from ${revenueLeak.unansweredBuying} unanswered buying comments
 
@@ -233,18 +269,18 @@ Each recommendation must cite specific numbers from this data, state what RepMeU
     const text = resp.data?.choices?.[0]?.message?.content?.trim() || '';
     const parsed = JSON.parse(text);
     if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    return defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks);
+    return defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks, platforms);
   } catch (err) {
     logger.warn('[auditScoringService] AI recommendations failed — using defaults', { error: err.message });
-    return defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks);
+    return defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks, platforms);
   }
 }
 
-function defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks) {
+function defaultRecommendations(socialPresence, reputation, revenueLeak, benchmarks, platforms = {}) {
   const recs = [];
   let rank = 1;
 
-  if ((socialPresence.igUnansweredBuying || 0) > 5) {
+  if (platforms.instagram && (socialPresence.igUnansweredBuying || 0) > 5) {
     recs.push({
       rank: rank++,
       title: 'Stop Ignoring Buying-Intent Comments',
@@ -254,7 +290,7 @@ function defaultRecommendations(socialPresence, reputation, revenueLeak, benchma
     });
   }
 
-  if ((reputation.google?.ownerReplyRate || 0) < (benchmarks.reviewReplyRate || 80)) {
+  if (platforms.google && (reputation.google?.ownerReplyRate || 0) < (benchmarks.reviewReplyRate || 80)) {
     recs.push({
       rank: rank++,
       title: 'Reply to Every Google Review',
@@ -284,9 +320,10 @@ function defaultRecommendations(socialPresence, reputation, revenueLeak, benchma
  * @param {string} industry             - Industry key from INDUSTRY_BENCHMARKS
  * @param {number} inputAvgOrderValue   - User-provided AOV in INR (0 = use default)
  * @param {string} businessName
+ * @param {{ instagram?: boolean, facebook?: boolean, google?: boolean }} platforms - Which platforms were audited
  * @returns {Promise<{ modules, benchmarks, score, grade }>}
  */
-async function score(rawData, industry, inputAvgOrderValue, businessName) {
+async function score(rawData, industry, inputAvgOrderValue, businessName, platforms = {}) {
   const benchmarks = getBenchmarks(industry);
   const avgOrderValue = inputAvgOrderValue > 0 ? inputAvgOrderValue : benchmarks.avgOrderValue;
   const conversionRate = benchmarks.conversionRate;
@@ -295,11 +332,11 @@ async function score(rawData, industry, inputAvgOrderValue, businessName) {
   const fb = rawData.fb || {};
   const google = rawData.google || {};
 
-  const socialPresence = computeSocialPresence(ig, fb);
-  const reputation     = computeReputation(google, fb);
+  const socialPresence = computeSocialPresence(ig, fb, platforms);
+  const reputation     = computeReputation(google, fb, platforms);
   const revenueLeak    = computeRevenueLeak(socialPresence, avgOrderValue, conversionRate);
-  const opportunityCalc= computeOpportunityCalc(socialPresence, reputation, benchmarks, avgOrderValue, conversionRate);
-  const conversationScore = computeConversationScore(socialPresence, reputation, benchmarks);
+  const opportunityCalc= computeOpportunityCalc(socialPresence, reputation, benchmarks, avgOrderValue, conversionRate, platforms);
+  const conversationScore = computeConversationScore(socialPresence, reputation, benchmarks, platforms);
   const grade = gradeFromScore(conversationScore);
 
   const aiRecommendations = await generateAIRecommendations({
@@ -310,7 +347,8 @@ async function score(rawData, industry, inputAvgOrderValue, businessName) {
     revenueLeak,
     score: conversationScore,
     grade,
-    benchmarks
+    benchmarks,
+    platforms
   });
 
   return {
