@@ -7,25 +7,9 @@
  * We audit ONLY public pages (rating, recommendation score, comment reply rate).
  */
 
-const axios = require('axios');
 const logger = require('../../../config/logger');
 const { mockFacebook } = require('./mockProvider');
-
-const APIFY_BASE = 'https://api.apify.com/v2';
-
-async function runApifyActor(actorId, input, timeoutSecs = 60) {
-  const token = process.env.APIFY_TOKEN;
-  const resp = await axios.post(
-    `${APIFY_BASE}/acts/${actorId}/run-sync-get-dataset-items`,
-    input,
-    {
-      params: { token, timeout: timeoutSecs },
-      timeout: (timeoutSecs + 10) * 1000,
-      headers: { 'Content-Type': 'application/json' }
-    }
-  );
-  return Array.isArray(resp.data) ? resp.data : [];
-}
+const { runApifyActor } = require('./apifyRunner');
 
 /**
  * Fetch public Facebook page data.
@@ -44,7 +28,7 @@ async function fetchFacebook(fbPageUrl) {
     : `https://www.facebook.com/${fbPageUrl}`;
 
   try {
-    const items = await runApifyActor('apify/facebook-pages-scraper', {
+    const items = await runApifyActor('apify~facebook-pages-scraper', {
       startUrls: [{ url }],
       maxPosts: 10,
       maxPostComments: 20,
