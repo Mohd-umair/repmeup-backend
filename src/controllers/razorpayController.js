@@ -7,7 +7,11 @@ const Organization = require('../models/Organization');
 const User = require('../models/User');
 const logger = require('../config/logger');
 const entitlementsService = require('../services/entitlementsService');
-const { extractRzpError } = require('../services/razorpayPlanService');
+const {
+  extractRzpError,
+  createRazorpayPlan,
+  isPaidBillablePlan
+} = require('../services/razorpayPlanService');
 
 function isValidRazorpayPlanId(id) {
   return typeof id === 'string' && id.startsWith('plan_') && id.length > 5;
@@ -138,23 +142,74 @@ exports.createSubscription = async (req, res, next) => {
       }
     }
 
-    // Verify plan exists in current Razorpay mode (live vs test) before checkout
+    // Verify the plan exists in the CURRENT Razorpay mode (live vs test) before checkout.
+    // When keys are switched (e.g. test ↔ live, or a different Razorpay account) the stored
+    // razorpayPlanId points at a plan that doesn't exist here. Razorpay plans are immutable,
+    // so we self-heal: create a fresh plan in the current mode, persist it, and continue.
+    const mode = (process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_') ? 'live' : 'test';
     try {
       await razorpay.plans.fetch(plan.razorpayPlanId);
     } catch (fetchErr) {
-      const mode = (process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_') ? 'live' : 'test';
-      logger.error('[Razorpay] Plan ID not found in Razorpay', {
+      // Only self-heal a stale/missing plan ID (after a mode/account switch). A missing
+      // plan fetch returns a 4xx ("id does not exist"); auth (401/403) and network/5xx
+      // errors must NOT trigger creating a duplicate plan.
+      const fetchStatus = Number(fetchErr?.statusCode) || 0;
+      const isAuthError = fetchStatus === 401 || fetchStatus === 403;
+      const isStalePlan =
+        isRzpNotFoundError(fetchErr) || (fetchStatus >= 400 && fetchStatus < 500 && !isAuthError);
+
+      if (!isStalePlan) {
+        logger.error('[Razorpay] Plan fetch failed (not a missing-plan error)', {
+          appPlanId: plan.planId,
+          razorpayPlanId: plan.razorpayPlanId,
+          mode,
+          statusCode: fetchStatus,
+          error: extractRzpError(fetchErr)
+        });
+        return res.status(502).json({
+          success: false,
+          error: `Could not reach Razorpay to verify the plan (${extractRzpError(fetchErr)}). Please try again.`
+        });
+      }
+
+      logger.warn('[Razorpay] Plan ID not found in current mode — recreating', {
         appPlanId: plan.planId,
         razorpayPlanId: plan.razorpayPlanId,
         mode,
         error: extractRzpError(fetchErr)
       });
-      return res.status(400).json({
-        success: false,
-        error:
-          `Razorpay plan "${plan.razorpayPlanId}" was not found in ${mode} mode. ` +
-          `Update the "${plan.planId}" plan in Admin (re-save to auto-create) or set the correct live Plan ID from Razorpay Dashboard → Subscriptions → Plans.`
-      });
+
+      if (!isPaidBillablePlan(plan)) {
+        return res.status(400).json({
+          success: false,
+          error: `The "${plan.planId}" plan is not configured for online payment.`
+        });
+      }
+
+      try {
+        const recreated = await createRazorpayPlan(plan);
+        plan.razorpayPlanId = recreated.razorpayPlanId;
+        if (recreated.priceInr) plan.priceInr = recreated.priceInr;
+        await plan.save();
+        logger.info('[Razorpay] Recreated plan in current mode', {
+          appPlanId: plan.planId,
+          razorpayPlanId: plan.razorpayPlanId,
+          mode
+        });
+      } catch (createErr) {
+        logger.error('[Razorpay] Failed to recreate plan', {
+          appPlanId: plan.planId,
+          mode,
+          error: extractRzpError(createErr)
+        });
+        return res.status(createErr?.statusCode || 502).json({
+          success: false,
+          error:
+            `Could not set up the "${plan.planId}" plan for ${mode}-mode payments automatically ` +
+            `(${extractRzpError(createErr)}). Re-save the plan in Admin or set a valid ${mode} Plan ID ` +
+            `from Razorpay Dashboard → Subscriptions → Plans.`
+        });
+      }
     }
 
     // Build notes for customer context
