@@ -109,7 +109,9 @@ exports.createSubscription = async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Subscription record not found' });
     }
 
-    if (plan.tier < subscription.tier) {
+    // Demo workspaces run on an unlimited top-tier internal plan, so every paid plan
+    // looks like a "downgrade". Allow them to subscribe to any plan to convert.
+    if (!subscription.isDemo && plan.tier < subscription.tier) {
       return res.status(400).json({
         success: false,
         error: 'Changing to a lower-tier plan is not supported. Contact support if you need help.'
@@ -277,7 +279,10 @@ exports.verifyPayment = async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Subscription not found' });
     }
 
-    if (plan.tier < subscription.tier) {
+    // Demo workspaces convert in place (see createSubscription) — they sit on a
+    // top-tier internal plan, so skip the lower-tier guard for them.
+    const wasDemo = subscription.isDemo;
+    if (!wasDemo && plan.tier < subscription.tier) {
       return res.status(400).json({
         success: false,
         error: 'Changing to a lower-tier plan is not supported. Contact support if you need help.'
@@ -309,6 +314,16 @@ exports.verifyPayment = async (req, res, next) => {
     const now = new Date();
     subscription.currentPeriodStart = now;
     subscription.currentPeriodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    // A demo workspace just paid: convert it in place to a real paid subscription
+    // so the trial banner/lock and per-demo credit cap no longer apply.
+    if (wasDemo) {
+      subscription.isDemo = false;
+      subscription.demoStatus = 'converted';
+      subscription.convertedAt = now;
+      subscription.demoCreditsCap = null;
+      subscription.trialEndsAt = undefined;
+    }
 
     await subscription.save();
     await entitlementsService.invalidateEntitlements(subscription.organization);
