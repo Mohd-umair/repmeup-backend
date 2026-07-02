@@ -213,6 +213,14 @@ module.exports = async function processWebhook(job) {
       const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
       const threadDm = isThreadStyleDm(interaction);
 
+      // A CTA button tap (e.g. "Product detail", "Buy") arrives as a DM but was
+      // already answered deterministically by salesConversationService.handlePostback
+      // inside the webhook service. The last incomingMessages entry carries
+      // type:'postback' only for these taps (real text DMs have no type), so this is
+      // self-correcting — a later real message clears it. Without this the commenter
+      // also gets the AI "our agent will contact you" fallback as a second reply.
+      const isPostbackTap = isPostbackTapInteraction(interaction);
+
       // Workflow-first gate: AI runs only as a fallback per the channel automation mode.
       let runAiFallback = true;
       if (organizationId) {
@@ -240,6 +248,8 @@ module.exports = async function processWebhook(job) {
         logger.info(`⏭️  [Webhook] Skipping AI — Story-to-DM handled this message: ${interaction._id}`);
       } else if (commentDmSent) {
         logger.info(`⏭️  [Webhook] Skipping AI — Comment-to-DM handled this comment: ${interaction._id}`);
+      } else if (isPostbackTap) {
+        logger.info(`⏭️  [Webhook] Skipping AI — CTA postback tap already handled by sales conversation: ${interaction._id}`);
       } else {
         // Thread DMs reuse one interaction id per conversation — jobId must include message id or each new message would be deduped by Bull
         const mid = interaction.metadata?.lastMid;
@@ -289,6 +299,19 @@ module.exports = async function processWebhook(job) {
     throw error;
   }
 };
+
+/**
+ * True when the most recent inbound event on this (DM thread) interaction was a
+ * CTA postback button tap. Only the postback persist path tags an incomingMessages
+ * entry with type:'postback'; real text DMs carry no type. Because we look at the
+ * LAST entry, the signal reflects the current event and clears itself once the
+ * customer sends a normal message.
+ */
+function isPostbackTapInteraction(interaction) {
+  const msgs = interaction?.metadata?.incomingMessages;
+  if (!Array.isArray(msgs) || msgs.length === 0) return false;
+  return msgs[msgs.length - 1]?.type === 'postback';
+}
 
 /**
  * @deprecated Logic has been moved to src/services/webhook/instagramWebhookService.js
