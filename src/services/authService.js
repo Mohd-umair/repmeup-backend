@@ -415,9 +415,23 @@ class AuthService {
   /**
    * Create team member
    */
-  async createTeamMember(organizationId, creatorId, userData) {
+  async createTeamMember(organizationId, creatorId, userData, creatorRole = 'agent') {
     try {
       const { email, firstName, lastName, role } = userData;
+
+      // SECURITY: never trust the requested role blindly — that let a tenant
+      // admin/manager mint a `super_admin` (full platform takeover). Only an
+      // `admin` may create tenant roles up to `admin`; a `manager` is capped at
+      // `agent`/`viewer`. Platform roles (`super_admin`) are never grantable here.
+      const ROLE_GRANTS = {
+        admin: ['admin', 'manager', 'agent', 'viewer'],
+        manager: ['agent', 'viewer']
+      };
+      const grantable = ROLE_GRANTS[creatorRole] || [];
+      const requestedRole = role || 'agent';
+      if (!grantable.includes(requestedRole)) {
+        throw new Error(`You are not permitted to assign the role '${requestedRole}'`);
+      }
 
       // Check if user already exists
       const existingUser = await User.findOne({ email });
@@ -431,8 +445,8 @@ class AuthService {
         throw new Error('User limit reached for your plan');
       }
 
-      // Generate temporary password
-      const tempPassword = Math.random().toString(36).slice(-8);
+      // Generate a cryptographically strong temporary password
+      const tempPassword = crypto.randomBytes(12).toString('base64url');
 
       // Create user
       const user = await User.create({
@@ -440,7 +454,7 @@ class AuthService {
         password: tempPassword,
         firstName,
         lastName,
-        role: role || 'agent',
+        role: requestedRole,
         organization: organizationId
       });
 

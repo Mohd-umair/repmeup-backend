@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const userActivityLogService = require('../services/userActivityLogService');
@@ -6,17 +7,34 @@ const { protect, authorize } = require('../middlewares/auth');
 const { validateRegistration, validateLogin } = require('../middlewares/validation');
 const riscController = require('../controllers/riscController');
 
+/**
+ * Strict brute-force limiter for credential/OTP endpoints. The global limiter
+ * (1000 req / 15 min) is far too permissive for password and OTP guessing.
+ * Disabled in development unless RATE_LIMIT_ENABLED=true, and globally
+ * overridable via RATE_LIMIT_DISABLED for single-IP proxy deployments.
+ */
+const authLimiter = rateLimit({
+  windowMs: parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX) || 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () =>
+    process.env.RATE_LIMIT_DISABLED === 'true' ||
+    (process.env.NODE_ENV === 'development' && process.env.RATE_LIMIT_ENABLED !== 'true'),
+  message: { success: false, error: 'Too many attempts. Please try again later.' }
+});
+
 // Public routes
-router.post('/register', validateRegistration, authController.register);
-router.post('/login', validateLogin, authController.login);
+router.post('/register', authLimiter, validateRegistration, authController.register);
+router.post('/login', authLimiter, validateLogin, authController.login);
 // Magic-link login for demo prospects (no password)
-router.post('/demo-login', authController.demoLogin);
-router.post('/forgot-password', authController.forgotPassword);
-router.post('/reset-password', authController.resetPassword);
+router.post('/demo-login', authLimiter, authController.demoLogin);
+router.post('/forgot-password', authLimiter, authController.forgotPassword);
+router.post('/reset-password', authLimiter, authController.resetPassword);
 
 // Passwordless login via email OTP
-router.post('/send-otp', authController.sendLoginOtp);
-router.post('/verify-otp', authController.verifyLoginOtp);
+router.post('/send-otp', authLimiter, authController.sendLoginOtp);
+router.post('/verify-otp', authLimiter, authController.verifyLoginOtp);
 
 router.post('/verify-email', authController.verifyEmail);
 router.post('/resend-verification', authController.resendVerification);

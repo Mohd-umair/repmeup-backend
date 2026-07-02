@@ -235,7 +235,8 @@ exports.createTeamMember = async (req, res, next) => {
     const result = await authService.createTeamMember(
       req.user.organization._id,
       req.user._id,
-      req.body
+      req.body,
+      req.user.role
     );
 
     try {
