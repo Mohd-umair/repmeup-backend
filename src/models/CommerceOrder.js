@@ -24,12 +24,7 @@ const lineItemSchema = new mongoose.Schema({
   name: { type: String, trim: true },
   qty: { type: Number, default: 1, min: 1 },
   unitPrice: { type: Number, min: 0 },
-  currency: { type: String, default: 'INR', trim: true },
-  /** Chosen variant (size / colour) when the product has variants. */
-  variant: {
-    size:  { type: String, trim: true, default: null },
-    color: { type: String, trim: true, default: null }
-  }
+  currency: { type: String, default: 'INR', trim: true }
 }, { _id: false });
 
 /** Structured shipping address (parsed from chat or edited by an agent). */

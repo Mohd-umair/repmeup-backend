@@ -28,7 +28,6 @@ const PlatformConnection = require('../models/PlatformConnection');
 const instagramService = require('../integrations/meta/instagramService');
 const commentToDmService = require('./commentToDmService');
 const { recordAutomationReply } = require('./inbox/inboxAutomationReplyService');
-const productVariantService = require('./productVariantService');
 const logger = require('../config/logger');
 
 const svcLogger = logger.createChild({ module: 'salesConversationService' });
@@ -171,38 +170,23 @@ async function sendInstagramTextAndRecord({ state, organizationId, order, conn, 
   return result;
 }
 
-function buildProductDetailsText(product, selectedVariant = null) {
+function buildProductDetailsText(product) {
   const lines = [];
   lines.push(`🛍️ *${product.name}*`);
   if (product.description) lines.push(`📝 ${product.description}`);
   if (product.price != null) lines.push(`💵 Price: ${product.currency || 'AED'} ${product.price}`);
   if (product.sizes?.length) lines.push(`📦 Sizes: ${product.sizes.join(', ')}`);
-  if (product.colors?.length) lines.push(`🎨 Colours: ${product.colors.join(', ')}`);
-
-  const chosen = productVariantService.summarizeVariant(selectedVariant);
-  if (chosen) lines.push(`✅ Your pick: ${chosen}`);
-
+  if (product.colors?.length) lines.push(`🎨 Colors: ${product.colors.join(', ')}`);
   lines.push('');
-  const { hasVariants } = productVariantService.variantDimensions(product);
-  lines.push(hasVariants && !isVariantComplete(product, selectedVariant)
-    ? 'Tell me the size/colour you want, then reply "payment link" to order — or ask us anything! 😊'
-    : 'Reply with "payment link" to place your order, or ask us anything! 😊');
+  lines.push('Reply with "payment link" to place your order, or ask us anything! 😊');
   return lines.join('\n');
-}
-
-/** True when the product's required variant dimensions are all chosen. */
-function isVariantComplete(product, variant) {
-  const { needsSize, needsColor } = productVariantService.variantDimensions(product);
-  if (needsSize && !variant?.size) return false;
-  if (needsColor && !variant?.color) return false;
-  return true;
 }
 
 /**
  * Sends the full product details as a plain-text DM.
  */
-async function sendProductDetails(instagramUserId, product, conn, recordCtx = null, selectedVariant = null) {
-  const content = buildProductDetailsText(product, selectedVariant);
+async function sendProductDetails(instagramUserId, product, conn, recordCtx = null) {
+  const content = buildProductDetailsText(product);
   if (recordCtx) {
     return sendInstagramTextAndRecord({
       ...recordCtx,
@@ -221,24 +205,20 @@ async function sendProductDetails(instagramUserId, product, conn, recordCtx = nu
   );
 }
 
-function buildPaymentLinkText(product, orderToken, variant = null) {
+function buildPaymentLinkText(product, orderToken) {
   if (!product.paymentUrl) {
     return 'Our payment link will be ready shortly. We\'ll send it to you as soon as it\'s available! 🙏';
   }
   const sep = product.paymentUrl.includes('?') ? '&' : '?';
-  let url = orderToken ? `${product.paymentUrl}${sep}ref=${orderToken}` : product.paymentUrl;
-  url = productVariantService.appendVariantToUrl(url, variant);
-
-  const chosen = productVariantService.summarizeVariant(variant);
-  const confirm = chosen ? `✅ ${product.name} — ${chosen}\n\n` : '';
-  return `${confirm}👉 Here's your order link:\n\n${url}\n\nTap the link to complete your purchase! 🛍️`;
+  const url = orderToken ? `${product.paymentUrl}${sep}ref=${orderToken}` : product.paymentUrl;
+  return `👉 Here's your order link:\n\n${url}\n\nTap the link to complete your purchase! 🛍️`;
 }
 
 /**
- * Sends the payment link as a plain-text DM (variant embedded when chosen).
+ * Sends the payment link as a plain-text DM.
  */
-async function sendPaymentLink(instagramUserId, product, orderToken, conn, recordCtx = null, variant = null) {
-  const content = buildPaymentLinkText(product, orderToken, variant);
+async function sendPaymentLink(instagramUserId, product, orderToken, conn, recordCtx = null) {
+  const content = buildPaymentLinkText(product, orderToken);
   if (recordCtx) {
     return sendInstagramTextAndRecord({
       ...recordCtx,
@@ -255,138 +235,6 @@ async function sendPaymentLink(instagramUserId, product, orderToken, conn, recor
     false,
     conn.connType
   );
-}
-
-// ── Variant capture & payment gating ─────────────────────────────────────────
-
-/**
- * Ask the customer for their WhatsApp number (hesitancy path). Advances the state
- * to `whatsapp_requested`. Shared by every stage that can divert to WA capture.
- */
-async function askForWhatsApp({ recordCtx, conn, instagramUserId, state, cfg }) {
-  const captureMsg = cfg?.whatsappCaptureMessage
-    || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
-  await sendInstagramTextAndRecord({
-    ...recordCtx,
-    conn,
-    instagramUserId,
-    content: captureMsg
-  });
-  if (state) {
-    state.stage = 'whatsapp_requested';
-    state.lastStageAt = new Date();
-    await state.save();
-  }
-}
-
-/**
- * Persist a chosen variant to the conversation state, its ProductOrder, and the
- * mirrored CommerceOrder line item. `state` is a live mongoose doc; the order and
- * commerce updates are best-effort and never break the funnel.
- */
-async function persistSelectedVariant(state, product, variant, organizationId) {
-  const clean = { size: variant?.size || null, color: variant?.color || null };
-  if (state) {
-    state.selectedVariant = clean;
-  }
-  try {
-    if (state?.productOrderId) {
-      await ProductOrder.updateOne(
-        { _id: state.productOrderId },
-        { $set: { selectedVariant: clean } }
-      );
-    }
-  } catch (e) {
-    svcLogger.warn('[salesConversation] persist variant → ProductOrder failed (non-fatal)', { error: e.message });
-  }
-  try {
-    if (product?._id && (clean.size || clean.color)) {
-      const CommerceOrder = require('../models/CommerceOrder');
-      await CommerceOrder.updateOne(
-        {
-          organization: organizationId,
-          channel: 'instagram',
-          instagramUserId: String(state?.instagramUserId || ''),
-          'lineItems.product': product._id,
-          status: { $nin: ['cancelled', 'returned', 'refunded'] }
-        },
-        { $set: { 'lineItems.$.variant': clean } }
-      );
-    }
-  } catch (e) {
-    svcLogger.warn('[salesConversation] persist variant → CommerceOrder failed (non-fatal)', { error: e.message });
-  }
-}
-
-/**
- * Opportunistically capture any size/colour the customer mentioned in a message
- * (in any stage) and merge it into the running selection on state. Returns the
- * merged selection. Does NOT persist to order/commerce — that happens at payment.
- */
-function captureVariantMention(state, product, text) {
-  const { needsSize, needsColor } = productVariantService.variantDimensions(product);
-  if (!needsSize && !needsColor) return state?.selectedVariant || { size: null, color: null };
-
-  const prior = state?.selectedVariant || {};
-  const sizeMatch = needsSize ? productVariantService.matchSize(text, product.sizes) : { matched: null };
-  const colorMatch = needsColor ? productVariantService.matchColor(text, product.colors) : { matched: null };
-
-  const merged = {
-    size: sizeMatch.matched || prior.size || null,
-    color: colorMatch.matched || prior.color || null
-  };
-  if (state) state.selectedVariant = merged;
-  return merged;
-}
-
-/**
- * The single gate before taking payment. Ensures a complete, in-stock variant is
- * chosen; otherwise sends the right prompt (ask-missing / unavailable / OOS) and
- * parks the conversation in `awaiting_variant`.
- *
- * @returns {Promise<boolean>} true if the payment link was sent, false if we asked
- *   the customer for more info (or the product is unbuyable right now).
- */
-async function proceedToPaymentOrAskVariant({
-  state, product, orderToken, text, conn, instagramUserId, organizationId, order = null
-}) {
-  const recordCtx = { state, organizationId, order };
-  const result = productVariantService.resolveVariantForPayment(product, state?.selectedVariant, text);
-
-  if (result.status === 'complete') {
-    await persistSelectedVariant(state, product, result.variant, organizationId);
-    await sendPaymentLink(instagramUserId, product, orderToken, conn, recordCtx, result.variant);
-    if (state) {
-      state.stage = 'payment_link_sent';
-      state.lastStageAt = new Date();
-      await state.save();
-    }
-    svcLogger.info('[salesConversation] Variant complete — payment link sent', {
-      instagramUserId, variant: result.variant
-    });
-    return true;
-  }
-
-  // incomplete | unavailable | out_of_stock → remember partial choice and ask.
-  if (state) {
-    state.selectedVariant = result.variant || state.selectedVariant;
-  }
-  await persistSelectedVariant(state, product, result.variant || {}, organizationId);
-  await sendInstagramTextAndRecord({
-    ...recordCtx,
-    conn,
-    instagramUserId,
-    content: result.message
-  });
-  if (state) {
-    state.stage = 'awaiting_variant';
-    state.lastStageAt = new Date();
-    await state.save();
-  }
-  svcLogger.info('[salesConversation] Variant not ready — asked customer', {
-    instagramUserId, status: result.status, missing: result.missing
-  });
-  return false;
 }
 
 // ── Postback (CTA button tap) handler ────────────────────────────────────────
@@ -604,7 +452,7 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
     const recordCtx = { state, organizationId, order };
 
     if (action === 'details') {
-      await sendProductDetails(instagramUserId, order.product, conn, recordCtx, state?.selectedVariant);
+      await sendProductDetails(instagramUserId, order.product, conn, recordCtx);
       if (state) {
         state.stage = 'details_sent';
         state.lastStageAt = new Date();
@@ -615,18 +463,12 @@ async function handlePostback({ instagramUserId, organizationId, payload, title,
     }
 
     if (action === 'payment') {
-      // Gate on a complete, in-stock variant before sending the link. With no free
-      // text on a button tap, this uses any variant already captured or asks for it.
-      await proceedToPaymentOrAskVariant({
-        state,
-        product: order.product,
-        orderToken: order.orderToken,
-        text: '',
-        conn,
-        instagramUserId,
-        organizationId,
-        order
-      });
+      await sendPaymentLink(instagramUserId, order.product, order.orderToken, conn, recordCtx);
+      if (state) {
+        state.stage = 'payment_link_sent';
+        state.lastStageAt = new Date();
+        await state.save();
+      }
       svcLogger.info('[salesConversation] Postback action handled: payment', { instagramUserId, orderToken });
       return;
     }
@@ -757,53 +599,6 @@ async function handleInboundDm(interaction, organizationId) {
     const productData = await loadProductFromState(state);
     const cfg = effectiveConfig(productData?.product, settings);
     const recordCtx = { state, organizationId };
-    const product = productData?.product || null;
-
-    // ── Variant awareness (all stages) ─────────────────────────────────
-    // Capture any size/colour the customer mentioned so a later "buy" doesn't
-    // re-ask, and answer pure "what sizes/colours do you have?" questions directly.
-    if (product) {
-      const beforeCapture = JSON.stringify(state.selectedVariant || {});
-      captureVariantMention(state, product, replyText);
-      if (JSON.stringify(state.selectedVariant || {}) !== beforeCapture) {
-        try { await state.save(); } catch (_) { /* non-fatal */ }
-      }
-
-      if (productVariantService.isAvailabilityQuery(replyText) && !wantsPayment(replyText)) {
-        await sendInstagramTextAndRecord({
-          ...recordCtx,
-          conn,
-          instagramUserId,
-          content: productVariantService.buildAvailabilityText(product)
-        });
-        svcLogger.info('[salesConversation] Answered variant availability query', { instagramUserId });
-        return;
-      }
-    }
-
-    // ── Stage: awaiting_variant ────────────────────────────────────────
-    // We asked for size/colour. Hesitancy still diverts to WhatsApp capture;
-    // otherwise re-run the payment gate with the newly captured variant.
-    if (state.stage === 'awaiting_variant') {
-      if (isHesitant(replyText, cfg.hesitancyKeywords)) {
-        await askForWhatsApp({ recordCtx, conn, instagramUserId, state, cfg });
-        return;
-      }
-      if (productData) {
-        await proceedToPaymentOrAskVariant({
-          state,
-          product,
-          orderToken: productData.orderToken,
-          text: replyText,
-          conn,
-          instagramUserId,
-          organizationId
-        });
-      } else {
-        svcLogger.warn('[salesConversation] awaiting_variant but no product on state', { instagramUserId, stateId: state._id });
-      }
-      return;
-    }
 
     // ── Stage: initial_cta_sent ────────────────────────────────────────
     if (state.stage === 'initial_cta_sent') {
@@ -813,15 +608,11 @@ async function handleInboundDm(interaction, organizationId) {
 
       if (payIntent) {
         if (productData) {
-          await proceedToPaymentOrAskVariant({
-            state,
-            product,
-            orderToken: productData.orderToken,
-            text: replyText,
-            conn,
-            instagramUserId,
-            organizationId
-          });
+          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn, recordCtx);
+          state.stage = 'payment_link_sent';
+          state.lastStageAt = new Date();
+          await state.save();
+          svcLogger.info('[salesConversation] Payment intent detected — sent payment link', { instagramUserId });
         } else {
           svcLogger.warn('[salesConversation] Payment intent but no product found on state', { instagramUserId, stateId: state._id });
         }
@@ -830,7 +621,7 @@ async function handleInboundDm(interaction, organizationId) {
 
       if (detailIntent) {
         if (productData) {
-          await sendProductDetails(instagramUserId, product, conn, recordCtx, state.selectedVariant);
+          await sendProductDetails(instagramUserId, productData.product, conn, recordCtx);
           state.stage = 'details_sent';
           state.lastStageAt = new Date();
           await state.save();
@@ -842,7 +633,17 @@ async function handleInboundDm(interaction, organizationId) {
       }
 
       if (hesitant) {
-        await askForWhatsApp({ recordCtx, conn, instagramUserId, state, cfg });
+        const captureMsg = cfg.whatsappCaptureMessage
+          || 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊';
+        await sendInstagramTextAndRecord({
+          ...recordCtx,
+          conn,
+          instagramUserId,
+          content: captureMsg
+        });
+        state.stage = 'whatsapp_requested';
+        state.lastStageAt = new Date();
+        await state.save();
         svcLogger.info('[salesConversation] Hesitancy detected at initial_cta_sent — asked for WhatsApp', { instagramUserId });
         return;
       }
@@ -858,15 +659,11 @@ async function handleInboundDm(interaction, organizationId) {
 
       if (payIntent) {
         if (productData) {
-          await proceedToPaymentOrAskVariant({
-            state,
-            product,
-            orderToken: productData.orderToken,
-            text: replyText,
-            conn,
-            instagramUserId,
-            organizationId
-          });
+          await sendPaymentLink(instagramUserId, productData.product, productData.orderToken, conn, recordCtx);
+          state.stage = 'payment_link_sent';
+          state.lastStageAt = new Date();
+          await state.save();
+          svcLogger.info('[salesConversation] Payment intent after details — sent payment link', { instagramUserId });
         }
         return;
       }
