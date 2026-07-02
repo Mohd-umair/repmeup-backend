@@ -55,15 +55,6 @@ const productOrderSchema = new mongoose.Schema({
     default: 'dm_sent'
   },
 
-  /**
-   * Variant the customer chose in the DM conversation (size / colour).
-   * Null fields mean the product has no such dimension or it wasn't required.
-   */
-  selectedVariant: {
-    size:  { type: String, trim: true, default: null },
-    color: { type: String, trim: true, default: null }
-  },
-
   /** Reference from payment provider (e.g. Razorpay payment_id) */
   paymentRef: {
     type: String,
