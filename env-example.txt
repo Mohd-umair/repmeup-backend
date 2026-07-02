@@ -41,6 +41,16 @@ REDIS_URL=redis://localhost:6379
 # To allow more requests: RATE_LIMIT_MAX_REQUESTS=5000
 # To disable rate limiting entirely (e.g. all traffic behind one IP): RATE_LIMIT_DISABLED=true
 
+# Strict brute-force limiter for /auth login, OTP, and password-reset endpoints
+# (defaults: 10 attempts / 15 min per IP)
+# AUTH_RATE_LIMIT_MAX=10
+# AUTH_RATE_LIMIT_WINDOW_MS=900000
+
+# Bull Board queue dashboard (/admin/queues) — REQUIRED to enable it.
+# If either is unset the dashboard is disabled (returns 404) rather than served openly.
+BULL_BOARD_USER=change-me
+BULL_BOARD_PASSWORD=change-me-to-a-long-random-string
+
 # JWT
 JWT_SECRET=your-super-secret-jwt-key-change-in-production-minimum-32-characters
 JWT_EXPIRE=7d

@@ -13,6 +13,15 @@ function isValidRazorpayPlanId(id) {
   return typeof id === 'string' && id.startsWith('plan_') && id.length > 5;
 }
 
+/** Constant-time comparison of two hex-encoded signatures (avoids timing leaks). */
+function safeSignatureEqual(expected, received) {
+  if (typeof expected !== 'string' || typeof received !== 'string') return false;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(received);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 /** True when Razorpay says the resource does not exist (test ID + live keys, etc.). */
 function isRzpNotFoundError(err) {
   const code = err?.error?.code;
@@ -262,7 +271,7 @@ exports.verifyPayment = async (req, res, next) => {
       .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
       .digest('hex');
 
-    if (expectedSignature !== razorpay_signature) {
+    if (!safeSignatureEqual(expectedSignature, razorpay_signature)) {
       logger.warn('[Razorpay] Payment signature mismatch', { org: req.user.organization._id });
       return res.status(400).json({ success: false, error: 'Payment verification failed. Invalid signature.' });
     }
@@ -392,7 +401,7 @@ exports.handleWebhook = async (req, res) => {
       .update(rawBody)
       .digest('hex');
 
-    if (expectedSignature !== receivedSignature) {
+    if (!safeSignatureEqual(expectedSignature, receivedSignature)) {
       logger.warn('[Razorpay Webhook] Signature mismatch');
       return res.status(400).json({ success: false, error: 'Invalid webhook signature' });
     }

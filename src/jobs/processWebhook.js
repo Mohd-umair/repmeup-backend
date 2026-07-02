@@ -166,19 +166,25 @@ module.exports = async function processWebhook(job) {
       }
 
       // Comment-to-DM selling flow only (follow-invite moved to processAI.js so sentiment is available)
+      // Awaited (not fire-and-forget) so we know whether it answered the comment: when it
+      // did, we must suppress the AI auto-reply engine below, otherwise the commenter also
+      // receives the "agent will contact you" fallback as a second response.
+      let commentDmSent = false;
       if (
         !flowHandledComment &&
         interaction.platform === 'instagram' &&
         interaction.type === 'comment'
       ) {
         const commentToDmService = require('../services/commentToDmService');
-        (async () => {
-          try {
-            await commentToDmService.processCommentForProduct(interaction, organizationId);
-          } catch (err) {
-            jobLogger.warn('comment automation chain error', { err: err?.message });
+        try {
+          const result = await commentToDmService.processCommentForProduct(interaction, organizationId);
+          commentDmSent = !!result?.sent;
+          if (commentDmSent) {
+            jobLogger.info('Comment-to-DM automation sent', { interactionId: interaction._id.toString() });
           }
-        })();
+        } catch (err) {
+          jobLogger.warn('comment automation chain error', { err: err?.message });
+        }
       }
 
       // Story-to-DM: story reply / @mention → product DM (before AI queue)
@@ -232,6 +238,8 @@ module.exports = async function processWebhook(job) {
         logger.info(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
       } else if (storyToDmSent) {
         logger.info(`⏭️  [Webhook] Skipping AI — Story-to-DM handled this message: ${interaction._id}`);
+      } else if (commentDmSent) {
+        logger.info(`⏭️  [Webhook] Skipping AI — Comment-to-DM handled this comment: ${interaction._id}`);
       } else {
         // Thread DMs reuse one interaction id per conversation — jobId must include message id or each new message would be deduped by Bull
         const mid = interaction.metadata?.lastMid;

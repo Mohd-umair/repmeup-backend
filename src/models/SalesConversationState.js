@@ -45,6 +45,7 @@ const salesConversationStateSchema = new mongoose.Schema({
    *  awaiting_product_selection — Multi-product post: picker DM sent; waiting for user to choose
    *  initial_cta_sent   — CTA Generic Template DM was sent; waiting for user reply
    *  details_sent       — Bot sent product details (price, sizes, etc.); waiting for next reply
+   *  awaiting_variant   — Buy intent detected but size/colour still needed; bot asked for it
    *  payment_link_sent  — Bot sent payment link; waiting for next reply
    *  whatsapp_requested — Hesitancy detected; bot asked for WhatsApp number
    *  whatsapp_captured  — User shared a WhatsApp number; retargeting data saved
@@ -56,12 +57,22 @@ const salesConversationStateSchema = new mongoose.Schema({
       'awaiting_product_selection',
       'initial_cta_sent',
       'details_sent',
+      'awaiting_variant',
       'payment_link_sent',
       'whatsapp_requested',
       'whatsapp_captured',
       'dropped'
     ],
     default: 'initial_cta_sent'
+  },
+
+  /**
+   * Variant the customer has chosen so far in the DM (accumulates across turns —
+   * they may give size first, colour next). Consumed when the payment link is sent.
+   */
+  selectedVariant: {
+    size:  { type: String, trim: true, default: null },
+    color: { type: String, trim: true, default: null }
   },
 
   /** Token correlating product-picker postback / numeric replies (multi-product posts). */

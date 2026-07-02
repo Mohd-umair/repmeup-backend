@@ -37,10 +37,17 @@ const { ensureCommentDmLink } = require('./inbox/commentDmThreadLinkService');
 
 const svcLogger = logger.createChild({ module: 'commentToDmService' });
 
+/**
+ * @returns {Promise<{sent:boolean, mode?:string, productId?:string|null, reason?:string}>}
+ *   `sent:true` when a public reply / product DM was actually dispatched for this
+ *   comment. Callers (e.g. processWebhook) use this to suppress the AI auto-reply
+ *   engine so the commenter doesn't also receive a second "agent will contact you"
+ *   fallback message.
+ */
 async function processCommentForProduct(interaction, organizationId) {
   try {
     if (!interaction || interaction.platform !== 'instagram' || interaction.type !== 'comment') {
-      return;
+      return { sent: false, reason: 'not_ig_comment' };
     }
 
     const interactionId = interaction._id?.toString?.() || 'unknown';
@@ -57,7 +64,7 @@ async function processCommentForProduct(interaction, organizationId) {
 
     if (!org?.commentToDmSettings?.enabled) {
       svcLogger.info('[commentToDm] Skipping — automation is disabled for this org', { organizationId });
-      return;
+      return { sent: false, reason: 'disabled' };
     }
 
     const settings = org.commentToDmSettings;
@@ -67,12 +74,13 @@ async function processCommentForProduct(interaction, organizationId) {
 
     if (!matched) {
       svcLogger.info('[commentToDm] Skipping — no trigger keyword matched', { commentText: commentText.substring(0, 60) });
-      return;
+      return { sent: false, reason: 'no_keyword_match' };
     }
 
-    await sendPostLinkedProductsDM(interaction, organizationId, { settings, publicStub: true });
+    return await sendPostLinkedProductsDM(interaction, organizationId, { settings, publicStub: true });
   } catch (err) {
     svcLogger.error('[commentToDm] Unhandled error', { error: err.message, stack: err.stack });
+    return { sent: false, reason: 'error' };
   }
 }
 

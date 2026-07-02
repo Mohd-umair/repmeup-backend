@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -146,9 +147,41 @@ app.get('/health', async (req, res) => {
   res.status(200).json(payload);
 });
 
-// Bull Board monitoring UI
+// Bull Board monitoring UI — MUST be authenticated. It exposes raw job
+// payloads (webhook bodies, access tokens, PII) and allows retry/delete/purge.
+// Guarded with HTTP Basic Auth (browser-friendly) using dedicated credentials.
 const bullBoardAdapter = require('./config/bullBoard');
-app.use('/admin/queues', bullBoardAdapter.getRouter());
+const bullBoardAuth = (req, res, next) => {
+  const user = process.env.BULL_BOARD_USER;
+  const pass = process.env.BULL_BOARD_PASSWORD;
+
+  // Fail closed: if no credentials are configured, the dashboard is disabled
+  // rather than served openly.
+  if (!user || !pass) {
+    return res.status(404).json({ success: false, error: 'Route not found' });
+  }
+
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Basic ')) {
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    const idx = decoded.indexOf(':');
+    const providedUser = decoded.slice(0, idx);
+    const providedPass = decoded.slice(idx + 1);
+
+    // Constant-time compare to avoid credential timing leaks.
+    const expected = `${user}:${pass}`;
+    const got = `${providedUser}:${providedPass}`;
+    const a = Buffer.from(expected);
+    const b = Buffer.from(got);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      return next();
+    }
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Queue Dashboard"');
+  return res.status(401).json({ success: false, error: 'Authentication required' });
+};
+app.use('/admin/queues', bullBoardAuth, bullBoardAdapter.getRouter());
 
 // ── Route definitions ─────────────────────────────────────────────────────────
 // Each route module is loaded once and mounted at BOTH the legacy /api/ prefix
