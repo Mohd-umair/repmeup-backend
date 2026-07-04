@@ -16,6 +16,7 @@ const PDFDocument = require('pdfkit');
 const GrowthAudit = require('../models/GrowthAudit');
 const { publicAuditQueue, queueConfig } = require('../config/queue');
 const { listIndustries } = require('../services/audit/industryBenchmarks');
+const leadCaptureService = require('../services/crm/leadCaptureService');
 const logger = require('../config/logger');
 
 const router = express.Router();
@@ -232,6 +233,14 @@ router.post('/:id/lead', genericLimiter, async (req, res) => {
       logger.info('[GrowthAudit] lead captured', {
         auditId: String(audit._id),
         email: audit.lead.email
+      });
+
+      // Fire-and-forget: the public audit unlock must never fail on CRM issues
+      leadCaptureService.captureFromGrowthAudit(audit).catch((err) => {
+        logger.error('[GrowthAudit] CRM lead capture failed', {
+          auditId: String(audit._id),
+          error: err?.message || err
+        });
       });
     }
 
