@@ -1,6 +1,7 @@
 const ContactInquiry = require('../models/ContactInquiry');
 const emailService = require('../services/emailService');
 const userActivityLogService = require('../services/userActivityLogService');
+const leadCaptureService = require('../services/crm/leadCaptureService');
 const { sanitizeString } = require('../utils/sanitize');
 
 const DEMO_RECIPIENT = () =>
@@ -53,6 +54,11 @@ exports.book = async (req, res, next) => {
       source: 'book-demo',
       ip: userActivityLogService.clientIp(req),
       userAgent: String(req.headers['user-agent'] || '').slice(0, 500)
+    });
+
+    // Fire-and-forget: the public booking must never fail on CRM issues
+    leadCaptureService.captureFromDemoBooking(inquiry).catch((err) => {
+      console.error('[demoBooking] CRM lead capture failed:', err?.message || err);
     });
 
     emailService

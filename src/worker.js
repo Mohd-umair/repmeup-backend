@@ -1,6 +1,7 @@
 require('dotenv').config();
 const connectDB = require('./config/database');
-const { connectRedis } = require('./config/redis');
+const { connectRedis, getRedisClient } = require('./config/redis');
+const socketEmitter = require('./utils/socketEmitter');
 const {
   webhookQueue,
   aiQueue,
@@ -56,6 +57,12 @@ async function startWorker() {
 
     await connectDB();
     await connectRedis();
+
+    // Bridge realtime events to browsers: jobs in this process call emitToOrg(),
+    // which publishes via Redis; the API instances (redis-adapter) deliver them.
+    // Without this init every emit from a job was silently dropped.
+    socketEmitter.initRedisEmitter(getRedisClient());
+    logger.info('[Worker] Socket emitter bridged via Redis (realtime events reach API clients)');
 
     webhookQueue.process(WEBHOOK_CONCURRENCY, async (job) => {
       logger.debug('[Worker:webhook] picked up job', { jobId: job.id });

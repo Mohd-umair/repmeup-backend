@@ -2,9 +2,10 @@ require('dotenv').config();
 const app = require('./app');
 const { getCorsOriginOption } = require('./config/corsOrigins');
 const connectDB = require('./config/database');
-const { connectRedis } = require('./config/redis');
+const { connectRedis, getRedisClient } = require('./config/redis');
 const http = require('http');
 const socketIO = require('socket.io');
+const { createAdapter } = require('@socket.io/redis-adapter');
 const logger = require('./config/logger');
 
 process.on('uncaughtException', (err) => {
@@ -72,7 +73,20 @@ async function startServer() {
     // Connect to Redis
     await connectRedis();
     logger.info('Redis connected successfully');
-    
+
+    // Socket.IO Redis adapter — REQUIRED for pm2 cluster mode and for worker
+    // processes to reach browser clients. Without it, an emit on one API
+    // instance never reaches clients connected to another instance, and
+    // @socket.io/redis-emitter events from worker.js/campaignWorker.js go
+    // nowhere. Attached before server.listen() so no client ever connects
+    // to an adapter-less instance. Subscriber mode needs dedicated
+    // connections, hence the two duplicates.
+    const pubClient = getRedisClient().duplicate();
+    const subClient = getRedisClient().duplicate();
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+    io.adapter(createAdapter(pubClient, subClient));
+    logger.info('Socket.IO Redis adapter attached (cross-instance + worker emits enabled)');
+
     // Upgrade rate limiting to Redis-backed after connection
     if (app.upgradeRateLimiting) {
       app.upgradeRateLimiting();

@@ -57,6 +57,9 @@ router.patch(
 router.get('/tickets', ticketController.superAdminListTickets);
 router.patch('/tickets/:id/status', ticketController.superAdminUpdateStatus);
 
+// Lead Management CRM
+router.use('/crm', require('./crm'));
+
 router.get('/plans', superAdminController.listPlans);
 router.get('/features', featureController.listCatalog);
 router.get('/contact-inquiries', contactInquiryController.listForSuperAdmin);

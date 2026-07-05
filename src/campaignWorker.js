@@ -7,9 +7,10 @@
  */
 require('dotenv').config();
 const connectDB = require('./config/database');
-const { connectRedis } = require('./config/redis');
+const { connectRedis, getRedisClient } = require('./config/redis');
 const { campaignSendQueue, campaignInboxQueue } = require('./config/queue');
 const { registerCampaignWorkers } = require('./workers/registerCampaignWorkers');
+const socketEmitter = require('./utils/socketEmitter');
 const logger = require('./config/logger');
 
 async function startCampaignWorker() {
@@ -18,6 +19,9 @@ async function startCampaignWorker() {
 
     await connectDB();
     await connectRedis();
+
+    // Campaign jobs emit progress/inbox events — bridge them to API clients via Redis.
+    socketEmitter.initRedisEmitter(getRedisClient());
 
     const { batchConcurrency } = await registerCampaignWorkers();
 
