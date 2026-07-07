@@ -87,6 +87,19 @@ function isGibberish(text) {
   const words = stripped.split(/\s+/).filter(w => w.replace(/[^\p{L}\p{N}]/gu, '').length >= 2);
   if (words.length === 0 && stripped.length < 15) return true;
 
+  // Single-token keyboard-mash: one latin-script "word" with almost no vowels AND a
+  // long consonant run (e.g. "hhggfgh", "asdfgh", "zxcvbnm", "sdfsdf"). Restricted to
+  // a single all-latin token so multi-word messages, real words ("tshirt", "thanks"),
+  // and non-latin scripts (Hindi/Arabic/CJK) are never misclassified.
+  if (!/\s/.test(stripped) && /^[a-z]+$/i.test(stripped) && stripped.length >= 5) {
+    const lower = stripped.toLowerCase();
+    const vowels = (lower.match(/[aeiou]/g) || []).length;
+    const vowelRatio = vowels / lower.length;
+    const longestConsonantRun = (lower.match(/[^aeiou]+/g) || [])
+      .reduce((mx, run) => Math.max(mx, run.length), 0);
+    if (vowelRatio < 0.25 && longestConsonantRun >= 4) return true;
+  }
+
   return false;
 }
 
