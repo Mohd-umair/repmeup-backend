@@ -32,6 +32,26 @@ describe('classifyMessage()', () => {
     expect(classifyMessage('!@#$%^&*()')).toBe('gibberish');
   });
 
+  it('classifies single-token keyboard-mash as gibberish', () => {
+    expect(classifyMessage('hhggfgh')).toBe('gibberish');
+    expect(classifyMessage('asdfgh')).toBe('gibberish');
+    expect(classifyMessage('zxcvbnm')).toBe('gibberish');
+    expect(classifyMessage('sdfsdf')).toBe('gibberish');
+  });
+
+  it('does NOT misclassify real single words / short replies as gibberish', () => {
+    expect(classifyMessage('tshirt')).toBe('business');
+    expect(classifyMessage('kurti')).toBe('business');
+    expect(classifyMessage('available')).toBe('business');
+    expect(classifyMessage('delivery')).toBe('business');
+    // greeting/closing precedence still wins
+    expect(classifyMessage('hello')).toBe('small_talk');
+  });
+
+  it('does NOT misclassify non-latin scripts (Hindi) as gibberish', () => {
+    expect(classifyMessage('कितने का है')).toBe('business');
+  });
+
   it('returns business for null/undefined input', () => {
     expect(classifyMessage(null)).toBe('business');
     expect(classifyMessage(undefined)).toBe('business');

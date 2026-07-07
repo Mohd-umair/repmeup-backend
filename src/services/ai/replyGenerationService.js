@@ -28,6 +28,11 @@ const {
 
 const MAX_KB_ENTRY_CHARS = 400;   // per-entry cap injected into the prompt
 const MAX_KB_TOTAL_CHARS = 1200;  // hard total cap across all entries
+// Conversation memory the model gets for continuity. Larger than the transcript
+// default so the agent reasons over the recent thread (last ~15-20 turns), while
+// the char cap keeps prompt token cost bounded.
+const CONVERSATION_TRANSCRIPT_MAX_MESSAGES = 18;
+const CONVERSATION_TRANSCRIPT_MAX_TOTAL_CHARS = 4000;
 const REPLY_TIMEOUT_MS = 120000;
 const STANDARD_REPLY_TEMPERATURE = 0.7;
 const STANDARD_REPLY_MAX_TOKENS = 200;
@@ -45,6 +50,41 @@ const MAX_CONFIDENCE = 0.95;
 function kbBackedConfidence(relevantKB) {
   if (!relevantKB?.length) return BASE_CONFIDENCE;
   return Math.min(MAX_CONFIDENCE, BASE_CONFIDENCE + relevantKB.length * KB_CONFIDENCE_BONUS);
+}
+
+/**
+ * Opaque placeholders WhatsApp/native-cart use when the customer sent an order
+ * with NO real typed text (e.g. "[Product order]"). Only in this case may the
+ * order description stand in for the customer's message.
+ */
+const OPAQUE_ORDER_PLACEHOLDER_RE = /^\s*\[?\s*(product\s*order|order|cart|checkout)\s*\]?\s*$/i;
+
+function isOpaqueOrderPlaceholder(content) {
+  const s = String(content == null ? '' : content).trim();
+  if (!s) return true; // empty content → native cart with no text
+  return OPAQUE_ORDER_PLACEHOLDER_RE.test(s);
+}
+
+/**
+ * Resolve the "latest customer message" line injected into the prompt.
+ *
+ * CRITICAL: for any real typed message the customer's OWN words must be what the
+ * model answers — the open order is background context only. We substitute the
+ * order description ONLY when the actual message is an opaque cart placeholder
+ * (WhatsApp native cart). Previously the order always replaced the message, so
+ * "hi"/gibberish/anything got answered with an order confirmation.
+ *
+ * @param {object} interaction
+ * @param {string} [orderContext]
+ * @returns {{ line: string, usedOrderAsMessage: boolean }}
+ */
+function resolveLatestMessageForPrompt(interaction, orderContext) {
+  const order = (orderContext && String(orderContext).trim()) || '';
+  const content = interaction?.content != null ? String(interaction.content).trim() : '';
+  if (order && isOpaqueOrderPlaceholder(content)) {
+    return { line: `the customer placed an order — ${order}`, usedOrderAsMessage: true };
+  }
+  return { line: `"${content}"`, usedOrderAsMessage: false };
 }
 
 /** Cap each KB entry and the total context length to control prompt token cost. */
@@ -168,12 +208,13 @@ function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = 
   const orderBlock = (orderContext && String(orderContext).trim())
     ? `
 
-ACTIVE ORDER (background context — the customer has this open order on this thread):
+ACTIVE ORDER (BACKGROUND CONTEXT ONLY — this is NOT the customer's message):
 ${String(orderContext).trim()}
-- ALWAYS answer the customer's actual latest message directly and helpfully — that is the priority. If they greet ("hi"), greet back; if they ask a question, answer THAT question; do not reply with something unrelated.
-- Use the order above only as context (e.g. if they ask about their order/items/total/status, use these exact details). NEVER re-ask which product or what quantity — those are already specified.
-- A delivery address has not been captured yet, so AFTER answering their message you may add ONE short line asking them to share their full delivery address (house/flat, area/landmark, city, pincode). Ask at most once — never repeat it if they're talking about something else.
-- Keep it concise and friendly.`
+- This order is ALREADY recorded. Do NOT "confirm" it again, do NOT restate its price/total, and do NOT thank them for ordering — UNLESS the customer's latest message is clearly them placing or confirming an order right now.
+- ALWAYS reply to the customer's ACTUAL latest message (shown in the user prompt). If they greet, greet back; if they ask something, answer THAT; if the message is unclear or looks like random characters, ask a short, friendly clarifying question. Never volunteer order details they didn't ask about.
+- Use the order above only if the customer asks about their order/items/total/status — then use these exact details. Never re-ask which product or what quantity.
+- Delivery address: ONLY if the customer is actively moving forward with this order AND the recent thread does NOT already show you asking for it, you may add ONE short line requesting their full delivery address (house/flat, area/landmark, city, pincode). If it was already requested earlier in the thread, do NOT ask again.
+- Keep it concise, natural, and human.`
     : '';
   const continuity = transcript
     ? `
@@ -262,13 +303,9 @@ CRITICAL RULES — you MUST follow all of these:
 7. noReply true → reply field may be empty string "".`;
 
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
-  // WhatsApp native-cart orders arrive as the opaque placeholder "[Product order]".
-  // When we have the resolved order, describe the latest message as the real order so
-  // the model treats it as resolvable business intent instead of an unclear message.
-  const order = (orderContext && String(orderContext).trim()) || '';
-  const latestMessage = order
-    ? `the customer placed an order — ${order}`
-    : `"${interaction.content}"`;
+  // Substitute the order for the message ONLY when the real message is an opaque
+  // native-cart placeholder; otherwise the customer's actual words are the intent.
+  const { line: latestMessage } = resolveLatestMessageForPrompt(interaction, orderContext);
   const userContent = transcript
     ? `Recent conversation:\n${transcript}\n\nLatest customer message (prioritize replying to this): ${latestMessage}\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`
     : `Message: ${latestMessage}\nPlatform: ${interaction.platform} | Sentiment: ${interaction.sentiment || 'unknown'}`;
@@ -339,7 +376,10 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
 
     const kbContext = buildKbContext(relevantKB);
     const bucketContext = await buildBucketContext(interaction, organizationId);
-    const conversationTranscript = buildRecentConversationTranscript(interaction);
+    const conversationTranscript = buildRecentConversationTranscript(interaction, {
+      maxMessages: CONVERSATION_TRANSCRIPT_MAX_MESSAGES,
+      maxTotalChars: CONVERSATION_TRANSCRIPT_MAX_TOTAL_CHARS
+    });
     const arTone = options.autoReplyTone;
     const arToneCustom = options.autoReplyToneCustom;
     const toneAddon =
@@ -462,7 +502,7 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
       };
     }
 
-    const stdLatest = orderContext ? `the customer placed an order — ${orderContext}` : `"${interaction.content}"`;
+    const { line: stdLatest } = resolveLatestMessageForPrompt(interaction, orderContext);
     const stdUserContent = (conversationTranscript && conversationTranscript.trim())
       ? `Recent conversation:\n${conversationTranscript}\n\nLatest customer message:\n${stdLatest}\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`
       : `Customer message: ${stdLatest}\n\nPlatform: ${interaction.platform}\nType: ${interaction.type}\nSentiment: ${interaction.sentiment || 'unknown'}`;
@@ -563,5 +603,8 @@ async function generateText(systemPrompt, userPrompt, options = {}) {
 module.exports = {
   generateResponse,
   generateResponseOpenAI,
-  generateText
+  generateText,
+  // Exported for unit tests
+  isOpaqueOrderPlaceholder,
+  resolveLatestMessageForPrompt
 };

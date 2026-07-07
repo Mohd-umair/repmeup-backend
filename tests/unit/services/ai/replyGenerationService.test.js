@@ -597,3 +597,76 @@ describe('generateResponse() alias', () => {
     });
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Order-context handling — regression for the "every message → order confirmed" bug
+// ═══════════════════════════════════════════════════════════════════════════
+const {
+  isOpaqueOrderPlaceholder,
+  resolveLatestMessageForPrompt
+} = require('../../../../src/services/ai/replyGenerationService');
+
+describe('isOpaqueOrderPlaceholder()', () => {
+  it.each(['[Product order]', 'product order', '[Order]', 'checkout', '  [cart] ', ''])(
+    'treats "%s" as an opaque placeholder', (v) => expect(isOpaqueOrderPlaceholder(v)).toBe(true)
+  );
+  it.each(['hi', 'hooooo', 'hhggfgh', 'do you ship to Dubai?', 'I want the black kurti'])(
+    'treats real message "%s" as NOT a placeholder', (v) => expect(isOpaqueOrderPlaceholder(v)).toBe(false)
+  );
+});
+
+describe('resolveLatestMessageForPrompt()', () => {
+  const order = 'ORDER ORD-1006 (just placed via WhatsApp): 1× Y2K Black Beaded Kurti. Total $1400.';
+
+  it('uses the customer\'s REAL words when they typed a message, even with an open order', () => {
+    const r = resolveLatestMessageForPrompt({ content: 'hiii' }, order);
+    expect(r.usedOrderAsMessage).toBe(false);
+    expect(r.line).toBe('"hiii"');
+    expect(r.line).not.toMatch(/placed an order/);
+  });
+
+  it('substitutes the order ONLY for an opaque native-cart placeholder', () => {
+    const r = resolveLatestMessageForPrompt({ content: '[Product order]' }, order);
+    expect(r.usedOrderAsMessage).toBe(true);
+    expect(r.line).toContain('placed an order');
+    expect(r.line).toContain('ORD-1006');
+  });
+
+  it('uses the real message when there is no order context', () => {
+    const r = resolveLatestMessageForPrompt({ content: 'hooooo' }, '');
+    expect(r).toEqual({ line: '"hooooo"', usedOrderAsMessage: false });
+  });
+});
+
+describe('generateResponseOpenAI() with an active order', () => {
+  const order = 'ORDER ORD-1006 (just placed via WhatsApp): 1× Y2K Black Beaded Kurti. Total $1400.';
+  const selfAssessJson = JSON.stringify({
+    resolvable: true, confidence: 1, reply: 'Hey! How can I help? 😊',
+    messageType: 'small_talk', noReply: false
+  });
+
+  it('sends the customer\'s ACTUAL message to the model — not the order — for a real message', async () => {
+    openaiClient.chatCompletion.mockResolvedValue(okChat(selfAssessJson));
+
+    await generateResponseOpenAI(
+      makeInteraction({ content: 'hiii', platform: 'whatsapp', type: 'dm' }),
+      'org_1', null, { withSelfAssessment: true, orderContext: order }
+    );
+
+    const userMsg = openaiClient.chatCompletion.mock.calls[0][0].messages[1].content;
+    expect(userMsg).toContain('hiii');
+    expect(userMsg).not.toContain('the customer placed an order');
+  });
+
+  it('still describes the order when the message is an opaque native-cart placeholder', async () => {
+    openaiClient.chatCompletion.mockResolvedValue(okChat(selfAssessJson));
+
+    await generateResponseOpenAI(
+      makeInteraction({ content: '[Product order]', platform: 'whatsapp', type: 'dm' }),
+      'org_1', null, { withSelfAssessment: true, orderContext: order }
+    );
+
+    const userMsg = openaiClient.chatCompletion.mock.calls[0][0].messages[1].content;
+    expect(userMsg).toContain('the customer placed an order');
+  });
+});
