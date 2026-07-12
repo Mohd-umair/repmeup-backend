@@ -4,6 +4,7 @@ const multer = require('multer');
 const { protect } = require('../middlewares/auth');
 const { requireFeature } = require('../middlewares/requireFeature');
 const { FEATURE_KEYS } = require('../config/featureCatalog');
+const { validateProductCreate, validateProductUpdate } = require('../middlewares/productValidation');
 const productController = require('../controllers/productController');
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -44,8 +45,8 @@ router.get('/by-post/:postId', productController.getProductsByPost);
 // ── Catalog CRUD ────────────────────────────────────────────────────────────
 router.get('/', productController.getProducts);
 router.get('/:id', productController.getProduct);
-router.post('/', requireCatalog, productController.createProduct);
-router.put('/:id', requireCatalog, productController.updateProduct);
+router.post('/', requireCatalog, validateProductCreate, productController.createProduct);
+router.put('/:id', requireCatalog, validateProductUpdate, productController.updateProduct);
 router.delete('/:id', requireCatalog, productController.deleteProduct);
 
 // ── Per-product DM configuration ────────────────────────────────────────────

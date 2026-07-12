@@ -39,23 +39,32 @@ class EmailService {
 
     const auth = { user, pass };
 
-    // Allow overriding auth method via env (LOGIN, PLAIN, etc.)
+    // Allow overriding auth method via env (LOGIN, PLAIN, etc.). Some GoDaddy /
+    // Microsoft 365 servers accept AUTH LOGIN but reject AUTH PLAIN.
     const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
     if (authMethod) auth.method = authMethod;
+
+    // Port 465 = implicit TLS (secure); 587/25 = plain socket then STARTTLS.
+    // SMTP_SECURE=true|false overrides the port-based default when needed.
+    const secureEnv = smtpEnv('SMTP_SECURE').toLowerCase();
+    const secure = secureEnv ? secureEnv === 'true' : port === 465;
 
     const options = {
       host,
       port,
       auth,
-      secureConnection: false,
-      requireTLS: true,
-      tls: { ciphers: 'SSLv3' }
+      secure,
+      requireTLS: !secure // force STARTTLS on 587/25
     };
 
-    if (port === 465) {
-      options.secure = true;
-    } else {
-      options.secure = false; // VERY IMPORTANT for port 587: plain socket → STARTTLS
+    // Legacy SSLv3 cipher pinning is ONLY needed by GoDaddy's old Workspace Email
+    // (smtpout.secureserver.net). Forcing it on Microsoft 365 (smtp.office365.com)
+    // breaks the TLS handshake, so only apply it for the legacy host — or when
+    // explicitly opted in with SMTP_LEGACY_CIPHERS=true.
+    const legacyCiphers =
+      smtpEnv('SMTP_LEGACY_CIPHERS') === 'true' || /secureserver\.net$/i.test(host);
+    if (legacyCiphers) {
+      options.tls = { ciphers: 'SSLv3' };
     }
 
     if (smtpEnv('SMTP_DEBUG') === 'true') {

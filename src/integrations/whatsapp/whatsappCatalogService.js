@@ -18,6 +18,12 @@
 
 const axios = require('axios');
 const logger = require('../../config/logger');
+const {
+  DEFAULT_CURRENCY,
+  MAX_ADDITIONAL_IMAGES,
+  resolveAvailability,
+  deriveSalePrice
+} = require('../../utils/productCommerceFields');
 
 const API_VERSION = 'v23.0';
 const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
@@ -97,10 +103,10 @@ function _effectivePrice(product) {
 
 /**
  * POST /{catalog-id}/products expects `price` as a number in the currency's
- * smallest unit (e.g. 49.99 AED → 4999). NOT a string like "4999 AED".
+ * smallest unit (e.g. 49.99 INR → 4999). NOT a string like "4999 INR".
  */
-function _priceMinorUnits(amount, currency = 'AED') {
-  const cur = (currency || 'AED').toUpperCase();
+function _priceMinorUnits(amount, currency = DEFAULT_CURRENCY) {
+  const cur = (currency || DEFAULT_CURRENCY).toUpperCase();
   const num = Number(amount);
   if (!Number.isFinite(num) || num < 0) return 0;
   if (ZERO_DECIMAL_CURRENCIES.has(cur)) return Math.round(num);
@@ -108,18 +114,21 @@ function _priceMinorUnits(amount, currency = 'AED') {
 }
 
 /**
- * items_batch expects price as "amount CURRENCY" string, e.g. "49.99 AED".
+ * items_batch expects price as "amount CURRENCY" string, e.g. "49.99 INR".
  */
-function _formatBatchPriceString(amount, currency = 'AED') {
-  const cur = (currency || 'AED').toUpperCase();
+function _formatBatchPriceString(amount, currency = DEFAULT_CURRENCY) {
+  const cur = (currency || DEFAULT_CURRENCY).toUpperCase();
   const num = Number(amount);
   const safe = Number.isFinite(num) && num >= 0 ? num : 0;
   return `${safe.toFixed(2)} ${cur}`;
 }
 
+/** Meta `link`: real product page first, checkout link second, placeholder last. */
 function _productLink(product) {
-  const url = product.paymentUrl && String(product.paymentUrl).trim();
-  if (url && /^https:\/\//i.test(url)) return url;
+  for (const candidate of [product.websiteUrl, product.paymentUrl]) {
+    const url = candidate && String(candidate).trim();
+    if (url && /^https:\/\//i.test(url)) return url;
+  }
   return 'https://example.com';
 }
 
@@ -129,23 +138,157 @@ function _productImageUrl(product) {
   return '';
 }
 
+/** images[1..20] as additional images (https-only). */
+function _additionalImageUrls(product) {
+  return (product.images || [])
+    .slice(1, 1 + MAX_ADDITIONAL_IMAGES)
+    .map((u) => String(u || '').trim())
+    .filter((u) => /^https:\/\//i.test(u));
+}
+
+/** ISO-8601 "START/END" range string for sale_price_effective_date. */
+function _salePriceEffectiveDateRange(sale) {
+  if (!sale?.start || !sale?.end) return '';
+  return `${sale.start.toISOString()}/${sale.end.toISOString()}`;
+}
+
+/** Set key only when the value is non-empty (Meta rejects '' for enums). */
+function _setIf(target, key, value) {
+  if (value === undefined || value === null || value === '') return;
+  target[key] = value;
+}
+
+/**
+ * Meta commerce fields shared derivation → items_batch (feed-style) names.
+ * Spec: Commerce Platform catalog fields reference. Only keys with values are
+ * included. See _buildCommerceProductsFields for the /products fallback names.
+ */
+function _buildCommerceBatchFields(product) {
+  const c = product.commerce || {};
+  const currency = (product.currency || DEFAULT_CURRENCY).toUpperCase();
+  const out = {};
+
+  _setIf(out, 'brand', c.brand);
+  _setIf(out, 'gtin', c.gtin);
+  _setIf(out, 'mpn', c.mpn);
+  _setIf(out, 'google_product_category', c.googleProductCategory);
+  _setIf(out, 'fb_product_category', c.fbProductCategory);
+  _setIf(out, 'product_type', c.productType);
+  _setIf(out, 'item_group_id', c.itemGroupId);
+  _setIf(out, 'color', c.color);
+  _setIf(out, 'size', c.size);
+  _setIf(out, 'gender', c.gender);
+  _setIf(out, 'age_group', c.ageGroup);
+  _setIf(out, 'material', c.material);
+  _setIf(out, 'pattern', c.pattern);
+
+  // India compliance
+  _setIf(out, 'origin_country', c.originCountry);
+  _setIf(out, 'importer_name', c.importerName);
+  _setIf(out, 'manufacturer_info', c.manufacturerInfo);
+  _setIf(out, 'wa_compliance_category', c.waComplianceCategory);
+  if (c.importerAddress && Object.keys(c.importerAddress).length) {
+    const a = c.importerAddress;
+    const addr = {};
+    _setIf(addr, 'street1', a.street1);
+    _setIf(addr, 'street2', a.street2);
+    _setIf(addr, 'city', a.city);
+    _setIf(addr, 'region', a.region);
+    _setIf(addr, 'postal_code', a.postalCode);
+    _setIf(addr, 'country', a.country);
+    if (Object.keys(addr).length) out.importer_address = addr;
+  }
+
+  // Pricing: sale_price derives from discountPercent (price stays the base price)
+  const sale = deriveSalePrice(product);
+  if (sale) {
+    out.sale_price = _formatBatchPriceString(sale.salePrice, currency);
+    const range = _salePriceEffectiveDateRange(sale);
+    if (range) out.sale_price_effective_date = range;
+  }
+  if (c.unitPrice?.value > 0 && c.unitPrice.currency && c.unitPrice.unit) {
+    out.unit_price = { value: c.unitPrice.value, currency: c.unitPrice.currency, unit: c.unitPrice.unit };
+  }
+
+  // Media
+  const additionalImages = _additionalImageUrls(product);
+  if (additionalImages.length) out.additional_image_link = additionalImages;
+  if (Array.isArray(c.videoUrls) && c.videoUrls.length) {
+    out.video = c.videoUrls.slice(0, 20).map((url) => ({ url }));
+  }
+
+  // Fulfillment / visibility
+  if (c.shippingWeight?.value > 0 && c.shippingWeight.unit) {
+    out.shipping_weight = `${c.shippingWeight.value} ${c.shippingWeight.unit}`;
+  }
+  out.status = product.isActive === false ? 'archived' : 'active';
+
+  return out;
+}
+
+/**
+ * Same commerce data with POST /{catalog-id}/products endpoint param names.
+ * This fallback path is rarely exercised (only when items_batch is rejected),
+ * so a conservative, verified subset is sent — enough for Meta requireds.
+ */
+function _buildCommerceProductsFields(product) {
+  const c = product.commerce || {};
+  const currency = (product.currency || DEFAULT_CURRENCY).toUpperCase();
+  const out = {};
+
+  _setIf(out, 'brand', c.brand);
+  _setIf(out, 'gtin', c.gtin);
+  _setIf(out, 'manufacturer_part_number', c.mpn);
+  _setIf(out, 'category', c.googleProductCategory);
+  _setIf(out, 'product_type', c.productType);
+  _setIf(out, 'retailer_product_group_id', c.itemGroupId);
+  _setIf(out, 'color', c.color);
+  _setIf(out, 'size', c.size);
+  _setIf(out, 'gender', c.gender);
+  _setIf(out, 'age_group', c.ageGroup);
+  _setIf(out, 'material', c.material);
+  _setIf(out, 'pattern', c.pattern);
+  _setIf(out, 'origin_country', c.originCountry);
+  _setIf(out, 'importer_name', c.importerName);
+  _setIf(out, 'manufacturer_info', c.manufacturerInfo);
+  _setIf(out, 'wa_compliance_category', c.waComplianceCategory);
+
+  const sale = deriveSalePrice(product);
+  if (sale) {
+    out.sale_price = _priceMinorUnits(sale.salePrice, currency);
+    if (sale.start && sale.end) {
+      out.sale_price_start_date = sale.start.toISOString();
+      out.sale_price_end_date = sale.end.toISOString();
+    }
+  }
+
+  const additionalImages = _additionalImageUrls(product);
+  if (additionalImages.length) out.additional_image_urls = additionalImages;
+
+  return out;
+}
+
 /**
  * Payload for POST /{catalog-id}/products (single-item upsert).
+ *
+ * PRICING: `price` is the BASE price; when discountPercent > 0 a `sale_price`
+ * is added (Meta renders the strikethrough). Previously the discounted price
+ * was sent as `price`, hiding the discount from customers.
  */
 function _buildMetaProductPayload(product) {
   const retailerId = _resolveRetailerId(product);
-  const currency = (product.currency || 'AED').toUpperCase();
-  const priceAmount = _effectivePrice(product);
+  const currency = (product.currency || DEFAULT_CURRENCY).toUpperCase();
 
   const payload = {
     retailer_id: retailerId,
     name: String(product.name || 'Product').substring(0, 200),
     description: String(product.description || product.name || 'Product').substring(0, 5000),
-    price: _priceMinorUnits(priceAmount, currency),
+    price: _priceMinorUnits(product.price, currency),
     currency,
     url: _productLink(product),
-    availability: product.stock === 0 ? 'out of stock' : 'in stock',
-    condition: 'new'
+    availability: resolveAvailability(product),
+    condition: product.commerce?.condition || 'new',
+    ..._buildCommerceProductsFields(product)
   };
 
   const imageUrl = _productImageUrl(product);
@@ -156,20 +299,21 @@ function _buildMetaProductPayload(product) {
 
 /**
  * Data block for items_batch (batch sync). Field names differ from /products.
+ * Pricing follows the same base-price + sale_price model as above.
  */
 function _buildBatchProductData(product) {
   const id = _resolveRetailerId(product);
-  const currency = (product.currency || 'AED').toUpperCase();
-  const priceAmount = _effectivePrice(product);
+  const currency = (product.currency || DEFAULT_CURRENCY).toUpperCase();
 
   const data = {
     id,
     title: String(product.name || 'Product').substring(0, 200),
     description: String(product.description || product.name || 'Product').substring(0, 5000),
-    price: _formatBatchPriceString(priceAmount, currency),
-    availability: product.stock === 0 ? 'out of stock' : 'in stock',
-    condition: 'new',
-    link: _productLink(product)
+    price: _formatBatchPriceString(product.price, currency),
+    availability: resolveAvailability(product),
+    condition: product.commerce?.condition || 'new',
+    link: _productLink(product),
+    ..._buildCommerceBatchFields(product)
   };
 
   const imageUrl = _productImageUrl(product);
@@ -676,6 +820,34 @@ async function deleteProduct(connection, catalogItemId) {
   }
 }
 
+/**
+ * Delete a catalog item by RETAILER id via items_batch. Needed because
+ * whatsapp.catalogItemId frequently stores the retailer id (items_batch path),
+ * for which a graph-node DELETE fails. Also used to clean up the old item
+ * after a product's sku (= retailer_id) changes.
+ */
+async function deleteProductByRetailerId(connection, catalogId, retailerId) {
+  try {
+    await axios.post(
+      `${BASE_URL}/${catalogId}/items_batch`,
+      {
+        allow_upsert: false,
+        item_type: 'PRODUCT_ITEM',
+        requests: [{ method: 'DELETE', data: { id: String(retailerId) } }]
+      },
+      { headers: _jsonHeaders(connection), timeout: 20000 }
+    );
+    return { success: true };
+  } catch (err) {
+    logger.error('[whatsappCatalogService] deleteProductByRetailerId failed', {
+      catalogId,
+      retailerId,
+      error: err.response?.data?.error?.message || err.message
+    });
+    throw new Error(err.response?.data?.error?.message || 'Failed to delete catalog item by retailer id');
+  }
+}
+
 // ── Batch Sync ────────────────────────────────────────────────────────────────
 
 /**
@@ -873,12 +1045,17 @@ module.exports = {
   linkCatalogToWaba,
   upsertProduct,
   deleteProduct,
+  deleteProductByRetailerId,
   batchSync,
   sendProductMessage,
   sendProductListMessage,
   // exported for unit tests
   _buildMetaProductPayload,
   _buildBatchProductData,
+  _buildCommerceBatchFields,
+  _buildCommerceProductsFields,
   _resolveRetailerId,
-  _priceMinorUnits
+  _priceMinorUnits,
+  _productLink,
+  _additionalImageUrls
 };
