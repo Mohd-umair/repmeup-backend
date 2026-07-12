@@ -6,6 +6,11 @@ const logger = require('../config/logger');
 const xlsx = require('xlsx');
 const axios = require('axios');
 const { syncProductToKb, removeProductFromKb } = require('../services/ai/productKbSyncService');
+const {
+  DEFAULT_CURRENCY,
+  coerceCommerceFields,
+  parseShippingWeight
+} = require('../utils/productCommerceFields');
 
 /**
  * Auto-sync a product to the org's WhatsApp catalog if connected.
@@ -83,7 +88,17 @@ async function _autoDeleteFromMeta(product, orgId) {
     const whatsappCatalogService = require('../integrations/whatsapp/whatsappCatalogService');
     const conn = await PlatformConnection.findOne({ organization: orgId, platform: 'whatsapp', isActive: true }).lean();
     if (!conn) return;
-    await whatsappCatalogService.deleteProduct(conn, catalogItemId);
+    try {
+      await whatsappCatalogService.deleteProduct(conn, catalogItemId);
+    } catch (nodeDeleteErr) {
+      // catalogItemId often stores a retailer id (items_batch path), not a graph
+      // node id — the node DELETE then fails. Fall back to a batch DELETE by
+      // retailer id, which works for both shapes.
+      const resolved = await whatsappCatalogService.resolveCatalogIdForSync(conn);
+      if (!resolved.catalogId) throw nodeDeleteErr;
+      const retailerId = (product.sku && String(product.sku).trim()) || String(product._id);
+      await whatsappCatalogService.deleteProductByRetailerId(conn, resolved.catalogId, retailerId);
+    }
     await Product.updateOne(
       { _id: product._id },
       { $set: { 'whatsapp.syncStatus': 'not_synced', 'whatsapp.catalogItemId': null } }
@@ -92,6 +107,33 @@ async function _autoDeleteFromMeta(product, orgId) {
   } catch (err) {
     logger.warn('[productController] Auto-delete from WA catalog failed (non-fatal)', {
       productId: String(product._id),
+      error: err.message
+    });
+  }
+}
+
+/**
+ * Best-effort cleanup of the OLD Meta catalog item after a product's sku
+ * (= retailer_id) changed and the product was resynced under the new id.
+ */
+async function _deleteOldRetailerItem(orgId, oldRetailerId) {
+  try {
+    if (!oldRetailerId) return;
+    const whatsappCatalogService = require('../integrations/whatsapp/whatsappCatalogService');
+    const conn = await PlatformConnection.findOne({
+      organization: orgId,
+      platform: 'whatsapp',
+      status: 'connected',
+      isActive: true
+    }).lean();
+    if (!conn) return;
+    const resolved = await whatsappCatalogService.resolveCatalogIdForSync(conn);
+    if (!resolved.catalogId) return;
+    await whatsappCatalogService.deleteProductByRetailerId(conn, resolved.catalogId, oldRetailerId);
+    logger.info('[productController] Deleted old catalog item after SKU change', { oldRetailerId });
+  } catch (err) {
+    logger.warn('[productController] Old catalog item cleanup failed (non-fatal)', {
+      oldRetailerId,
       error: err.message
     });
   }
@@ -230,26 +272,40 @@ exports.createProduct = async (req, res, next) => {
       throw err;
     }
 
-    const { name, description, price, currency, discountPercent, images, paymentUrl, sizes, colors, stock } = req.body;
+    const {
+      name, sku, description, price, currency, discountPercent, images,
+      paymentUrl, websiteUrl, sizes, colors, stock, commerce
+    } = req.body;
 
     if (!name || price === undefined || price === null) {
       return res.status(400).json({ success: false, error: 'name and price are required' });
     }
 
-    const product = await Product.create({
-      organization: orgId,
-      name,
-      description,
-      price: Number(price),
-      currency: currency || 'AED',
-      discountPercent: Number(discountPercent || 0),
-      images: images || [],
-      paymentUrl: paymentUrl || '',
-      sizes: sizes || [],
-      colors: colors || [],
-      stock: stock != null ? Number(stock) : null,
-      createdBy: req.user._id
-    });
+    let product;
+    try {
+      product = await Product.create({
+        organization: orgId,
+        name,
+        sku: sku ? String(sku).trim() : undefined,
+        description,
+        price: Number(price),
+        currency: currency || DEFAULT_CURRENCY,
+        discountPercent: Number(discountPercent || 0),
+        images: images || [],
+        paymentUrl: paymentUrl || '',
+        websiteUrl: websiteUrl || '',
+        sizes: sizes || [],
+        colors: colors || [],
+        stock: stock != null ? Number(stock) : null,
+        commerce: commerce || undefined,
+        createdBy: req.user._id
+      });
+    } catch (createErr) {
+      if (createErr?.code === 11000) {
+        return res.status(409).json({ success: false, error: 'A product with this SKU already exists' });
+      }
+      throw createErr;
+    }
 
     // KB sync stays non-blocking; WA sync is awaited so the UI can show Meta errors.
     syncProductToKb(product).catch(() => {});
@@ -274,19 +330,37 @@ exports.updateProduct = async (req, res, next) => {
 
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
 
-    const allowedFields = ['name', 'description', 'price', 'currency', 'discountPercent', 'images', 'paymentUrl', 'sizes', 'colors', 'stock', 'isActive'];
+    const allowedFields = ['name', 'sku', 'description', 'price', 'currency', 'discountPercent', 'images', 'paymentUrl', 'websiteUrl', 'sizes', 'colors', 'stock', 'commerce', 'isActive'];
     const wasActive = product.isActive;
+    // retailer_id BEFORE any change — needed to clean up the old Meta item if sku changes.
+    const oldRetailerId = (product.sku && String(product.sku).trim()) || String(product._id);
+    const wasSynced = product.whatsapp?.syncStatus === 'synced';
+
     allowedFields.forEach(f => {
       if (req.body[f] !== undefined) product[f] = req.body[f];
     });
 
-    await product.save();
+    try {
+      await product.save();
+    } catch (saveErr) {
+      if (saveErr?.code === 11000) {
+        return res.status(409).json({ success: false, error: 'A product with this SKU already exists' });
+      }
+      throw saveErr;
+    }
 
     // Fire-and-forget KB sync; await WA sync so Meta failures reach the UI.
     syncProductToKb(product).catch(() => {});
     let whatsappSync = { attempted: false, synced: false };
     if (product.isActive) {
       whatsappSync = await _autoSyncToMeta(product, req.user.organization._id);
+
+      // SKU change → retailer_id change → the old Meta item is now orphaned.
+      // Best-effort delete after a successful resync; never blocks the save.
+      const newRetailerId = (product.sku && String(product.sku).trim()) || String(product._id);
+      if (wasSynced && whatsappSync.synced && newRetailerId !== oldRetailerId) {
+        _deleteOldRetailerItem(req.user.organization._id, oldRetailerId).catch(() => {});
+      }
     } else if (wasActive && !product.isActive) {
       _autoDeleteFromMeta(product, req.user.organization._id).catch(() => {});
       removeProductFromKb(product._id, req.user.organization._id).catch(() => {});
@@ -1175,24 +1249,54 @@ exports.importProducts = async (req, res, next) => {
     }
 
     const bulkOps = [];
+    const warnings = [];
     let processedCount = 0;
+    let rowNo = 1;
 
     for (const row of data) {
+      rowNo++;
       const sku = row['SKU'] ? String(row['SKU']).trim() : null;
       const name = row['Name'] ? String(row['Name']).trim() : null;
-      
+
       if (!name) continue; // Name is required
 
       const price = Number(row['Price']) || 0;
-      const currency = row['Currency'] ? String(row['Currency']).trim() : 'AED';
+      const currency = row['Currency'] ? String(row['Currency']).trim() : DEFAULT_CURRENCY;
       const description = row['Description'] ? String(row['Description']).trim() : '';
       const discountPercent = Number(row['Discount']) || 0;
       const stock = row['Stock'] != null && row['Stock'] !== '' ? Number(row['Stock']) : null;
       const paymentUrl = row['Payment URL'] ? String(row['Payment URL']).trim() : '';
-      
+      const websiteUrl = row['Website URL'] ? String(row['Website URL']).trim() : '';
+
       const images = row['Images'] ? String(row['Images']).split(',').map(s => s.trim()).filter(Boolean) : [];
       const sizes = row['Sizes'] ? String(row['Sizes']).split(',').map(s => s.trim()).filter(Boolean) : [];
       const colors = row['Colors'] ? String(row['Colors']).split(',').map(s => s.trim()).filter(Boolean) : [];
+
+      // Meta commerce columns — lenient: bad values are dropped with a warning,
+      // never rejecting the row.
+      const { commerce, warnings: rowWarnings } = coerceCommerceFields({
+        brand: row['Brand'],
+        condition: row['Condition'],
+        availability: row['Availability'],
+        gtin: row['GTIN'],
+        mpn: row['MPN'],
+        googleProductCategory: row['Google Product Category'],
+        fbProductCategory: row['FB Product Category'],
+        productType: row['Product Type'],
+        itemGroupId: row['Item Group ID'],
+        color: row['Color'],
+        size: row['Size'],
+        gender: row['Gender'],
+        ageGroup: row['Age Group'],
+        material: row['Material'],
+        pattern: row['Pattern'],
+        originCountry: row['Origin Country'],
+        importerName: row['Importer Name'],
+        manufacturerInfo: row['Manufacturer Info'],
+        waComplianceCategory: row['WA Compliance Category'],
+        shippingWeight: row['Shipping Weight']
+      }, { lenient: true });
+      for (const w of rowWarnings) warnings.push(`Row ${rowNo}: ${w}`);
 
       const productData = {
         organization: orgId,
@@ -1209,6 +1313,12 @@ exports.importProducts = async (req, res, next) => {
         isActive: true,
         createdBy: req.user._id
       };
+      if (websiteUrl) productData.websiteUrl = websiteUrl;
+      if (commerce) {
+        for (const [key, value] of Object.entries(commerce)) {
+          productData[`commerce.${key}`] = value;
+        }
+      }
 
       if (sku) {
         productData.sku = sku;
@@ -1241,11 +1351,12 @@ exports.importProducts = async (req, res, next) => {
           upsertedCount: result.upsertedCount,
           modifiedCount: result.modifiedCount,
           matchedCount: result.matchedCount,
-          totalProcessed: processedCount
+          totalProcessed: processedCount,
+          warnings
         }
       });
     } else {
-      res.json({ success: true, data: { upsertedCount: 0, modifiedCount: 0, matchedCount: 0, totalProcessed: 0 } });
+      res.json({ success: true, data: { upsertedCount: 0, modifiedCount: 0, matchedCount: 0, totalProcessed: 0, warnings } });
     }
 
   } catch (err) {
@@ -1261,7 +1372,12 @@ exports.importProducts = async (req, res, next) => {
 /**
  * Build a bulkWrite ops array from a normalised product list and execute it.
  * Each item must have at least { name }. Optional: { sku, price, currency,
- * description, discountPercent, stock, paymentUrl, images, sizes, colors }.
+ * description, discountPercent, stock, paymentUrl, websiteUrl, images, sizes,
+ * colors, commerce }.
+ *
+ * `commerce` fields are written as dotted paths ONLY for keys the import
+ * actually provides — a re-import must never wipe compliance/attribute data
+ * the user entered manually.
  */
 async function runBulkUpsert(items, orgId, userId) {
   const bulkOps = [];
@@ -1276,7 +1392,7 @@ async function runBulkUpsert(items, orgId, userId) {
       name,
       description: item.description ? String(item.description).trim() : '',
       price: Number(item.price) || 0,
-      currency: item.currency ? String(item.currency).trim() : 'USD',
+      currency: item.currency ? String(item.currency).trim() : DEFAULT_CURRENCY,
       discountPercent: Number(item.discountPercent) || 0,
       stock: item.stock != null && item.stock !== '' ? Number(item.stock) : null,
       paymentUrl: item.paymentUrl ? String(item.paymentUrl).trim() : '',
@@ -1286,6 +1402,15 @@ async function runBulkUpsert(items, orgId, userId) {
       isActive: true,
       createdBy: userId
     };
+    if (item.websiteUrl) productData.websiteUrl = String(item.websiteUrl).trim();
+
+    // Sparse commerce update: one dotted path per provided key.
+    if (item.commerce && typeof item.commerce === 'object') {
+      for (const [key, value] of Object.entries(item.commerce)) {
+        if (value === undefined || value === null || value === '') continue;
+        productData[`commerce.${key}`] = value;
+      }
+    }
 
     const sku = item.sku ? String(item.sku).trim() : null;
     if (sku) productData.sku = sku;
@@ -1356,17 +1481,23 @@ exports.importFromWooCommerce = async (req, res, next) => {
         ? p.short_description.replace(/<[^>]*>/g, '').trim()
         : (p.description ? p.description.replace(/<[^>]*>/g, '').trim() : ''),
       price: parseFloat(p.price) || parseFloat(p.regular_price) || 0,
-      currency: 'USD', // WooCommerce doesn't return currency per product
+      currency: DEFAULT_CURRENCY, // WooCommerce doesn't return currency per product
       discountPercent: 0,
       stock: p.manage_stock ? (p.stock_quantity ?? null) : null,
       paymentUrl: p.permalink || '',
+      websiteUrl: p.permalink || '',
       images: (p.images || []).map(img => img.src).filter(Boolean),
       sizes: (p.attributes || [])
         .filter(a => /size/i.test(a.name))
         .flatMap(a => a.options || []),
       colors: (p.attributes || [])
         .filter(a => /colou?r/i.test(a.name))
-        .flatMap(a => a.options || [])
+        .flatMap(a => a.options || []),
+      commerce: coerceCommerceFields({
+        productType: (p.categories || []).map(c => c.name).filter(Boolean).join(' > '),
+        // Woo stores weight unit at store level; kg is the common default.
+        shippingWeight: p.weight ? { value: parseFloat(p.weight), unit: 'kg' } : undefined
+      }, { lenient: true }).commerce
     }));
 
     const summary = await runBulkUpsert(items, orgId, req.user._id);
@@ -1398,7 +1529,7 @@ exports.importFromShopify = async (req, res, next) => {
 
     // Shopify cursor-based pagination
     while (true) {
-      const params = { limit: 250, status: 'active', fields: 'id,title,body_html,variants,images' };
+      const params = { limit: 250, status: 'active', fields: 'id,title,body_html,variants,images,vendor,product_type,handle' };
       if (pageInfo) params.page_info = pageInfo;
 
       const response = await axios.get(`https://${domain}/admin/api/2024-01/products.json`, {
@@ -1432,17 +1563,26 @@ exports.importFromShopify = async (req, res, next) => {
         name: p.title || '',
         description: p.body_html ? p.body_html.replace(/<[^>]*>/g, '').trim() : '',
         price: parseFloat(variant.price) || 0,
-        currency: 'USD',
+        currency: DEFAULT_CURRENCY,
         discountPercent: variant.compare_at_price && parseFloat(variant.compare_at_price) > parseFloat(variant.price)
           ? Math.round((1 - parseFloat(variant.price) / parseFloat(variant.compare_at_price)) * 100)
           : 0,
         stock: variant.inventory_quantity != null ? variant.inventory_quantity : null,
         paymentUrl: '',
+        websiteUrl: p.handle ? `https://${domain}/products/${p.handle}` : '',
         images: (p.images || []).map(img => img.src).filter(Boolean),
         sizes: (p.variants || [])
           .map(v => v.option1)
           .filter(v => v && !/^\d/.test(v)), // crude: skip pure-numeric variant options (prices)
-        colors: []
+        colors: [],
+        commerce: coerceCommerceFields({
+          brand: p.vendor,
+          productType: p.product_type,
+          gtin: variant.barcode,
+          shippingWeight: variant.weight
+            ? { value: Number(variant.weight), unit: String(variant.weight_unit || 'kg').toLowerCase() }
+            : undefined
+        }, { lenient: true }).commerce
       };
     });
 
@@ -1485,20 +1625,26 @@ exports.importFromUrl = async (req, res, next) => {
       return res.status(422).json({ success: false, error: 'Could not find a product array in the API response. Make sure the endpoint returns an array of products (or wraps it in a "data", "products", or "items" key).' });
     }
 
-    // Best-effort field mapping — accepts both snake_case and camelCase keys
+    // Best-effort field mapping — accepts both snake_case and camelCase keys.
+    // Product-page links (permalink/url) now feed websiteUrl (the Meta `link`);
+    // paymentUrl comes only from explicit payment fields.
     const items = raw.map(p => ({
       sku: p.sku || p.SKU || null,
       name: p.name || p.title || p.product_name || '',
       description: p.description || p.body_html || p.short_description || '',
       price: parseFloat(p.price || p.sale_price || p.regular_price || 0) || 0,
-      currency: p.currency || p.currency_code || 'USD',
+      currency: p.currency || p.currency_code || DEFAULT_CURRENCY,
       discountPercent: Number(p.discountPercent || p.discount_percent || p.discount || 0) || 0,
       stock: p.stock != null ? Number(p.stock) : (p.stock_quantity != null ? Number(p.stock_quantity) : null),
-      paymentUrl: p.paymentUrl || p.payment_url || p.permalink || p.url || '',
+      paymentUrl: p.paymentUrl || p.payment_url || '',
+      websiteUrl: p.websiteUrl || p.website_url || p.permalink || p.url || '',
       images: Array.isArray(p.images) ? p.images.map(img => (typeof img === 'string' ? img : img.src || img.url || '')).filter(Boolean)
         : (p.image ? [p.image] : []),
       sizes: Array.isArray(p.sizes) ? p.sizes : (p.sizes ? String(p.sizes).split(',').map(s => s.trim()).filter(Boolean) : []),
-      colors: Array.isArray(p.colors) ? p.colors : (p.colors ? String(p.colors).split(',').map(s => s.trim()).filter(Boolean) : [])
+      colors: Array.isArray(p.colors) ? p.colors : (p.colors ? String(p.colors).split(',').map(s => s.trim()).filter(Boolean) : []),
+      // Lenient pass over the raw object — coerceCommerceFields understands
+      // snake_case aliases (brand, condition, gtin/barcode, origin_country, …).
+      commerce: coerceCommerceFields(p, { lenient: true }).commerce
     }));
 
     const summary = await runBulkUpsert(items, orgId, req.user._id);

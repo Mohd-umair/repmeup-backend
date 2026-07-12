@@ -1,4 +1,12 @@
 const mongoose = require('mongoose');
+const {
+  CONDITIONS,
+  AVAILABILITY_VALUES,
+  GENDERS,
+  AGE_GROUPS,
+  WA_COMPLIANCE_CATEGORIES,
+  WEIGHT_UNITS
+} = require('../utils/productCommerceFields');
 
 /**
  * Product / Catalog item.
@@ -61,6 +69,82 @@ const productSchema = new mongoose.Schema({
     type: String,
     trim: true,
     default: ''
+  },
+
+  /**
+   * Product page URL on the business's website — sent to Meta as the catalog
+   * item `link`. Falls back to paymentUrl in the sync payload when unset.
+   */
+  websiteUrl: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+
+  /**
+   * Meta/WhatsApp Commerce catalog attributes (all optional; unset fields are
+   * simply omitted from the sync payload). Enums/values mirror Meta's catalog
+   * field spec — see utils/productCommerceFields.js (single source of truth).
+   * `default: undefined` keeps old documents untouched (no empty {} persisted).
+   */
+  commerce: {
+    type: new mongoose.Schema({
+      brand: { type: String, trim: true, maxlength: 100 },
+      condition: { type: String, enum: CONDITIONS },
+      /** Explicit override; unset → derived from `stock === 0`. */
+      availability: { type: String, enum: AVAILABILITY_VALUES },
+
+      /** Identifiers */
+      gtin: { type: String, trim: true, maxlength: 14 },
+      mpn: { type: String, trim: true, maxlength: 100 },
+
+      /** Categorization */
+      googleProductCategory: { type: String, trim: true, maxlength: 750 },
+      fbProductCategory: { type: String, trim: true, maxlength: 750 },
+      productType: { type: String, trim: true, maxlength: 750 },
+
+      /** Variant attributes (single item per product — no auto-expansion) */
+      itemGroupId: { type: String, trim: true, maxlength: 100 },
+      color: { type: String, trim: true, maxlength: 200 },
+      size: { type: String, trim: true, maxlength: 200 },
+      gender: { type: String, enum: GENDERS },
+      ageGroup: { type: String, enum: AGE_GROUPS },
+      material: { type: String, trim: true, maxlength: 200 },
+      pattern: { type: String, trim: true, maxlength: 100 },
+
+      /** India compliance (WhatsApp requirement for India sellers) */
+      originCountry: { type: String, trim: true, uppercase: true, maxlength: 2 },
+      importerName: { type: String, trim: true, maxlength: 200 },
+      importerAddress: {
+        street1: { type: String, trim: true, maxlength: 200 },
+        street2: { type: String, trim: true, maxlength: 200 },
+        city: { type: String, trim: true, maxlength: 200 },
+        region: { type: String, trim: true, maxlength: 200 },
+        postalCode: { type: String, trim: true, maxlength: 20 },
+        country: { type: String, trim: true, uppercase: true, maxlength: 2 }
+      },
+      manufacturerInfo: { type: String, trim: true, maxlength: 1000 },
+      waComplianceCategory: { type: String, enum: WA_COMPLIANCE_CATEGORIES },
+
+      /** Sale window — sale price itself derives from discountPercent */
+      salePriceStart: { type: Date },
+      salePriceEnd: { type: Date },
+
+      unitPrice: {
+        value: { type: Number, min: 0 },
+        currency: { type: String, trim: true, uppercase: true, maxlength: 3 },
+        unit: { type: String, trim: true, lowercase: true }
+      },
+
+      shippingWeight: {
+        value: { type: Number, min: 0 },
+        unit: { type: String, enum: WEIGHT_UNITS }
+      },
+
+      /** Direct-download video URLs (Meta supports up to 20) */
+      videoUrls: { type: [String], default: undefined }
+    }, { _id: false }),
+    default: undefined
   },
 
   sizes: [{

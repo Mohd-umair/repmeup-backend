@@ -13,6 +13,7 @@
 const Product = require('../models/Product');
 const PlatformConnection = require('../models/PlatformConnection');
 const Interaction = require('../models/Interaction');
+const { DEFAULT_CURRENCY, coerceCommerceFields } = require('../utils/productCommerceFields');
 const whatsappCatalogService = require('../integrations/whatsapp/whatsappCatalogService');
 const logger = require('../config/logger');
 const xlsx = require('xlsx');
@@ -392,7 +393,13 @@ exports.syncAllProducts = async (req, res, next) => {
 // multipart/form-data — file field: "file"
 //
 // Expected CSV columns (case-insensitive):
-//   name (required), description, price, currency, image_url, payment_url, sku, stock
+//   name (required), description, price, currency, image_url, additional_image_link,
+//   payment_url, website_url (alias: link), sku, stock
+// Meta commerce columns (all optional; invalid values dropped with a warning):
+//   brand, condition, availability, gtin, mpn, google_product_category,
+//   fb_product_category, product_type, item_group_id, color, size, gender,
+//   age_group, material, pattern, origin_country, importer_name,
+//   manufacturer_info, wa_compliance_category, shipping_weight
 // ─────────────────────────────────────────────────────────────────────────────
 exports.importCsv = async (req, res, next) => {
   try {
@@ -424,6 +431,7 @@ exports.importCsv = async (req, res, next) => {
 
     const bulkOps = [];
     const importErrors = [];
+    const importWarnings = [];
     let rowIndex = 0;
 
     for (const rawRow of rows) {
@@ -438,11 +446,22 @@ exports.importCsv = async (req, res, next) => {
 
       const sku = row.sku ? String(row.sku).trim() : null;
       const price = parseFloat(row.price) || 0;
-      const currency = row.currency ? String(row.currency).trim().toUpperCase() : 'AED';
+      const currency = row.currency ? String(row.currency).trim().toUpperCase() : DEFAULT_CURRENCY;
       const description = row.description ? String(row.description).trim() : '';
       const imageUrl = row.image_url ? String(row.image_url).trim() : '';
       const paymentUrl = row.payment_url ? String(row.payment_url).trim() : '';
+      const websiteUrl = (row.website_url || row.link) ? String(row.website_url || row.link).trim() : '';
       const stock = row.stock !== '' && row.stock != null ? Number(row.stock) : null;
+
+      // additional_image_link: comma/semicolon/pipe separated → appended after image_url
+      const additionalImages = row.additional_image_link
+        ? String(row.additional_image_link).split(/[,;|]/).map(s => s.trim()).filter(Boolean)
+        : [];
+      const images = [...(imageUrl ? [imageUrl] : []), ...additionalImages];
+
+      // Meta commerce fields — lenient: invalid values dropped with a warning.
+      const { commerce, warnings: rowWarnings } = coerceCommerceFields(row, { lenient: true });
+      for (const w of rowWarnings) importWarnings.push({ row: rowIndex, warning: w });
 
       const productData = {
         organization: orgId,
@@ -450,13 +469,19 @@ exports.importCsv = async (req, res, next) => {
         description,
         price,
         currency,
-        images: imageUrl ? [imageUrl] : [],
+        images,
         paymentUrl,
         stock,
         isActive: true,
         createdBy: req.user._id,
         'whatsapp.syncStatus': 'pending'
       };
+      if (websiteUrl) productData.websiteUrl = websiteUrl;
+      if (commerce) {
+        for (const [key, value] of Object.entries(commerce)) {
+          productData[`commerce.${key}`] = value;
+        }
+      }
       if (sku) productData.sku = sku;
 
       const filter = sku
@@ -514,6 +539,7 @@ exports.importCsv = async (req, res, next) => {
         created: upsertedCount,
         updated: modifiedCount,
         failed: importErrors,
+        warnings: importWarnings,
         sync: syncResult,
         totalRows: rowIndex
       }
