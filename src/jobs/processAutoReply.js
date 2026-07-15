@@ -11,6 +11,7 @@ const { emitToOrg } = require('../utils/socketEmitter');
 const { classifyMessage, countPreviousFallbacks, isInternalAiPayload, isPleasantriesMessage, detectBotConversationLoop } = require('../utils/messageIntentClassifier');
 const { updateAIInsights } = require('../services/contactService');
 const { shouldSkipAiProcessingForSyncedInteraction } = require('../utils/syncInteractionBackfillGuard');
+const { isAgentRecentlyActive, resolveHoldMinutes } = require('../utils/agentActivity');
 
 // ─── Fallback tone rotation pool ─────────────────────────────────────────────
 // Primary message comes from fallbackSettings.message (user-configured).
@@ -22,6 +23,36 @@ const FALLBACK_VARIANTS = [
   "Our team is on it! You'll hear back from us shortly 🙌",
 ];
 const REPEAT_FALLBACK_MSG = "Our team is already looking into this — you'll hear from us soon 😊";
+
+// ─── Human-handoff promise detection (OUTBOUND AI reply) ─────────────────────
+// When the AI's own reply tells the customer a human / agent / team will follow
+// up ("I've escalated this", "our priority team will reach out", "connecting you
+// with a team member", "we'll arrange the pickup"), we MUST actually escalate and
+// assign a human — otherwise the AI makes a promise the system never keeps.
+// The escalation SCORER only reads the customer's message, so it cannot catch this;
+// these patterns read the AI reply that is about to be (or was just) sent.
+const HUMAN_HANDOFF_REPLY_PATTERNS = [
+  /escalat/i,                                                   // escalate / escalated / escalation
+  /priority team/i,
+  /someone (will|should|from (our|the) team) .{0,40}?(reach out|reaches out|contact|get back|be in touch|call|assist|help|follow up)/i,
+  /(reach out|reaches out|get back|be in touch|contact|follow up with) (to )?you .{0,25}?(shortly|soon|as soon|right away|asap|within \d)/i,
+  /(connect|connecting|put you in touch|transfer(?:ring)?) (you )?(with|to) .{0,25}?(team|agent|human|colleague|representative|specialist|member|expert)/i,
+  /(our|a) (agent|team member|representative|specialist|colleague|human agent|support (?:agent|team)) .{0,30}?(will|to|is going to|can) .{0,25}?(reach out|contact|get back|be in touch|call|assist|help|follow up|look into)/i,
+  /(passed|passing|forwarded|forwarding|raised|escalated) .{0,40}?(this|it|your (?:request|message|query|refund|issue|order|concern|complaint)) .{0,25}?(along|on|to (?:our|the) team|with (?:our|the) team|to (?:a )?(?:team|specialist|agent))/i,
+  /(team|agent|someone) .{0,25}?(will|to) .{0,15}?(arrange|arranges|arrange the) .{0,10}?pickup/i,
+  /arrange (the|a|your) (pickup|return|refund|replacement)/i,
+  /our team will (reach out|contact you|get back|be in touch|take it from here|look into|follow up)/i,
+  /if you (don['’]?t|do not|haven['’]?t|have not) hear.{0,12}from us/i,   // customer left waiting on the business
+];
+
+/**
+ * True when an outbound AI reply promises a human/agent/team will follow up.
+ * Used to guarantee a real human is assigned so the AI's promise is kept.
+ */
+function replyPromisesHumanHandoff(text) {
+  if (!text || typeof text !== 'string') return false;
+  return HUMAN_HANDOFF_REPLY_PATTERNS.some((re) => re.test(text));
+}
 
 /**
  * Route an interaction to the org's designated fallback bucket (isFallback=true).
@@ -41,6 +72,43 @@ async function routeToFallbackBucket(interaction, organizationId) {
     }
   } catch (err) {
     logger.warn('[Auto-reply] routeToFallbackBucket error (non-fatal)', { error: err.message });
+  }
+}
+
+/**
+ * Guarantee a real human agent is assigned + notified for this interaction.
+ *
+ * Called when the AI reply promised a human follow-up. `escalateInteraction` only
+ * auto-assigns when `escalationSettings.autoAssign` is on; this closes the gap so
+ * the promise is kept even when auto-assign is off (forceFallback bypasses the
+ * 'manual' assignment restriction). No-op if a human is already assigned — never throws.
+ */
+async function ensureHumanAssigned(interaction, organization) {
+  try {
+    const already = await Interaction.findById(interaction._id).select('assignedTo').lean();
+    if (already?.assignedTo) return; // escalateInteraction (autoAssign) already handled it
+
+    const agent = await escalationService.assignToAgent(interaction, organization, { forceFallback: true });
+    if (agent) {
+      const notify =
+        organization.autoReplySettings?.fallbackSettings?.notifyByEmail ??
+        organization.escalationSettings?.notifyAgents ?? true;
+      if (notify) {
+        await escalationService.notifyAgent(agent, interaction, organization);
+      }
+      logger.info('[Auto-reply] Guaranteed human assignment after AI handoff promise', {
+        interactionId: interaction._id?.toString(),
+        agent: agent._id?.toString()
+      });
+    } else {
+      // requiresHumanResponse is still set (via escalateInteraction), so it shows in the
+      // "needs human" queue even if there is no agent in the pool to receive it.
+      logger.warn('[Auto-reply] AI promised a human but no agent available to assign', {
+        interactionId: interaction._id?.toString()
+      });
+    }
+  } catch (e) {
+    logger.warn('[Auto-reply] ensureHumanAssigned error (non-fatal)', { error: e.message });
   }
 }
 
@@ -313,23 +381,30 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       return { skipped: true, reason: `Status is ${interactionForReply.status}` };
     }
 
-    // Skip if a human agent read the interaction during the delay window.
-    // isRead is reset to false on every new inbound webhook message, so this
-    // only fires when an agent opened this specific message before the job ran.
-    if (interactionForReply.isRead && interactionForReply.readBy) {
-      logger.info('[Auto-reply] Skipped — human agent read the interaction during the delay window', {
+    // Hold the AI back while a human agent is actively handling this chat.
+    // Fires when an agent OPENED (readAt/readBy) or manually REPLIED to the thread
+    // within `agentActiveHoldMinutes` (default 5). Unlike the old `isRead` check,
+    // these signals survive a new inbound (which resets isRead=false), so it also
+    // catches a mid-conversation agent who is typing but hasn't re-opened the new
+    // message. Time-based, so the chat auto-recovers if the agent walks away.
+    const holdMinutes = resolveHoldMinutes(organization.autoReplySettings);
+    const agentHold = isAgentRecentlyActive(interactionForReply, holdMinutes);
+    if (agentHold.active) {
+      logger.info('[Auto-reply] Skipped — human agent recently active (agent_active_hold)', {
         interactionId: interactionForReply._id?.toString(),
-        readBy: interactionForReply.readBy?.toString(),
-        readAt: interactionForReply.readAt
+        source: agentHold.source,
+        lastActivityAt: agentHold.at,
+        ageMs: agentHold.ageMs,
+        holdMinutes
       });
-      // Still escalate if rules triggered, but do not generate an AI reply
+      // Still escalate if rules triggered, but do not generate an AI reply.
       if (escalationCheck.shouldEscalate) {
         await escalationService.escalateInteraction(
           interactionForReply, organization,
           escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
         );
       }
-      return { skipped: true, reason: 'Human agent is handling this interaction' };
+      return { skipped: true, reason: 'agent_recently_active' };
     }
 
     // ─── LAYER 0: Pre-AI message classification ────────────────────────────────
@@ -764,17 +839,30 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       autoReply.response
     );
 
-    const shouldEscalate = escalationCheck.shouldEscalate || postReplyEscalationCheck.shouldEscalate;
+    // GUARDRAIL: if the AI's own reply promised a human will follow up ("I've
+    // escalated this", "our priority team will reach out", "connecting you with an
+    // agent", "we'll arrange the pickup"), we must actually escalate + assign a
+    // human. The scorer above only reads the customer's message, so it never catches
+    // a promise the AI itself introduced — this is exactly the "AI says escalated but
+    // nobody is assigned" bug.
+    const promisesHandoff = replyPromisesHumanHandoff(autoReply.response.content);
+
+    const shouldEscalate =
+      escalationCheck.shouldEscalate ||
+      postReplyEscalationCheck.shouldEscalate ||
+      promisesHandoff;
     const escalationReasons = [
       ...(escalationCheck.reasons || []),
-      ...(postReplyEscalationCheck?.reasons || [])
+      ...(postReplyEscalationCheck?.reasons || []),
+      ...(promisesHandoff ? ['AI reply promised a human follow-up — routing to a human agent'] : [])
     ];
     const escalationType = escalationCheck.shouldEscalate
       ? escalationCheck.type
-      : 'ai_confidence';
+      : (postReplyEscalationCheck.shouldEscalate ? 'ai_confidence' : 'ai_unresolvable');
     const escalationMetadata = {
       ...(escalationCheck.metadata || {}),
-      ...(postReplyEscalationCheck?.metadata || {})
+      ...(postReplyEscalationCheck?.metadata || {}),
+      ...(promisesHandoff ? { promisedHumanHandoff: true } : {})
     };
 
     // Send the reply FIRST so the customer always gets an acknowledgment,
@@ -813,6 +901,15 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         escalationMetadata
       );
 
+      // When the AI itself promised a human, guarantee one is actually assigned +
+      // notified (escalateInteraction only auto-assigns when autoAssign is on). This
+      // keeps the promise even for orgs running "ReppyAI only" with auto-assign off.
+      // No extra message is sent — the reply already carried the handoff wording.
+      if (promisesHandoff) {
+        await ensureHumanAssigned(interactionForReply, organization);
+        await routeToFallbackBucket(interactionForReply, organization._id);
+      }
+
       // Emit final state so the frontend list reflects the definitive status after all DB writes
       try {
         const fresh = await Interaction.findById(interactionForReply._id).lean();
@@ -823,6 +920,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         interactionId: interactionForReply._id?.toString(),
         replySent,
         escalationType,
+        promisesHandoff,
         reasons: escalationReasons
       });
       return { sent: replySent, escalated: true };
@@ -1321,4 +1419,7 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
     return false;
   }
 }
+
+// Exposed for unit tests (the primary export is the processAutoReply job function).
+module.exports.replyPromisesHumanHandoff = replyPromisesHumanHandoff;
 

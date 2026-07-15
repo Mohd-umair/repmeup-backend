@@ -300,7 +300,9 @@ CRITICAL RULES — you MUST follow all of these:
 4. Automated pleasantries / bot-like messages ("thank you so much, always a pleasure to connect, wishing you a wonderful day") → messageType "closing", noReply true, reply "".
 5. Message is from the wrong business or a competitor reference and you cannot help → resolvable false, short polite handoff reply, confidence < 0.5.
 6. Unclear query → attempt a clarifying question (low confidence).
-7. noReply true → reply field may be empty string "".`;
+7. noReply true → reply field may be empty string "".
+8. Account- or order-specific requests you CANNOT verify from the knowledge base or the provided order context — order status/tracking ("where is my order"), refund/return/replacement/cancellation status, arranging a pickup, payment/billing disputes, or changing an existing order — need private/system data → resolvable false, confidence < 0.6, and a short reply that a team member will assist. NEVER invent a status, order number, tracking detail, or timeline.
+9. If your reply tells the customer that a human, agent, team, or "someone" will contact / reach out / follow up, or that you have escalated / forwarded / raised / passed along their request — you are NOT resolving it yourself: set resolvable false. Never claim a human will follow up while resolvable is true.`;
 
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
   // Substitute the order for the message ONLY when the real message is an opaque
