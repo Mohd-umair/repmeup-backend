@@ -234,6 +234,15 @@ const organizationSchema = new mongoose.Schema({
       min: 0,
       max: 120
     },
+    // Hold AI auto-reply while a human agent is actively handling a chat.
+    // If an agent OPENED or manually REPLIED to the conversation within this many
+    // minutes, ReppyAI stays silent on new inbound messages. 0 = disabled.
+    agentActiveHoldMinutes: {
+      type: Number,
+      default: 5,
+      min: 0,
+      max: 60
+    },
     scheduleInterval: {
       type: String,
       enum: ['15min', '30min', '1hour', '6hours', '12hours', '24hours'],

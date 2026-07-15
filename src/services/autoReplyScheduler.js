@@ -3,6 +3,7 @@ const Organization = require('../models/Organization');
 const aiService = require('./aiService');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
 const { computeReplyDelayMs } = require('../utils/replyDelayHelper');
+const { isAgentRecentlyActive, resolveHoldMinutes } = require('../utils/agentActivity');
 const logger = require('../config/logger');
 
 /**
@@ -153,7 +154,7 @@ class AutoReplyScheduler {
 
       const Interaction = require('../models/Interaction');
       const interaction = await Interaction.findById(interactionId).select(
-        'replies status platform type platformId metadata.lastMid metadata.flowHandled'
+        'replies status platform type platformId metadata.lastMid metadata.flowHandled readAt readBy'
       );
 
       if (!interaction) {
@@ -191,6 +192,15 @@ class AutoReplyScheduler {
         const enabledPlats = settings.enabledPlatforms?.join(', ') || 'all';
         const enabledTypes = settings.enabledTypes?.join(', ') || 'all';
         logger.info(`⚠️  [Auto-Reply Queue] Skipping — platform/type not enabled. Interaction: platform="${interaction.platform}" type="${interaction.type}". Settings: enabledPlatforms=[${enabledPlats}] enabledTypes=[${enabledTypes}]. Org: ${organizationId}`);
+        return false;
+      }
+
+      // Don't even queue if a human agent opened/replied within the hold window —
+      // they're actively handling this chat. The job-level guard (processAutoReply)
+      // is the source of truth for agents who become active DURING the delay.
+      const agentHold = isAgentRecentlyActive(interaction, resolveHoldMinutes(settings));
+      if (agentHold.active) {
+        logger.info(`⚠️  [Auto-Reply Queue] Skipping — human agent recently active (${agentHold.source}, ${Math.round((agentHold.ageMs || 0) / 1000)}s ago). Interaction: ${interactionId}`);
         return false;
       }
 
