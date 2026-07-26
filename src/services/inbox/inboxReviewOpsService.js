@@ -1,5 +1,6 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const Interaction = require('../../models/Interaction');
 const ReviewRequest = require('../../models/ReviewRequest');
 const { generateOpsRef } = require('../../utils/opsRefHelper');
@@ -260,7 +261,8 @@ async function createReview(orgId, body) {
     customerHandle,
     rating,
     reviewBody,
-    sentiment
+    sentiment,
+    sourceInteractionId
   } = body;
 
   if (!platform) return { error: 'platform is required' };
@@ -274,6 +276,11 @@ async function createReview(orgId, body) {
     ratingNum >= 4 ? 'positive' :
     ratingNum <= 2 ? 'negative' : 'neutral'
   );
+
+  const validSourceId =
+    sourceInteractionId && mongoose.Types.ObjectId.isValid(String(sourceInteractionId))
+      ? String(sourceInteractionId)
+      : null;
 
   const uniqueId = `manual-${orgId}-${Date.now()}`;
   const { displayRef, number } = await generateOpsRef(orgId, 'review');
@@ -297,6 +304,7 @@ async function createReview(orgId, body) {
       reviewNumber: number,
       rating: ratingNum,
       ...(ratingNum ? { starRating: STAR_MAP[ratingNum] } : {}),
+      ...(validSourceId ? { sourceInteractionId: validSourceId } : {}),
       manualEntry: true
     },
     platformCreatedAt: new Date()
@@ -305,12 +313,39 @@ async function createReview(orgId, body) {
   return { review: await getReviewDetail(orgId, doc._id) };
 }
 
+/**
+ * Find the newest review Interaction linked to a source inbox chat.
+ * Mirrors getOrderByInteraction in inboxOrderOpsService.
+ */
+async function getReviewByInteraction(orgId, interactionId) {
+  if (!mongoose.Types.ObjectId.isValid(String(interactionId))) return null;
+
+  const doc = await Interaction.findOne({
+    organization: orgId,
+    type: 'review',
+    'metadata.sourceInteractionId': String(interactionId)
+  })
+    .select('_id metadata sentiment')
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (!doc) return null;
+
+  const displayRef = doc.metadata?.reviewDisplayRef || doc._id.toString().slice(-8).toUpperCase();
+  return {
+    id: doc._id.toString(),
+    displayRef,
+    sentiment: doc.sentiment || null
+  };
+}
+
 module.exports = {
   listReviews,
   getReviewStats,
   getReviewDetail,
   loadReview,
   createReview,
+  getReviewByInteraction,
   ensureReviewDisplayRef,
   buildReviewFilter,
   replyStatusFor,

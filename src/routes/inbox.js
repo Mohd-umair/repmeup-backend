@@ -62,6 +62,8 @@ router.patch('/ops/orders/:id/shipping', inboxOpsController.updateOrderShipping)
 
 router.get('/ops/complaints', inboxOpsController.listComplaints);
 router.get('/ops/complaints/stats', inboxOpsController.getComplaintStats);
+// Must be before /:id to avoid param conflict
+router.post('/ops/complaints/from-interaction/:interactionId', inboxOpsController.createComplaintFromInteraction);
 router.get('/ops/complaints/:id', inboxOpsController.getComplaintDetail);
 router.post('/ops/complaints/:id/acknowledge', inboxOpsController.acknowledgeComplaint);
 router.post('/ops/complaints/:id/assign', inboxOpsController.assignComplaint);
@@ -70,6 +72,8 @@ router.post('/ops/complaints/:id/close', inboxOpsController.closeComplaint);
 
 router.get('/ops/reviews', inboxOpsController.listReviews);
 router.get('/ops/reviews/stats', inboxOpsController.getReviewStats);
+// Must be before /:id to avoid param conflict
+router.get('/ops/reviews/by-interaction/:interactionId', inboxOpsController.getReviewByInteraction);
 router.post('/ops/reviews', inboxOpsController.createReview);
 router.get('/ops/reviews/:id', inboxOpsController.getReviewDetail);
 router.post('/ops/reviews/:id/suggest-reply', inboxOpsController.suggestReviewReply);

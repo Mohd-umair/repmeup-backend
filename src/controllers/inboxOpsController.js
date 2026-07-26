@@ -100,6 +100,34 @@ exports.updateOrderShipping = async (req, res, next) => {
 
 // ── Complaints ────────────────────────────────────────────────────────────────
 
+// POST /inbox/ops/complaints/from-interaction/:interactionId
+exports.createComplaintFromInteraction = async (req, res, next) => {
+  try {
+    const { issueSummary, priority } = req.body;
+    const result = await complaintOps.raiseComplaint(
+      orgId(req),
+      req.params.interactionId,
+      { issueSummary, priority }
+    );
+    if (result.error === 'invalid_interaction_id') {
+      return res.status(400).json({ success: false, error: 'Invalid interaction ID' });
+    }
+    if (result.error === 'not_found') {
+      return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+    if (result.error === 'complaint_already_open') {
+      return res.status(409).json({
+        success: false,
+        error: 'An active complaint already exists for this conversation',
+        displayRef: result.displayRef
+      });
+    }
+    res.status(201).json({ success: true, data: result.detail });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.listComplaints = async (req, res, next) => {
   try {
     const data = await complaintOps.listComplaints(orgId(req), req.query);
@@ -218,6 +246,17 @@ exports.createReview = async (req, res, next) => {
 exports.listReviews = async (req, res, next) => {
   try {
     const data = await reviewOps.listReviews(orgId(req), req.query);
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /inbox/ops/reviews/by-interaction/:interactionId
+exports.getReviewByInteraction = async (req, res, next) => {
+  try {
+    const data = await reviewOps.getReviewByInteraction(orgId(req), req.params.interactionId);
+    if (!data) return res.status(404).json({ success: false, error: 'No review linked to this conversation' });
     res.json({ success: true, data });
   } catch (err) {
     next(err);
