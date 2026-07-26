@@ -53,14 +53,40 @@ jest.mock('../../../../src/models/User', () => ({
   findOne: () => ({ select: async () => null })
 }));
 
+// productSearchService: new dependency added for product grounding. Mock it
+// so tests run without a MongoDB connection.
+jest.mock('../../../../src/services/ai/productSearchService', () => ({
+  searchProducts: jest.fn().mockResolvedValue({ products: [], fromFallback: true }),
+  buildProductPromptBlock: jest.fn(() => '')
+}));
+
+// entitlementsService: needs to be mocked so generateAutoReply tests can
+// drive specific entitlement outcomes without hitting Subscription/Redis.
+const mockEntitlementAssert = jest.fn().mockResolvedValue(undefined); // pass by default
+const mockEntitlementCan = jest.fn().mockResolvedValue(true);
+jest.mock('../../../../src/services/entitlementsService', () => ({
+  assert: (...args) => mockEntitlementAssert(...args),
+  can: (...args) => mockEntitlementCan(...args),
+  consume: jest.fn().mockResolvedValue(undefined)
+}));
+
+// CommerceOrder: mocked so buildOrderContext doesn't hit MongoDB.
+jest.mock('../../../../src/models/CommerceOrder', () => ({
+  findOne: jest.fn(() => ({
+    sort: () => ({ lean: async () => null })
+  }))
+}));
+
 const autoReplyService = require('../../../../src/services/ai/autoReplyService');
 
 beforeEach(() => {
   mockGenerateResponseOpenAI.mockReset();
   mockCheckCredits.mockReset();
-  mockDeductCredits.mockReset();
+  mockDeductCredits.mockReset().mockResolvedValue(true);
   mockBucketFindById.mockReset();
   mockIsThreadStyleDm.mockReset().mockReturnValue(false);
+  mockEntitlementAssert.mockReset().mockResolvedValue(undefined);
+  mockEntitlementCan.mockReset().mockResolvedValue(true);
 });
 
 const baseInteraction = (over = {}) => ({

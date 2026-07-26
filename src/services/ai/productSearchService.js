@@ -22,6 +22,7 @@ const MAX_PRODUCT_CHARS = 400;
 
 /**
  * Build a concise text snippet for a single product for use inside an AI prompt.
+ * Includes image availability, colors, and sizes so the AI never has to guess.
  * Keeps token usage low by capping at MAX_PRODUCT_CHARS.
  *
  * @param {object} product
@@ -34,10 +35,26 @@ function formatProductForPrompt(product) {
   const stock = product.stock == null ? 'in stock' : product.stock > 0 ? `${product.stock} in stock` : 'out of stock';
   const sku = product.sku ? ` [SKU: ${product.sku}]` : '';
   const desc = product.description
-    ? ` — ${product.description.substring(0, 200)}${product.description.length > 200 ? '…' : ''}`
+    ? ` — ${product.description.substring(0, 120)}${product.description.length > 120 ? '…' : ''}`
     : '';
 
-  return `${product.name}${sku}: ${price}, ${stock}${desc}`.substring(0, MAX_PRODUCT_CHARS);
+  // Image availability — explicit so the AI is never tempted to claim/deny an image
+  const images = Array.isArray(product.images) ? product.images : [];
+  const hasValidImage = images.some((img) => {
+    const url = typeof img === 'string' ? img : img?.url || img?.src || '';
+    return typeof url === 'string' && url.startsWith('https://');
+  });
+  const imageNote = hasValidImage ? 'image: available' : 'image: not available';
+
+  // Colors and sizes — always ground the AI in real catalog facts
+  const colors = Array.isArray(product.colors) && product.colors.length > 0
+    ? `colors: ${product.colors.slice(0, 8).join(', ')}`
+    : 'colors: not specified';
+  const sizes = Array.isArray(product.sizes) && product.sizes.length > 0
+    ? `sizes: ${product.sizes.slice(0, 8).join(', ')}`
+    : 'sizes: not specified';
+
+  return `${product.name}${sku}: ${price}, ${stock}, ${imageNote}, ${colors}, ${sizes}${desc}`.substring(0, MAX_PRODUCT_CHARS);
 }
 
 /**
@@ -64,12 +81,15 @@ async function searchProducts(organizationId, query, {
 
     const trimmed = (query && String(query).trim()) || '';
 
+    // Fields that ground the AI: image availability, colors, sizes, plus commerce info
+    const PRODUCT_FIELDS = 'name sku description price currency discountPercent stock images colors sizes paymentUrl';
+
     // 1. MongoDB text search
     if (trimmed) {
       let textResults = [];
       try {
         textResults = await Product.find({ ...base, $text: { $search: trimmed } })
-          .select('name sku description price currency discountPercent stock images paymentUrl')
+          .select(PRODUCT_FIELDS)
           .sort({ score: { $meta: 'textScore' } })
           .limit(limit)
           .lean();
@@ -98,7 +118,7 @@ async function searchProducts(organizationId, query, {
             { sku: { $regex: escaped.join('|'), $options: 'i' } }
           ]
         })
-          .select('name sku description price currency discountPercent stock images paymentUrl')
+          .select(PRODUCT_FIELDS)
           .sort({ price: 1 })
           .limit(limit)
           .lean();
@@ -109,9 +129,10 @@ async function searchProducts(organizationId, query, {
       }
     }
 
-    // 3. Fallback — return top active products (best-sellers proxy: lowest stock = most moved)
+    // 3. Fallback — fromFallback:true signals to the caller that these are NOT a match for the query.
+    // The caller should NOT present these to the customer as relevant results.
     const fallback = await Product.find(base)
-      .select('name sku description price currency discountPercent stock images paymentUrl')
+      .select(PRODUCT_FIELDS)
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();

@@ -13,6 +13,88 @@ const { updateAIInsights } = require('../services/contactService');
 const { shouldSkipAiProcessingForSyncedInteraction } = require('../utils/syncInteractionBackfillGuard');
 const { isAgentRecentlyActive, resolveHoldMinutes } = require('../utils/agentActivity');
 
+// ─── Policy enforcement helpers ──────────────────────────────────────────────
+
+/**
+ * Returns true when the current time falls inside the org's quiet-hours window.
+ * Quiet hours are compared in the org's configured timezone using a simple
+ * HH:MM string comparison (no DST correction needed for ±1h accuracy).
+ */
+function isInsideQuietHours(quietHours) {
+  if (!quietHours?.enabled) return false;
+  try {
+    const tz = quietHours.timezone || 'Asia/Kolkata';
+    const now = new Date();
+    const localStr = now.toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const [hh, mm] = localStr.split(':').map(Number);
+    const currentMins = hh * 60 + mm;
+
+    const parseHHMM = (s) => {
+      const parts = String(s || '').split(':');
+      return (Number(parts[0]) || 0) * 60 + (Number(parts[1]) || 0);
+    };
+    const startMins = parseHHMM(quietHours.start || '22:00');
+    const endMins   = parseHHMM(quietHours.end   || '08:00');
+
+    if (startMins < endMins) {
+      // Same-day window (e.g. 02:00–06:00)
+      return currentMins >= startMins && currentMins < endMins;
+    }
+    // Overnight window (e.g. 22:00–08:00)
+    return currentMins >= startMins || currentMins < endMins;
+  } catch (e) {
+    logger.debug('[policy] quiet hours check error (non-fatal)', { error: e.message });
+    return false;
+  }
+}
+
+/**
+ * Returns true when the message text contains any of the org's skip keywords.
+ */
+function containsSkipKeyword(text, skipKeywords) {
+  if (!skipKeywords?.length || !text) return false;
+  const lower = String(text).toLowerCase();
+  return skipKeywords.some((kw) => lower.includes(String(kw).toLowerCase().trim()));
+}
+
+/**
+ * WhatsApp 24-hour customer-care window check.
+ * Meta only allows free-form messages within 24 hours of the last customer inbound.
+ * Outside this window autonomous sends are blocked (should use approved templates).
+ * Returns true when we are OUTSIDE the window and should not send free-form text.
+ */
+function isOutsideWhatsApp24hWindow(interaction) {
+  if (interaction.platform !== 'whatsapp') return false;
+  const lastInboundAt = interaction.metadata?.lastInboundAt;
+  if (!lastInboundAt) return false;
+  const ageMs = Date.now() - new Date(lastInboundAt).getTime();
+  return ageMs > 23.5 * 60 * 60 * 1000; // 23.5h safety margin
+}
+
+// ─── Image intent detection ──────────────────────────────────────────────────
+
+const IMAGE_INTENT_RE = /\b(image|images|photo|photos|pic|pics|picture|pictures|catalog|catalogue|tasveer|tasveere|design|designs|show me|dikhao|dikha|bhejo|send me)\b/i;
+
+function isImageRequest(text) {
+  return IMAGE_INTENT_RE.test(text || '');
+}
+
+// ─── Address text heuristic ──────────────────────────────────────────────────
+// Rough classifier: a delivery address is medium-length, not a greeting, not a
+// single word. We only capture it when WhatsAppAiState says we are expecting one.
+
+const GREETING_RE = /^\s*(hello|hi|hey|salam|salaam|hola|hy|hii|hanji|ji|ok|okay|thanks|thankyou|thank you|fine|good|great|sure|yes|no|nope|kk|hmm|k)\s*[!.]*\s*$/i;
+
+function looksLikeAddress(text) {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (trimmed.length < 10) return false;
+  if (GREETING_RE.test(trimmed)) return false;
+  // Must have at least 2 words (rules out single product names)
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  return wordCount >= 2;
+}
+
 // ─── Fallback tone rotation pool ─────────────────────────────────────────────
 // Primary message comes from fallbackSettings.message (user-configured).
 // These are used as natural-sounding alternatives / repeat-fallback messages.
@@ -381,6 +463,35 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       return { skipped: true, reason: `Status is ${interactionForReply.status}` };
     }
 
+    // ─── POLICY GATE: quiet hours ─────────────────────────────────────────────
+    if (isInsideQuietHours(organization.autoReplySettings?.quietHours)) {
+      logger.info('[Auto-reply] Skipped — quiet hours active', {
+        interactionId: interactionForReply._id?.toString(),
+        quietHours: organization.autoReplySettings.quietHours
+      });
+      return { skipped: true, reason: 'quiet_hours' };
+    }
+
+    // ─── POLICY GATE: skip negative keywords ────────────────────────────────
+    const skipKws = organization.autoReplySettings?.skipNegativeKeywords;
+    if (containsSkipKeyword(interactionForReply.content, skipKws)) {
+      logger.info('[Auto-reply] Skipped — message contains a blocked keyword', {
+        interactionId: interactionForReply._id?.toString()
+      });
+      return { skipped: true, reason: 'blocked_keyword' };
+    }
+
+    // ─── POLICY GATE: WhatsApp 24-hour customer-care window ─────────────────
+    // Meta prohibits free-form messages after the 24h window closes. Outside this
+    // window the AI must stay silent (use approved templates manually instead).
+    if (isOutsideWhatsApp24hWindow(interactionForReply)) {
+      logger.info('[Auto-reply] Skipped — outside WhatsApp 24h customer-care window', {
+        interactionId: interactionForReply._id?.toString(),
+        lastInboundAt: interactionForReply.metadata?.lastInboundAt
+      });
+      return { skipped: true, reason: 'whatsapp_24h_window_closed' };
+    }
+
     // Hold the AI back while a human agent is actively handling this chat.
     // Fires when an agent OPENED (readAt/readBy) or manually REPLIED to the thread
     // within `agentActiveHoldMinutes` (default 5). Unlike the old `isRead` check,
@@ -572,6 +683,211 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           handoffSent
         });
         return { sent: handoffSent, escalated: true, reason: 'intent_routing' };
+      }
+    }
+
+    // ─── POLICY GATE: requireApproval / autoSend ────────────────────────────
+    // When requireApproval is true or autoSend is false, do not automatically
+    // deliver the reply. The AI reply is still generated for the inbox agent to
+    // review, but sending is blocked here. We store it on the interaction so the
+    // agent can review and click "Send" manually.
+    const requireApproval = organization.autoReplySettings?.requireApproval === true;
+    const autoSend = organization.autoReplySettings?.autoSend !== false; // default true
+
+    // ─── WHATSAPP SPECIALIZATION: address capture ─────────────────────────────
+    // If the AI state says we are awaiting a delivery address from this customer,
+    // and the inbound message looks like an address (not a greeting, not too short),
+    // capture it, save to the pending CommerceOrder, and send a confirmation —
+    // without spending any LLM tokens.
+    if (
+      interactionForReply.platform === 'whatsapp' &&
+      isThreadStyleDm(interactionForReply) &&
+      looksLikeAddress(interactionForReply.content)
+    ) {
+      try {
+        const WhatsAppAiState = require('../models/WhatsAppAiState');
+        const phoneNumberId = interactionForReply.metadata?.phoneNumberId;
+        const senderId = interactionForReply.author?.platformId
+          || (interactionForReply.platformId?.startsWith('dm_')
+            ? interactionForReply.platformId.split('_')[2]
+            : null);
+
+        if (phoneNumberId && senderId) {
+          const aiState = await WhatsAppAiState.findOne({
+            organization: organization._id,
+            phoneNumberId,
+            senderId,
+            pendingAction: 'awaiting_shipping_address'
+          }).lean();
+
+          if (aiState?.entityId) {
+            const CommerceOrder = require('../models/CommerceOrder');
+            const addressText = interactionForReply.content.trim();
+            const updated = await CommerceOrder.findOneAndUpdate(
+              { _id: aiState.entityId, organization: organization._id },
+              {
+                $set: {
+                  shippingAddress: addressText,
+                  'shipping.raw': addressText
+                },
+                $push: {
+                  statusHistory: {
+                    status: 'address_captured',
+                    at: new Date(),
+                    note: `Delivery address captured via WhatsApp: ${addressText.substring(0, 80)}`
+                  }
+                }
+              },
+              { new: true }
+            ).lean();
+
+            if (updated) {
+              // Clear the AI state — address is now captured
+              await WhatsAppAiState.clearPendingAction({
+                organization: organization._id,
+                phoneNumberId,
+                senderId
+              });
+
+              // Send deterministic confirmation (no LLM)
+              const confText =
+                `✅ Perfect! We've recorded your delivery address:\n\n${addressText}\n\n` +
+                `Your order ${updated.displayRef || ''} is being processed. We'll reach out if we need anything else. Thank you! 🙌`;
+
+              if (autoSend && !requireApproval) {
+                const sent = await sendReplyToPlatform(interactionForReply, confText, organization);
+                if (sent) {
+                  logger.info('[Auto-reply] Address captured and confirmation sent', {
+                    interactionId: interactionForReply._id?.toString(),
+                    orderId: aiState.entityId?.toString()
+                  });
+                  return { sent: true, reason: 'address_captured' };
+                }
+              }
+            }
+          }
+        }
+      } catch (addrErr) {
+        logger.warn('[Auto-reply] Address capture failed (non-fatal) — falling through to AI', { error: addrErr.message });
+      }
+    }
+
+    // ─── WHATSAPP SPECIALIZATION: image intent — deterministic no-hallucination ─
+    // Detect image/photo requests before the LLM. If the customer is asking for
+    // product images, we check the catalog directly and either send a catalog card
+    // or an honest "no image available" message — no LLM guessing.
+    if (
+      interactionForReply.platform === 'whatsapp' &&
+      isThreadStyleDm(interactionForReply) &&
+      isImageRequest(interactionForReply.content)
+    ) {
+      try {
+        const WhatsAppAiState = require('../models/WhatsAppAiState');
+        const phoneNumberId = interactionForReply.metadata?.phoneNumberId;
+        const senderId = interactionForReply.author?.platformId
+          || (interactionForReply.platformId?.startsWith('dm_')
+            ? interactionForReply.platformId.split('_')[2]
+            : null);
+
+        let productToShow = null;
+
+        // 1. Check if AI state has a recently selected product
+        if (phoneNumberId && senderId) {
+          const aiState = await WhatsAppAiState.findOne({
+            organization: organization._id,
+            phoneNumberId,
+            senderId
+          }).lean();
+          if (aiState?.selectedProductId) {
+            const Product = require('../models/Product');
+            productToShow = await Product.findOne({
+              _id: aiState.selectedProductId,
+              organization: organization._id,
+              isActive: true
+            }).select('name sku images currency price').lean();
+          }
+        }
+
+        // 2. Fallback: search for a product by name mentioned in the message
+        if (!productToShow) {
+          const { searchProducts } = require('../services/ai/productSearchService');
+          const { products, fromFallback } = await searchProducts(
+            organization._id.toString(),
+            interactionForReply.content,
+            { limit: 1 }
+          );
+          if (products.length > 0 && !fromFallback) productToShow = products[0];
+        }
+
+        if (productToShow) {
+          const images = Array.isArray(productToShow.images) ? productToShow.images : [];
+          const validImageUrl = images.find((img) => {
+            const url = typeof img === 'string' ? img : img?.url || img?.src || '';
+            return typeof url === 'string' && url.startsWith('https://');
+          });
+          const rawUrl = validImageUrl
+            ? (typeof validImageUrl === 'string' ? validImageUrl : validImageUrl?.url || validImageUrl?.src)
+            : null;
+
+          let imageHandled = false;
+
+          if (rawUrl) {
+            // Send product card via WhatsApp catalog
+            try {
+              const PlatformConnection = require('../models/PlatformConnection');
+              const conn = await PlatformConnection.findOne({
+                organization: organization._id,
+                platform: 'whatsapp',
+                isActive: true
+              }).lean();
+              const catalogId = conn?.platformData?.catalogId || conn?.metadata?.catalogId;
+
+              if (conn && catalogId) {
+                const whatsappCatalogService = require('../integrations/whatsapp/whatsappCatalogService');
+                const retailerId = productToShow.sku || productToShow._id.toString();
+                await whatsappCatalogService.sendProductMessage(
+                  conn,
+                  senderId,
+                  catalogId,
+                  retailerId,
+                  `Here's ${productToShow.name}! Let me know if you'd like to place an order.`
+                );
+                imageHandled = true;
+              }
+            } catch (catalogErr) {
+              logger.debug('[Auto-reply] Image catalog send failed — falling back to text', { error: catalogErr.message });
+            }
+          }
+
+          if (!imageHandled) {
+            // Truthful "no image" message — never hallucinate
+            const noImageText =
+              `I'm sorry, product images aren't available here right now for *${productToShow.name}*.\n\n` +
+              `I can share all the details though:\n` +
+              `• Price: ${productToShow.currency || ''} ${productToShow.price || 'on request'}\n\n` +
+              `Would you like to know more, or shall I connect you with our team? 😊`;
+
+            if (autoSend && !requireApproval) {
+              const sent = await sendReplyToPlatform(interactionForReply, noImageText, organization);
+              if (sent) {
+                logger.info('[Auto-reply] Truthful no-image reply sent', {
+                  interactionId: interactionForReply._id?.toString(),
+                  product: productToShow.name
+                });
+                return { sent: true, reason: 'image_not_available_honest_reply' };
+              }
+            }
+          } else {
+            // Catalog card was sent — no further reply needed
+            logger.info('[Auto-reply] Product image card sent via catalog', {
+              interactionId: interactionForReply._id?.toString(),
+              product: productToShow.name
+            });
+            return { sent: true, reason: 'image_catalog_card_sent' };
+          }
+        }
+      } catch (imgErr) {
+        logger.warn('[Auto-reply] Image intent handler failed (non-fatal) — falling through to AI', { error: imgErr.message });
       }
     }
 
@@ -867,8 +1183,9 @@ async function processSingleInteraction(interactionId, organization, jobData = {
 
     // Send the reply FIRST so the customer always gets an acknowledgment,
     // even when the conversation is being escalated to a human agent.
+    // requireApproval / autoSend gate: if either blocks sending, do not deliver.
     let replySent = false;
-    if (organization.autoReplySettings.enabled) {
+    if (organization.autoReplySettings.enabled && autoSend && !requireApproval) {
       const sent = await sendReplyToPlatform(
         interactionForReply, autoReply.response.content, organization,
         autoReply.response.confidence, autoReply.response.messageType
@@ -933,6 +1250,24 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       interactionId,
       error,
       phase: 'processSingleInteraction'
+    });
+    // Re-throw transient infrastructure/send failures so BullMQ can retry the job.
+    // Policy-gate skips (quiet_hours, blocked_keyword, etc.) will have already
+    // returned normally above — any error reaching here is unexpected.
+    const isTransient = (
+      /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|network|timeout|rate.?limit|5[0-9]{2}/i.test(error.message)
+    );
+    if (isTransient) {
+      logger.warn('[Auto-reply] Transient error in processSingleInteraction — will retry', {
+        interactionId,
+        error: error.message
+      });
+      throw error; // BullMQ retries
+    }
+    // Non-transient: log and complete the job (don't fill dead-letter with permanent errors)
+    logger.error('[Auto-reply] Non-transient error in processSingleInteraction — marking as completed', {
+      interactionId,
+      error: error.message
     });
     return { skipped: true, reason: error.message };
   }

@@ -47,6 +47,11 @@ jest.mock('../../../../src/config/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn()
 }));
 
+jest.mock('../../../../src/utils/correlationContext', () => ({
+  buildCorrelationCtx: jest.fn(() => ({ _ts: Date.now() })),
+  hashId: jest.fn((id) => String(id || 'unknown').slice(0, 12))
+}));
+
 // These are lazy-required INSIDE processIncomingMessage so they can be
 // stubbed with jest.mock at module scope.
 jest.mock('../../../../src/integrations/whatsapp/whatsappService', () => ({
@@ -86,6 +91,15 @@ jest.mock('../../../../src/services/contactService', () => ({
 jest.mock('../../../../src/services/campaignService', () => ({
   markRecipientReplied: jest.fn().mockResolvedValue(undefined),
   applyRecipientDeliveryStatus: jest.fn().mockResolvedValue(undefined)
+}));
+
+jest.mock('../../../../src/models/WhatsAppAiState', () => ({
+  resetSession: jest.fn().mockResolvedValue(undefined),
+  setPendingAction: jest.fn().mockResolvedValue({}),
+  clearPendingAction: jest.fn().mockResolvedValue(undefined),
+  findOne: jest.fn().mockResolvedValue(null),
+  deleteOne: jest.fn().mockResolvedValue({ deletedCount: 1 }),
+  findOneAndUpdate: jest.fn().mockResolvedValue({})
 }));
 
 const Interaction = require('../../../../src/models/Interaction');
@@ -233,7 +247,7 @@ describe('processWhatsAppWebhook', () => {
     expect(emitToOrg).toHaveBeenCalledWith('org-1', 'new_interaction', expect.any(Object));
     // AI queue + auto reply
     expect(aiQueue.add).toHaveBeenCalled();
-    expect(autoReplyScheduler.queueImmediateAutoReply).toHaveBeenCalledWith('int-1', 'org-1');
+    expect(autoReplyScheduler.queueImmediateAutoReply).toHaveBeenCalledWith('int-1', 'org-1', expect.objectContaining({ expectedLastMid: 'wamid.abc' }));
   });
 
   test('status-only change dispatches to processStatusUpdate', async () => {
