@@ -400,7 +400,7 @@ async function updateOrderShipping(orgId, orderId, body = {}) {
 }
 
 async function createOrder(orgId, body) {
-  const { channel = 'manual', lineItems = [], buyerName, buyerPhone, shippingAddress, shipping, notes, status } = body;
+  const { channel = 'manual', lineItems = [], buyerName, buyerPhone, shippingAddress, shipping, notes, status, sourceInteraction } = body;
 
   if (!lineItems.length) {
     return { error: 'At least one product is required' };
@@ -447,6 +447,12 @@ async function createOrder(orgId, body) {
       }
     : undefined;
 
+  const mongoose = require('mongoose');
+  const sourceInteractionId =
+    sourceInteraction && mongoose.Types.ObjectId.isValid(String(sourceInteraction))
+      ? String(sourceInteraction)
+      : undefined;
+
   const payload = await assignOrderDisplayRef(orgId, {
     organization: orgId,
     channel,
@@ -459,6 +465,7 @@ async function createOrder(orgId, body) {
     shippingAddress: t(shippingAddress),
     shipping: structured,
     notes: t(notes),
+    ...(sourceInteractionId ? { sourceInteraction: sourceInteractionId } : {}),
     statusHistory: [{ status: initialStatus, at: new Date(), note: 'Order created' }]
   });
 

@@ -289,7 +289,7 @@ exports.createManualKnowledgeBase = async (req, res) => {
     await assertKbEntryCapAvailable(orgId);
 
     const {
-      title, content, category, tags, priority, metadata,
+      title, content, type, category, tags, priority, metadata,
       trainingContext, trainingWeight, isTrainingData, isActive,
       templateFields
     } = req.body;
@@ -297,6 +297,7 @@ exports.createManualKnowledgeBase = async (req, res) => {
     const knowledgeBase = new KnowledgeBase({
       title,
       content,
+      type: type || 'general',
       category,
       tags: tags || [],
       priority: priority || 1,

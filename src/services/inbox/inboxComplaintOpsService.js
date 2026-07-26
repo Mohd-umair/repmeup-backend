@@ -1,6 +1,8 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const Interaction = require('../../models/Interaction');
+const { generateOpsRef } = require('../../utils/opsRefHelper');
 const {
   CHANNEL_LABELS,
   COMPLAINT_STATUS_LABELS,
@@ -283,6 +285,48 @@ async function closeComplaint(orgId, interactionId, userId) {
   return { detail: await getComplaintDetail(orgId, interactionId) };
 }
 
+/**
+ * Manually raise a complaint on an existing interaction.
+ * Mirrors ensureComplaintFromIntent but is triggered by an agent rather than AI.
+ * Returns { error } if the interaction has an existing open/in-progress complaint,
+ * to prevent silent overwrite of the single embedded subdoc.
+ */
+async function raiseComplaint(orgId, interactionId, { issueSummary, priority } = {}) {
+  if (!mongoose.Types.ObjectId.isValid(interactionId)) {
+    return { error: 'invalid_interaction_id' };
+  }
+
+  const doc = await Interaction.findOne({ _id: interactionId, organization: orgId });
+  if (!doc) return { error: 'not_found' };
+
+  if (doc.complaint?.displayRef && !['resolved', 'closed'].includes(doc.complaint.status)) {
+    return { error: 'complaint_already_open', displayRef: doc.complaint.displayRef };
+  }
+
+  const { displayRef } = await generateOpsRef(orgId, 'complaint');
+  const now = new Date();
+  const summary = String(issueSummary || doc.content || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .substring(0, 280) || 'Customer complaint';
+
+  const safeP = ['low', 'medium', 'high', 'urgent'].includes(priority) ? priority : 'medium';
+
+  await Interaction.findByIdAndUpdate(interactionId, {
+    $set: {
+      complaint: {
+        displayRef,
+        status: 'open',
+        issueSummary: summary,
+        priority: safeP,
+        timeline: [{ event: 'Complaint raised manually', at: now, note: summary }]
+      }
+    }
+  });
+
+  return { detail: await getComplaintDetail(orgId, interactionId) };
+}
+
 module.exports = {
   listComplaints,
   getComplaintStats,
@@ -291,6 +335,7 @@ module.exports = {
   assignComplaint,
   resolveComplaint,
   closeComplaint,
+  raiseComplaint,
   buildComplaintFilter,
   acknowledgedLabel,
   mapComplaintRow
