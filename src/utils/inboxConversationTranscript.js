@@ -92,12 +92,26 @@ function applyLatestCustomerContent(sliced, interaction, maxLine) {
  * @param {number} [opts.maxMessages=5] — max transcript lines (customer + business turns)
  * @param {number} [opts.maxLineChars=360]
  * @param {number} [opts.maxTotalChars=2400]
+ * @param {Date|number|null} [opts.sessionStartedAt] — when set, only include events at or after
+ *   this time. Use to prevent stale cross-session context from polluting replies.
  * @returns {string} Transcript or '' if no thread data beyond a bare interaction
  */
 function buildRecentConversationTranscript(interaction, opts = {}) {
   const maxMessages = opts.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const maxLine = opts.maxLineChars ?? DEFAULT_MAX_LINE_CHARS;
   const maxTotal = opts.maxTotalChars ?? DEFAULT_MAX_TOTAL_CHARS;
+
+  // Session boundary: only messages at/after this epoch ms are included.
+  let sessionCutoffMs = null;
+  if (opts.sessionStartedAt != null) {
+    const raw = opts.sessionStartedAt;
+    if (raw instanceof Date) {
+      sessionCutoffMs = raw.getTime();
+    } else {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) sessionCutoffMs = n;
+    }
+  }
 
   const events = [];
   const incoming = interaction?.metadata?.incomingMessages;
@@ -106,8 +120,11 @@ function buildRecentConversationTranscript(interaction, opts = {}) {
     incoming.forEach((msg, idx) => {
       const line = truncateLine(incomingBodyLine(msg), maxLine);
       if (!line) return;
+      const t = normalizeMsgTimestamp(msg.timestamp);
+      // Drop events before session boundary
+      if (sessionCutoffMs != null && t != null && t < sessionCutoffMs) return;
       events.push({
-        t: normalizeMsgTimestamp(msg.timestamp),
+        t,
         tie: idx,
         role: 'Customer',
         body: line,
@@ -126,6 +143,8 @@ function buildRecentConversationTranscript(interaction, opts = {}) {
       const d = r.sentAt instanceof Date ? r.sentAt : new Date(r.sentAt);
       t = Number.isFinite(d.getTime()) ? d.getTime() : null;
     }
+    // Drop replies before session boundary
+    if (sessionCutoffMs != null && t != null && t < sessionCutoffMs) return;
     events.push({
       t,
       tie: idx,

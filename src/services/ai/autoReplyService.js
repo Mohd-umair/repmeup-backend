@@ -307,6 +307,24 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
     // delivery address instead of re-asking which product / quantity.
     const orderContext = await buildOrderContext(interaction, organizationId);
 
+    // Product grounding: detect purchase/product intent and inject real DB facts so the AI
+    // never hallucinates colors, sizes, images, prices, or stock.
+    let productContext = '';
+    try {
+      const { searchProducts, buildProductPromptBlock } = require('./productSearchService');
+      const msgText = interaction.content || '';
+      const { products, fromFallback } = await searchProducts(organizationId, msgText, { limit: 3 });
+      if (products.length > 0 && !fromFallback) {
+        productContext = buildProductPromptBlock(products, 3);
+      }
+    } catch (prodErr) {
+      logger.debug('[Auto-Reply] Product context lookup failed (non-fatal)', { error: prodErr.message });
+    }
+
+    // Session boundary: if the thread has a recorded session start, only show messages from
+    // that session in the transcript to prevent stale context (e.g. 9-day-old address discussion).
+    const sessionStartedAt = interaction.metadata?.sessionStartedAt || null;
+
     // Layer 2: LLM also returns a `resolvable` flag for human-routing decisions.
     const { result: response, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
@@ -319,7 +337,9 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
           withSelfAssessment: true,
           autoReplyTone: arSettings.tone || 'balanced',
           autoReplyToneCustom: arSettings.toneCustomText || '',
-          orderContext
+          orderContext,
+          productContext,
+          sessionStartedAt
         })
     );
 

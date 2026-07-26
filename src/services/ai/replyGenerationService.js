@@ -203,8 +203,26 @@ function buildAutoReplyToneAddon(tone, customText) {
   return AUTO_REPLY_TONE_PRESETS[key] || AUTO_REPLY_TONE_PRESETS.balanced;
 }
 
-function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '', autoReplyToneAddon = '', orderContext = '') {
+/**
+ * Anti-hallucination rules injected into every system prompt.
+ * Ensures the model never fabricates facts it wasn't given.
+ */
+const ANTI_HALLUCINATION_BLOCK = `
+ANTI-HALLUCINATION RULES (NON-NEGOTIABLE — never violate these):
+- NEVER claim to have sent, attached, or shared an image, photo, file, or document. You can only send text; any attachment must come through a separate system action.
+- NEVER invent product details: colors, sizes, patterns, designs, availability, stock level, price, discount, SKU, or variant. If not provided, say "I don't have that detail available" or offer to have the team confirm.
+- NEVER fabricate order status, tracking number, delivery date, estimated arrival, refund status, return status, cancellation status, or payment status. If not provided, state that only the team can confirm and route accordingly.
+- NEVER confirm an appointment or booking unless you are given explicit booking confirmation data.
+- NEVER use customer-sounding phrases like "I've sent you the image" or "here's the photo" — only the system can send media.
+- If a customer asks for product images and no image data is in context, say exactly: "I'm sorry, product images aren't available here right now. I can share full details or connect you with our team."
+- If asked about something you were not given data for, be transparent: say the information is not available rather than guessing or estimating.
+`;
+
+function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '', autoReplyToneAddon = '', orderContext = '', productContext = '') {
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
+  const productBlock = (productContext && String(productContext).trim())
+    ? `\n\nPRODUCT CATALOG (GROUND YOUR ANSWERS IN THESE FACTS — do NOT add details beyond what is listed here):\n${String(productContext).trim()}`
+    : '';
   const orderBlock = (orderContext && String(orderContext).trim())
     ? `
 
@@ -240,10 +258,12 @@ ${transcript}`
 - If you don't have enough information, acknowledge it professionally
 - Do not make promises you can't keep
 - Match the tone to the platform (casual for social media, professional for reviews)
+${ANTI_HALLUCINATION_BLOCK}
 ${orderBlock}
 ${continuity}
 ${bucketContext ? `\n${bucketContext}` : ''}
 ${kbContext ? `\n\nKNOWLEDGE BASE (Use this information to answer; it may be general brand/FAQ context if the user message was very short):\n${kbContext}` : '\n\nNote: No specific knowledge base available. Provide a general helpful response.'}
+${productBlock}
 ${autoReplyToneAddon ? `\n\n${autoReplyToneAddon}` : ''}`;
 }
 
@@ -380,7 +400,8 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
     const bucketContext = await buildBucketContext(interaction, organizationId);
     const conversationTranscript = buildRecentConversationTranscript(interaction, {
       maxMessages: CONVERSATION_TRANSCRIPT_MAX_MESSAGES,
-      maxTotalChars: CONVERSATION_TRANSCRIPT_MAX_TOTAL_CHARS
+      maxTotalChars: CONVERSATION_TRANSCRIPT_MAX_TOTAL_CHARS,
+      sessionStartedAt: options.sessionStartedAt || null
     });
     const arTone = options.autoReplyTone;
     const arToneCustom = options.autoReplyToneCustom;
@@ -389,7 +410,9 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
         ? buildAutoReplyToneAddon(arTone, arToneCustom)
         : '';
     const orderContext = options.orderContext || '';
-    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript, toneAddon, orderContext);
+    // productContext: grounded product facts so AI never invents colors/images/sizes/prices
+    const productContext = options.productContext || '';
+    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript, toneAddon, orderContext, productContext);
 
     if (withSelfAssessment) {
       // NOTE: Layer 0 (messageIntentClassifier) already filters out 'closing' and 'gibberish'
