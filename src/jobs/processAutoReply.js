@@ -1610,12 +1610,73 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
         }
       }
       if (!result && interaction.type !== 'dm') {
-        result = await instagramService.replyToComment(
-          interaction.platformId,
-          content,
-          connection.accessToken,
-          connType
-        );
+        // Route product-linked-post comments through Private Reply (DM) so that
+        // price, checkout links, and product-specific copy never appear publicly.
+        const {
+          isCommentOnProductLinkedPost,
+          resolveInstagramPrivateReplyPageId
+        } = require('../services/instagramCommentReplyRouter');
+
+        const forcePrivate =
+          organization?.commentToDmSettings?.forcePrivateReplyForLinkedProducts !== false;
+
+        const usePrivateReply =
+          interaction.type === 'comment' &&
+          forcePrivate &&
+          await isCommentOnProductLinkedPost(
+            interaction,
+            interaction.organization?.toString?.() || interaction.organization,
+            { forcePrivateReply: forcePrivate }
+          );
+
+        if (usePrivateReply) {
+          const pageId = resolveInstagramPrivateReplyPageId(connection, connType);
+          if (!pageId) {
+            logger.warn('[Auto-reply] Instagram private reply skipped — could not resolve pageId', {
+              interactionId: interaction._id?.toString(),
+              connType
+            });
+          } else {
+            try {
+              result = await instagramService.sendPrivateReply(
+                interaction.platformId,
+                content,
+                connection.accessToken,
+                pageId,
+                connType
+              );
+              if (result?.success) {
+                // Override the messageType so the inbox shows "DM" not "comment reply"
+                messageType = 'instagram_private_dm';
+              }
+            } catch (privateReplyErr) {
+              // Do NOT fall back to replyToComment: the content may contain price/
+              // checkout links that must never appear publicly. Instead, assign to
+              // a human agent so the lead is not lost.
+              logger.error('[Auto-reply] Instagram private reply failed — escalating to human agent', {
+                interactionId: interaction._id?.toString(),
+                error: privateReplyErr.message,
+                platformError: privateReplyErr.platformError
+              });
+              try {
+                await escalationService.assignToAgent(interaction, organization, { forceFallback: true });
+              } catch (escalateErr) {
+                logger.warn('[Auto-reply] escalation after private-reply failure also failed', {
+                  interactionId: interaction._id?.toString(),
+                  error: escalateErr.message
+                });
+              }
+              result = null;
+            }
+          }
+        } else {
+          result = await instagramService.replyToComment(
+            interaction.platformId,
+            content,
+            connection.accessToken,
+            connType
+          );
+        }
       }
       if (result && result.success && result.platformResponseId) {
         platformResponseId = result.platformResponseId;

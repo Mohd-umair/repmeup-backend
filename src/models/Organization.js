@@ -395,6 +395,20 @@ const organizationSchema = new mongoose.Schema({
     },
     dmsSentResetDate: {
       type: Date
+    },
+
+    /**
+     * When true (the default), any AI-generated or agent-approved reply to a
+     * comment on a product-linked post is routed through Instagram's Private
+     * Reply API (DM) instead of being posted as a public comment reply.
+     * This prevents prices, checkout links, and product-specific copy from
+     * appearing publicly in the comments thread.
+     * Set to false only if you explicitly want public comment replies on
+     * product posts.
+     */
+    forcePrivateReplyForLinkedProducts: {
+      type: Boolean,
+      default: true
     }
   },
 
