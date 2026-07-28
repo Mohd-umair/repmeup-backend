@@ -207,9 +207,60 @@ async function sendReplyToPlatform({
                 : 'Instagram comment replies cannot be empty. Enter a message and try again.'
             };
           }
-          result = await instagramService.replyToComment(
-            interaction.platformId, commentText, connection.accessToken, connType
-          );
+
+          // Route replies to product-linked-post comments through Private Reply
+          // (DM) so price, checkout links, and product-specific copy never appear
+          // publicly in the comments thread.
+          const {
+            isCommentOnProductLinkedPost,
+            resolveInstagramPrivateReplyPageId
+          } = require('./instagramCommentReplyRouter');
+
+          const Organization = require('../models/Organization');
+          const orgId = interaction.organization?.toString?.() || interaction.organization;
+          const orgSettings = await Organization.findById(orgId)
+            .select('commentToDmSettings.forcePrivateReplyForLinkedProducts')
+            .lean();
+          const forcePrivate =
+            orgSettings?.commentToDmSettings?.forcePrivateReplyForLinkedProducts !== false;
+
+          const usePrivateReply =
+            forcePrivate &&
+            await isCommentOnProductLinkedPost(interaction, orgId, { forcePrivateReply: forcePrivate });
+
+          if (usePrivateReply) {
+            const pageId = resolveInstagramPrivateReplyPageId(connection, connType);
+            if (!pageId) {
+              return {
+                platformResponseId: null,
+                status: 'failed',
+                errorMessage: 'Could not resolve Instagram Page ID for private reply. Reconnect this account in Settings → Platforms.'
+              };
+            }
+            try {
+              result = await instagramService.sendPrivateReply(
+                interaction.platformId, commentText, connection.accessToken, pageId, connType
+              );
+            } catch (privateErr) {
+              // Do NOT silently fall back to public comment: the reply may contain
+              // price or checkout links. Surface the error so the agent can act.
+              const errMsg = privateErr.message || 'Private reply failed';
+              logger.warn('[replyService] Instagram private reply failed — not falling back to public comment', {
+                interactionId: interaction._id?.toString(),
+                error: errMsg,
+                platformError: privateErr.platformError
+              });
+              return {
+                platformResponseId: null,
+                status: 'failed',
+                errorMessage: `Could not send as private DM — the Instagram 7-day reply window may have expired, or the account needs reconnecting. (${errMsg})`
+              };
+            }
+          } else {
+            result = await instagramService.replyToComment(
+              interaction.platformId, commentText, connection.accessToken, connType
+            );
+          }
         }
 
         if (result?.success && result.platformResponseId) {
