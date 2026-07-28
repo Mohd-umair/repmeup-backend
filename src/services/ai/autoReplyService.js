@@ -309,13 +309,29 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
 
     // Product grounding: detect purchase/product intent and inject real DB facts so the AI
     // never hallucinates colors, sizes, images, prices, or stock.
+    //
+    // Two guards:
+    //  1. Postback interactions — the interaction content is a button label such as
+    //     "Product Details", not a customer query. Searching it against the catalog would
+    //     match unrelated products (any product whose name/description contains "product"
+    //     or "details"), so we skip entirely. The sales service already replied.
+    //  2. Post-scoped search — when the DM originated from a comment on a specific post
+    //     (metadata.postId is set), constrain the catalog search to products linked to that
+    //     post so the AI only surfaces the right product.
     let productContext = '';
     try {
-      const { searchProducts, buildProductPromptBlock } = require('./productSearchService');
-      const msgText = interaction.content || '';
-      const { products, fromFallback } = await searchProducts(organizationId, msgText, { limit: 3 });
-      if (products.length > 0 && !fromFallback) {
-        productContext = buildProductPromptBlock(products, 3);
+      const isPostback = !!(interaction.metadata?.buttonPayload);
+      if (!isPostback) {
+        const { searchProducts, buildProductPromptBlock } = require('./productSearchService');
+        const msgText = interaction.content || '';
+        const postId = interaction.metadata?.postId || null;
+        const { products, fromFallback } = await searchProducts(organizationId, msgText, {
+          limit: 3,
+          instagramPostId: postId || undefined
+        });
+        if (products.length > 0 && !fromFallback) {
+          productContext = buildProductPromptBlock(products, 3);
+        }
       }
     } catch (prodErr) {
       logger.debug('[Auto-Reply] Product context lookup failed (non-fatal)', { error: prodErr.message });

@@ -165,6 +165,23 @@ module.exports = async function processWebhook(job) {
         }
       }
 
+      // Commerce postback gate — SALES:* / PICK:* button taps are fully handled by
+      // salesConversationService.handlePostback inside instagramWebhookService before this
+      // point. Never queue AI for them: the button label text (e.g. "Product Details") would
+      // hit productSearchService's regex and return unrelated catalog items, producing a wrong
+      // second message. This gate mirrors the commentDmSent / storyToDmSent pattern.
+      const salesPostbackHandled = !!(
+        interaction.platform === 'instagram' &&
+        interaction.metadata?.buttonPayload &&
+        /^(SALES:|PICK:)/.test(String(interaction.metadata.buttonPayload))
+      );
+      if (salesPostbackHandled) {
+        jobLogger.info('Sales commerce postback already handled — skipping AI', {
+          interactionId: interaction._id.toString(),
+          buttonPayload: String(interaction.metadata.buttonPayload).slice(0, 40)
+        });
+      }
+
       // Comment-to-DM selling flow only (follow-invite moved to processAI.js so sentiment is available)
       // Awaited (not fire-and-forget) so we know whether it answered the comment: when it
       // did, we must suppress the AI auto-reply engine below, otherwise the commenter also
@@ -236,6 +253,8 @@ module.exports = async function processWebhook(job) {
         logger.info(`⏭️  [Webhook] Skipping AI — channel mode/flow ownership (flowHandled: ${flowHandled}): ${interaction._id}`);
       } else if (!threadDm && (hasReplies || isAlreadyReplied)) {
         logger.info(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+      } else if (salesPostbackHandled) {
+        logger.info(`⏭️  [Webhook] Skipping AI — Sales commerce postback already handled: ${interaction._id}`);
       } else if (storyToDmSent) {
         logger.info(`⏭️  [Webhook] Skipping AI — Story-to-DM handled this message: ${interaction._id}`);
       } else if (commentDmSent) {

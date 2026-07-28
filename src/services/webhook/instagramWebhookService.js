@@ -288,6 +288,12 @@ async function persistInstagramPostbackToDmThread({
     platformCreatedAt: new Date(event.timestamp || Date.now()),
     'metadata.lastMid': mid,
     'metadata.instagramAccountId': resolvedIgAccountId || igAccountId,
+    // Store the raw postback payload so processWebhook can:
+    //  1. Route the event as 'instagram.postback' (not 'instagram.dm')
+    //  2. Detect commerce postbacks (SALES:*/PICK:*) and suppress AI — the
+    //     sales conversation service already handled the response in handlePostback.
+    'metadata.buttonPayload': payload,
+    'metadata.postback': true,
     status: 'unread',
     isRead: false
   };
