@@ -35,5 +35,8 @@ router.delete('/:id/logo', authorize('admin', 'manager'), organizationController
 // Get auto-reply settings
 router.get('/:id/auto-reply-settings', organizationController.getAutoReplySettings);
 
+// Get live automation status (auto-reply, quiet hours, profile completeness)
+router.get('/:id/automation-status', organizationController.getAutomationStatus);
+
 module.exports = router;
 

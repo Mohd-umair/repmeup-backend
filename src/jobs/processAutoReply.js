@@ -16,6 +16,20 @@ const { isAgentRecentlyActive, resolveHoldMinutes } = require('../utils/agentAct
 // ─── Policy enforcement helpers ──────────────────────────────────────────────
 
 /**
+ * Persists a user-facing skip reason onto the interaction (fire-and-forget).
+ * Only the 5 reasons that are meaningful to show a user in the UI are stored.
+ */
+const USER_FACING_SKIP_REASONS = new Set([
+  'quiet_hours', 'blocked_keyword', 'whatsapp_24h_window_closed',
+  'agent_recently_active', 'max_auto_replies_reached'
+]);
+function persistSkipReason(interactionId, reason) {
+  if (!interactionId || !USER_FACING_SKIP_REASONS.has(reason)) return;
+  Interaction.updateOne({ _id: interactionId }, { $set: { aiSkipReason: reason } })
+    .catch(err => logger.debug('[Auto-reply] Failed to persist skip reason', { err: err.message }));
+}
+
+/**
  * Returns true when the current time falls inside the org's quiet-hours window.
  * Quiet hours are compared in the org's configured timezone using a simple
  * HH:MM string comparison (no DST correction needed for ±1h accuracy).
@@ -469,6 +483,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         interactionId: interactionForReply._id?.toString(),
         quietHours: organization.autoReplySettings.quietHours
       });
+      persistSkipReason(interactionForReply._id, 'quiet_hours');
       return { skipped: true, reason: 'quiet_hours' };
     }
 
@@ -478,6 +493,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       logger.info('[Auto-reply] Skipped — message contains a blocked keyword', {
         interactionId: interactionForReply._id?.toString()
       });
+      persistSkipReason(interactionForReply._id, 'blocked_keyword');
       return { skipped: true, reason: 'blocked_keyword' };
     }
 
@@ -489,6 +505,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         interactionId: interactionForReply._id?.toString(),
         lastInboundAt: interactionForReply.metadata?.lastInboundAt
       });
+      persistSkipReason(interactionForReply._id, 'whatsapp_24h_window_closed');
       return { skipped: true, reason: 'whatsapp_24h_window_closed' };
     }
 
@@ -515,10 +532,9 @@ async function processSingleInteraction(interactionId, organization, jobData = {
           escalationCheck.reasons, escalationCheck.type, escalationCheck.metadata
         );
       }
+      persistSkipReason(interactionForReply._id, 'agent_recently_active');
       return { skipped: true, reason: 'agent_recently_active' };
-    }
-
-    // ─── LAYER 0: Pre-AI message classification ────────────────────────────────
+    } ────────────────────────────────
     // Classify the message BEFORE spending AI credits. This handles:
     //   - Closing / satisfied messages → mark resolved, no reply
     //   - Small talk (hi, hello) → always handle with AI, skip no-KB fallback
@@ -617,6 +633,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         const fresh = await Interaction.findById(interactionForReply._id).lean();
         if (fresh) emitToOrg(organization._id.toString(), 'interaction_updated', { interaction: fresh });
       } catch (_e) {}
+      persistSkipReason(interactionForReply._id, 'max_auto_replies_reached');
       return { skipped: true, escalated: true, reason: 'max_auto_replies_reached' };
     }
 
@@ -1769,6 +1786,7 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
       );
       interaction.autoReplied = true;
       interaction.respondedAt = new Date();
+      interaction.aiSkipReason = null;
       await interaction.save();
 
       // Clear the interaction cache NOW so the next poll returns fresh DB data

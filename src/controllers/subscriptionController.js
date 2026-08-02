@@ -5,6 +5,7 @@ const User = require('../models/User');
 const ScheduledPost = require('../models/ScheduledPost');
 const AICreditUsage = require('../models/AICreditUsage');
 const entitlementsService = require('../services/entitlementsService');
+const { ensureAiCreditPeriodCurrent, utcMonthStart } = require('../services/creditPeriodService');
 const { buildPublicPlanCard } = require('../services/planPresentationService');
 const { cancelRazorpaySubscription } = require('./razorpayController');
 
@@ -67,10 +68,13 @@ exports.getLimits = async (req, res, next) => {
       });
     }
 
-    // Compute all real-time usage values from actual data
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
+    // Trigger carry-forward rollover before aggregating usage so the
+    // period anchor is current and `carriedCredits` reflects the banked amount.
+    const orgId = req.user.organization._id;
+    const creditPeriod = await ensureAiCreditPeriodCurrent(orgId);
+
+    // Use the UTC month start consistent with creditPeriodService.
+    const startOfMonth = utcMonthStart();
 
     const [
       connectedAccountsCount,
@@ -111,14 +115,28 @@ exports.getLimits = async (req, res, next) => {
 
     const aiCreditsThisMonth = aiCreditsAgg[0]?.total ?? 0;
 
+    // Update display-accuracy usage counts atomically without touching the credit
+    // period fields (carriedCredits, creditPeriodStart) managed by creditPeriodService.
+    await Subscription.findOneAndUpdate(
+      { organization: orgId },
+      {
+        $set: {
+          'usage.connectedAccounts': connectedAccountsCount,
+          'usage.activeUsers': activeUserCount,
+          'usage.postsThisMonth': postsThisMonthCount,
+          'usage.autoRepliesThisMonth': autoRepliesThisMonthCount,
+          'usage.aiCreditsThisMonth': aiCreditsThisMonth
+        }
+      }
+    );
+
+    // Patch in-memory values so the response below is correct without a second query.
     subscription.usage.connectedAccounts = connectedAccountsCount;
     subscription.usage.activeUsers = activeUserCount;
     subscription.usage.postsThisMonth = postsThisMonthCount;
     subscription.usage.autoRepliesThisMonth = autoRepliesThisMonthCount;
     subscription.usage.aiCreditsThisMonth = aiCreditsThisMonth;
-    await subscription.save();
 
-    const orgId = req.user.organization._id;
     const ent = await entitlementsService.getEntitlements(orgId);
     const resolvedLimits = { ...ent.limits };
 
@@ -166,7 +184,20 @@ exports.getLimits = async (req, res, next) => {
               ? 500
               : resolvedLimits.maxAICreditsPerMonth
         },
-        usage: subscription.usage,
+        usage: {
+          ...subscription.usage,
+          // Authoritative carry-forward state from creditPeriodService.
+          carriedCredits: creditPeriod.carriedCredits,
+          creditPeriodStart: subscription.usage.creditPeriodStart
+        },
+        // Breakdown used by billing / header / ai-credits pages.
+        creditSummary: {
+          planLimit: creditPeriod.planLimit,
+          carriedCredits: creditPeriod.carriedCredits,
+          effectiveLimit: creditPeriod.effectiveLimit,
+          remaining: creditPeriod.remaining,
+          isUnlimited: creditPeriod.isUnlimited
+        },
         canConnectMore,
         remaining,
         nextTier,
