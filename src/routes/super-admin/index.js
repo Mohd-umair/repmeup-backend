@@ -1,11 +1,18 @@
 /**
  * Super Admin API — isolated under /api/super-admin
- * Requires JWT + role super_admin or admin (panel operators).
+ * Requires a token issued by POST /api/auth/admin-login (signed with
+ * SUPER_ADMIN_JWT_SECRET) + role super_admin.
+ *
+ * Three-layer gate (cheapest check first):
+ *   1. adminIpAllowlist — reject non-allowlisted IPs before any DB work
+ *   2. protectAdmin     — verify admin-issued JWT (SUPER_ADMIN_JWT_SECRET)
+ *   3. requireSuperAdminAccess — double-check role on the loaded User document
  */
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../../middlewares/auth');
+const { protectAdmin } = require('../../middlewares/adminAuth');
 const { requireSuperAdminAccess } = require('../../middlewares/superAdminAccess');
+const { adminIpAllowlist } = require('../../middlewares/adminIpAllowlist');
 const superAdminController = require('../../controllers/superAdminController');
 const superAdminMenuController = require('../../controllers/superAdminMenuController');
 const contactInquiryController = require('../../controllers/contactInquiryController');
@@ -16,8 +23,10 @@ const inspirationAdminController = require('../../controllers/inspirationAdminCo
 const featureController = require('../../controllers/featureController');
 const multer = require('multer');
 
-router.use(protect);
-router.use(requireSuperAdminAccess);
+// ── Authentication gates (order matters: cheapest → most expensive) ──────────
+router.use(adminIpAllowlist);        // 1. IP check — no crypto, no DB
+router.use(protectAdmin);            // 2. Verify admin JWT (SUPER_ADMIN_JWT_SECRET)
+router.use(requireSuperAdminAccess); // 3. Role double-check on loaded user doc
 
 // Groups & Permissions
 router.get('/permissions/meta', gpController.getPermissionMeta);

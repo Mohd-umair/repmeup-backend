@@ -51,7 +51,8 @@ const aiCreditUsageSchema = new mongoose.Schema({
       'rollback_ai_response_auto_reply',
       'rollback_ai_response_test',
       'rollback_brand_config_preview',
-      'rollback_chat_summary'
+      'rollback_chat_summary',
+      'credit_rollover'
     ],
     index: true
   },

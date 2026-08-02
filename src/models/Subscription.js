@@ -77,6 +77,20 @@ const subscriptionSchema = new mongoose.Schema({
     lastResetAt: {
       type: Date,
       default: Date.now
+    },
+    // Credits banked from the previous period (carry-forward).
+    // Added to the plan's monthly allowance so unused credits accumulate
+    // indefinitely. 0 for unlimited plans and demo workspaces.
+    carriedCredits: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    // UTC calendar-month anchor used by creditPeriodService to detect rollover
+    // without a cron job. Mirrors the lazy-reset pattern used by bucketService.
+    creditPeriodStart: {
+      type: Date,
+      default: Date.now
     }
   },
 
@@ -224,6 +238,9 @@ subscriptionSchema.methods.hasFeature = function(featureName) {
 };
 
 // Method to reset monthly usage (legacy keys + new bucket map kept in sync).
+// NOTE: does NOT touch usage.carriedCredits — that is managed exclusively by
+// creditPeriodService.ensureAiCreditPeriodCurrent so the carry-forward bank
+// is never accidentally zeroed by manual admin resets.
 subscriptionSchema.methods.resetMonthlyUsage = function() {
   this.usage.postsThisMonth = 0;
   this.usage.autoRepliesThisMonth = 0;

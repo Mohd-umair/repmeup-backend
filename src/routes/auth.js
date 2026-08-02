@@ -2,8 +2,10 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const authService = require('../services/authService');
 const userActivityLogService = require('../services/userActivityLogService');
 const { protect, authorize } = require('../middlewares/auth');
+const { generateAdminToken } = require('../middlewares/adminAuth');
 const { validateRegistration, validateLogin } = require('../middlewares/validation');
 const riscController = require('../controllers/riscController');
 
@@ -24,9 +26,78 @@ const authLimiter = rateLimit({
   message: { success: false, error: 'Too many attempts. Please try again later.' }
 });
 
+/**
+ * Tighter brute-force limiter for the super-admin login endpoint.
+ * Half the attempts of the regular auth limiter (5 vs 10) to provide an extra
+ * layer of protection for the most privileged credentials in the system.
+ */
+const adminAuthLimiter = rateLimit({
+  windowMs: parseInt(process.env.ADMIN_AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+  max: parseInt(process.env.ADMIN_AUTH_RATE_LIMIT_MAX) || 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () =>
+    process.env.RATE_LIMIT_DISABLED === 'true' ||
+    (process.env.NODE_ENV === 'development' && process.env.RATE_LIMIT_ENABLED !== 'true'),
+  message: { success: false, error: 'Too many admin login attempts. Please try again later.' }
+});
+
 // Public routes
 router.post('/register', authLimiter, validateRegistration, authController.register);
 router.post('/login', authLimiter, validateLogin, authController.login);
+
+/**
+ * POST /api/auth/admin-login
+ *
+ * Dedicated login endpoint for the super-admin panel.
+ *
+ * Differences from the regular /auth/login:
+ *   - Only accepts credentials belonging to a `super_admin` role user.
+ *     Any other role receives the same "Invalid credentials" response to
+ *     prevent role enumeration attacks.
+ *   - Issues a token signed with SUPER_ADMIN_JWT_SECRET (separate from
+ *     JWT_SECRET) so admin tokens are cryptographically independent of
+ *     tenant tokens.
+ *   - Protected by a tighter rate limiter (5 req / 15 min).
+ */
+router.post('/admin-login', adminAuthLimiter, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ success: false, error: 'Email and password are required' });
+    }
+
+    const result = await authService.login(email, password);
+
+    // Silently reject non-super_admin credentials — same error message to avoid
+    // role enumeration (an attacker should not learn whether the account exists).
+    if (result.user.role !== 'super_admin') {
+      return res.status(401).json({ success: false, error: 'Invalid credentials' });
+    }
+
+    const adminToken = generateAdminToken(result.user._id);
+
+    userActivityLogService.recordAuthEvent({
+      userId: result.user._id,
+      organizationId: result.user.organization?._id || result.user.organization,
+      action: 'admin_login',
+      path: '/api/auth/admin-login',
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent']
+    });
+
+    res.status(200).json({
+      success: true,
+      data: { user: result.user, token: adminToken }
+    });
+  } catch (error) {
+    // Return a generic error message regardless of the underlying cause to
+    // avoid leaking account existence or lockout state to an attacker.
+    res.status(error.statusCode || 401).json({ success: false, error: 'Invalid credentials' });
+  }
+});
 // Magic-link login for demo prospects (no password)
 router.post('/demo-login', authLimiter, authController.demoLogin);
 router.post('/forgot-password', authLimiter, authController.forgotPassword);

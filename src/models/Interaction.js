@@ -163,6 +163,21 @@ const interactionSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Why the auto-reply was skipped (user-facing reasons only; null = not skipped or no data)
+  aiSkipReason: {
+    type: String,
+    enum: [
+      'quiet_hours',
+      'blocked_keyword',
+      'whatsapp_24h_window_closed',
+      'agent_recently_active',
+      'max_auto_replies_reached',
+      'auto_reply_disabled',
+      'credits_exhausted',
+      null
+    ],
+    default: null
+  },
   
   // Escalation tracking
   autoReplyCount: {
