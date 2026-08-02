@@ -706,7 +706,10 @@ exports.handleWhatsAppWebhook = async (req, res) => {
     const hasStatuses = req.body?.entry?.some((e) =>
       e.changes?.some((c) => c.value?.statuses?.length > 0)
     );
-    await webhookQueue.add(
+    const messageCount = req.body?.entry?.reduce(
+      (n, e) => n + (e.changes?.reduce((c, ch) => c + (ch.value?.messages?.length ?? 0), 0) ?? 0), 0
+    );
+    const job = await webhookQueue.add(
       {
         platform: 'whatsapp_webhook',
         payload: req.body
@@ -717,6 +720,11 @@ exports.handleWhatsAppWebhook = async (req, res) => {
         priority: hasStatuses ? 2 : 1
       }
     );
+    logger.info('[WhatsApp Webhook] Enqueued', {
+      jobId: job.id,
+      messages: messageCount,
+      statuses: hasStatuses
+    });
   } catch (error) {
     logger.error('[WhatsApp Webhook] Failed to enqueue', { error: error.message, stack: error.stack });
   }
