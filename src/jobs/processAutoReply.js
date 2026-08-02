@@ -534,7 +534,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
       }
       persistSkipReason(interactionForReply._id, 'agent_recently_active');
       return { skipped: true, reason: 'agent_recently_active' };
-    } ────────────────────────────────
+    }
     // Classify the message BEFORE spending AI credits. This handles:
     //   - Closing / satisfied messages → mark resolved, no reply
     //   - Small talk (hi, hello) → always handle with AI, skip no-KB fallback

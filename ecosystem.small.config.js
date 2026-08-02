@@ -31,6 +31,36 @@ module.exports = {
       kill_timeout: 5000,
       node_args: '--max-old-space-size=400',
       exp_backoff_restart_delay: 100
+    },
+    {
+      // Worker MUST run alongside the API even on small servers — webhook
+      // processing, AI jobs, and mark-as-read all execute here, not in server.js.
+      name: 'orm-worker',
+      script: './src/worker.js',
+      instances: 1,
+      exec_mode: 'fork',
+      env: {
+        NODE_ENV: 'development'
+      },
+      env_production: {
+        NODE_ENV: 'production',
+        WEBHOOK_CONCURRENCY: 3,
+        AI_CONCURRENCY: 2,
+        AUTOREPLY_CONCURRENCY: 2,
+        MONGODB_POOL_MAX: 8,
+        MONGODB_POOL_MIN: 2
+      },
+      max_memory_restart: '350M',
+      error_file: './logs/pm2-worker-error.log',
+      out_file: './logs/pm2-worker-out.log',
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      min_uptime: '10s',
+      kill_timeout: 5000,
+      node_args: '--max-old-space-size=350',
+      exp_backoff_restart_delay: 100
     }
   ]
 };
