@@ -114,17 +114,28 @@ async function processKbCrawl(job) {
   const { crawlJobId } = job.data;
   if (!crawlJobId) throw new Error('crawlJobId is required');
 
-  const crawlJob = await KbCrawlJob.findById(crawlJobId);
-  if (!crawlJob) throw new Error(`KbCrawlJob ${crawlJobId} not found`);
+  // Atomic claim — prevents double-processing when both the API inline
+  // fallback and the Bull worker try to run the same job.
+  const crawlJob = await KbCrawlJob.findOneAndUpdate(
+    { _id: crawlJobId, status: 'queued' },
+    { $set: { status: 'crawling', startedAt: new Date() } },
+    { new: true }
+  );
+
+  if (!crawlJob) {
+    const existing = await KbCrawlJob.findById(crawlJobId).select('status').lean();
+    if (!existing) throw new Error(`KbCrawlJob ${crawlJobId} not found`);
+    logger.info('[KbCrawl] skip — already claimed or finished', {
+      crawlJobId: String(crawlJobId),
+      status: existing.status
+    });
+    return { status: 'skipped', reason: existing.status };
+  }
 
   const organizationId = crawlJob.organization;
   const userId = crawlJob.createdBy;
   const opts = crawlJob.options || {};
   const selectedUrls = Array.isArray(crawlJob.selectedUrls) ? crawlJob.selectedUrls.filter(Boolean) : [];
-
-  crawlJob.status = 'crawling';
-  crawlJob.startedAt = new Date();
-  await crawlJob.save();
 
   logger.info('[KbCrawl] starting', {
     crawlJobId: String(crawlJobId),
@@ -133,6 +144,33 @@ async function processKbCrawl(job) {
     selectedCount: selectedUrls.length
   });
 
+  try {
+    return await _runClaimedCrawl(crawlJob, crawlJobId, organizationId, userId, opts, selectedUrls);
+  } catch (fatalErr) {
+    // Uncaught throw after claim would leave the job stuck in "crawling" forever.
+    logger.error('[KbCrawl] fatal uncaught error', {
+      crawlJobId: String(crawlJobId),
+      error: fatalErr.message,
+      stack: fatalErr.stack
+    });
+    try {
+      await KbCrawlJob.updateOne(
+        { _id: crawlJobId, status: 'crawling' },
+        {
+          $set: {
+            status: 'failed',
+            error: (fatalErr.message || 'Crawl failed unexpectedly').slice(0, 500),
+            finishedAt: new Date()
+          }
+        }
+      );
+      await entitlementsService.invalidateEntitlements(organizationId);
+    } catch (_) { /* best effort */ }
+    throw fatalErr;
+  }
+}
+
+async function _runClaimedCrawl(crawlJob, crawlJobId, organizationId, userId, opts, selectedUrls) {
   let capacityRemaining = await remainingKbCapacity(organizationId);
   if (capacityRemaining <= 0) {
     crawlJob.status = 'failed';
