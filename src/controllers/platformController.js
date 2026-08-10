@@ -563,20 +563,34 @@ exports.refreshGoogleLocations = async (req, res, next) => {
 
     // Fetch accounts and locations
     try {
-      const accounts = await googleService.getAccounts(connection.accessToken);
-      
-      if (!accounts || accounts.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'No Google Business Profile accounts found',
-          message: 'Please set up a Google Business Profile at https://business.google.com/',
-          code: 'NO_ACCOUNTS'
-        });
+      // Skip accounts.list when we already stored accountId — that call hits
+      // mybusinessaccountmanagement.googleapis.com which often has 0 RPM quota.
+      let account = null;
+      const cachedAccountId = connection.platformData?.accountId;
+
+      if (cachedAccountId) {
+        account = {
+          name: cachedAccountId,
+          accountName: connection.platformData?.accountName || cachedAccountId
+        };
+        console.log(`ℹ️ [Google] Using cached accountId ${cachedAccountId} (skip accounts.list)`);
+      } else {
+        const accounts = await googleService.getAccounts(connection.accessToken);
+
+        if (!accounts || accounts.length === 0) {
+          return res.status(404).json({
+            success: false,
+            error: 'No Google Business Profile accounts found',
+            message: 'Please set up a Google Business Profile at https://business.google.com/',
+            code: 'NO_ACCOUNTS'
+          });
+        }
+
+        account = accounts[0];
       }
 
-      const account = accounts[0];
       const locations = await googleService.getLocations(connection.accessToken, account.name);
-      
+
       if (!locations || locations.length === 0) {
         return res.status(404).json({
           success: false,
@@ -609,9 +623,17 @@ exports.refreshGoogleLocations = async (req, res, next) => {
       });
     } catch (apiError) {
       console.error('❌ [Google] Location refresh API error:', apiError.message);
-      
-      // Handle specific API errors
-      if (apiError.message.includes('403')) {
+
+      if (apiError.code === 'GBP_QUOTA_EXCEEDED' || apiError.statusCode === 429 || apiError.message?.includes('429')) {
+        return res.status(429).json({
+          success: false,
+          error: 'Google Business Profile API quota exceeded',
+          message: apiError.message,
+          code: 'GBP_QUOTA_EXCEEDED'
+        });
+      }
+
+      if (apiError.code === 'API_ACCESS_DENIED' || apiError.message?.includes('403')) {
         return res.status(403).json({
           success: false,
           error: 'Access denied to Google Business Profile API',

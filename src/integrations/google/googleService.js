@@ -119,31 +119,105 @@ class GoogleService {
   }
 
   /**
-   * Get Google Business Profile accounts
+   * Create a structured Google API error (status + code for controllers).
+   */
+  _makeApiError(statusCode, message, code) {
+    const err = new Error(message);
+    err.statusCode = statusCode;
+    err.code = code;
+    return err;
+  }
+
+  /**
+   * GET accounts from one host. Returns [] on empty success.
+   */
+  async _listAccountsFrom(url, accessToken) {
+    const response = await axios.get(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 20000
+    });
+    return response.data.accounts || [];
+  }
+
+  /**
+   * Get Google Business Profile accounts.
+   * Tries Account Management API first, then legacy My Business v4 (separate quota).
+   * Soft-cooldown after 429 so repeated Setup clicks don't burn the minute quota.
    */
   async getAccounts(accessToken) {
-    try {
-      const response = await axios.get(`${this.businessProfileApiUrl}/accounts`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`
+    const now = Date.now();
+    if (this._accountsCooldownUntil && now < this._accountsCooldownUntil) {
+      const waitSec = Math.ceil((this._accountsCooldownUntil - now) / 1000);
+      throw this._makeApiError(
+        429,
+        `Google Business Profile account quota is cooling down. Wait ~${waitSec}s, then try again. ` +
+          `If this keeps happening, your GCP project likely has 0 Requests/minute on ` +
+          `My Business Account Management API — request GBP API access and a quota increase ` +
+          `(Cloud Console → APIs & Services → My Business Account Management API → Quotas).`,
+        'GBP_QUOTA_EXCEEDED'
+      );
+    }
+
+    const endpoints = [
+      `${this.businessProfileApiUrl}/accounts`,
+      `${this.reviewsApiUrl}/accounts`
+    ];
+
+    let lastError = null;
+
+    for (const url of endpoints) {
+      try {
+        const accounts = await this._listAccountsFrom(url, accessToken);
+        this._accountsCooldownUntil = 0;
+        return accounts;
+      } catch (error) {
+        const statusCode = error.statusCode || error.response?.status;
+        const errorMessage =
+          error.response?.data?.error?.message || error.message;
+        lastError = { statusCode, errorMessage, url };
+
+        // Try next endpoint on 429/403/404; other errors stop early
+        if (statusCode && ![429, 403, 404].includes(statusCode)) {
+          break;
         }
-      });
-
-      return response.data.accounts || [];
-    } catch (error) {
-      const statusCode = error.response?.status;
-      const errorMessage = error.response?.data?.error?.message || error.message;
-
-      if (statusCode === 403) {
-        throw new Error(`Access denied (403): ${errorMessage}. The Google Business Profile API may not be enabled, or the user may not have a Business Profile account.`);
-      } else if (statusCode === 429) {
-        throw new Error(`Rate limit exceeded (429): ${errorMessage}. Please wait before retrying.`);
-      } else if (statusCode === 404) {
-        throw new Error(`Not found (404): ${errorMessage}. The API endpoint may be incorrect or the API is not enabled.`);
-      } else {
-        throw new Error(`Failed to get accounts (${statusCode || 'unknown'}): ${errorMessage}`);
+        console.warn(`[Google] accounts.list failed on ${url}: ${statusCode} ${errorMessage}`);
       }
     }
+
+    const statusCode = lastError?.statusCode || 500;
+    const errorMessage = lastError?.errorMessage || 'Unknown error';
+
+    if (statusCode === 429) {
+      // Default Google often ships this API with 0 RPM until access + quota are approved.
+      this._accountsCooldownUntil = Date.now() + 60_000;
+      throw this._makeApiError(
+        429,
+        `Rate limit / quota exceeded (429): ${errorMessage}. ` +
+          `Check GCP project quotas for mybusinessaccountmanagement.googleapis.com ` +
+          `(default is often 0 until Google approves GBP API access + quota increase). ` +
+          `Wait 1 minute before retrying.`,
+        'GBP_QUOTA_EXCEEDED'
+      );
+    }
+    if (statusCode === 403) {
+      throw this._makeApiError(
+        403,
+        `Access denied (403): ${errorMessage}. Enable Business Profile APIs and ensure the Google user manages a Business Profile.`,
+        'API_ACCESS_DENIED'
+      );
+    }
+    if (statusCode === 404) {
+      throw this._makeApiError(
+        404,
+        `Not found (404): ${errorMessage}. Enable Google My Business / Account Management APIs in Cloud Console.`,
+        'API_NOT_FOUND'
+      );
+    }
+    throw this._makeApiError(
+      statusCode || 500,
+      `Failed to get accounts (${statusCode || 'unknown'}): ${errorMessage}`,
+      'API_ERROR'
+    );
   }
 
   /**
