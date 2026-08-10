@@ -563,17 +563,32 @@ exports.refreshGoogleLocations = async (req, res, next) => {
 
     // Fetch accounts and locations
     try {
-      // Skip accounts.list when we already stored accountId — that call hits
-      // mybusinessaccountmanagement.googleapis.com which often has 0 RPM quota.
+      // Skip accounts.list when accountId is known (body override, or cached).
+      // accounts.list hits mybusinessaccountmanagement.googleapis.com which often has 0 RPM.
       let account = null;
+      const bodyAccountId = typeof req.body?.accountId === 'string'
+        ? req.body.accountId.trim()
+        : '';
       const cachedAccountId = connection.platformData?.accountId;
+      const resolvedAccountId = bodyAccountId || cachedAccountId;
 
-      if (cachedAccountId) {
+      if (resolvedAccountId) {
+        // Accept "123", "accounts/123", or full resource paths
+        if (!/^(accounts\/)?\d+/.test(resolvedAccountId)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid account ID',
+            message: 'Enter a numeric Google Business account ID, e.g. 1234567890 or accounts/1234567890',
+            code: 'INVALID_ACCOUNT_ID'
+          });
+        }
         account = {
-          name: cachedAccountId,
-          accountName: connection.platformData?.accountName || cachedAccountId
+          name: resolvedAccountId,
+          accountName: connection.platformData?.accountName || resolvedAccountId
         };
-        console.log(`ℹ️ [Google] Using cached accountId ${cachedAccountId} (skip accounts.list)`);
+        console.log(
+          `ℹ️ [Google] Using ${bodyAccountId ? 'manual' : 'cached'} accountId ${resolvedAccountId} (skip accounts.list)`
+        );
       } else {
         const accounts = await googleService.getAccounts(connection.accessToken);
 
