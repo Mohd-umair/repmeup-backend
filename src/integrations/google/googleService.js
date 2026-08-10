@@ -140,8 +140,25 @@ class GoogleService {
   }
 
   /**
+   * Pick the most actionable error when multiple account endpoints fail.
+   * Prefer quota (429) over dead legacy endpoints (404).
+   */
+  _pickAccountsError(errors) {
+    if (!errors.length) return { statusCode: 500, errorMessage: 'Unknown error' };
+    const rank = (status) => {
+      if (status === 429) return 0;
+      if (status === 403) return 1;
+      if (status === 401) return 2;
+      if (status === 404) return 9; // legacy/disabled hosts often 404 — least useful
+      return 5;
+    };
+    return [...errors].sort((a, b) => rank(a.statusCode) - rank(b.statusCode))[0];
+  }
+
+  /**
    * Get Google Business Profile accounts.
-   * Tries Account Management API first, then legacy My Business v4 (separate quota).
+   * Primary: Account Management API.
+   * Fallback on quota only: legacy My Business v4 accounts (separate quota pool).
    * Soft-cooldown after 429 so repeated Setup clicks don't burn the minute quota.
    */
   async getAccounts(accessToken) {
@@ -158,44 +175,48 @@ class GoogleService {
       );
     }
 
-    const endpoints = [
-      `${this.businessProfileApiUrl}/accounts`,
-      `${this.reviewsApiUrl}/accounts`
-    ];
+    const primaryUrl = `${this.businessProfileApiUrl}/accounts`;
+    const legacyUrl = `${this.reviewsApiUrl}/accounts`;
+    const errors = [];
 
-    let lastError = null;
+    try {
+      const accounts = await this._listAccountsFrom(primaryUrl, accessToken);
+      this._accountsCooldownUntil = 0;
+      return accounts;
+    } catch (error) {
+      const statusCode = error.response?.status;
+      const errorMessage =
+        error.response?.data?.error?.message || error.message;
+      errors.push({ statusCode, errorMessage, url: primaryUrl });
+      console.warn(`[Google] accounts.list failed on ${primaryUrl}: ${statusCode} ${errorMessage}`);
 
-    for (const url of endpoints) {
-      try {
-        const accounts = await this._listAccountsFrom(url, accessToken);
-        this._accountsCooldownUntil = 0;
-        return accounts;
-      } catch (error) {
-        const statusCode = error.statusCode || error.response?.status;
-        const errorMessage =
-          error.response?.data?.error?.message || error.message;
-        lastError = { statusCode, errorMessage, url };
-
-        // Try next endpoint on 429/403/404; other errors stop early
-        if (statusCode && ![429, 403, 404].includes(statusCode)) {
-          break;
+      // Only try legacy host when primary is quota-limited — not on 403/404.
+      if (statusCode === 429) {
+        try {
+          const accounts = await this._listAccountsFrom(legacyUrl, accessToken);
+          this._accountsCooldownUntil = 0;
+          return accounts;
+        } catch (legacyError) {
+          const legacyStatus = legacyError.response?.status;
+          const legacyMessage =
+            legacyError.response?.data?.error?.message || legacyError.message;
+          errors.push({ statusCode: legacyStatus, errorMessage: legacyMessage, url: legacyUrl });
+          console.warn(`[Google] accounts.list failed on ${legacyUrl}: ${legacyStatus} ${legacyMessage}`);
         }
-        console.warn(`[Google] accounts.list failed on ${url}: ${statusCode} ${errorMessage}`);
       }
     }
 
-    const statusCode = lastError?.statusCode || 500;
-    const errorMessage = lastError?.errorMessage || 'Unknown error';
+    const { statusCode, errorMessage } = this._pickAccountsError(errors);
 
     if (statusCode === 429) {
-      // Default Google often ships this API with 0 RPM until access + quota are approved.
       this._accountsCooldownUntil = Date.now() + 60_000;
       throw this._makeApiError(
         429,
-        `Rate limit / quota exceeded (429): ${errorMessage}. ` +
-          `Check GCP project quotas for mybusinessaccountmanagement.googleapis.com ` +
-          `(default is often 0 until Google approves GBP API access + quota increase). ` +
-          `Wait 1 minute before retrying.`,
+        `Google API quota exceeded for Account Management (429). ` +
+          `In Cloud Console for this GCP project, open My Business Account Management API → Quotas. ` +
+          `If Requests/minute is 0, request GBP API access + quota increase ` +
+          `(https://developers.google.com/my-business/content/prereqs). Wait 1 minute before retrying. ` +
+          `Detail: ${errorMessage}`,
         'GBP_QUOTA_EXCEEDED'
       );
     }
@@ -209,7 +230,8 @@ class GoogleService {
     if (statusCode === 404) {
       throw this._makeApiError(
         404,
-        `Not found (404): ${errorMessage}. Enable Google My Business / Account Management APIs in Cloud Console.`,
+        `Google Account Management API returned 404. Enable "My Business Account Management API" ` +
+          `on the same GCP project as GOOGLE_CLIENT_ID, then retry. Detail: ${errorMessage}`,
         'API_NOT_FOUND'
       );
     }

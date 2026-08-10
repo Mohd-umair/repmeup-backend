@@ -633,12 +633,21 @@ exports.refreshGoogleLocations = async (req, res, next) => {
         });
       }
 
-      if (apiError.code === 'API_ACCESS_DENIED' || apiError.message?.includes('403')) {
+      if (apiError.code === 'API_ACCESS_DENIED' || apiError.statusCode === 403 || apiError.message?.includes('403')) {
         return res.status(403).json({
           success: false,
           error: 'Access denied to Google Business Profile API',
           message: 'Please ensure you have a Google Business Profile and granted all permissions during OAuth.',
           code: 'API_ACCESS_DENIED'
+        });
+      }
+
+      if (apiError.code === 'API_NOT_FOUND' || apiError.statusCode === 404) {
+        return res.status(404).json({
+          success: false,
+          error: 'Google Business Profile API not found',
+          message: apiError.message,
+          code: 'API_NOT_FOUND'
         });
       }
 
