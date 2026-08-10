@@ -1,15 +1,28 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
-const PlatformConnection = require('../../models/PlatformConnection');
 const { generateChatRef } = require('../../utils/chatRefHelper');
+
+/** Google starRating enum → numeric 1–5 */
+const STAR_RATING_MAP = {
+  ONE: 1,
+  TWO: 2,
+  THREE: 3,
+  FOUR: 4,
+  FIVE: 5,
+  STAR_RATING_UNSPECIFIED: null
+};
 
 class GoogleService {
   constructor() {
     this.clientId = process.env.GOOGLE_CLIENT_ID;
     this.clientSecret = process.env.GOOGLE_CLIENT_SECRET;
     this.redirectUri = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/api/platforms/google/callback';
+    // Account Management API — list GBP accounts
     this.businessProfileApiUrl = 'https://mybusinessaccountmanagement.googleapis.com/v1';
+    // Business Information API — list locations
     this.businessInfoApiUrl = 'https://mybusinessbusinessinformation.googleapis.com/v1';
+    // My Business API v4 — reviews + reply (correct surface)
+    this.reviewsApiUrl = 'https://mybusiness.googleapis.com/v4';
   }
 
   /**
@@ -55,7 +68,8 @@ class GoogleService {
         tokenType: response.data.token_type
       };
     } catch (error) {
-      throw new Error(`Failed to exchange code for tokens: ${error.message}`);
+      const detail = error.response?.data?.error_description || error.message;
+      throw new Error(`Failed to exchange code for tokens: ${detail}`);
     }
   }
 
@@ -76,7 +90,8 @@ class GoogleService {
         expiresIn: response.data.expires_in
       };
     } catch (error) {
-      throw new Error(`Failed to refresh token: ${error.message}`);
+      const detail = error.response?.data?.error_description || error.message;
+      throw new Error(`Failed to refresh token: ${detail}`);
     }
   }
 
@@ -116,10 +131,9 @@ class GoogleService {
 
       return response.data.accounts || [];
     } catch (error) {
-      // Provide more detailed error information
       const statusCode = error.response?.status;
       const errorMessage = error.response?.data?.error?.message || error.message;
-      
+
       if (statusCode === 403) {
         throw new Error(`Access denied (403): ${errorMessage}. The Google Business Profile API may not be enabled, or the user may not have a Business Profile account.`);
       } else if (statusCode === 429) {
@@ -133,25 +147,37 @@ class GoogleService {
   }
 
   /**
-   * Get locations for an account
+   * Get locations for an account (paginated).
+   * @param {string} accessToken
+   * @param {string} accountName - e.g. accounts/123456
    */
   async getLocations(accessToken, accountName) {
     try {
-      const response = await axios.get(`${this.businessInfoApiUrl}/${accountName}/locations`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`
-        },
-        params: {
-          readMask: 'name,title,storefrontAddress,phoneNumbers,websiteUri'
-        }
-      });
+      const accountPath = this._normalizeAccountName(accountName);
+      const locations = [];
+      let pageToken;
 
-      return response.data.locations || [];
+      do {
+        const params = {
+          readMask: 'name,title,storefrontAddress,phoneNumbers,websiteUri',
+          pageSize: 100
+        };
+        if (pageToken) params.pageToken = pageToken;
+
+        const response = await axios.get(`${this.businessInfoApiUrl}/${accountPath}/locations`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params
+        });
+
+        locations.push(...(response.data.locations || []));
+        pageToken = response.data.nextPageToken;
+      } while (pageToken);
+
+      return locations;
     } catch (error) {
-      // Provide more detailed error information
       const statusCode = error.response?.status;
       const errorMessage = error.response?.data?.error?.message || error.message;
-      
+
       if (statusCode === 403) {
         throw new Error(`Access denied (403): ${errorMessage}`);
       } else if (statusCode === 429) {
@@ -163,124 +189,230 @@ class GoogleService {
   }
 
   /**
-   * Fetch reviews for a location
+   * Normalize location list for PlatformConnection.platformData.
+   * Stores short IDs (compat) + full resource metadata for v4 reviews.
+   */
+  buildLocationPlatformData(account, locations = []) {
+    const accountName = this._normalizeAccountName(account?.name || account);
+    const mapped = (locations || []).map((loc) => {
+      const locationId = this._extractLocationId(loc.name);
+      return {
+        id: locationId,
+        name: loc.name,
+        title: loc.title || locationId
+      };
+    });
+
+    return {
+      accountId: accountName,
+      accountName: account?.accountName || accountName,
+      locationIds: mapped.map((l) => l.id).filter(Boolean),
+      locations: mapped
+    };
+  }
+
+  mapStarRating(starRating) {
+    if (typeof starRating === 'number' && starRating >= 1 && starRating <= 5) return starRating;
+    if (typeof starRating === 'string') {
+      if (STAR_RATING_MAP[starRating] != null) return STAR_RATING_MAP[starRating];
+      const n = parseInt(starRating, 10);
+      if (n >= 1 && n <= 5) return n;
+    }
+    return null;
+  }
+
+  /**
+   * Build v4 parent: accounts/{accountId}/locations/{locationId}
+   */
+  _buildReviewsParent(accountId, locationId) {
+    const accountNum = this._extractAccountId(accountId);
+    const locationNum = this._extractLocationId(locationId);
+    if (!accountNum || !locationNum) {
+      throw new Error('Missing accountId or locationId for Google reviews API');
+    }
+    return `accounts/${accountNum}/locations/${locationNum}`;
+  }
+
+  _normalizeAccountName(accountId) {
+    if (!accountId) return '';
+    const s = String(accountId);
+    return s.startsWith('accounts/') ? s.split('/').slice(0, 2).join('/') : `accounts/${s}`;
+  }
+
+  _extractAccountId(accountId) {
+    if (!accountId) return '';
+    const s = String(accountId).replace(/^accounts\//, '');
+    return s.split('/')[0];
+  }
+
+  _extractLocationId(locationRef) {
+    if (!locationRef) return '';
+    const s = String(locationRef);
+    if (s.includes('/locations/')) {
+      return s.split('/locations/').pop().split('/')[0];
+    }
+    return s.replace(/^locations\//, '').split('/')[0];
+  }
+
+  _googleApiError(error, fallback) {
+    const msg =
+      error.response?.data?.error?.message ||
+      error.response?.data?.error_description ||
+      error.message ||
+      fallback;
+    return msg;
+  }
+
+  /**
+   * Fetch all review pages for one location via My Business API v4.
    */
   async fetchReviews(platformConnection, locationId) {
     try {
       const accessToken = await this.ensureValidToken(platformConnection);
-      const locationName = `locations/${locationId}`;
+      const accountId = platformConnection.platformData?.accountId;
+      if (!accountId) {
+        throw new Error('Google connection is missing accountId. Reconnect or refresh locations.');
+      }
 
-      const response = await axios.get(
-        `${this.businessInfoApiUrl}/${locationName}/reviews`,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`
-          },
-          params: {
-            pageSize: 50,
-            orderBy: 'updateTime desc'
+      const parent = this._buildReviewsParent(accountId, locationId);
+      const reviews = [];
+      let pageToken;
+
+      do {
+        const params = {
+          pageSize: 50,
+          orderBy: 'updateTime desc'
+        };
+        if (pageToken) params.pageToken = pageToken;
+
+        const response = await axios.get(
+          `${this.reviewsApiUrl}/${parent}/reviews`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            params
           }
-        }
-      );
+        );
 
-      const reviews = response.data.reviews || [];
-      console.log(`Found ${reviews.length} reviews for location ${locationId}`);
+        reviews.push(...(response.data.reviews || []));
+        pageToken = response.data.nextPageToken;
+      } while (pageToken);
+
+      console.log(`[Google] Found ${reviews.length} reviews for ${parent}`);
+
       const interactions = [];
+      const shortLocationId = this._extractLocationId(locationId);
 
       for (const review of reviews) {
         try {
-          // Check if interaction already exists
-          const existingInteraction = await Interaction.findOne({
-            platformId: review.reviewId,
-            organization: platformConnection.organization
-          });
+          const reviewId = review.reviewId || (review.name ? review.name.split('/').pop() : null);
+          if (!reviewId) continue;
 
-          if (existingInteraction) {
-            continue; // Skip if already exists
-          }
+          const rating = this.mapStarRating(review.starRating);
 
-          // Create interaction from review
-          const interaction = {
+          interactions.push({
             organization: platformConnection.organization,
             platformConnection: platformConnection._id,
             platform: 'google',
             type: 'review',
-            platformId: review.reviewId,
-            platformUrl: review.reviewReply?.reply || null,
+            platformId: reviewId,
             content: review.comment || '',
             contentType: 'text',
-            language: review.reviewer?.displayName ? 'en' : null,
-            
-            // Author information
+            language: null,
+
             author: {
-              platformId: review.reviewer?.profilePhotoUrl || null,
+              platformId: review.reviewer?.profilePhotoUrl || reviewId,
               name: review.reviewer?.displayName || 'Anonymous',
               username: review.reviewer?.displayName || 'Anonymous',
               profileUrl: review.reviewer?.profilePhotoUrl || null,
               avatarUrl: review.reviewer?.profilePhotoUrl || null,
               isVerified: false
             },
-            
-            // Review-specific data
-            rating: review.starRating || null,
+
+            rating,
             reviewDate: review.createTime ? new Date(review.createTime) : new Date(),
-            
-            // Status
+
             status: 'unread',
             isRead: false,
-            
-            // Platform timestamps
+
             platformCreatedAt: review.createTime ? new Date(review.createTime) : new Date(),
             platformUpdatedAt: review.updateTime ? new Date(review.updateTime) : new Date(),
-            
-            // Metadata
+
             metadata: {
-              reviewId: review.reviewId,
+              reviewId,
+              reviewName: review.name || `${parent}/reviews/${reviewId}`,
               reviewReply: review.reviewReply || null,
               starRating: review.starRating,
-              locationId: locationId
-            }
-          };
+              rating,
+              locationId: shortLocationId,
+              accountId: this._normalizeAccountName(accountId),
+              reviewsParent: parent
+            },
 
-          // Sentiment will be analyzed by AI processing job
-          // Star rating is stored in metadata for reference
-          interaction.sentiment = null;
-
-          interactions.push(interaction);
+            sentiment: null
+          });
         } catch (error) {
-          console.error(`Error processing review ${review.reviewId}:`, error.message);
-          continue;
+          console.error(`[Google] Error processing review:`, error.message);
         }
       }
 
-      // Bulk upsert interactions (insert new, update existing)
       if (interactions.length > 0) {
-        const ggOrgId = platformConnection.organization;
-        const ggExistingIds = new Set(
-          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
-            .map(i => i.platformId)
+        const orgId = platformConnection.organization;
+        const existingIds = new Set(
+          (
+            await Interaction.find({
+              organization: orgId,
+              platform: 'google',
+              platformId: { $in: interactions.map((i) => i.platformId) }
+            })
+              .select('platformId')
+              .lean()
+          ).map((i) => i.platformId)
         );
-        const ggChatRefMap = {};
+
+        const chatRefMap = {};
         for (const interaction of interactions) {
-          if (!ggExistingIds.has(interaction.platformId)) {
-            ggChatRefMap[interaction.platformId] = await generateChatRef(ggOrgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          if (!existingIds.has(interaction.platformId)) {
+            chatRefMap[interaction.platformId] = await generateChatRef(orgId).catch(() => ({
+              chatNumber: null,
+              chatRef: null
+            }));
           }
         }
-        const bulkOps = interactions.map(interaction => {
+
+        const bulkOps = interactions.map((interaction) => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
-          const ref = ggChatRefMap[interaction.platformId] || {};
+          const ref = chatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
-              filter: { platformId: interaction.platformId },
+              filter: {
+                organization: orgId,
+                platform: 'google',
+                platformId: interaction.platformId
+              },
               update: {
-                $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
+                $set: {
+                  ...platformFields,
+                  // Keep reply metadata fresh on re-sync
+                  'metadata.reviewReply': interaction.metadata.reviewReply,
+                  'metadata.rating': interaction.metadata.rating,
+                  rating: interaction.rating,
+                  content: interaction.content,
+                  platformUpdatedAt: interaction.platformUpdatedAt
+                },
+                $setOnInsert: {
+                  status: 'unread',
+                  isRead: false,
+                  source: 'sync',
+                  sentiment: sentiment ?? null,
+                  chatNumber: ref.chatNumber ?? null,
+                  chatRef: ref.chatRef ?? null
+                }
               },
               upsert: true
             }
           };
         });
-        
+
         await Interaction.bulkWrite(bulkOps, { ordered: false });
       }
 
@@ -290,38 +422,44 @@ class GoogleService {
         interactions
       };
     } catch (error) {
-      console.error('Error fetching reviews:', error);
-      throw new Error(`Failed to fetch reviews: ${error.message}`);
+      const detail = this._googleApiError(error, 'Failed to fetch reviews');
+      console.error('[Google] Error fetching reviews:', detail);
+      throw new Error(`Failed to fetch reviews: ${detail}`);
     }
   }
 
   /**
-   * Fetch all reviews for all locations
+   * Fetch all reviews for all locations on the connection
    */
   async fetchAllReviews(platformConnection) {
     try {
       let { platformData } = platformConnection;
+      platformData = platformData || {};
       let locationIds = platformData.locationIds || [];
 
-      // If no locationIds, try to fetch them now
       if (locationIds.length === 0 && platformData.accountId) {
         try {
-          console.log('No locationIds found, attempting to fetch locations...');
+          console.log('[Google] No locationIds found, fetching locations...');
           const accessToken = await this.ensureValidToken(platformConnection);
           const locations = await this.getLocations(accessToken, platformData.accountId);
-          locationIds = locations.map(loc => loc.name.split('/').pop());
-          
-          // Update platformData with locationIds
-          platformData.locationIds = locationIds;
-          platformConnection.platformData = platformData;
+          const built = this.buildLocationPlatformData(
+            { name: platformData.accountId, accountName: platformData.accountName },
+            locations
+          );
+          locationIds = built.locationIds;
+          platformConnection.platformData = {
+            ...platformData,
+            ...built,
+            lastLocationRefresh: new Date()
+          };
           await platformConnection.save();
-          
-          console.log(`Found ${locationIds.length} location(s) for Google Business Profile`);
+          platformData = platformConnection.platformData;
+          console.log(`[Google] Found ${locationIds.length} location(s)`);
         } catch (error) {
-          console.error('Failed to fetch locations during sync:', error.message);
-          return { 
-            success: false, 
-            count: 0, 
+          console.error('[Google] Failed to fetch locations during sync:', error.message);
+          return {
+            success: false,
+            count: 0,
             interactions: [],
             error: `No locations found. Please ensure your Google Business Profile has locations set up. Error: ${error.message}`
           };
@@ -329,9 +467,9 @@ class GoogleService {
       }
 
       if (locationIds.length === 0) {
-        return { 
-          success: false, 
-          count: 0, 
+        return {
+          success: false,
+          count: 0,
           interactions: [],
           error: 'No Google Business Profile locations found.',
           errorDetails: {
@@ -356,12 +494,10 @@ class GoogleService {
           totalCount += result.count;
           allInteractions.push(...result.interactions);
         } catch (error) {
-          console.error(`Error fetching reviews for location ${locationId}:`, error.message);
-          continue;
+          console.error(`[Google] Error fetching reviews for location ${locationId}:`, error.message);
         }
       }
 
-      // Update sync stats
       await platformConnection.updateSyncStats(totalCount, true);
 
       return {
@@ -376,20 +512,23 @@ class GoogleService {
   }
 
   /**
-   * Reply to a review
+   * Reply to a review via My Business API v4.
+   * PUT accounts/{a}/locations/{l}/reviews/{r}/reply  { comment }
    */
   async replyToReview(platformConnection, locationId, reviewId, replyText) {
     try {
-      const { accessToken } = platformConnection;
-      const locationName = `locations/${locationId}`;
+      const accessToken = await this.ensureValidToken(platformConnection);
+      const accountId =
+        platformConnection.platformData?.accountId ||
+        null;
+
+      // Prefer parent stored on interaction metadata path when caller only has short IDs
+      const parent = this._buildReviewsParent(accountId, locationId);
+      const cleanReviewId = String(reviewId).split('/').pop();
 
       const response = await axios.put(
-        `${this.businessInfoApiUrl}/${locationName}/reviews/${reviewId}`,
-        {
-          reviewReply: {
-            comment: replyText
-          }
-        },
+        `${this.reviewsApiUrl}/${parent}/reviews/${cleanReviewId}/reply`,
+        { comment: replyText },
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -400,10 +539,12 @@ class GoogleService {
 
       return {
         success: true,
-        review: response.data
+        reviewReply: response.data,
+        platformResponseId: `google-review-${cleanReviewId}`
       };
     } catch (error) {
-      throw new Error(`Failed to reply to review: ${error.message}`);
+      const detail = this._googleApiError(error, 'Failed to reply to review');
+      throw new Error(`Failed to reply to review: ${detail}`);
     }
   }
 
@@ -423,7 +564,6 @@ class GoogleService {
       platformConnection.refreshToken
     );
 
-    // Update platform connection
     platformConnection.accessToken = accessToken;
     platformConnection.tokenExpiry = new Date(Date.now() + expiresIn * 1000);
     await platformConnection.save();
@@ -433,4 +573,3 @@ class GoogleService {
 }
 
 module.exports = new GoogleService();
-
