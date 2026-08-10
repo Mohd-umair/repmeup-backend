@@ -58,13 +58,25 @@ class WebScraperService {
       const $ = cheerio.load(response.data);
       const links = opts.extractLinks ? this._extractInternalLinks($, url) : [];
 
+      // Extract structured content — fall back to meta tags for SPA / JS-rendered pages.
+      let mainContent = this._extractMainContent($);
+      let isSpaFallback = false;
+
+      if (!mainContent || mainContent.trim().length < 50) {
+        const metaContent = this._extractMetaContent($);
+        if (metaContent) {
+          mainContent = metaContent;
+          isSpaFallback = true;
+        }
+      }
+
       // Extract structured content
       const scrapedData = {
         url: url,
         title: this._extractTitle($),
         description: this._extractDescription($),
-        content: this._extractMainContent($),
-        metadata: this._extractMetadata($),
+        content: mainContent,
+        metadata: { ...this._extractMetadata($), isSpaFallback },
         links,
         scrapedAt: new Date()
       };
@@ -152,6 +164,53 @@ class WebScraperService {
       .trim();
 
     return content;
+  }
+
+  /**
+   * Build a meaningful text block from <head> meta tags alone.
+   * Used as a fallback when _extractMainContent yields nothing — most
+   * commonly because the page is a JavaScript SPA (React, Angular, Vue, Next.js)
+   * that renders all its visible content at runtime.
+   *
+   * Returns an empty string when there are not enough meta tags to build
+   * anything useful (< 30 chars total), so the caller can still decide to
+   * throw a proper error rather than save a useless entry.
+   * @private
+   */
+  _extractMetaContent($) {
+    const parts = [];
+
+    const title = this._extractTitle($);
+    if (title) parts.push(title);
+
+    // Description — try several sources in priority order.
+    const description =
+      $('meta[name="description"]').attr('content')?.trim() ||
+      $('meta[property="og:description"]').attr('content')?.trim() ||
+      $('meta[name="twitter:description"]').attr('content')?.trim() || '';
+    if (description && description !== title) parts.push(description);
+
+    const keywords = $('meta[name="keywords"]').attr('content')?.trim();
+    if (keywords) parts.push(`Keywords: ${keywords}`);
+
+    const siteName = $('meta[property="og:site_name"]').attr('content')?.trim();
+    if (siteName && siteName !== title) parts.push(siteName);
+
+    // Collect any remaining <meta name="…"> content tags that look like
+    // human-readable text (not directives, tokens or numeric values).
+    $('meta[name]').each((_, el) => {
+      const name = $(el).attr('name')?.toLowerCase() || '';
+      // Skip already-covered or machine-only tags.
+      if (['description', 'keywords', 'author', 'viewport', 'robots', 'theme-color',
+           'google-site-verification', 'charset', 'generator', 'application-name'].includes(name)) return;
+      const content = $(el).attr('content')?.trim();
+      if (content && content.length > 20 && content.length < 500 && !/^[\d./,\-+%]+$/.test(content)) {
+        parts.push(content);
+      }
+    });
+
+    const raw = parts.join(' | ');
+    return raw.trim().length >= 30 ? raw.trim() : '';
   }
 
   /**
@@ -344,7 +403,8 @@ class WebScraperService {
     return {
       url,
       title: this._extractTitle($) || url,
-      links: this._extractInternalLinks($, url)
+      links: this._extractInternalLinks($, url),
+      isSpa: false
     };
   }
 

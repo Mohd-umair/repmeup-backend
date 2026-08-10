@@ -733,15 +733,36 @@ exports.createCrawlKnowledgeBase = async (req, res) => {
       }
     });
 
-    await kbCrawlQueue.add(
-      { crawlJobId: String(crawlJob._id) },
-      { ...queueConfig, attempts: 1 }
-    );
+    const crawlJobId = String(crawlJob._id);
+    let enqueued = false;
+    try {
+      await kbCrawlQueue.add(
+        { crawlJobId },
+        { ...queueConfig, attempts: 1 }
+      );
+      enqueued = true;
+    } catch (enqueueErr) {
+      console.error('[KB Crawl] Failed to enqueue Bull job — falling back to inline processing', enqueueErr.message);
+    }
+
+    // Always kick off processing on the API process for small imports (≤3 pages).
+    // Atomic claim in processKbCrawl prevents double-work if the worker is also healthy.
+    // This keeps the UI from getting stuck at "Starting crawl…" when orm-worker is down.
+    const INLINE_CRAWL_PAGE_LIMIT = 3;
+    if (!enqueued || urlsToImport.length <= INLINE_CRAWL_PAGE_LIMIT) {
+      const processKbCrawl = require('../jobs/processKbCrawl');
+      setImmediate(() => {
+        processKbCrawl({ data: { crawlJobId }, id: `inline-${crawlJobId}` })
+          .catch((err) => {
+            console.error('[KB Crawl] Inline processing failed', { crawlJobId, error: err.message });
+          });
+      });
+    }
 
     return res.status(202).json({
       success: true,
       data: {
-        crawlJobId: String(crawlJob._id),
+        crawlJobId,
         status: crawlJob.status,
         maxPages: urlsToImport.length,
         selectedCount: urlsToImport.length
