@@ -114,20 +114,11 @@ exports.handleGoogleCallback = async (req, res, next) => {
             const account = accounts[0];
             try {
               const locations = await googleService.getLocations(tokens.accessToken, account.name);
-              
-              platformData = {
-                accountId: account.name,
-                accountName: account.accountName || account.name,
-                locationIds: locations.map(loc => loc.name.split('/').pop())
-              };
+              platformData = googleService.buildLocationPlatformData(account, locations);
             } catch (locationError) {
               console.warn('Failed to get locations, continuing without location data:', locationError.message);
               // Still save connection even without locations
-              platformData = {
-                accountId: account.name,
-                accountName: account.accountName || account.name,
-                locationIds: []
-              };
+              platformData = googleService.buildLocationPlatformData(account, []);
             }
           } else {
             console.warn('No Google Business Profile accounts found for this user');
@@ -207,7 +198,9 @@ exports.handleGoogleCallback = async (req, res, next) => {
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken,
           tokenExpiry: tokenExpiry,
-          scope: ['business.manage', 'youtube.readonly'],
+          scope: type === 'youtube'
+            ? ['youtube.readonly', 'youtube.force-ssl']
+            : ['business.manage'],
           platformData: platformData,
           status: 'connected',
           isActive: true,
@@ -594,18 +587,15 @@ exports.refreshGoogleLocations = async (req, res, next) => {
         });
       }
 
-      // Update connection with location IDs
-      const locationIds = locations.map(loc => loc.name.split('/').pop());
+      const built = googleService.buildLocationPlatformData(account, locations);
       connection.platformData = {
         ...connection.platformData,
-        accountId: account.name,
-        accountName: account.accountName || account.name,
-        locationIds: locationIds,
+        ...built,
         lastLocationRefresh: new Date()
       };
       await connection.save();
 
-      console.log(`✅ [Google] Refreshed locations for connection ${connection._id}: Found ${locationIds.length} location(s)`);
+      console.log(`✅ [Google] Refreshed locations for connection ${connection._id}: Found ${built.locationIds.length} location(s)`);
 
       res.json({
         success: true,
@@ -613,7 +603,8 @@ exports.refreshGoogleLocations = async (req, res, next) => {
         data: {
           locationsCount: locations.length,
           locationNames: locations.map(loc => loc.title || loc.name),
-          accountName: account.accountName || account.name
+          accountName: account.accountName || account.name,
+          locations: built.locations
         }
       });
     } catch (apiError) {

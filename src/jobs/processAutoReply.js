@@ -1728,8 +1728,45 @@ async function sendReplyToPlatform(interaction, content, organization, confidenc
       }
     } else if (interaction.platform === 'google') {
       const googleService = require('../integrations/google/googleService');
-      // TODO: Implement Google Business reply
-      logger.debug('Google Business reply not yet implemented');
+      const locationId = interaction.metadata?.locationId;
+      const reviewId = interaction.metadata?.reviewId || interaction.platformId;
+
+      if (interaction.type !== 'review') {
+        logger.warn('[Auto-reply] Google reply skipped — only reviews are supported', {
+          interactionId: interaction._id?.toString(),
+          type: interaction.type
+        });
+      } else if (!locationId || !reviewId) {
+        logger.warn('[Auto-reply] Google reply skipped — missing locationId or reviewId', {
+          interactionId: interaction._id?.toString(),
+          hasLocationId: !!locationId,
+          hasReviewId: !!reviewId
+        });
+      } else if (!connection.platformData?.accountId) {
+        logger.warn('[Auto-reply] Google reply skipped — connection missing accountId (refresh locations)', {
+          interactionId: interaction._id?.toString(),
+          connectionId: connection._id?.toString()
+        });
+      } else {
+        try {
+          await googleService.ensureValidToken(connection);
+          const result = await googleService.replyToReview(
+            connection,
+            locationId,
+            reviewId,
+            content
+          );
+          if (result?.success) {
+            platformResponseId = result.platformResponseId || `google-review-${reviewId}`;
+            replyStatus = 'sent';
+          }
+        } catch (gErr) {
+          logger.error('[Auto-reply] Google replyToReview failed', {
+            interactionId: interaction._id?.toString(),
+            error: gErr.message
+          });
+        }
+      }
     } else if (interaction.platform === 'whatsapp') {
       const whatsappService = require('../integrations/whatsapp/whatsappService');
       // WhatsApp interactions use a thread model: author.platformId is the sender's WA ID (phone)

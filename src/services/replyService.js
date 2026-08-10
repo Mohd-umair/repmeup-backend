@@ -461,9 +461,25 @@ async function sendReplyToPlatform({
         if (!locationId || !reviewId) {
           return { platformResponseId: null, status: 'failed', errorMessage: 'Missing location or review ID for Google review reply.' };
         }
+        if (!connection.platformData?.accountId) {
+          return {
+            platformResponseId: null,
+            status: 'failed',
+            errorMessage: 'Google connection is missing Business Profile account. Open Settings and click Refresh Locations, or reconnect Google.'
+          };
+        }
         await googleService.ensureValidToken(connection);
-        await googleService.replyToReview(connection, locationId, reviewId, replyContent);
-        return { platformResponseId: `google-review-${reviewId}`, status: 'sent', errorMessage: null };
+        const googleResult = await googleService.replyToReview(
+          connection,
+          locationId,
+          reviewId,
+          replyContent
+        );
+        return {
+          platformResponseId: googleResult.platformResponseId || `google-review-${reviewId}`,
+          status: 'sent',
+          errorMessage: null
+        };
       }
 
       default:
