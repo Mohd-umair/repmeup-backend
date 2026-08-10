@@ -48,4 +48,13 @@ describe('googleService GBP review helpers', () => {
     expect(data.locations).toHaveLength(2);
     expect(data.locations[0].title).toBe('Store A');
   });
+
+  test('_pickAccountsError prefers 429 over legacy 404', () => {
+    const picked = googleService._pickAccountsError([
+      { statusCode: 429, errorMessage: 'Quota exceeded' },
+      { statusCode: 404, errorMessage: 'Request failed with status code 404' }
+    ]);
+    expect(picked.statusCode).toBe(429);
+    expect(picked.errorMessage).toContain('Quota');
+  });
 });
