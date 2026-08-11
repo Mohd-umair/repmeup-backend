@@ -35,7 +35,13 @@ exports.listCatalog = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      data: { items, grouped, kinds: Feature.KINDS, categories: Feature.CATEGORIES }
+      data: {
+        items,
+        grouped,
+        kinds: Feature.KINDS,
+        categories: Feature.CATEGORIES,
+        meteringKinds: Feature.METERING_KINDS
+      }
     });
   } catch (err) {
     next(err);

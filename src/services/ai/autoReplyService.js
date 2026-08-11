@@ -22,6 +22,7 @@
 
 const logger = require('../../config/logger');
 const aiCreditService = require('../aiCreditService');
+const aiConversationService = require('./aiConversationService');
 const entitlementsService = require('../entitlementsService');
 const { FEATURE_KEYS } = require('../../config/featureCatalog');
 const replyGenerationService = require('./replyGenerationService');
@@ -174,6 +175,14 @@ async function resolveAttributableUserId(interaction, organizationId) {
   }
 }
 
+/**
+ * Operations that produced a reply for the customer, and therefore count against the
+ * AI-conversation meter. `auto_reply_unresolvable` is excluded on purpose: the AI
+ * decided it could not help and handed off to a human, so no AI conversation happened.
+ * The vendor cost of that LLM call is still charged to the AI credit pool below.
+ */
+const CONVERSATION_METERED_OPERATIONS = new Set(['auto_reply']);
+
 async function deductCreditsSafely(organizationId, operation, interaction, aiApiUsageId) {
   try {
     const userId = await resolveAttributableUserId(interaction, organizationId);
@@ -195,6 +204,15 @@ async function deductCreditsSafely(organizationId, operation, interaction, aiApi
       .catch(() => {});
   } catch {
     // Credit deduction failure is non-fatal — usage is logged separately.
+  }
+
+  // Conversation meter: opens a 24h window with this contact, or rides the open one
+  // for free. Never throws.
+  if (CONVERSATION_METERED_OPERATIONS.has(operation) && interaction.contact) {
+    await aiConversationService.openOrReuse(organizationId, interaction.contact, {
+      channel: interaction.platform,
+      interactionId: interaction._id
+    });
   }
 }
 
@@ -284,6 +302,30 @@ async function generateAutoReply(interaction, organizationId, organizationSettin
         };
       }
       throw err;
+    }
+
+    // AI conversation meter (the headline plan limit). Checked BEFORE the LLM call so
+    // we never pay a vendor for a reply the plan won't let us send. Free when a 24h
+    // window with this contact is already open.
+    if (interaction.contact) {
+      try {
+        await aiConversationService.assertCapacity(organizationId, interaction.contact);
+      } catch (err) {
+        if (err?.name === 'EntitlementError') {
+          logger.warn('[Auto-Reply] AI conversation quota exhausted', {
+            organizationId,
+            code: err.code
+          });
+          return {
+            eligible: false,
+            reason: err.message,
+            code: err.code,
+            featureKey: err.featureKey,
+            creditsRemaining: err.meta?.remaining ?? 0
+          };
+        }
+        throw err;
+      }
     }
 
     const creditCheck = await aiCreditService.checkCredits(organizationId, AUTO_REPLY_CREDITS);

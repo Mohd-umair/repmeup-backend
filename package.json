@@ -16,6 +16,8 @@
     "seed:menus:force": "node scripts/seedAllMenus.js --force",
     "seed:plans": "node scripts/seedPlans.js",
     "seed:features": "node scripts/seedFeatures.js",
+    "seed:addons": "node scripts/seedAddOns.js",
+    "seed:wa-rates": "node scripts/seedWhatsAppRates.js",
     "seed:free-plan": "node scripts/seedFreePlanEntitlements.js",
     "seed:flow-blueprints": "node scripts/seed-automation-flow-blueprints.js",
     "migrate:wa-flows": "node scripts/migrate-whatsapp-flows-to-automation.js",

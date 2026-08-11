@@ -101,6 +101,7 @@ async function seedFeatures() {
       unit: row.unit ?? null,
       resetPeriod: row.resetPeriod || existing.resetPeriod || 'none',
       enumOptions: row.enumOptions || existing.enumOptions || [],
+      metering: row.metering,
       sortOrder: row.sortOrder ?? existing.sortOrder ?? 100
     });
     await existing.save();

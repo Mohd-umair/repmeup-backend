@@ -35,6 +35,7 @@ const aiCreditUsageSchema = new mongoose.Schema({
       'ai_assist_regenerate',
       'auto_reply',
       'auto_reply_unresolvable',
+      'ai_conversation_open',
       'processAI_analysis',
       'brand_config_preview',
       'chat_summary',

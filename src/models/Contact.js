@@ -80,4 +80,8 @@ contactSchema.index({ organization: 1, 'channels.platform': 1, 'channels.platfor
 // Text search on name/notes
 contactSchema.index({ primaryName: 'text', notes: 'text' });
 
+// Live count for the `contacts.max` ("Active Contacts") entitlement. Without this,
+// every entitlements cache miss scans the whole collection for the org.
+contactSchema.index({ organization: 1, isDeleted: 1 });
+
 module.exports = mongoose.model('Contact', contactSchema);

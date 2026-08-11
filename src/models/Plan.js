@@ -119,11 +119,82 @@ const planSchema = new mongoose.Schema({
     default: () => ({})
   },
   
+  // ── Annual billing option ──────────────────────────────────────────────────
+  // A plan carries BOTH cycles: `price`/`priceInr`/`razorpayPlanId` are the monthly
+  // leg, these are the annual leg. Two Razorpay plans, one app plan — so tier
+  // ordering and upgrade paths stay intact regardless of the cycle a customer picks.
+  priceAnnual: {
+    type: mongoose.Schema.Types.Mixed,
+    // Whole INR per YEAR (e.g. 6000), or 'custom'. Undefined = no annual option.
+  },
+  priceAnnualInr: {
+    type: Number,
+    // Annual price in paise (e.g. 600000 = ₹6,000/yr); server-managed.
+    default: 0,
+  },
+  razorpayPlanIdAnnual: {
+    type: String,
+    trim: true,
+    // Razorpay Plan ID for the yearly leg; server-managed.
+  },
+  annualOfferLabel: {
+    type: String,
+    trim: true,
+    // Marketing copy for the annual saving, e.g. 'Save 67% — offer price, billed annually'.
+    // The percentage itself is COMPUTED from price vs priceAnnual, never stored.
+  },
+
   // Visual & Marketing
   badge: {
     type: String,
     trim: true,
     // e.g., 'MOST POPULAR', 'BEST VALUE', 'RECOMMENDED'
+  },
+  tagline: {
+    type: String,
+    trim: true,
+    // One-line positioning under the plan name on the pricing card.
+  },
+  cardStyle: {
+    type: String,
+    enum: ['light', 'dark'],
+    default: 'light',
+    // 'dark' renders the inverted, emphasised card (the highlighted plan).
+  },
+  inheritsFromPlanId: {
+    type: String,
+    trim: true,
+    lowercase: true,
+    // Renders as "Everything in <that plan's name>" at the top of the bullet list.
+  },
+  headlineMetricKeys: [{
+    type: String,
+    trim: true,
+    // Feature keys shown as the hero metric tiles on the card
+    // (e.g. credits.aiConversations.monthly, users.max, contacts.max).
+  }],
+  cardBullets: [{
+    _id: false,
+    label: { type: String, trim: true, required: true },
+    /** false renders the bullet greyed out — the sheet advertises what a tier lacks. */
+    included: { type: Boolean, default: true },
+    note: { type: String, trim: true },
+    /** Optional link back to the entitlement this bullet describes. */
+    featureKey: { type: String, trim: true }
+  }],
+  /**
+   * Per-feature footnotes shown in the comparison table cell, keyed by feature key
+   * (e.g. { 'users.max': 'Simultaneous login allowed' }).
+   * Mixed rather than Map because Mongoose Map keys cannot contain dots.
+   */
+  entitlementNotes: {
+    type: mongoose.Schema.Types.Mixed,
+    default: () => ({}),
+  },
+  limitedOffer: {
+    active: { type: Boolean, default: false },
+    badge: { type: String, trim: true },
+    endsAt: { type: Date }
   },
   badgeColor: {
     type: String,

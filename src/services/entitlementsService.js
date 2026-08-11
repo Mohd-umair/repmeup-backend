@@ -27,6 +27,7 @@ const Organization = require('../models/Organization');
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
 const KnowledgeBase = require('../models/KnowledgeBase');
+const Contact = require('../models/Contact');
 const cacheService = require('./cacheService');
 const bucketService = require('./bucketService');
 const logger = require('../config/logger');
@@ -67,13 +68,24 @@ const KEY_TO_LEGACY_LIMIT = Object.fromEntries(
  * Limit features whose `used` value must reflect live DB rows (not buckets).
  * KB entries can be deleted, so bucket counters would drift.
  */
+/**
+ * Keys whose "used" figure is a live count of rows rather than an incrementing
+ * bucket. Necessary wherever the underlying thing can be DELETED — a bucket only
+ * ever goes up, so deleting a contact would never give the capacity back.
+ */
 const LIVE_COUNT_FEATURE_KEYS = new Set([
-  FEATURE_KEYS.KB_ENTRIES_MAX
+  FEATURE_KEYS.KB_ENTRIES_MAX,
+  FEATURE_KEYS.CONTACTS_MAX
 ]);
 
 async function getLiveUsedCount(organizationId, featureKey) {
   if (featureKey === FEATURE_KEYS.KB_ENTRIES_MAX) {
     return KnowledgeBase.countDocuments({ organization: organizationId });
+  }
+  if (featureKey === FEATURE_KEYS.CONTACTS_MAX) {
+    // "Active Contacts" on the pricing sheet = contacts stored in the CRM.
+    // Backed by the { organization, isDeleted } index on Contact.
+    return Contact.countDocuments({ organization: organizationId, isDeleted: false });
   }
   return null;
 }
@@ -178,6 +190,64 @@ function resolveFeatureFromPlan(plan, catalogEntry) {
   return { ...empty, ...defaultsFor(catalogEntry) };
 }
 
+/** UTC 'YYYY-MM', matching the key `period_credit` grants are stamped with. */
+function currentMonthKey(now = new Date()) {
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+/**
+ * Layer purchased add-ons over the plan-resolved entitlements, in place.
+ *
+ * The rule, stated plainly: **an override can only ever INCREASE capability.**
+ * Limits are additive, booleans and enums are grant-only. Nothing here can take
+ * something away, so a plan change can never strand a customer below what they paid
+ * for, and this stays a pure post-pass — `resolveFeatureFromPlan` is untouched and
+ * still testable on its own.
+ *
+ * `baseLimit` and `purchasedDelta` are attached so the UI can show
+ * "10,000 + 3,000 purchased" without re-deriving anything.
+ */
+function applyOverrides(keys, overrides) {
+  if (!overrides || typeof overrides !== 'object') return keys;
+
+  const now = new Date();
+  const thisMonth = currentMonthKey(now);
+
+  for (const [key, override] of Object.entries(overrides)) {
+    const entry = keys[key];
+    const catalogEntry = CATALOG_BY_KEY[key];
+    if (!entry || !catalogEntry || !override) continue;
+
+    // Expired or lapsed grants simply stop applying — no cron needed.
+    if (override.expiresAt && new Date(override.expiresAt) < now) continue;
+    if (override.periodMonthKey && override.periodMonthKey !== thisMonth) continue;
+
+    if (catalogEntry.kind === 'limit' && Number.isFinite(override.limitDelta)) {
+      if (entry.limit === -1) continue;            // already unlimited — nothing to add
+      entry.baseLimit = entry.limit;
+      entry.limit = Math.max(0, entry.limit + override.limitDelta);
+      entry.purchasedDelta = override.limitDelta;
+      entry.source = 'subscription.override';
+    } else if (catalogEntry.kind === 'boolean' && override.enabled === true) {
+      entry.enabled = true;
+      entry.source = 'subscription.override';
+    } else if (catalogEntry.kind === 'enum' && override.value) {
+      // Only ever move UP the ladder.
+      const options = catalogEntry.enumOptions || [];
+      if (options.indexOf(override.value) > options.indexOf(entry.value)) {
+        entry.value = override.value;
+        entry.source = 'subscription.override';
+      }
+    } else if (catalogEntry.kind === 'list' && Array.isArray(override.value)) {
+      const merged = new Set([...(entry.value || []), ...override.value]);
+      entry.value = [...merged];
+      entry.source = 'subscription.override';
+    }
+  }
+
+  return keys;
+}
+
 function defaultsFor(catalogEntry) {
   const v = catalogEntry.defaultValue;
   switch (catalogEntry.kind) {
@@ -244,6 +314,10 @@ async function resolveFromDb(organizationId) {
   for (const catalogEntry of CATALOG) {
     keys[catalogEntry.key] = resolveFeatureFromPlan(plan || {}, catalogEntry);
   }
+
+  // Layer purchased add-ons on top. Runs BEFORE the legacy `limits` view is derived,
+  // so `limits.maxUsers` also reflects purchased seats.
+  applyOverrides(keys, subscription?.entitlementOverrides);
 
   // Legacy `limits` view derived from the resolved keys.
   const limits = {};
@@ -333,7 +407,76 @@ async function can(organizationId, featureKey) {
   if (!resolved) return true;
   if (resolved.kind === 'boolean') return !!resolved.enabled;
   if (resolved.kind === 'limit') return resolved.limit !== 0; // 0 = explicitly disabled
+  // An enum whose ladder starts at a 'none' rung is off when it sits on that rung.
+  // Ladders that start at a real capability (e.g. rbac 'single') are always on.
+  if (resolved.kind === 'enum') {
+    const opts = catalogEntry.enumOptions || [];
+    return !(opts[0] === 'none' && resolved.value === 'none');
+  }
+  if (resolved.kind === 'list') return Array.isArray(resolved.value) && resolved.value.length > 0;
   return true;
+}
+
+/**
+ * Resolved enum value for an `enum` feature (e.g. 'basic' for commerce.orders.level).
+ */
+async function level(organizationId, featureKey) {
+  const catalogEntry = CATALOG_BY_KEY[featureKey];
+  if (!catalogEntry || catalogEntry.kind !== 'enum') {
+    throw new Error(`level: feature "${featureKey}" is not an enum`);
+  }
+  const ent = await getEntitlements(organizationId);
+  return ent.keys[featureKey]?.value ?? catalogEntry.defaultValue;
+}
+
+/**
+ * Is the org at or above `minLevel` on this feature's capability ladder?
+ * `enumOptions` order is the ladder, ascending.
+ */
+async function levelAtLeast(organizationId, featureKey, minLevel) {
+  const catalogEntry = CATALOG_BY_KEY[featureKey];
+  if (!catalogEntry || catalogEntry.kind !== 'enum') return true; // not a ladder → not gated
+  const opts = catalogEntry.enumOptions || [];
+  const required = opts.indexOf(minLevel);
+  if (required < 0) return true; // unknown rung fails open rather than locking everyone out
+  const current = opts.indexOf(await level(organizationId, featureKey));
+  return current >= required;
+}
+
+/** Throw 403 FEATURE_LEVEL_TOO_LOW unless the org is at or above `minLevel`. */
+async function assertLevel(organizationId, featureKey, minLevel) {
+  const catalogEntry = CATALOG_BY_KEY[featureKey];
+  if (!catalogEntry || catalogEntry.kind !== 'enum') return;
+  if (await levelAtLeast(organizationId, featureKey, minLevel)) return;
+  throw new EntitlementError(
+    `Your plan's "${catalogEntry.label}" level does not include this. Upgrade to enable it.`,
+    {
+      code: 'FEATURE_LEVEL_TOO_LOW',
+      featureKey,
+      statusCode: 403,
+      meta: { required: minLevel, current: await level(organizationId, featureKey) }
+    }
+  );
+}
+
+/** Does the org's `list` feature include `member`? (e.g. channels.allowed ∋ 'whatsapp') */
+async function hasListMember(organizationId, featureKey, member) {
+  const catalogEntry = CATALOG_BY_KEY[featureKey];
+  if (!catalogEntry || catalogEntry.kind !== 'list') return true;
+  const ent = await getEntitlements(organizationId);
+  const value = ent.keys[featureKey]?.value;
+  return Array.isArray(value) && value.includes(member);
+}
+
+/** Throw 403 unless the org's `list` feature includes `member`. */
+async function assertListMember(organizationId, featureKey, member) {
+  const catalogEntry = CATALOG_BY_KEY[featureKey];
+  if (!catalogEntry || catalogEntry.kind !== 'list') return;
+  if (await hasListMember(organizationId, featureKey, member)) return;
+  throw new EntitlementError(
+    `Your plan does not include the "${member}" channel. Upgrade to connect it.`,
+    { code: 'FEATURE_DISABLED', featureKey, statusCode: 403, meta: { member } }
+  );
 }
 
 /**
@@ -405,6 +548,17 @@ async function assert(organizationId, featureKey, amount = 1) {
         }
       );
     }
+    return;
+  }
+
+  // enum / list: presence check only. Use assertLevel()/assertListMember() when a
+  // specific rung or member is required.
+  if (catalogEntry.kind === 'enum' || catalogEntry.kind === 'list') {
+    if (await can(organizationId, featureKey)) return;
+    throw new EntitlementError(
+      `Your plan does not include "${catalogEntry.label}". Upgrade to enable it.`,
+      { code: 'FEATURE_DISABLED', featureKey, statusCode: 403 }
+    );
   }
 }
 
@@ -494,6 +648,12 @@ module.exports = {
   quota,
   assert,
   consume,
+  // Enum ladders + list membership
+  level,
+  levelAtLeast,
+  assertLevel,
+  hasListMember,
+  assertListMember,
   invalidateEntitlements,
   EntitlementError,
   resolvePlanFeature,
@@ -503,6 +663,7 @@ module.exports = {
   // Test hooks
   _resolveFromDb: resolveFromDb,
   _resolveFeatureFromPlan: resolveFeatureFromPlan,
+  _applyOverrides: applyOverrides,
   _LEGACY_LIMIT_TO_KEY: LEGACY_LIMIT_TO_KEY,
   _LEGACY_USAGE_TO_KEY: LEGACY_USAGE_TO_KEY
 };

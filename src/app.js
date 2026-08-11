@@ -210,6 +210,7 @@ const routeMap = [
   ['/notifications',  './routes/notifications'],
   ['/menus',          './routes/menus'],
   ['/subscription',   './routes/subscription'],
+  ['/addons',         './routes/addons'],
   ['/social-accounts','./routes/socialAccounts'],
   ['/plans',          './routes/plans'],
   ['/super-admin',    './routes/super-admin'],

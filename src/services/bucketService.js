@@ -28,6 +28,34 @@ const { CATALOG_BY_KEY } = require('../config/featureCatalog');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/**
+ * Feature keys are dotted ('credits.autoReply.monthly'), but `Subscription.usageBuckets`
+ * is a Mongoose Map — and a dot in an update path is ALWAYS a path separator to MongoDB.
+ * `usageBuckets.credits.autoReply.monthly.used` therefore reads as a four-level descent
+ * into a Map whose values only have { used, periodStart }, so strict mode silently
+ * dropped every write and `used` stayed 0 forever. That is why these quotas never
+ * enforced.
+ *
+ * Buckets are stored under a dot-free key instead. This is an internal storage detail:
+ * every public function still takes and returns the canonical dotted feature key.
+ */
+const KEY_SEPARATOR = '__';
+
+function storageKey(featureKey) {
+  return String(featureKey).split('.').join(KEY_SEPARATOR);
+}
+
+/** Read a bucket out of a subscription doc (lean object or hydrated Map). */
+function readStoredBucket(usageBuckets, featureKey) {
+  if (!usageBuckets) return null;
+  const key = storageKey(featureKey);
+  if (typeof usageBuckets.get === 'function') {
+    return usageBuckets.get(key) || usageBuckets.get(featureKey) || null;
+  }
+  // Legacy docs may hold the dotted key from before the escaping fix.
+  return usageBuckets[key] || usageBuckets[featureKey] || null;
+}
+
 /** UTC year+month identifier for monthly buckets. */
 function monthKey(d) {
   return `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
@@ -65,7 +93,7 @@ async function getBucket(organizationId, featureKey) {
 
   const catalogEntry = CATALOG_BY_KEY[featureKey];
   const resetPeriod = catalogEntry?.resetPeriod || 'none';
-  const raw = subscription?.usageBuckets?.[featureKey] || null;
+  const raw = readStoredBucket(subscription?.usageBuckets, featureKey);
   const stale = isStale(raw, resetPeriod);
 
   return {
@@ -99,33 +127,32 @@ async function consume(organizationId, featureKey, amount = 1) {
   const resetPeriod = catalogEntry?.resetPeriod || 'none';
   const now = new Date();
 
+  const path = `usageBuckets.${storageKey(featureKey)}`;
+
   // Step 1: read current bucket (lean — we'll do the actual write next).
   const current = await Subscription.findOne({ organization: organizationId })
-    .select(`usageBuckets.${featureKey}`)
+    .select(path)
     .lean();
-  const raw = current?.usageBuckets?.[featureKey] || null;
+  const raw = readStoredBucket(current?.usageBuckets, featureKey);
   const stale = isStale(raw, resetPeriod, now);
 
-  // Step 2: write. If stale, reset to `amount`; otherwise increment.
-  const update = stale
-    ? { $set: { [`usageBuckets.${featureKey}`]: { used: amount, periodStart: now } } }
-    : {
-        $inc: { [`usageBuckets.${featureKey}.used`]: amount },
-        // Ensure periodStart exists for never-before-touched bucket on a non-resetting key.
-        $setOnInsert: { [`usageBuckets.${featureKey}.periodStart`]: now }
-      };
+  // Step 2: write. If stale (or never touched), seed the whole bucket so periodStart
+  // is always present; otherwise increment in place.
+  const update = (stale || !raw)
+    ? { $set: { [path]: { used: amount, periodStart: now } } }
+    : { $inc: { [`${path}.used`]: amount } };
 
   const updated = await Subscription.findOneAndUpdate(
     { organization: organizationId },
     update,
     { new: true, upsert: false }
-  ).select(`usageBuckets.${featureKey}`);
+  ).select(path);
 
   // Mirror legacy counters so older controllers still report correct numbers
   // during the transition window. Best-effort, never throws.
   await mirrorLegacyCounter(organizationId, featureKey, amount, stale).catch(() => {});
 
-  const final = updated?.usageBuckets?.get?.(featureKey) || updated?.usageBuckets?.[featureKey] || {};
+  const final = readStoredBucket(updated?.usageBuckets, featureKey) || {};
   return {
     used: final.used ?? amount,
     periodStart: final.periodStart || now
@@ -138,7 +165,7 @@ async function consume(organizationId, featureKey, amount = 1) {
 async function reset(organizationId, featureKey) {
   await Subscription.findOneAndUpdate(
     { organization: organizationId },
-    { $set: { [`usageBuckets.${featureKey}`]: { used: 0, periodStart: new Date() } } }
+    { $set: { [`usageBuckets.${storageKey(featureKey)}`]: { used: 0, periodStart: new Date() } } }
   );
 }
 
@@ -155,7 +182,9 @@ async function sweepStaleBuckets(organizationId) {
   const now = new Date();
 
   subscription.usageBuckets.forEach((bucket, key) => {
-    const resetPeriod = CATALOG_BY_KEY[key]?.resetPeriod || 'none';
+    // Stored keys are dot-escaped; the catalog is keyed by the canonical dotted key.
+    const featureKey = key.split(KEY_SEPARATOR).join('.');
+    const resetPeriod = CATALOG_BY_KEY[featureKey]?.resetPeriod || 'none';
     if (isStale(bucket, resetPeriod, now)) {
       subscription.usageBuckets.set(key, { used: 0, periodStart: now });
       rolled += 1;

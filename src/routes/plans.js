@@ -4,8 +4,10 @@ const planController = require('../controllers/planController');
 const { protectAdmin } = require('../middlewares/adminAuth');
 const { requireSuperAdminAccess } = require('../middlewares/superAdminAccess');
 
-// Public routes - for users viewing plans
+// Public routes - for users viewing plans.
+// `/pricing-page` must precede `/:planId` or it is captured as a planId.
 router.get('/', planController.getPlans);
+router.get('/pricing-page', planController.getPricingPage);
 
 // Admin routes MUST be registered before `/:planId` or `GET /admin` is captured as planId "admin".
 // Uses protectAdmin (SUPER_ADMIN_JWT_SECRET) because plan admin mutations are only ever called

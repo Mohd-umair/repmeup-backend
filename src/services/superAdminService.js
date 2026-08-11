@@ -18,8 +18,15 @@ const {
 } = require('../middlewares/auth');
 const crypto = require('crypto');
 
-const PLAN_ADMIN_SELECT =
-  'planId name description tier price billingCycle limits features entitlements badge badgeColor highlightColor isActive isPublic displayOrder trialDays stripePriceId stripeProductId createdAt updatedAt';
+// Everything the admin Plans form needs to hydrate. Razorpay ids and paise amounts are
+// read-only in the UI but must be returned, or the form shows them blank.
+const PLAN_ADMIN_SELECT = [
+  'planId name description tier price billingCycle limits features entitlements',
+  'badge badgeColor highlightColor isActive isPublic displayOrder trialDays',
+  'stripePriceId stripeProductId createdAt updatedAt',
+  'razorpayPlanId priceInr razorpayPlanIdAnnual priceAnnual priceAnnualInr annualOfferLabel',
+  'tagline cardStyle inheritsFromPlanId headlineMetricKeys cardBullets entitlementNotes limitedOffer'
+].join(' ');
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;

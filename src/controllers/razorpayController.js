@@ -97,17 +97,49 @@ exports.createSubscription = async (req, res, next) => {
       });
     }
 
-    if (!plan.razorpayPlanId) {
+    /**
+     * Which billing leg the customer chose.
+     *
+     * A plan carries two Razorpay plans — monthly and (optionally) annual — because
+     * Razorpay plans are single-cycle and immutable. Everything below works off the
+     * RESOLVED leg, never `plan.razorpayPlanId` directly, so the annual price shown on
+     * the pricing page is the price actually charged.
+     */
+    const cycleRaw = String(req.body?.billingCycle || 'monthly').trim().toLowerCase();
+    if (!['monthly', 'yearly'].includes(cycleRaw)) {
       return res.status(400).json({
         success: false,
-        error: 'This plan is not yet configured for online payment. Save the plan in Admin to create a Razorpay plan, or contact support.'
+        error: 'billingCycle must be "monthly" or "yearly".'
+      });
+    }
+    const isAnnual = cycleRaw === 'yearly';
+
+    if (isAnnual && !(Number(plan.priceAnnual) > 0)) {
+      return res.status(400).json({
+        success: false,
+        error: `The ${plan.name} plan is not offered on annual billing.`
       });
     }
 
-    if (!isValidRazorpayPlanId(plan.razorpayPlanId)) {
+    const razorpayPlanId = isAnnual ? plan.razorpayPlanIdAnnual : plan.razorpayPlanId;
+    const amountInr = (isAnnual ? plan.priceAnnualInr : plan.priceInr) || 0;
+    // Razorpay caps the schedule by cycle count, so 120 monthly cycles and 120 ANNUAL
+    // cycles are not the same promise. Both come to ten years.
+    const totalCount = isAnnual ? 10 : 120;
+
+    if (!razorpayPlanId) {
       return res.status(400).json({
         success: false,
-        error: `Invalid Razorpay Plan ID on "${plan.planId}". Expected a value like plan_Xxxxx from Razorpay Dashboard, got "${plan.razorpayPlanId}".`
+        error: isAnnual
+          ? `Annual billing for "${plan.planId}" is not configured yet. Save the plan in Admin to create its annual Razorpay plan, or choose monthly.`
+          : 'This plan is not yet configured for online payment. Save the plan in Admin to create a Razorpay plan, or contact support.'
+      });
+    }
+
+    if (!isValidRazorpayPlanId(razorpayPlanId)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid Razorpay Plan ID on "${plan.planId}". Expected a value like plan_Xxxxx from Razorpay Dashboard, got "${razorpayPlanId}".`
       });
     }
 
@@ -149,19 +181,20 @@ exports.createSubscription = async (req, res, next) => {
 
     // Verify plan exists in current Razorpay mode (live vs test) before checkout
     try {
-      await razorpay.plans.fetch(plan.razorpayPlanId);
+      await razorpay.plans.fetch(razorpayPlanId);
     } catch (fetchErr) {
       const mode = (process.env.RAZORPAY_KEY_ID || '').startsWith('rzp_live_') ? 'live' : 'test';
       logger.error('[Razorpay] Plan ID not found in Razorpay', {
         appPlanId: plan.planId,
-        razorpayPlanId: plan.razorpayPlanId,
+        razorpayPlanId,
+        billingCycle: cycleRaw,
         mode,
         error: extractRzpError(fetchErr)
       });
       return res.status(400).json({
         success: false,
         error:
-          `Razorpay plan "${plan.razorpayPlanId}" was not found in ${mode} mode. ` +
+          `Razorpay plan "${razorpayPlanId}" was not found in ${mode} mode. ` +
           `Update the "${plan.planId}" plan in Admin (re-save to auto-create) or set the correct live Plan ID from Razorpay Dashboard → Subscriptions → Plans.`
       });
     }
@@ -171,12 +204,13 @@ exports.createSubscription = async (req, res, next) => {
       organizationId: String(req.user.organization._id),
       userId: String(req.user._id),
       planId,
-      planName: plan.name
+      planName: plan.name,
+      billingCycle: cycleRaw
     };
 
     const rzpSubscription = await razorpay.subscriptions.create({
-      plan_id: plan.razorpayPlanId,
-      total_count: 120,          // max billing cycles (10 years for monthly)
+      plan_id: razorpayPlanId,
+      total_count: totalCount,
       quantity: 1,
       notes
     });
@@ -184,6 +218,8 @@ exports.createSubscription = async (req, res, next) => {
     // Mark subscription as pending_payment while checkout is open
     subscription.status = 'pending_payment';
     subscription.razorpaySubscriptionId = rzpSubscription.id;
+    // Record the chosen leg so renewals, the billing page and invoices agree.
+    subscription.billingCycle = cycleRaw;
     await subscription.save();
 
     // Record the order creation event for the admin transactions view
@@ -197,10 +233,11 @@ exports.createSubscription = async (req, res, next) => {
         planId: plan.planId,
         planName: plan.name,
         razorpaySubscriptionId: rzpSubscription.id,
-        amountInr: plan.priceInr || 0,
+        amountInr,
         currency: 'INR',
         type: 'order',
-        status: 'pending'
+        status: 'pending',
+        metadata: { billingCycle: cycleRaw }
       });
     } catch (txErr) {
       logger.warn('[Razorpay] Failed to record order transaction', { error: txErr.message });
@@ -209,6 +246,7 @@ exports.createSubscription = async (req, res, next) => {
     logger.info('[Razorpay] Subscription created', {
       razorpaySubscriptionId: rzpSubscription.id,
       planId,
+      billingCycle: cycleRaw,
       org: req.user.organization._id
     });
 
@@ -218,7 +256,8 @@ exports.createSubscription = async (req, res, next) => {
         subscriptionId: rzpSubscription.id,
         keyId: process.env.RAZORPAY_KEY_ID,
         planName: plan.name,
-        priceInr: plan.priceInr,
+        priceInr: amountInr,
+        billingCycle: cycleRaw,
         currency: 'INR'
       }
     });
@@ -319,10 +358,14 @@ exports.verifyPayment = async (req, res, next) => {
     subscription.cancelledAt = undefined;
     subscription.cancellationReason = undefined;
 
-    // Set billing period (monthly — next billing 30 days from now)
+    // Set the billing period from the leg the customer actually bought. An annual
+    // subscriber given a 30-day period would look "expired" eleven months early.
+    const isAnnualCycle = subscription.billingCycle === 'yearly';
     const now = new Date();
     subscription.currentPeriodStart = now;
-    subscription.currentPeriodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    subscription.currentPeriodEnd = isAnnualCycle
+      ? new Date(new Date(now).setFullYear(now.getFullYear() + 1))
+      : new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
     // A demo workspace just paid: convert it in place to a real paid subscription
     // so the trial banner/lock and per-demo credit cap no longer apply.
@@ -349,10 +392,11 @@ exports.verifyPayment = async (req, res, next) => {
         planName: plan.name,
         razorpaySubscriptionId: razorpay_subscription_id,
         razorpayPaymentId: razorpay_payment_id,
-        amountInr: plan.priceInr || 0,
+        amountInr: (isAnnualCycle ? plan.priceAnnualInr : plan.priceInr) || 0,
         currency: 'INR',
         type: 'payment',
-        status: 'completed'
+        status: 'completed',
+        metadata: { billingCycle: subscription.billingCycle }
       });
     } catch (txErr) {
       logger.warn('[Razorpay] Failed to record payment transaction', { error: txErr.message });
@@ -413,20 +457,41 @@ exports.handleWebhook = async (req, res) => {
     logger.info('[Razorpay Webhook] Received event', { eventType });
 
     switch (eventType) {
+      // One-time add-on purchases (contact top-ups, AI recharges). This is where
+      // entitlement is actually granted — the checkout callback is only a UX signal.
+      case 'order.paid':
+      case 'payment.captured':
+        await handleOneTimePaymentCaptured(payload);
+        break;
+
+      // Every subscription.* handler below assumes it is looking at the PLAN
+      // subscription, so add-on events are diverted first and handled on their own.
       case 'subscription.activated':
+        if (await handleAddOnSubscriptionEvent(eventType, payload)) break;
         await handleSubscriptionActivated(payload);
         break;
 
       case 'subscription.charged':
+        if (await handleAddOnSubscriptionEvent(eventType, payload)) break;
         await handleSubscriptionCharged(payload);
         break;
 
       case 'subscription.cancelled':
+        // An add-on cancellation must NOT fall through — handleSubscriptionCancelled
+        // reverts the org to the free plan, which would be catastrophic here.
+        if (await handleAddOnSubscriptionEvent(eventType, payload)) break;
         await handleSubscriptionCancelled(payload);
         break;
 
       case 'subscription.completed':
+        if (await handleAddOnSubscriptionEvent(eventType, payload)) break;
         await handleSubscriptionCompleted(payload);
+        break;
+
+      case 'subscription.halted':
+      case 'subscription.pending':
+        // Only meaningful for add-ons today; the plan flow has no handler for these.
+        await handleAddOnSubscriptionEvent(eventType, payload);
         break;
 
       case 'payment.failed':
@@ -446,6 +511,97 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ─── Webhook event handlers ───────────────────────────────────────────────────
+
+/**
+ * Is this subscription webhook about a recurring ADD-ON rather than the plan?
+ *
+ * Recurring add-ons get their own Razorpay subscription (the plan subscription is
+ * cancelled and recreated on every upgrade, which would destroy anything bundled into
+ * it). Every subscription.* handler below assumes it is looking at the plan, so
+ * add-on events must be diverted before they reach one.
+ */
+async function handleAddOnSubscriptionEvent(eventType, payload) {
+  const entity = payload?.subscription?.entity;
+  const razorpaySubscriptionId = entity?.id;
+  if (!razorpaySubscriptionId) return false;
+
+  const SubscriptionAddOn = require('../models/SubscriptionAddOn');
+  const addOnSub = await SubscriptionAddOn.findOne({ razorpaySubscriptionId })
+    .select('addOnId')
+    .lean();
+  if (!addOnSub) return false;     // it's the plan subscription — not ours
+
+  const {
+    activateAddOnSubscription,
+    markAddOnPastDue,
+    finaliseAddOnCancellation
+  } = require('../services/razorpayAddOnSubscriptionService');
+
+  // Razorpay sends period bounds as unix seconds.
+  const toDate = (s) => (s ? new Date(Number(s) * 1000) : undefined);
+
+  switch (eventType) {
+    case 'subscription.activated':
+    case 'subscription.charged':
+      await activateAddOnSubscription(razorpaySubscriptionId, {
+        periodStart: toDate(entity.current_start),
+        periodEnd: toDate(entity.current_end)
+      });
+      break;
+
+    case 'subscription.halted':
+    case 'subscription.pending':
+      // A renewal failed. Keep the entitlement for now — stripping seats mid-cycle on
+      // one failed charge is worse for the customer than carrying them a few days.
+      await markAddOnPastDue(razorpaySubscriptionId);
+      break;
+
+    case 'subscription.cancelled':
+    case 'subscription.completed':
+      await finaliseAddOnCancellation(razorpaySubscriptionId);
+      break;
+
+    default:
+      break;
+  }
+
+  logger.info('[Razorpay Webhook] add-on subscription event handled', {
+    eventType,
+    razorpaySubscriptionId,
+    addOnId: addOnSub.addOnId
+  });
+  return true;
+}
+
+/**
+ * A one-time payment succeeded — grant the add-on.
+ *
+ * Both `order.paid` and `payment.captured` can arrive for the same purchase; the
+ * fulfilment guard makes handling both harmless and means we grant on whichever
+ * lands first.
+ */
+async function handleOneTimePaymentCaptured(payload) {
+  const order = payload?.order?.entity;
+  const payment = payload?.payment?.entity;
+  const razorpayOrderId = order?.id || payment?.order_id;
+
+  if (!razorpayOrderId) {
+    logger.info('[Razorpay Webhook] payment without an order id — not an add-on purchase');
+    return;
+  }
+
+  const { fulfilOneTimePurchase } = require('../services/addOnFulfilmentService');
+  const result = await fulfilOneTimePurchase({
+    razorpayOrderId,
+    razorpayPaymentId: payment?.id
+  });
+
+  logger.info('[Razorpay Webhook] one-time purchase handled', {
+    razorpayOrderId,
+    fulfilled: result.fulfilled,
+    reason: result.reason
+  });
+}
 
 async function handleSubscriptionActivated(payload) {
   const rzpSub = payload?.subscription?.entity;
