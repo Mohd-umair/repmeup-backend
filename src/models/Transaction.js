@@ -36,11 +36,39 @@ const transactionSchema = new mongoose.Schema(
     currency: { type: String, default: 'INR' },
 
     razorpaySubscriptionId: { type: String, index: true },
-    razorpayPaymentId: { type: String },
+    /** Unique so a replayed webhook can never create a second completed transaction. */
+    razorpayPaymentId: { type: String, index: { unique: true, sparse: true } },
+    /** Set for one-time purchases (Razorpay Orders API), which subscriptions don't use. */
+    razorpayOrderId: { type: String, index: true },
+
+    /**
+     * What was bought. Populated for add-on purchases; empty for plan billing, where
+     * planId/planName already say everything.
+     */
+    lineItems: [{
+      _id: false,
+      addOnId: { type: String, trim: true },
+      name: { type: String, trim: true },
+      quantity: { type: Number, default: 1 },
+      unitAmountInr: { type: Number, default: 0 },   // paise
+      amountInr: { type: Number, default: 0 },       // paise
+      grantFeatureKey: { type: String, trim: true },
+      grantAmount: { type: Number, default: 0 }
+    }],
+
+    /**
+     * When entitlement was actually granted. The fulfilment guard is a conditional
+     * update on `fulfilledAt: null`, so a duplicate webhook loses the race and stops.
+     */
+    fulfilledAt: { type: Date, default: null },
 
     type: {
       type: String,
-      enum: ['order', 'payment', 'renewal', 'failed'],
+      enum: [
+        'order', 'payment', 'renewal', 'failed',
+        // Add-on commerce
+        'topup', 'addon_subscription', 'addon_renewal', 'refund'
+      ],
       required: true,
       index: true
     },

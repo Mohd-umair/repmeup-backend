@@ -31,6 +31,7 @@ const FEATURE_CATEGORIES = [
   'integrations'
 ];
 const RESET_PERIODS = ['none', 'daily', 'monthly'];
+const METERING_KINDS = ['AC', 'NAC'];
 
 const featureSchema = new mongoose.Schema(
   {
@@ -80,8 +81,24 @@ const featureSchema = new mongoose.Schema(
       enum: RESET_PERIODS,
       default: 'none'
     },
-    /** Allowed values for `enum` features (e.g. ['immediate','scheduled','hybrid']). */
+    /**
+     * Allowed values for `enum` features, and the permitted members for `list` features.
+     * For `enum` the array order is the ascending capability ladder used by
+     * entitlementsService.levelAtLeast().
+     */
     enumOptions: [{ type: String, trim: true }],
+    /**
+     * Pricing-sheet classification.
+     *   AC  — counted or credit-based: has a number that scales by plan, or is
+     *         powered by an AI agent.
+     *   NAC — not counted: a flat capability, present or absent, same mechanic
+     *         regardless of tier or volume.
+     */
+    metering: {
+      type: String,
+      enum: METERING_KINDS,
+      default: 'NAC'
+    },
     sortOrder: {
       type: Number,
       default: 100
@@ -101,6 +118,7 @@ featureSchema.index({ active: 1 });
 featureSchema.statics.KINDS = FEATURE_KINDS;
 featureSchema.statics.CATEGORIES = FEATURE_CATEGORIES;
 featureSchema.statics.RESET_PERIODS = RESET_PERIODS;
+featureSchema.statics.METERING_KINDS = METERING_KINDS;
 
 /** Active catalog ordered for admin display. */
 featureSchema.statics.getCatalog = function getCatalog() {

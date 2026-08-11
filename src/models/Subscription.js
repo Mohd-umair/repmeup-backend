@@ -119,7 +119,31 @@ const subscriptionSchema = new mongoose.Schema({
     ),
     default: undefined
   },
-  
+
+  /**
+   * Extra entitlement this org has PURCHASED on top of its plan, keyed by feature key.
+   *
+   *   { 'contacts.max':                     { limitDelta: 3000 },
+   *     'users.max':                        { limitDelta: 2 },
+   *     'credits.aiConversations.monthly':  { limitDelta: 500, periodMonthKey: '2026-08' },
+   *     'flowBuilder.enabled':              { enabled: true } }
+   *
+   * This is a DERIVED CACHE, never hand-edited: addOnService.recomputeOverrides()
+   * rebuilds it from the AddOnGrant ledger plus active SubscriptionAddOn rows. That
+   * makes fulfilment idempotent, repairable (recompute everything), and immune to
+   * double-granting on a replayed webhook.
+   *
+   * Overrides only ever ADD capability — see entitlementsService.applyOverrides.
+   *
+   * Mixed rather than Map because feature keys contain dots, which Mongoose Map keys
+   * cannot (the same reason Plan.entitlements is Mixed).
+   */
+  entitlementOverrides: {
+    type: mongoose.Schema.Types.Mixed,
+    default: () => ({})
+  },
+
+
   // Billing status
   status: {
     type: String,

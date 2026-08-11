@@ -583,7 +583,7 @@ async function processWhatsAppWebhook(payload) {
       if (value.statuses && value.statuses.length > 0) {
         for (const status of value.statuses) {
           try {
-            await processStatusUpdate(status);
+            await processStatusUpdate(status, value.metadata?.phone_number_id);
           } catch (statusErr) {
             logger.error('[WhatsApp Webhook] processStatusUpdate failed', {
               error: statusErr.message
@@ -996,7 +996,13 @@ async function _emitInteractionUpdatedForReplyWamid(wamid) {
   }
 }
 
-async function processStatusUpdate(status) {
+/**
+ * @param {object} status  one entry from webhook `value.statuses[]`
+ * @param {string} [phoneNumberId]  `value.metadata.phone_number_id`, used to resolve the
+ *   owning organization for pass-through cost tracking. Optional so existing callers
+ *   (and tests) keep working; cost is simply not recorded without it.
+ */
+async function processStatusUpdate(status, phoneNumberId) {
   if (!status?.id) return;
   logger.info('[WhatsApp] Status update', { id: status.id, status: status.status });
 
@@ -1013,6 +1019,23 @@ async function processStatusUpdate(status) {
     status.timestamp,
     errorDetail
   );
+
+  // Pass-through WhatsApp cost. Meta bills per 24h conversation, and the `pricing` +
+  // `conversation` objects on this status are the only place that data appears.
+  // Wrapped so cost tracking can never break delivery-status processing.
+  if (phoneNumberId && status.conversation?.id) {
+    try {
+      const connection = await _lookupWhatsAppConnection(phoneNumberId);
+      if (connection?.organization) {
+        const whatsappCostService = require('../whatsappCostService');
+        await whatsappCostService.recordConversationCharge(connection.organization, status);
+      }
+    } catch (costErr) {
+      logger.warn('[WhatsApp] conversation cost tracking failed (non-fatal)', {
+        error: costErr.message
+      });
+    }
+  }
 
   const statusAt = new Date(parseInt(status.timestamp, 10) * 1000);
   const DELIVERY_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, failed: -1 };

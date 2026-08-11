@@ -1,7 +1,12 @@
 /**
  * Canonical entitlement maps for default plan seeds and admin tier presets.
  * Keep in sync with admin/src/app/features/plans/plan-tier-presets.ts
+ *
+ * The 2026 pricing-sheet tiers (Starter/Growth/Pro) live in pricingSheetEntitlements.js;
+ * this file covers the legacy lineup plus the derived Enterprise map.
  */
+
+const { CATALOG } = require('../src/config/featureCatalog');
 
 const FREE_ENTITLEMENTS = {
   'users.max': { limit: 1 },
@@ -118,12 +123,29 @@ const BUSINESS_ENTITLEMENTS = {
   'campaigns.recipients.monthly': { limit: 200000 }
 };
 
+/**
+ * Enterprise = every capability, maxed out. Derived rather than hand-listed so a new
+ * catalog key can never leave Enterprise short.
+ *
+ * Note this walks the CATALOG, not PRO_ENTITLEMENTS — deriving from Pro would silently
+ * omit any key Pro does not name, leaving it on the (now fail-closed) catalog default.
+ */
 const ENTERPRISE_ENTITLEMENTS = Object.fromEntries(
-  Object.keys(PRO_ENTITLEMENTS).map((key) => {
-    const entry = PRO_ENTITLEMENTS[key];
-    if (entry.limit !== undefined) return [key, { limit: -1 }];
-    if (entry.enabled !== undefined) return [key, { enabled: true }];
-    return [key, entry];
+  CATALOG.map((entry) => {
+    switch (entry.kind) {
+      case 'limit':
+        return [entry.key, { limit: -1 }];
+      case 'boolean':
+        return [entry.key, { enabled: true }];
+      case 'enum': {
+        const opts = entry.enumOptions || [];
+        return [entry.key, { value: opts.length ? opts[opts.length - 1] : entry.defaultValue }];
+      }
+      case 'list':
+        return [entry.key, { value: entry.enumOptions ? [...entry.enumOptions] : [] }];
+      default:
+        return [entry.key, { value: entry.defaultValue ?? null }];
+    }
   })
 );
 

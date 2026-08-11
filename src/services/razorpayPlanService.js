@@ -199,6 +199,47 @@ async function syncPlanWithRazorpay(planDoc, previousPlan = null) {
   };
 }
 
+/**
+ * Project the annual leg of a plan into the shape the monthly-oriented helpers expect:
+ * `price` becomes the yearly rupee amount and the cycle becomes 'yearly', so
+ * resolvePriceInPaise / needsNewRazorpayPlan / createRazorpayPlan all work unchanged.
+ */
+function toAnnualLeg(plan) {
+  return {
+    ...plan,
+    price: plan.priceAnnual,
+    priceInr: plan.priceAnnualInr,
+    razorpayPlanId: plan.razorpayPlanIdAnnual,
+    billingCycle: 'yearly'
+  };
+}
+
+/**
+ * Sync BOTH billing legs of a plan with Razorpay.
+ *
+ * A plan carries a monthly price and, optionally, a discounted annual price. Razorpay
+ * plans are immutable and single-cycle, so each leg needs its own Razorpay plan — but
+ * they stay one app plan, which keeps tier ordering and upgrade paths intact.
+ *
+ * @returns {Promise<{ monthly: {razorpayPlanId, priceInr, created}, annual: {...} }>}
+ */
+async function syncPlanBillingOptions(planDoc, previousPlan = null) {
+  const next = planDoc?.toObject ? planDoc.toObject() : { ...planDoc };
+  const prev = previousPlan
+    ? (previousPlan.toObject ? previousPlan.toObject() : { ...previousPlan })
+    : null;
+
+  const monthly = await syncPlanWithRazorpay(next, prev);
+
+  // No annual price configured → nothing to sync, and any previous annual link is dropped.
+  if (next.priceAnnual === undefined || next.priceAnnual === null || next.priceAnnual === '') {
+    return { monthly, annual: { razorpayPlanId: null, priceInr: null, created: false } };
+  }
+
+  const annual = await syncPlanWithRazorpay(toAnnualLeg(next), prev ? toAnnualLeg(prev) : null);
+  return { monthly, annual };
+}
+
 module.exports = {
   RazorpayPlanSyncError,
   extractRzpError,
@@ -207,6 +248,8 @@ module.exports = {
   resolvePriceInPaise,
   mapBillingCycle,
   needsNewRazorpayPlan,
+  toAnnualLeg,
   createRazorpayPlan,
-  syncPlanWithRazorpay
+  syncPlanWithRazorpay,
+  syncPlanBillingOptions
 };

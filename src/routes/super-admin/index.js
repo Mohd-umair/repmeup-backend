@@ -66,6 +66,11 @@ router.patch('/tickets/:id/status', ticketController.superAdminUpdateStatus);
 // Lead Management CRM
 router.use('/crm', require('./crm'));
 
+// Add-on catalogue (commercial configuration; SKUs themselves are code-defined)
+const superAdminAddOnController = require('../../controllers/superAdminAddOnController');
+router.get('/addons', superAdminAddOnController.listAddOns);
+router.put('/addons/:addOnId', superAdminAddOnController.updateAddOn);
+
 router.get('/plans', superAdminController.listPlans);
 router.get('/features', featureController.listCatalog);
 router.get('/contact-inquiries', contactInquiryController.listForSuperAdmin);

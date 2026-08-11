@@ -5,6 +5,8 @@ const User = require('../models/User');
 const ScheduledPost = require('../models/ScheduledPost');
 const AICreditUsage = require('../models/AICreditUsage');
 const entitlementsService = require('../services/entitlementsService');
+const bucketService = require('../services/bucketService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const { ensureAiCreditPeriodCurrent, utcMonthStart } = require('../services/creditPeriodService');
 const { buildPublicPlanCard } = require('../services/planPresentationService');
 const { cancelRazorpaySubscription } = require('./razorpayController');
@@ -14,6 +16,75 @@ const { cancelRazorpaySubscription } = require('./razorpayController');
  * Returns null for normal (non-demo) workspaces so the frontend can simply check
  * `data.trial` truthiness to decide whether to show trial UI.
  */
+/**
+ * The pricing-sheet meters (AI conversations, Active Contacts), display-ready.
+ *
+ * Both resolve through the entitlements engine rather than the legacy `usage.*`
+ * counters, so they pick up live counts and purchased top-ups automatically.
+ * `baseLimit`/`purchasedDelta` let the UI print "10,000 + 3,000 purchased".
+ */
+async function buildSheetMeters(orgId) {
+  const format = (n) => (n === -1 ? 'Unlimited' : Number(n || 0).toLocaleString('en-IN'));
+
+  const build = async (featureKey, label) => {
+    try {
+      const q = await entitlementsService.quota(orgId, featureKey);
+      const resolved = (await entitlementsService.getEntitlements(orgId)).keys?.[featureKey] || {};
+      return {
+        featureKey,
+        label,
+        used: q.used,
+        limit: q.limit,
+        baseLimit: resolved.baseLimit ?? q.limit,
+        purchasedDelta: resolved.purchasedDelta ?? 0,
+        remaining: q.isUnlimited ? null : q.remaining,
+        isUnlimited: q.isUnlimited,
+        isExhausted: q.isExhausted,
+        percentUsed: q.isUnlimited || !q.limit ? 0 : Math.min(100, Math.round((q.used / q.limit) * 100)),
+        display: `${format(q.used)} / ${format(q.limit)}`,
+        resetPeriod: q.resetPeriod
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const [aiConversations, activeContacts] = await Promise.all([
+    build(FEATURE_KEYS.CREDITS_AI_CONVERSATIONS, 'AI conversations this month'),
+    build(FEATURE_KEYS.CONTACTS_MAX, 'Active Contacts')
+  ]);
+
+  // Contacts dropped because the org was at its ceiling — drives the "top up" nudge.
+  let contactsNotSaved = 0;
+  try {
+    const overflow = await bucketService.getBucket(orgId, 'contacts.overflow.monthly');
+    contactsNotSaved = overflow?.used || 0;
+  } catch { /* counter is best-effort */ }
+
+  return { aiConversations, activeContacts, contactsNotSaved };
+}
+
+/**
+ * @desc    WhatsApp pass-through message spend for this org
+ * @route   GET /api/subscription/whatsapp-spend
+ *
+ * These are Meta's conversation charges billed straight through — identical on every
+ * plan, which is why they sit beside the plan meters rather than inside them.
+ */
+exports.getWhatsAppSpend = async (req, res, next) => {
+  try {
+    const whatsappCostService = require('../services/whatsappCostService');
+    const { from, to } = req.query;
+    const summary = await whatsappCostService.getSpendSummary(
+      req.user.organization._id,
+      { from, to }
+    );
+    res.status(200).json({ success: true, data: summary });
+  } catch (error) {
+    next(error);
+  }
+};
+
 function buildTrialStatus(subscription) {
   if (!subscription || !subscription.isDemo) return null;
   const now = Date.now();
@@ -201,6 +272,10 @@ exports.getLimits = async (req, res, next) => {
         canConnectMore,
         remaining,
         nextTier,
+        // The 2026 pricing-sheet meters, display-ready. Separate from `usage` because
+        // these resolve through the entitlements engine (live counts, purchased
+        // top-ups) rather than the legacy counter fields.
+        meters: await buildSheetMeters(orgId),
         billing: {
           currentPeriodStart: subscription.currentPeriodStart ?? null,
           currentPeriodEnd: subscription.currentPeriodEnd ?? null,

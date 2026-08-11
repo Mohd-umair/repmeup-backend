@@ -26,9 +26,16 @@ function buildFullAccessEntitlements() {
     if (entry.kind === 'boolean') {
       entitlements[entry.key] = { enabled: true };
     } else if (entry.kind === 'limit') {
-      entitlements[entry.key] = { value: -1 }; // -1 = unlimited
+      entitlements[entry.key] = { limit: -1 }; // -1 = unlimited
+    } else if (entry.kind === 'enum') {
+      // Top rung of the ladder — enumOptions is ordered ascending by capability.
+      // Falling back to defaultValue here would hand demos the LOWEST rung.
+      const opts = entry.enumOptions || [];
+      entitlements[entry.key] = { value: opts.length ? opts[opts.length - 1] : entry.defaultValue };
+    } else if (entry.kind === 'list') {
+      // Every allowed member, not the (empty) default.
+      entitlements[entry.key] = { value: entry.enumOptions ? [...entry.enumOptions] : [] };
     } else {
-      // No enum/list/json kinds today, but stay forward-safe: grant a permissive default.
       entitlements[entry.key] = { value: entry.defaultValue ?? null };
     }
   }

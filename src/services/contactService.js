@@ -7,8 +7,11 @@
  * across all platforms. It is called from every webhook handler.
  */
 const Contact = require('../models/Contact');
+const Notification = require('../models/Notification');
 const logger = require('../config/logger');
 const entitlementsService = require('./entitlementsService');
+const bucketService = require('./bucketService');
+const { emitToOrg } = require('../utils/socketEmitter');
 const { FEATURE_KEYS } = require('../config/featureCatalog');
 
 /** Meta Graph `/picture` URLs need a token — store null and let the inbox proxy resolve. */
@@ -51,6 +54,87 @@ async function tickUniqueContactsBucket(organizationId, contact, prevLastInterac
     logger.warn('[contactService] uniqueContacts bucket consume failed (non-fatal)', {
       contactId: contact?._id?.toString(),
       err: err.message
+    });
+  }
+}
+
+/**
+ * Internal counter for contacts dropped because the org was at its ceiling.
+ * Not a plan feature — it exists so "we silently lost contacts" becomes a number
+ * the billing page can show. Unenforced by design.
+ */
+const CONTACTS_OVERFLOW_KEY = 'contacts.overflow.monthly';
+
+/** Don't nag: at most one in-app notification per org per day. */
+const OVERFLOW_NOTIFY_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const overflowNotifiedAt = new Map();
+
+/**
+ * The org has hit `contacts.max` and a new contact cannot be stored.
+ *
+ * On authenticated user actions we throw a 402 so the person sees why. On webhook
+ * paths we must NOT throw: Meta retries a failing webhook and then disables the
+ * subscription, which would cost the customer *messages*, not just contact rows.
+ * There we keep ingestion alive but make the drop loud — error log, a counter, and
+ * a once-a-day in-app notification.
+ */
+async function handleContactCapacityReached(orgId, quota, enforce) {
+  if (enforce === 'hard') {
+    throw new entitlementsService.EntitlementError(
+      `You've reached your Active Contacts limit (${quota.used}/${quota.limit}). `
+      + 'Top up your contacts or upgrade your plan to add more.',
+      {
+        code: 'QUOTA_EXCEEDED',
+        featureKey: FEATURE_KEYS.CONTACTS_MAX,
+        statusCode: 402,
+        meta: { limit: quota.limit, used: quota.used, remaining: 0, needed: 1 }
+      }
+    );
+  }
+
+  logger.error('[contactService] contacts.max reached — inbound contact NOT stored', {
+    organizationId: orgId,
+    used: quota.used,
+    limit: quota.limit
+  });
+
+  // Quantify the loss so Billing can show "N contacts not saved this month".
+  await bucketService.consume(orgId, CONTACTS_OVERFLOW_KEY, 1).catch(() => {});
+
+  const last = overflowNotifiedAt.get(orgId) || 0;
+  if (Date.now() - last < OVERFLOW_NOTIFY_INTERVAL_MS) return;
+  overflowNotifiedAt.set(orgId, Date.now());
+
+  try {
+    emitToOrg(orgId, 'entitlements:limit-reached', {
+      featureKey: FEATURE_KEYS.CONTACTS_MAX,
+      used: quota.used,
+      limit: quota.limit
+    });
+
+    // Notifications are per-user; tell the people who can act on billing.
+    const User = require('../models/User');
+    const recipients = await User.find({
+      organization: orgId,
+      role: { $in: ['admin', 'manager'] },
+      isActive: true
+    }).select('_id').lean();
+    if (!recipients.length) return;
+
+    await Notification.insertMany(recipients.map((u) => ({
+      user: u._id,
+      organization: orgId,
+      type: 'system',
+      title: 'Active Contacts limit reached',
+      message:
+        `You're at ${quota.used} of ${quota.limit} Active Contacts. New people messaging you `
+        + 'are not being saved as contacts. Top up your contacts or upgrade to keep capturing them.',
+      actionUrl: '/app/settings/accounts'
+    })));
+  } catch (err) {
+    logger.warn('[contactService] contacts.max notification failed (non-fatal)', {
+      organizationId: orgId,
+      error: err.message
     });
   }
 }
@@ -114,11 +198,18 @@ function normalizeAuthorForPlatform(platform, author = {}, rawData = {}) {
  *
  * @param {{ platform, platformUserId, phone, email, username, name, avatarUrl, rawData }} payload
  * @param {string|ObjectId} organizationId
+ * @param {{ enforce?: 'soft'|'hard' }} [options]
+ *   How to behave when the org is at its `contacts.max` ceiling:
+ *   - 'soft' (default): return null so message ingestion keeps working, but record
+ *     and surface the drop. Every caller today is a webhook, so this is the live path.
+ *   - 'hard': throw EntitlementError 402. For authenticated user actions (a contact
+ *     create/import UI), where a silent drop would be the wrong answer.
  * @returns {Promise<Contact>}
  */
-async function resolveContact(payload, organizationId) {
+async function resolveContact(payload, organizationId, options = {}) {
   const { platform, platformUserId, phone, email, username, name, avatarUrl: rawAvatarUrl, rawData } = payload;
   const avatarUrl = sanitizeAvatarUrl(rawAvatarUrl);
+  const { enforce = 'soft' } = options;
 
   if (!platformUserId || !platform) {
     // Not enough identity info — skip silently
@@ -151,14 +242,12 @@ async function resolveContact(payload, organizationId) {
 
     // 4. Create new contact
     if (!contact) {
-      const storedCount = await Contact.countDocuments({ organization: orgId, isDeleted: false });
+      // `used` is a live count of non-deleted contacts (see entitlementsService
+      // LIVE_COUNT_FEATURE_KEYS), so freeing contacts frees capacity, and a purchased
+      // top-up raises `limit` via the subscription override.
       const contactQuota = await entitlementsService.quota(orgId, FEATURE_KEYS.CONTACTS_MAX);
-      if (!contactQuota.isUnlimited && storedCount >= contactQuota.limit) {
-        logger.warn('[contactService] contacts.max reached — skipping new contact create', {
-          organizationId: orgId,
-          storedCount,
-          limit: contactQuota.limit
-        });
+      if (!contactQuota.isUnlimited && contactQuota.used >= contactQuota.limit) {
+        await handleContactCapacityReached(orgId, contactQuota, enforce);
         return null;
       }
 
@@ -232,7 +321,11 @@ async function resolveContact(payload, organizationId) {
     return contact;
 
   } catch (err) {
-    // Non-fatal — contact resolution must never block message delivery
+    // A 'hard' capacity rejection is a deliberate answer to an authenticated caller,
+    // not a failure to swallow — let it reach the route as a 402.
+    if (err?.name === 'EntitlementError') throw err;
+
+    // Everything else is non-fatal — contact resolution must never block message delivery.
     logger.warn('[contactService] resolveContact failed (non-fatal)', {
       platform,
       platformUserId,
