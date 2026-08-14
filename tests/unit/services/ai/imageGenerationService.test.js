@@ -38,11 +38,19 @@ jest.mock('../../../../src/services/designMemoryService', () => ({
   getTopStyleSpecs: jest.fn(async () => [])
 }));
 
+// `posts.logo` gates whether the brand logo is used as a reference image. Lazy-required
+// inside the module, so it is mocked the same way. Defaults to entitled, which is the
+// behaviour every pre-existing assertion in this file was written against.
+jest.mock('../../../../src/services/entitlementsService', () => ({
+  can: jest.fn(async () => true)
+}));
+
 const axios = require('axios');
 const openaiClient = require('../../../../src/services/ai/openaiClient');
 const brandContextService = require('../../../../src/services/ai/brandContextService');
 const Organization = require('../../../../src/models/Organization');
 const designMemoryService = require('../../../../src/services/designMemoryService');
+const entitlementsService = require('../../../../src/services/entitlementsService');
 const {
   generateImage, isTransientImageGenError
 } = require('../../../../src/services/ai/imageGenerationService');
@@ -253,6 +261,27 @@ describe('reference-only endpoint routing', () => {
     expect(axios.post.mock.calls[0][1].images).toEqual([
       { image_url: 'https://cdn/r1.jpg' },
       { image_url: 'https://cdn/logo.png' }
+    ]);
+  });
+
+  it('omits the org logo when the plan does not include posts.logo', async () => {
+    // The gate must remove the branding extra, not the whole image generation.
+    entitlementsService.can.mockResolvedValueOnce(false);
+    Organization.findById.mockReturnValue({
+      select: () => ({ lean: async () => ({ logo: 'https://cdn/logo.png' }) })
+    });
+    brandContextService.getReferenceOnlyContext.mockResolvedValue({
+      stylePrompt: null, imageUrls: ['https://cdn/r1.jpg'], styleSpec: null
+    });
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('a').toString('base64') }] }
+    });
+
+    await generateImage('a scene', 'org_1', { referenceOnly: true });
+
+    // The reference image survives; only the logo is dropped.
+    expect(axios.post.mock.calls[0][1].images).toEqual([
+      { image_url: 'https://cdn/r1.jpg' }
     ]);
   });
 

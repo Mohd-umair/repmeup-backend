@@ -12,7 +12,7 @@
 
 const Feature = require('../models/Feature');
 const entitlementsService = require('../services/entitlementsService');
-const { isEnforcedFeatureKey } = require('../config/featureCatalog');
+const { isEnforcedFeatureKey, resolveCatalogEntry } = require('../config/featureCatalog');
 
 /**
  * GET /api/super-admin/features
@@ -23,7 +23,11 @@ exports.listCatalog = async (req, res, next) => {
   try {
     const items = (await Feature.getCatalog()).map((row) => ({
       ...row,
-      enforced: isEnforcedFeatureKey(row.key)
+      // `enforced` stays for back-compat; `enforcement` carries the real three-state
+      // answer (code | manual | unbuilt) so the panel can stop saying "Not enforced"
+      // about things that are human-delivered or simply not built yet.
+      enforced: isEnforcedFeatureKey(row.key),
+      enforcement: resolveCatalogEntry(row.key)?.enforcement || 'unbuilt'
     }));
 
     const grouped = items.reduce((acc, row) => {

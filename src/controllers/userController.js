@@ -133,6 +133,43 @@ exports.getUserById = async (req, res, next) => {
   }
 };
 
+/**
+ * RBAC ladder: single → roles → advanced.
+ *
+ *   single   — everyone is a plain agent; there is no role model to speak of
+ *   roles    — assign the built-in roles (admin / manager / agent)
+ *   advanced — custom permission sets
+ *
+ * This gates ROLE ASSIGNMENT only, never user creation — how many users an org may have
+ * is already metered by `users.max`, and conflating the two would refuse a legitimate
+ * seat purchase with a confusing "permissions" error.
+ *
+ * The default role is exempt: creating a plain agent is not using the roles feature.
+ */
+const DEFAULT_ROLE = 'agent';
+
+async function assertCanAssignRole(organizationId, role) {
+  if (!role || role === DEFAULT_ROLE) return;
+  await entitlementsService.assertLevel(
+    organizationId.toString(),
+    FEATURE_KEYS.RBAC_LEVEL,
+    'roles'
+  );
+}
+
+/** Map an EntitlementError onto the standard response, else rethrow. */
+function sendEntitlementError(err, res) {
+  if (err?.name !== 'EntitlementError') return false;
+  res.status(err.statusCode || 403).json({
+    success: false,
+    code: err.code,
+    error: err.message,
+    featureKey: err.featureKey,
+    meta: err.meta
+  });
+  return true;
+}
+
 // @desc    Create new user (agent/team member)
 // @route   POST /api/users
 // @access  Private (Admin/Manager only)
@@ -173,6 +210,13 @@ exports.createUser = async (req, res, next) => {
       }
       throw err;
     }
+    try {
+      await assertCanAssignRole(organizationId, role);
+    } catch (err) {
+      if (sendEntitlementError(err, res)) return;
+      throw err;
+    }
+
     const { allowed, limit: maxUsers } = await entitlementsService.canAddResource(
       organizationId,
       'users',
@@ -282,6 +326,15 @@ exports.updateUser = async (req, res, next) => {
           success: false,
           error: 'You cannot deactivate your own account'
         });
+      }
+    }
+
+    if (role && canUpdateOthers && role !== userToUpdate.role) {
+      try {
+        await assertCanAssignRole(req.user.organization._id, role);
+      } catch (err) {
+        if (sendEntitlementError(err, res)) return;
+        throw err;
       }
     }
 

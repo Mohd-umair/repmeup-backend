@@ -39,6 +39,41 @@ function edgeBranch(edge) {
  * Pick the outgoing edge. When `preferLabel` is given, prefer an edge whose
  * branch matches; otherwise fall back to the first unlabeled/default edge.
  */
+/**
+ * Plan gate for the AI nodes inside a flow.
+ *
+ * Flows execute in the `processFlowTick` worker, so there is nobody to return a 403 to.
+ * Instead an unentitled AI node behaves exactly like an AI node that failed — which this
+ * file already handles everywhere: continue down the default edge with a warning. The
+ * enrolment keeps moving rather than wedging on a capability the org did not buy.
+ *
+ * Two keys, two meanings:
+ *   flowBuilder.ai.enabled        — may a flow use AI at all
+ *   automation.aiDecisioning.enabled — may AI decide which branch the flow takes
+ * Decision nodes need both; a plain AI reply needs only the first.
+ */
+async function aiNodeEntitlement(organizationId, { decisioning = false } = {}) {
+  if (!organizationId) return { allowed: true };
+  try {
+    const entitlementsService = require('../../entitlementsService');
+    const { FEATURE_KEYS } = require('../../../config/featureCatalog');
+    const orgId = String(organizationId);
+
+    if (!(await entitlementsService.can(orgId, FEATURE_KEYS.FLOW_BUILDER_AI_ENABLED))) {
+      return { allowed: false, reason: 'AI in Flow Builder is not included on this plan.' };
+    }
+    if (decisioning
+        && !(await entitlementsService.can(orgId, FEATURE_KEYS.AUTOMATION_AI_DECISIONING))) {
+      return { allowed: false, reason: 'AI-decisioned automations are not included on this plan.' };
+    }
+    return { allowed: true };
+  } catch (err) {
+    // An entitlement lookup failure must not silently disable a paid feature.
+    logger.warn('[FlowHandler] AI entitlement check failed — allowing node', { error: err.message });
+    return { allowed: true };
+  }
+}
+
 function pickEdge(edges, preferLabel) {
   if (!edges?.length) return null;
   if (preferLabel) {
@@ -952,6 +987,14 @@ async function handleAction(node, ctx) {
       break;
     }
     case 'action.ai_reply': {
+      const aiReplyGate = await aiNodeEntitlement(organizationId);
+      if (!aiReplyGate.allowed) {
+        return {
+          status: 'continue',
+          warning: `AI reply skipped — ${aiReplyGate.reason}`,
+          nextNodeId: pickEdge(ctx.edges)?.target
+        };
+      }
       const replyGenerationService = require('../../ai/replyGenerationService');
       const Interaction = require('../../../models/Interaction');
       const fullInteraction = interaction?._id
@@ -991,6 +1034,14 @@ async function handleAction(node, ctx) {
       break;
     }
     case 'action.ai_detect_intent': {
+      const intentGate = await aiNodeEntitlement(organizationId, { decisioning: true });
+      if (!intentGate.allowed) {
+        return {
+          status: 'continue',
+          warning: `Intent detection skipped — ${intentGate.reason}`,
+          nextNodeId: pickEdge(ctx.edges)?.target
+        };
+      }
       const saveAs = (config.saveAs && String(config.saveAs).trim()) || 'intent';
       const text = String(interaction?.content || '').trim();
       let intent = 'other';
@@ -1024,6 +1075,14 @@ async function handleAction(node, ctx) {
       };
     }
     case 'action.ai_extract': {
+      const extractGate = await aiNodeEntitlement(organizationId, { decisioning: true });
+      if (!extractGate.allowed) {
+        return {
+          status: 'continue',
+          warning: `Field extraction skipped — ${extractGate.reason}`,
+          nextNodeId: pickEdge(ctx.edges)?.target
+        };
+      }
       const saveAs = (config.saveAs && String(config.saveAs).trim()) || 'extracted';
       const fields = Array.isArray(config.fields)
         ? config.fields.map((f) => String(f).trim()).filter(Boolean)

@@ -55,6 +55,23 @@ async function tryAutonomousCommerceAction({ organizationId, senderId, text, con
 
     if (!org?.autonomousCommerceEnabled) return;
 
+    /**
+     * Plan gate, on top of the org's own toggle.
+     *
+     * This runs on the inbound-webhook path, so a throw would be wrong twice over: it
+     * has no caller to answer, and the caller treats failures as non-fatal anyway.
+     * Not entitled simply means the autonomous agent stays silent — the message is
+     * still received, stored and available to a human.
+     */
+    const entitlementsService = require('../entitlementsService');
+    const { FEATURE_KEYS } = require('../../config/featureCatalog');
+    if (!(await entitlementsService.can(String(organizationId), FEATURE_KEYS.COMMERCE_AUTONOMOUS_AGENT))) {
+      logger.debug('[commerceAgent] autonomous commerce not included on plan — skipping', {
+        organizationId: String(organizationId)
+      });
+      return;
+    }
+
     const { intent, confidence } = classifyCommerceIntent(text);
     if (intent === 'none' || confidence < 0.75) return;
 
@@ -85,8 +102,6 @@ async function tryAutonomousCommerceAction({ organizationId, senderId, text, con
     const catalogId = connection.platformData?.catalogId || connection.metadata?.catalogId;
     if (!catalogId) return;
 
-    const entitlementsService = require('../entitlementsService');
-    const { FEATURE_KEYS } = require('../../config/featureCatalog');
     const catalogAllowed = await entitlementsService.can(
       organizationId.toString(),
       FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED

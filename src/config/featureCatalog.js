@@ -16,10 +16,12 @@
  *   - frontend (via /api/entitlements + /api/super-admin/features)
  *
  * Adding a new feature:
- *   1. Append one entry below (including `metering` — the reducer throws without it).
+ *   1. Append one entry below, including `metering` AND `enforcement` — the reducer
+ *      throws without either.
  *   2. Re-run `node backend/scripts/seedFeatures.js`.
- *   3. Wire enforcement in code (a single `entitlements.assert(orgId, KEY)` call) and
- *      add the key to ENFORCED_FEATURE_KEYS in the same change.
+ *   3. Wire the gate in code (`entitlements.assert` / `requireFeature` / `requireLevel`)
+ *      and set `enforcement: 'code'` on the same row. If you cannot gate it yet, say so
+ *      honestly with 'unbuilt' rather than shipping a value that does nothing silently.
  *   4. The admin Plans page picks up the row automatically.
  *
  * `metering` mirrors the published pricing sheet's legend:
@@ -123,6 +125,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -134,6 +137,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -144,6 +148,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'gb',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 30
   },
   {
@@ -155,6 +160,7 @@ const CATALOG = [
     unit: 'calls',
     resetPeriod: 'daily',
     metering: 'AC',
+    enforcement: 'unbuilt',
     sortOrder: 40
   },
 
@@ -169,6 +175,7 @@ const CATALOG = [
     unit: 'credits',
     resetPeriod: 'monthly',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 50
   },
   {
@@ -181,6 +188,7 @@ const CATALOG = [
     unit: 'credits',
     resetPeriod: 'monthly',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 60
   },
   {
@@ -193,6 +201,7 @@ const CATALOG = [
     unit: 'credits',
     resetPeriod: 'monthly',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 70
   },
   {
@@ -207,6 +216,7 @@ const CATALOG = [
     unit: 'conversations',
     resetPeriod: 'monthly',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 5
   },
 
@@ -221,6 +231,7 @@ const CATALOG = [
     unit: 'contacts',
     resetPeriod: 'monthly',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -231,6 +242,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 15
   },
   {
@@ -241,6 +253,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -251,6 +264,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 30
   },
   {
@@ -261,6 +275,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 35
   },
   {
@@ -272,6 +287,7 @@ const CATALOG = [
     defaultValue: 'labels',
     enumOptions: ['labels', 'shared'],
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 40
   },
 
@@ -285,6 +301,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -295,6 +312,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -305,6 +323,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 30
   },
 
@@ -318,6 +337,7 @@ const CATALOG = [
     unit: 'count',
     resetPeriod: 'monthly',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 5
   },
   {
@@ -329,6 +349,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -340,6 +361,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -350,6 +372,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 30
   },
   {
@@ -359,6 +382,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 40
   },
   {
@@ -368,6 +392,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 50
   },
   {
@@ -379,6 +404,7 @@ const CATALOG = [
     defaultValue: 'basic',
     enumOptions: ['none', 'basic', 'full'],
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 60
   },
   {
@@ -389,6 +415,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 70
   },
 
@@ -401,6 +428,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -411,6 +439,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -420,6 +449,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -430,6 +460,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 25
   },
   {
@@ -440,6 +471,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 40
   },
   {
@@ -450,6 +482,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 45
   },
 
@@ -462,6 +495,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 30
   },
 
@@ -475,6 +509,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -485,6 +520,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -495,6 +531,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 30
   },
   {
@@ -505,6 +542,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 40
   },
   {
@@ -516,6 +554,7 @@ const CATALOG = [
     defaultValue: 'none',
     enumOptions: ['none', 'basic', 'full'],
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 50
   },
   {
@@ -527,6 +566,7 @@ const CATALOG = [
     defaultValue: 'none',
     enumOptions: ['none', 'basic', 'advanced'],
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 60
   },
 
@@ -539,6 +579,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -551,6 +592,7 @@ const CATALOG = [
     unit: 'recipients',
     resetPeriod: 'monthly',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -561,6 +603,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: true,
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 30
   },
 
@@ -574,6 +617,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 10
   },
   {
@@ -585,6 +629,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'count',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -596,6 +641,7 @@ const CATALOG = [
     defaultValue: -1,
     unit: 'contacts',
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 30
   },
   {
@@ -607,6 +653,7 @@ const CATALOG = [
     defaultValue: [],
     enumOptions: ['instagram', 'whatsapp', 'youtube', 'facebook', 'google', 'linkedin', 'twitter'],
     metering: 'AC',
+    enforcement: 'code',
     sortOrder: 40
   },
 
@@ -619,6 +666,7 @@ const CATALOG = [
     kind: 'boolean',
     defaultValue: false,
     metering: 'NAC',
+    enforcement: 'unbuilt',
     sortOrder: 10
   },
   {
@@ -630,6 +678,7 @@ const CATALOG = [
     defaultValue: 'single',
     enumOptions: ['single', 'roles', 'advanced'],
     metering: 'NAC',
+    enforcement: 'code',
     sortOrder: 20
   },
   {
@@ -641,6 +690,7 @@ const CATALOG = [
     defaultValue: 'email',
     enumOptions: ['email', 'priority', 'dedicated'],
     metering: 'NAC',
+    enforcement: 'manual',
     sortOrder: 30
   }
 ];
@@ -649,37 +699,26 @@ const BUCKET_KEYS = CATALOG
   .filter((c) => c.kind === 'limit' && c.resetPeriod && c.resetPeriod !== 'none')
   .map((c) => c.key);
 
-/** Keys with backend assert/consume/requireFeature wired — shown in admin as "enforced". */
-const ENFORCED_FEATURE_KEYS = new Set([
-  FEATURE_KEYS.USERS_MAX,
-  FEATURE_KEYS.ACCOUNTS_MAX,
-  FEATURE_KEYS.STORAGE_GB,
-  FEATURE_KEYS.CREDITS_AUTO_REPLY,
-  FEATURE_KEYS.CREDITS_POST_CREATION,
-  FEATURE_KEYS.CREDITS_AI_GENERAL,
-  FEATURE_KEYS.INBOX_UNIQUE_CONTACTS,
-  FEATURE_KEYS.INBOX_BUCKET_CREATE,
-  FEATURE_KEYS.KB_ENTRIES_MAX,
-  FEATURE_KEYS.KB_UPLOAD_URL,
-  FEATURE_KEYS.KB_UPLOAD_PDF,
-  FEATURE_KEYS.POSTS_PER_MONTH,
-  FEATURE_KEYS.POSTS_PLATFORMS_MAX,
-  FEATURE_KEYS.POSTS_AI_VARIANTS_MAX,
-  FEATURE_KEYS.POSTS_TRENDS,
-  FEATURE_KEYS.POSTS_SAVE_DRAFT,
-  FEATURE_KEYS.AUTO_REPLY_ENABLED,
-  FEATURE_KEYS.ANALYTICS_ADVANCED,
-  FEATURE_KEYS.AGENTS_ENABLED,
-  FEATURE_KEYS.VOICE_IVR_ENABLED,
-  FEATURE_KEYS.COMMERCE_PRODUCTS_MAX,
-  FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED,
-  FEATURE_KEYS.CAMPAIGNS_ENABLED,
-  FEATURE_KEYS.CAMPAIGNS_RECIPIENTS_MONTHLY,
-  FEATURE_KEYS.WHATSAPP_BROADCAST_ENABLED,
-  FEATURE_KEYS.WHATSAPP_TEMPLATES_MAX,
-  FEATURE_KEYS.AUTOMATION_FLOWS_MAX,
-  FEATURE_KEYS.CONTACTS_MAX
-]);
+/**
+ * `enforcement` states, derived from each row rather than a parallel list.
+ *
+ * A hand-maintained Set used to live here, and it drifted: `credits.aiConversations.monthly`
+ * was asserted in aiConversationService while the admin panel reported it "Not enforced",
+ * because someone (me) wired the gate and forgot the second edit. Keeping the flag on the
+ * row it describes makes that class of mistake impossible.
+ *
+ *   code    — a real gate exists in the backend (assert / requireFeature / requireLevel)
+ *   manual  — genuine, but delivered by humans (support SLA); no code can enforce it
+ *   unbuilt — the feature does not exist yet, so there is nothing to gate
+ *
+ * `unbuilt` is not a to-do marker: it is an honest statement that the plan value is
+ * currently decorative. Build the feature, then flip the row to `code`.
+ */
+const VALID_ENFORCEMENT = new Set(['code', 'manual', 'unbuilt']);
+
+const ENFORCED_FEATURE_KEYS = new Set(
+  CATALOG.filter((row) => row.enforcement === 'code').map((row) => row.key)
+);
 
 const VALID_METERING = new Set(['AC', 'NAC']);
 
@@ -691,6 +730,12 @@ const CATALOG_BY_KEY = Object.freeze(
     if (!VALID_METERING.has(row.metering)) {
       throw new Error(
         `Feature catalog row "${row.key}" must declare metering: 'AC' | 'NAC' (it drives the public pricing sheet).`
+      );
+    }
+    if (!VALID_ENFORCEMENT.has(row.enforcement)) {
+      throw new Error(
+        `Feature catalog row "${row.key}" must declare enforcement: 'code' | 'manual' | 'unbuilt' `
+        + '(it tells admins whether the value actually does anything).'
       );
     }
     if (row.kind === 'enum' && !Array.isArray(row.enumOptions)) {
