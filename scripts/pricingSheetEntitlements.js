@@ -15,6 +15,8 @@
 const { FEATURE_KEYS: K } = require('../src/config/featureCatalog');
 
 const ALL_CHANNELS = ['instagram', 'whatsapp', 'youtube', 'facebook'];
+/** What Starter buys, per the sheet — and the ceiling for the unpaid tier. */
+const STARTER_CHANNELS = ['instagram', 'whatsapp'];
 
 /** Everything the three paid tiers share. */
 const COMMON_2026 = {
@@ -172,9 +174,28 @@ const PRO_MAX_2026 = {
  * lands. Tightening free to fewer channels is a separate product decision.
  */
 const FREE_PATCH_2026 = {
-  [K.CHANNELS_ALLOWED]: { value: [...ALL_CHANNELS] },
+  /**
+   * The unpaid tier must never out-rank a paying one.
+   *
+   * Free briefly carried all four channels (preserved so existing connections would not
+   * break when the keys were introduced) while Starter — at ₹1,499/mo — carried two.
+   * Once `channels.allowed` became enforced, that gap was visible: a free user could
+   * connect YouTube and a paying customer could not. Free is capped at Starter's set.
+   *
+   * This is safe for the 13 live free orgs because the gate is on CONNECT only —
+   * anything already connected keeps working; only new connections are refused.
+   */
+  [K.CHANNELS_ALLOWED]: { value: [...STARTER_CHANNELS] },
   [K.CREDITS_AI_CONVERSATIONS]: { limit: 50 },
   [K.BRANDING_REMOVED]: { enabled: false },
+  /**
+   * Explicit `false`, not left to the catalog default.
+   *
+   * `commerce.aiAssist.enabled` is one of the original fail-OPEN keys, so an absent
+   * value resolves to true — which is how free ended up with Commerce Assist while
+   * Starter had an explicit false. Stating it removes the accident.
+   */
+  [K.COMMERCE_AI_ASSIST_ENABLED]: { enabled: false },
   [K.INBOX_INTENT_BUCKET_ENABLED]: { enabled: false },
   [K.AUTOMATION_AI_DECISIONING]: { enabled: false },
   [K.POSTS_AI_ENABLED]: { enabled: false },

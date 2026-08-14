@@ -263,6 +263,18 @@ async function fetchKnowledgeBaseContext(orgId, query, {
  */
 async function fetchProductContext(orgId, query, instagramPostId = null) {
   try {
+    /**
+     * Reppy AI Commerce Assist is a plan capability. Without it the reply is still
+     * generated — it just is not commerce-aware. Degrading beats failing here: this
+     * function is documented as never throwing, and a missing product chip is a far
+     * smaller harm than a dead AI assist button.
+     */
+    const entitlementsService = require('../entitlementsService');
+    const { FEATURE_KEYS } = require('../../config/featureCatalog');
+    if (!(await entitlementsService.can(String(orgId), FEATURE_KEYS.COMMERCE_AI_ASSIST_ENABLED))) {
+      return { products: [], productPromptBlock: '', fromFallback: false };
+    }
+
     const { products, fromFallback } = await searchProducts(
       orgId,
       query,

@@ -66,6 +66,18 @@ function isTransientImageGenError(error) {
 async function fetchOrgLogoUrl(organizationId) {
   if (!organizationId) return null;
   try {
+    /**
+     * `posts.logo` decides whether the brand logo is placed into generated imagery.
+     * Not entitled returns null, exactly like "no logo uploaded" — image generation
+     * proceeds unbranded rather than failing. A plan gate should remove the extra,
+     * never the whole feature the customer is paying credits for.
+     */
+    const entitlementsService = require('../entitlementsService');
+    const { FEATURE_KEYS } = require('../../config/featureCatalog');
+    if (!(await entitlementsService.can(String(organizationId), FEATURE_KEYS.POSTS_LOGO))) {
+      return null;
+    }
+
     const Organization = require('../../models/Organization');
     const org = await Organization.findById(organizationId).select('logo').lean();
     return org?.logo || null;

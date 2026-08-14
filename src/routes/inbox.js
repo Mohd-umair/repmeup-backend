@@ -3,6 +3,8 @@ const router = express.Router();
 const inboxController = require('../controllers/inboxController');
 const inboxOpsController = require('../controllers/inboxOpsController');
 const { protect, authorize } = require('../middlewares/auth');
+const { requireFeature, requireLevel } = require('../middlewares/requireFeature');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 const {
   validateReply,
   validateInboxAssign,
@@ -52,22 +54,34 @@ router.get('/instagram-shared-media', inboxController.getInstagramSharedMedia);
 router.get('/whatsapp-media', inboxController.getWhatsAppMedia);
 
 // ── Inbox Operations (orders, complaints, reviews) ─────────────────────────
+/**
+ * Orders ladder (none → basic → full) and complaints ladder (none → basic → advanced).
+ *
+ * Reads stay open at every rung. An org that drops a tier keeps its order and complaint
+ * history visible and can still close what is open; it just cannot create new records
+ * or use the higher-tier workflow (shipping updates, complaint assignment/SLA).
+ */
+const requireOrdersBasic = requireLevel(FEATURE_KEYS.COMMERCE_ORDERS_LEVEL, 'basic');
+const requireOrdersFull = requireLevel(FEATURE_KEYS.COMMERCE_ORDERS_LEVEL, 'full');
+const requireComplaintsBasic = requireLevel(FEATURE_KEYS.SUPPORT_COMPLAINTS_LEVEL, 'basic');
+const requireComplaintsAdvanced = requireLevel(FEATURE_KEYS.SUPPORT_COMPLAINTS_LEVEL, 'advanced');
+
 router.get('/ops/orders', inboxOpsController.listOrders);
 router.get('/ops/orders/stats', inboxOpsController.getOrderStats);
 router.get('/ops/orders/by-interaction/:interactionId', inboxOpsController.getOrderByInteraction);
-router.post('/ops/orders', inboxOpsController.createOrder);
+router.post('/ops/orders', requireOrdersBasic, inboxOpsController.createOrder);
 router.get('/ops/orders/:id', inboxOpsController.getOrderDetail);
-router.patch('/ops/orders/:id/status', inboxOpsController.updateOrderStatus);
-router.patch('/ops/orders/:id/shipping', inboxOpsController.updateOrderShipping);
+router.patch('/ops/orders/:id/status', requireOrdersBasic, inboxOpsController.updateOrderStatus);
+router.patch('/ops/orders/:id/shipping', requireOrdersFull, inboxOpsController.updateOrderShipping);
 
 router.get('/ops/complaints', inboxOpsController.listComplaints);
 router.get('/ops/complaints/stats', inboxOpsController.getComplaintStats);
 // Must be before /:id to avoid param conflict
-router.post('/ops/complaints/from-interaction/:interactionId', inboxOpsController.createComplaintFromInteraction);
+router.post('/ops/complaints/from-interaction/:interactionId', requireComplaintsBasic, inboxOpsController.createComplaintFromInteraction);
 router.get('/ops/complaints/:id', inboxOpsController.getComplaintDetail);
-router.post('/ops/complaints/:id/acknowledge', inboxOpsController.acknowledgeComplaint);
-router.post('/ops/complaints/:id/assign', inboxOpsController.assignComplaint);
-router.post('/ops/complaints/:id/resolve', inboxOpsController.resolveComplaint);
+router.post('/ops/complaints/:id/acknowledge', requireComplaintsBasic, inboxOpsController.acknowledgeComplaint);
+router.post('/ops/complaints/:id/assign', requireComplaintsAdvanced, inboxOpsController.assignComplaint);
+router.post('/ops/complaints/:id/resolve', requireComplaintsBasic, inboxOpsController.resolveComplaint);
 router.post('/ops/complaints/:id/close', inboxOpsController.closeComplaint);
 
 router.get('/ops/reviews', inboxOpsController.listReviews);
@@ -87,18 +101,25 @@ router.post('/:id/reply', validateReply, inboxController.replyToInteraction);
 // Soft-delete a single reply (hidden from chat thread)
 router.delete('/:id/replies/:replyId', inboxController.deleteReply);
 
+/**
+ * AI message suggestions — a plan capability, gated at every entry point that
+ * produces a suggestion for an agent (single suggest, the 3-way assist, regenerate).
+ * Replying by hand is never gated.
+ */
+const requireSuggestions = requireFeature(FEATURE_KEYS.INBOX_MESSAGE_SUGGESTIONS);
+
 // Generate AI suggested reply for interaction
-router.post('/:id/suggest-reply', inboxController.suggestReply);
+router.post('/:id/suggest-reply', requireSuggestions, inboxController.suggestReply);
 
 // Chat summary: AI-generate (POST) or save manual (PUT)
 router.post('/:id/summary/generate', inboxController.generateSummary);
 router.put('/:id/summary', inboxController.saveSummary);
 
 // Generate AI-assisted replies (short, detailed, sales)
-router.post('/:id/ai-assist', inboxController.aiAssist);
+router.post('/:id/ai-assist', requireSuggestions, inboxController.aiAssist);
 
 // Regenerate a single AI reply type
-router.post('/:id/ai-assist/regenerate', inboxController.aiAssistRegenerate);
+router.post('/:id/ai-assist/regenerate', requireSuggestions, inboxController.aiAssistRegenerate);
 
 // Generate auto-replies for pending interactions (Admin/Manager only)
 router.post(
@@ -115,10 +136,22 @@ router.post(
   inboxController.testAutoReplyTrigger
 );
 
+/**
+ * Inbox collaboration ladder: labels → shared.
+ *
+ *   labels — label and work the inbox solo (every tier)
+ *   shared — assign work to teammates and leave internal notes
+ *
+ * Assignment and notes are the team features the sheet sells; labels stay open so a
+ * solo operator's inbox keeps working exactly as before.
+ */
+const requireSharedInbox = requireLevel(FEATURE_KEYS.INBOX_COLLABORATION_LEVEL, 'shared');
+
 // Assign interaction (Manager/Admin only)
 router.put(
   '/:id/assign',
   authorize('admin', 'manager'),
+  requireSharedInbox,
   validateInboxAssign,
   inboxController.assignInteraction
 );
@@ -127,13 +160,19 @@ router.put(
 router.put('/:id/labels', validateInboxAddLabel, inboxController.addLabel);
 
 // Add internal note
-router.post('/:id/notes', validateInboxAddNote, inboxController.addNote);
+router.post('/:id/notes', requireSharedInbox, validateInboxAddNote, inboxController.addNote);
 
 // Update status
 router.put('/:id/status', validateInboxUpdateStatus, inboxController.updateStatus);
 
 // Chat session open / closed (inbox workflow)
-router.put('/:id/chat-open', inboxController.updateChatOpen);
+/**
+ * `inbox.bucket.chat` — "chat from bucket view". Opening a chat session is the action
+ * that gate describes; the bucket board itself stays readable, as every read does.
+ * (Currently `true` on every plan, so this gate is inert today — it exists so the
+ * catalog value is honest and can be tightened without new code.)
+ */
+router.put('/:id/chat-open', requireFeature(FEATURE_KEYS.INBOX_BUCKET_CHAT), inboxController.updateChatOpen);
 
 // Update intent bucket (drag-and-drop reclassification)
 router.put('/:id/bucket', inboxController.updateBucket);
@@ -146,6 +185,7 @@ router.delete('/:id', inboxController.deleteInteraction);
 router.post(
   '/assign-bulk',
   authorize('admin', 'manager'),
+  requireSharedInbox,
   validateInboxBulkAssign,
   inboxController.bulkAssignInteractions
 );

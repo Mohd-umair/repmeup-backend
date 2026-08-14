@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middlewares/auth');
 const postController = require('../controllers/postController');
-const { requireFeature } = require('../middlewares/requireFeature');
+const { requireFeature, requireLevel } = require('../middlewares/requireFeature');
 const { FEATURE_KEYS } = require('../config/featureCatalog');
 const path = require('path');
 const fs = require('fs');
@@ -153,25 +153,35 @@ router.get('/media/:filename', async (req, res) => {
   }
 });
 
+/**
+ * AI post content is a plan capability (Starter: no, Growth and above: yes).
+ *
+ * Gating the four generate endpoints covers every entry point — text, variants, image
+ * and video all start here. Existing drafts and published posts are untouched; only
+ * making NEW AI content is gated. The credit meters (`credits.postCreation.monthly`,
+ * `posts.aiVariants.max`) still apply on top for orgs that do have the capability.
+ */
+const requirePostsAi = requireFeature(FEATURE_KEYS.POSTS_AI_ENABLED);
+
 // @route   POST /api/posts/generate
 // @desc    Generate post content with AI
 // @access  Private
-router.post('/generate', protect, postController.generatePostWithAI);
+router.post('/generate', protect, requirePostsAi, postController.generatePostWithAI);
 
 // @route   POST /api/posts/generate-variants
 // @desc    Generate N text variants for Content Studio (images handled separately)
 // @access  Private
-router.post('/generate-variants', protect, postController.generatePostVariantsWithAI);
+router.post('/generate-variants', protect, requirePostsAi, postController.generatePostVariantsWithAI);
 
 // @route   POST /api/posts/generate-variant-image
 // @desc    Generate one AI image for a single variant (called per-variant by frontend)
 // @access  Private
-router.post('/generate-variant-image', protect, postController.generateVariantImage);
+router.post('/generate-variant-image', protect, requirePostsAi, postController.generateVariantImage);
 
 // @route   POST /api/posts/generate-variant-video
 // @desc    Submit an AI video generation job (returns jobId immediately)
 // @access  Private
-router.post('/generate-variant-video', protect, postController.generateVariantVideo);
+router.post('/generate-variant-video', protect, requirePostsAi, postController.generateVariantVideo);
 
 // @route   GET /api/posts/video-job/:jobId
 // @desc    Poll the status of a video generation job
@@ -191,17 +201,30 @@ router.post(
 // @route   POST /api/posts/publish
 // @desc    Publish post immediately
 // @access  Private
-router.post('/publish', protect, postController.publishPost);
+/**
+ * Publishing ladder: none → basic → full.
+ *
+ *   basic — publish and schedule your own posts (every paid tier, and free)
+ *   full  — the approval workflow: send to approval, approve, publish someone else's
+ *
+ * Approval is the collaborative half of publishing, which is what the sheet sells at
+ * the higher tier. Plain publish/schedule stays at `basic` so nobody currently posting
+ * loses the ability to post.
+ */
+const requirePublishBasic = requireLevel(FEATURE_KEYS.POSTS_PUBLISHING_LEVEL, 'basic');
+const requirePublishFull = requireLevel(FEATURE_KEYS.POSTS_PUBLISHING_LEVEL, 'full');
+
+router.post('/publish', protect, requirePublishBasic, postController.publishPost);
 
 // @route   POST /api/posts/schedule
 // @desc    Schedule post for later
 // @access  Private
-router.post('/schedule', protect, postController.schedulePost);
+router.post('/schedule', protect, requirePublishBasic, postController.schedulePost);
 
 // @route   POST /api/posts/to-approval
 // @desc    Create a post as pending approval (Send to Approval from Content Studio)
 // @access  Private
-router.post('/to-approval', protect, postController.sendToApproval);
+router.post('/to-approval', protect, requirePublishFull, postController.sendToApproval);
 
 // @route   GET /api/posts/drafts
 // @desc    Get all draft posts
@@ -221,7 +244,7 @@ router.patch('/drafts/:id/schedule', protect, postController.scheduleDraft);
 // @route   PATCH /api/posts/drafts/:id/send-to-approval
 // @desc    Move an existing draft to pending_approval
 // @access  Private
-router.patch('/drafts/:id/send-to-approval', protect, postController.sendDraftToApproval);
+router.patch('/drafts/:id/send-to-approval', protect, requirePublishFull, postController.sendDraftToApproval);
 
 // @route   DELETE /api/posts/drafts/:id
 // @desc    Delete a draft
@@ -231,7 +254,7 @@ router.delete('/drafts/:id', protect, postController.deleteDraft);
 // @route   POST /api/posts/drafts/:id/publish
 // @desc    Publish a draft immediately
 // @access  Private
-router.post('/drafts/:id/publish', protect, postController.publishDraft);
+router.post('/drafts/:id/publish', protect, requirePublishBasic, postController.publishDraft);
 
 // @route   GET /api/posts/scheduled
 // @desc    Get all scheduled posts
