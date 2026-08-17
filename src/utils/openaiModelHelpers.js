@@ -12,11 +12,19 @@
 /** Default model to fall back to when nothing is configured. */
 const FALLBACK_MODEL = 'gpt-4';
 
-/** Aliases for short ChatGPT-style names → official Chat Completions model ids. */
+/**
+ * Aliases for short ChatGPT-style names → official Chat Completions model ids.
+ *
+ * Do not map anything onto a `*-chat-latest` id. OpenAI retired that family
+ * (gpt-5.2-chat-latest, gpt-5.3-chat-latest, …) and the failure mode is nasty:
+ * `GET /v1/models/<id>` still answers 200, so the id looks alive, while
+ * /chat/completions rejects it with a 404 `model_not_found`. Pin real dated or
+ * major-version ids instead.
+ */
 const MODEL_ALIASES = Object.freeze({
-  'gpt-5.3': 'gpt-5.3-chat-latest',
-  'gpt-5-3': 'gpt-5.3-chat-latest',
-  'gpt5.3': 'gpt-5.3-chat-latest'
+  'gpt-5.4': 'gpt-5.4',
+  'gpt-5-4': 'gpt-5.4',
+  'gpt5.4': 'gpt-5.4'
 });
 
 /**

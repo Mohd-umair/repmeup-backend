@@ -20,6 +20,8 @@ const logger = require('../../config/logger');
 const openaiClient = require('./openaiClient');
 const knowledgeBaseSearchService = require('./knowledgeBaseSearchService');
 const { buildRecentConversationTranscript } = require('../../utils/inboxConversationTranscript');
+const { AI_VOICE_BLOCK } = require('../../config/aiVoiceRules');
+const { stripMarkdownForMessaging } = require('../../utils/aiTextFormatting');
 const {
   normalizeOpenAIModelId,
   openAIChatCompletionMaxTokensField,
@@ -248,10 +250,10 @@ ${transcript}`
     : '';
 
   return `IMPORTANT GUIDELINES:
-- Be polite, empathetic, and professional
+- Be warm and straightforward — polite without being formal
 - Keep responses concise and clear (2-4 sentences) unless the thread clearly needs more detail
-- Use a friendly, conversational tone — sound like a person texting, not a FAQ robot
 - Address the customer's concern directly
+${AI_VOICE_BLOCK}
 - If knowledge base content is provided, ground your answer in that content and prioritize those facts over generic wording
 - Never say placeholders like "[List of services]"; provide real items from the knowledge base
 - If the user asks to list offerings/services/features, return a clear bullet list using names found in the knowledge base
@@ -557,7 +559,10 @@ Generate a response that addresses the customer's message appropriately.`;
       { timeout: REPLY_TIMEOUT_MS }
     );
 
-    const generatedResponse = response.data.choices[0].message.content.trim();
+    const generatedResponse = stripMarkdownForMessaging(
+      response.data.choices[0].message.content.trim(),
+      interaction.platform
+    );
 
     return {
       content: generatedResponse,

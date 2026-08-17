@@ -12,6 +12,12 @@ const reviewRequestSchema = new mongoose.Schema({
   interactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Interaction' },
   channel: { type: String, enum: ['whatsapp', 'email', 'sms'], default: 'whatsapp' },
   platform: { type: String }, // google, facebook, etc.
+  whatsappFlowToken: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
   status: {
     type: String,
     enum: ['pending', 'sent', 'delivered', 'reviewed', 'failed', 'skipped'],
@@ -23,6 +29,7 @@ const reviewRequestSchema = new mongoose.Schema({
   reviewSubmittedAt: Date,
   reviewUrl: String,
   rating: Number,
+  comment: String,
   reminderCount: { type: Number, default: 0 },
   nextReminderAt: Date,
   errorMessage: String,
