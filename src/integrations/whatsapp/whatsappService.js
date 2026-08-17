@@ -472,6 +472,128 @@ class WhatsAppService {
   }
 
   /**
+   * Send a WhatsApp Flow (interactive form).
+   * Supports two modes:
+   * - session: direct interactive.type='flow' (only valid within 24h of customer's last message)
+   * - template: message template with flow button (required for delayed sends)
+   *
+   * @param {Object} connection PlatformConnection
+   * @param {string} to Recipient phone number
+   * @param {Object} opts
+   * @param {string} opts.flowId Meta Flow ID (from metaFlowService.createFlow)
+   * @param {string} opts.flowToken Unique token for correlation (UUID, stored on ReviewRequest)
+   * @param {string} opts.flowCta Call-to-action button text (e.g. "Share Feedback")
+   * @param {string} [opts.mode] 'session' or 'template' (default 'template')
+   * @param {string} [opts.templateId] Required if mode='template' — WhatsAppTemplate._id with flow button
+   */
+  async sendFlowMessage(connection, to, opts = {}) {
+    const {
+      flowId,
+      flowToken,
+      flowCta = 'Open Form',
+      mode = 'template',
+      templateId = null
+    } = opts;
+
+    if (!flowId || !flowToken) {
+      throw new Error('flowId and flowToken are required');
+    }
+
+    const phoneNumberId = this._phoneNumberId(connection);
+
+    if (mode === 'session') {
+      return this._sendFlowSessionMode(phoneNumberId, connection, to, flowId, flowToken, flowCta);
+    } else if (mode === 'template') {
+      if (!templateId) {
+        throw new Error('templateId is required for template mode');
+      }
+      return this._sendFlowTemplateMode(phoneNumberId, connection, to, templateId, flowToken);
+    } else {
+      throw new Error(`Invalid flow send mode: ${mode}`);
+    }
+  }
+
+  async _sendFlowSessionMode(phoneNumberId, connection, to, flowId, flowToken, flowCta) {
+    try {
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'interactive',
+          interactive: {
+            type: 'flow',
+            header: { type: 'text', text: 'Review' },
+            body: { text: 'Help us improve by sharing your feedback.' },
+            footer: { text: 'Your feedback matters' },
+            action: {
+              name: 'flow',
+              parameters: {
+                flow_id: flowId,
+                flow_token: flowToken,
+                flow_cta: flowCta
+              }
+            }
+          }
+        },
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id, mode: 'session' };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send flow (session mode):', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp flow');
+    }
+  }
+
+  async _sendFlowTemplateMode(phoneNumberId, connection, to, templateId, flowToken) {
+    try {
+      const WhatsAppTemplate = require('../../models/WhatsAppTemplate');
+      const template = await WhatsAppTemplate.findById(templateId).lean();
+      if (!template) {
+        throw new Error('WhatsApp template not found');
+      }
+
+      const response = await axios.post(
+        `${this.apiURL}/${phoneNumberId}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to,
+          type: 'template',
+          template: {
+            name: template.name,
+            language: { code: template.language || 'en' },
+            components: [
+              {
+                type: 'body',
+                parameters: [{ type: 'text', text: 'Customer' }]
+              },
+              {
+                type: 'button',
+                sub_type: 'flow',
+                parameters: [
+                  {
+                    type: 'payload',
+                    payload: JSON.stringify({
+                      flow_id: template.flowId,
+                      flow_token: flowToken
+                    })
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        { headers: this._jsonHeaders(connection), timeout: 15000 }
+      );
+      return { success: true, messageId: response.data.messages[0].id, mode: 'template' };
+    } catch (error) {
+      console.error('[WhatsApp] Failed to send flow (template mode):', error.response?.data || error.message);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp flow');
+    }
+  }
+
+  /**
    * Mark a message as read.
    * @param {Object} connection
    * @param {string} messageId
@@ -637,14 +759,18 @@ class WhatsAppService {
           messageData.buttonPayload = message.button?.payload;
           break;
         case 'interactive':
-          messageData.content = message.interactive?.button_reply?.title
-            || message.interactive?.list_reply?.title
-            || '[Interactive reply]';
-          // Capture the tapped option id so flows can branch on it AND so address
-          // capture can tell a button tap apart from a typed reply.
-          messageData.buttonPayload = message.interactive?.button_reply?.id
-            || message.interactive?.list_reply?.id
-            || undefined;
+          if (message.interactive?.type === 'nfm_reply') {
+            messageData.content = '[WhatsApp Flow Response]';
+            messageData.flowResponse = message.interactive.nfm_reply?.response_json || {};
+            messageData.flowToken = messageData.flowResponse?.flow_token;
+          } else {
+            messageData.content = message.interactive?.button_reply?.title
+              || message.interactive?.list_reply?.title
+              || '[Interactive reply]';
+            messageData.buttonPayload = message.interactive?.button_reply?.id
+              || message.interactive?.list_reply?.id
+              || undefined;
+          }
           break;
         case 'order':
           messageData.content = message.order?.text?.trim() || '[Product order]';

@@ -93,6 +93,8 @@ const FEATURE_KEYS = Object.freeze({
   CAMPAIGNS_RECIPIENTS_MONTHLY: 'campaigns.recipients.monthly',
   WHATSAPP_TEMPLATES_MAX: 'whatsapp.templates.max',
   WHATSAPP_BROADCAST_ENABLED: 'whatsapp.broadcast.enabled',
+  WHATSAPP_FLOWS_ENABLED: 'whatsapp.flows.enabled',
+  WHATSAPP_FLOWS_MAX: 'whatsapp.flows.max',
   AUTOMATION_FLOWS_MAX: 'automation.flows.max',
   CONTACTS_MAX: 'contacts.max',
   CHANNELS_ALLOWED: 'channels.allowed',
@@ -631,6 +633,29 @@ const CATALOG = [
     metering: 'AC',
     enforcement: 'code',
     sortOrder: 20
+  },
+  {
+    key: FEATURE_KEYS.WHATSAPP_FLOWS_ENABLED,
+    label: 'WhatsApp Forms (Interactive Flows)',
+    description: 'Create and publish interactive forms (surveys, reviews) in WhatsApp.',
+    category: 'integrations',
+    kind: 'boolean',
+    defaultValue: false,
+    metering: 'NAC',
+    enforcement: 'code',
+    sortOrder: 25
+  },
+  {
+    key: FEATURE_KEYS.WHATSAPP_FLOWS_MAX,
+    label: 'Published WhatsApp Forms',
+    description: 'Maximum published interactive flows per organization.',
+    category: 'integrations',
+    kind: 'limit',
+    defaultValue: 0,
+    unit: 'count',
+    metering: 'AC',
+    enforcement: 'code',
+    sortOrder: 26
   },
   {
     key: FEATURE_KEYS.CONTACTS_MAX,

@@ -373,6 +373,19 @@ async function updateOrderStatus(orgId, orderId, status, extra = {}) {
   });
 
   await order.save();
+
+  if (status === 'delivered') {
+    const reviewCollectionService = require('../reviewCollectionService');
+    const queue = require('../../config/queue').getReviewRequestQueue();
+    reviewCollectionService.enqueueRequest(queue, {
+      orgId,
+      orderId: order._id,
+      interactionId: order.interactionId,
+      contactId: order.contactId,
+      channel: 'whatsapp'
+    }).catch(err => console.warn('[inboxOrderOpsService] Failed to enqueue review request', { error: err.message }));
+  }
+
   return { order: await getOrderDetail(orgId, orderId) };
 }
 

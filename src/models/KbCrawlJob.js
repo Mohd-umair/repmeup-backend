@@ -58,7 +58,8 @@ const kbCrawlJobSchema = new mongoose.Schema({
   startedAt: { type: Date },
   finishedAt: { type: Date }
 }, {
-  timestamps: true
+  timestamps: true,
+  suppressReservedKeysWarning: true
 });
 
 // Recent jobs per org, newest first — for a "crawl history" view and polling.

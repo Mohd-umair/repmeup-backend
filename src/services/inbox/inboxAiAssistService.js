@@ -41,6 +41,8 @@ const aiCreditService = require('../aiCreditService');
 const cacheService = require('../cacheService');
 const { runWithAiContextAndUsageId } = require('../aiRequestContext');
 const { searchProducts, buildProductPromptBlock } = require('../ai/productSearchService');
+const { AI_VOICE_BLOCK } = require('../../config/aiVoiceRules');
+const { stripMarkdownForMessaging } = require('../../utils/aiTextFormatting');
 
 // ─── constants ──────────────────────────────────────────────────────────────
 
@@ -57,19 +59,22 @@ const MAX_PRODUCT_SUGGESTIONS = 3;
  */
 const REPLY_TYPES = Object.freeze({
   short: Object.freeze({
-    instruction: 'Generate a SHORT, concise reply (1-2 sentences max). Get straight to the point.',
+    instruction: 'Write a SHORT reply (1-2 sentences max). Answer and stop.',
     maxTokens: 100,
     temperature: 0.6,
     regenerateTemperature: 0.8
   }),
   detailed: Object.freeze({
-    instruction: 'Generate a DETAILED, comprehensive reply (3-5 sentences). Cover all relevant points thoroughly while remaining friendly.',
+    // "Comprehensive / cover all points" is what produces padded replies that
+    // recap context and list options the customer never asked about. Detailed
+    // here means the answer is fully explained, not that more topics are added.
+    instruction: 'Write a fuller reply (3-5 sentences) that explains the answer properly — the extra length must go into answering what they asked, never into recapping their details or listing other things they could do.',
     maxTokens: 300,
     temperature: 0.7,
     regenerateTemperature: 0.8
   }),
   sales: Object.freeze({
-    instruction: 'Generate a SALES-oriented reply (2-4 sentences). Address the query, then naturally suggest relevant products/services or upsell opportunities. Be helpful, not pushy.',
+    instruction: 'Write a reply (2-4 sentences) that answers the question first, then mentions one genuinely relevant product or offer in a single sentence. One suggestion, not a list. Skip it entirely if nothing fits.',
     maxTokens: 250,
     temperature: 0.75,
     regenerateTemperature: 0.85
@@ -292,8 +297,8 @@ async function fetchProductContext(orgId, query, instagramPostId = null) {
  * Build the system prompt shared by aiAssist + aiAssistRegenerate.
  */
 function buildAssistSystemPrompt({ chatContext, kbContext, productContext, interaction }) {
-  return `You are a professional customer service AI assistant.
-You help agents draft replies to customer messages.
+  return `You are an experienced support agent writing a reply that will be sent to the customer as-is.
+Write the way a real person on the team would text — not the way an assistant would.
 
 CONVERSATION CONTEXT:
 ${chatContext}
@@ -301,15 +306,15 @@ ${chatContext}
 ${kbContext ? `KNOWLEDGE BASE (use this information to ground your answers):\n${kbContext}` : 'No knowledge base content available. Provide helpful general responses.'}
 
 ${productContext ? `RELEVANT PRODUCTS FROM CATALOG (mention naturally if relevant):\n${productContext}` : ''}
+${AI_VOICE_BLOCK}
 
 IMPORTANT RULES:
 - Address the customer's concern directly
-- Be polite, empathetic, and professional
 - If knowledge base content is provided, prioritize those facts
 - If catalog products are listed, reference them accurately (name, price, availability)
 - Never say placeholders like "[Your Name]" or "[Company]"
 - Match the tone to the platform: ${interaction.platform} (${interaction.type})
-- Do NOT include a greeting like "Dear customer" unless the message is formal`;
+- Output only the reply text itself — no preamble, no "Here's a draft:", no quotes around it`;
 }
 
 function buildAssistUserPrompt(interaction) {
@@ -454,7 +459,7 @@ async function generateAssistTriple({ interactionId, user }) {
           userPrompt,
           { temperature: config.temperature, maxTokens: config.maxTokens }
         );
-        return { type, content: result };
+        return { type, content: stripMarkdownForMessaging(result, interaction.platform) };
       }
     );
   };
@@ -523,13 +528,15 @@ async function regenerateAssistOne({ interactionId, user, type }) {
   ]);
 
   const config = REPLY_TYPES[type];
-  const systemPrompt = `You are a professional customer service AI assistant.
-You help agents draft replies to customer messages. Generate a DIFFERENT response than the previous one.
+  const systemPrompt = `You are an experienced support agent writing a reply that will be sent to the customer as-is.
+Write the way a real person on the team would text — not the way an assistant would.
+Generate a DIFFERENT response than the previous one.
 
 CONVERSATION CONTEXT:
 ${chatContext}
 
 ${kb.kbContext ? `KNOWLEDGE BASE:\n${kb.kbContext}` : ''}
+${AI_VOICE_BLOCK}
 
 ${config.instruction}`;
   const userPrompt = buildAssistUserPrompt(interaction);
@@ -561,7 +568,10 @@ ${config.instruction}`;
   });
 
   const credits = await aiCreditService.getUsage(orgIdStr);
-  return { data: { type, content }, credits };
+  return {
+    data: { type, content: stripMarkdownForMessaging(content, interaction.platform) },
+    credits
+  };
 }
 
 // ─── orchestrator 4: generateAutoReplies (batch) ────────────────────────────

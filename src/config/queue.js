@@ -58,6 +58,9 @@ const publicAuditQueue = new Queue('public-audit', queueOptions);
 // Appointment reminders + no-show sweep — a periodic scan (every ~10 min).
 const appointmentReminderQueue = new Queue('appointment-reminder', queueOptions);
 
+// Review request delivery — send WhatsApp flows with delay/reminder support.
+const reviewRequestQueue = new Queue('review-request', queueOptions);
+
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
 // Kept in place so existing Bull Board dashboards and imports keep working.
@@ -98,7 +101,8 @@ const queues = [
   kbCrawlQueue,
   demoExpiryQueue,
   appointmentReminderQueue,
-  publicAuditQueue
+  publicAuditQueue,
+  reviewRequestQueue
 ];
 
 queues.forEach(queue => {
@@ -148,5 +152,8 @@ module.exports = {
   demoExpiryQueue,
   appointmentReminderQueue,
   publicAuditQueue,
-  queueConfig
+  reviewRequestQueue,
+  queueConfig,
+  // Helper to get the queue (called from services)
+  getReviewRequestQueue: () => reviewRequestQueue
 };

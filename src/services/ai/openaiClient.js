@@ -54,8 +54,8 @@ class OpenAIClient {
     this.classificationModel = normalizeOpenAIModelId(
       process.env.OPENAI_CLASSIFICATION_MODEL || 'gpt-4o-mini'
     );
-    // Vision-capable model. The primary chat model (gpt-5.3-chat-latest) does NOT
-    // support image_url content, so vision tasks always go through this one.
+    // Vision-capable model, kept separate from the chat model so image tasks are
+    // unaffected when OPENAI_MODEL changes.
     this.visionModel = normalizeOpenAIModelId(
       process.env.OPENAI_VISION_MODEL || 'gpt-4o'
     );

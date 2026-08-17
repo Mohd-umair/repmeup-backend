@@ -768,6 +768,16 @@ async function processIncomingMessage(change, connection, rawPayload) {
     isNewSession
   });
 
+  // Handle WhatsApp Flow response (nfm_reply — structured form submission)
+  if (md.type === 'interactive' && md.flowResponse) {
+    const reviewCollectionService = require('../reviewCollectionService');
+    const flowToken = md.flowToken;
+    if (flowToken) {
+      reviewCollectionService.processFlowResponse(organizationId, flowToken, md.flowResponse)
+        .catch(err => logger.warn('[WhatsApp] Flow response processing failed (non-fatal)', { error: err.message }));
+    }
+  }
+
   // Resolve unified Contact (phone → contacts list) — same as other webhook platforms.
   await _resolveAndLinkContact({
     interaction: savedInteraction,

@@ -240,6 +240,15 @@ async function startWorker() {
     }
     logger.info('[Worker] flow-tick processor started');
 
+    const reviewRequestQueue = require('./config/queue').reviewRequestQueue;
+    reviewRequestQueue.process(2, async (job) => {
+      const { requestId } = job.data;
+      logger.debug('[Worker:review-request] processing', { jobId: job.id, requestId });
+      const reviewCollectionService = require('./services/reviewCollectionService');
+      return await reviewCollectionService.sendRequest(requestId);
+    });
+    logger.info('[Worker] review-request processor started', { concurrency: 2 });
+
     if (campaignConfig.enableInCoreWorker) {
       await registerCampaignWorkers();
       logger.info('[Worker] campaign queues registered in core worker (set ENABLE_CAMPAIGN_IN_CORE_WORKER=false + run campaignWorker.js in production)');
@@ -274,7 +283,8 @@ async function startWorker() {
           campaignSendQueue.close(),
           campaignInboxQueue.close(),
           flowTickQueue.close(),
-          publicAuditQueue.close()
+          publicAuditQueue.close(),
+          reviewRequestQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

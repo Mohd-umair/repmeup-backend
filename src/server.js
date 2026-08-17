@@ -106,10 +106,11 @@ async function startServer() {
       logger.warn('Blueprint seeding failed (non-fatal):', seedErr.message);
     }
 
-    // Initialize auto-reply scheduler
+    // Initialize auto-reply scheduler (non-blocking — runs in background)
     const autoReplyScheduler = require('./services/autoReplyScheduler');
-    await autoReplyScheduler.initializeScheduledJobs();
-    logger.info('Auto-reply scheduler initialized');
+    autoReplyScheduler.initializeScheduledJobs()
+      .catch(err => logger.error('Auto-reply scheduler init failed:', { error: err.message }));
+    logger.info('Auto-reply scheduler initialization started (background)');
 
     // Start listening
     server.listen(PORT, () => {

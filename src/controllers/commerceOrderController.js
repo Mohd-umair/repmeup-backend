@@ -201,6 +201,18 @@ exports.updateOrderStatus = async (req, res, next) => {
       orgId: String(orgId(req))
     });
 
+    if (status === 'delivered') {
+      const reviewCollectionService = require('../services/reviewCollectionService');
+      const queue = require('../config/queue').getReviewRequestQueue();
+      reviewCollectionService.enqueueRequest(queue, {
+        orgId: order.organization,
+        orderId: order._id,
+        interactionId: order.interactionId,
+        contactId: order.contactId,
+        channel: 'whatsapp'
+      }).catch(err => logger.warn('[commerceOrder] Failed to enqueue review request', { error: err.message }));
+    }
+
     res.json({ success: true, data: order });
   } catch (err) {
     next(err);

@@ -232,6 +232,7 @@ const routeMap = [
   ['/automation',           './routes/automation'],
   ['/retargeting',          './routes/retargeting'],
   ['/whatsapp-flows',       './routes/whatsappFlows'],
+  ['/whatsapp-form-flows',  './routes/whatsappFormFlows'],
   ['/campaigns',            './routes/campaigns'],
   ['/reports/number',       './routes/numberReports'],
   ['/commerce-orders',      './routes/commerceOrders'],

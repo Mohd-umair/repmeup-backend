@@ -24,6 +24,10 @@ const reviewRequestSettingsSchema = new mongoose.Schema({
   },
   delayDays: { type: Number, default: 3, min: 0, max: 30 },
   channels: { type: [String], enum: ['whatsapp', 'email', 'sms'], default: ['whatsapp'] },
+  whatsappFormFlow: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'WhatsAppFormFlow'
+  },
   language: { type: String, default: 'en' },
   message: {
     type: String,

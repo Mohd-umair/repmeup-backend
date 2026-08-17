@@ -84,7 +84,7 @@ const whatsappTemplateSchema = new mongoose.Schema(
     },
 
     // Meta-assigned ID (only present after creation)
-    metaTemplateId: { type: String, index: true },
+    metaTemplateId: { type: String },
 
     // Meta WABA ID
     wabaId: { type: String },
