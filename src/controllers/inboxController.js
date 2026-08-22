@@ -1691,22 +1691,24 @@ exports.getInstagramSharedMedia = async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Message not found' });
     }
 
+    // A shared post's permalink/label never change, and the miss path costs an
+    // outbound Graph call against the org's Instagram rate budget. Let the browser
+    // serve repeats — belt-and-braces so a chatty client can't drain that budget.
+    const sendCached = (data) => {
+      res.set('Cache-Control', 'private, max-age=300');
+      return res.json({ success: true, data });
+    };
+
     const label = instagramSharedMediaLabel(msg.attachmentType);
     const hasPreview = !!(msg.attachmentUrl || msg.igPostMediaId);
 
     if (!msg.igPostMediaId && !msg.attachmentUrl) {
-      return res.json({
-        success: true,
-        data: { label, permalink: null, mediaType: msg.attachmentType || null, hasPreview: false }
-      });
+      return sendCached({ label, permalink: null, mediaType: msg.attachmentType || null, hasPreview: false });
     }
 
     const connection = await resolveInstagramDmConnection(orgId, interaction);
     if (!connection?.accessToken) {
-      return res.json({
-        success: true,
-        data: { label, permalink: null, mediaType: msg.attachmentType || null, hasPreview }
-      });
+      return sendCached({ label, permalink: null, mediaType: msg.attachmentType || null, hasPreview });
     }
 
     let permalink = null;
@@ -1724,10 +1726,7 @@ exports.getInstagramSharedMedia = async (req, res, next) => {
       }
     }
 
-    return res.json({
-      success: true,
-      data: { label, permalink, mediaType, hasPreview }
-    });
+    return sendCached({ label, permalink, mediaType, hasPreview });
   } catch (error) {
     logger.error('[inboxController] getInstagramSharedMedia error', { error: error.message });
     next(error);

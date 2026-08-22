@@ -24,7 +24,11 @@ const FALLBACK_MODEL = 'gpt-4';
 const MODEL_ALIASES = Object.freeze({
   'gpt-5.4': 'gpt-5.4',
   'gpt-5-4': 'gpt-5.4',
-  'gpt5.4': 'gpt-5.4'
+  'gpt5.4': 'gpt-5.4',
+  // Retired *-chat-latest ids still 404 on /chat/completions — remap to a pinned id.
+  'gpt-5.3-chat-latest': 'gpt-5.4',
+  'gpt-5.2-chat-latest': 'gpt-5.4',
+  'gpt-5.1-chat-latest': 'gpt-5.4'
 });
 
 /**
@@ -38,7 +42,12 @@ function normalizeOpenAIModelId(raw) {
     return FALLBACK_MODEL;
   }
   const m = String(raw).trim().toLowerCase();
-  return MODEL_ALIASES[m] || m;
+  if (MODEL_ALIASES[m]) return MODEL_ALIASES[m];
+  // Catch any other retired *-chat-latest ids not explicitly listed above.
+  if (/-chat-latest$/.test(m) && /^gpt-5/.test(m)) {
+    return 'gpt-5.4';
+  }
+  return m;
 }
 
 /**
