@@ -625,7 +625,20 @@ async function generateText(systemPrompt, userPrompt, options = {}) {
 
     return response.data.choices[0].message.content.trim();
   } catch (error) {
-    logger.error('[AI] Text generation error', { error: error.message, status: error.response?.status });
+    const status = error.response?.status;
+    const openAiCode = error.response?.data?.error?.code;
+    const openAiMessage = error.response?.data?.error?.message;
+    logger.error('[AI] Text generation error', {
+      error: error.message,
+      status,
+      openAiCode,
+      model: normalizeOpenAIModelId(model || openaiClient.chatModel)
+    });
+    if (status === 404 && (openAiCode === 'model_not_found' || /model/i.test(openAiMessage || ''))) {
+      throw new Error(
+        `OpenAI model not found (404). Check OPENAI_MODEL on the server — retired ids like gpt-5.3-chat-latest fail on /chat/completions. Use gpt-5.4 or gpt-4o.`
+      );
+    }
     throw new Error(`Failed to generate text: ${error.message}`);
   }
 }

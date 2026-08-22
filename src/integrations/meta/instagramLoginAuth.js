@@ -27,7 +27,7 @@ function normalizeInstagramMetadataAccountType(accountTypeRaw) {
  * https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login
  *
  * Key differences from Facebook Login flow:
- *  - Auth URL:      https://api.instagram.com/oauth/authorize
+ *  - Auth URL:      https://www.instagram.com/oauth/authorize
  *  - Token URL:     https://api.instagram.com/oauth/access_token
  *  - Long-lived:    https://graph.instagram.com/access_token
  *  - Graph API:     https://graph.instagram.com
@@ -38,7 +38,22 @@ function normalizeInstagramMetadataAccountType(accountTypeRaw) {
  */
 class InstagramLoginAuthService {
   constructor() {
-    this.authURL = 'https://api.instagram.com/oauth/authorize';
+    // Authorization MUST use www.instagram.com.
+    //
+    // We previously pointed at api.instagram.com/oauth/authorize, which worked until
+    // roughly 2026-08-21 and then started failing with Instagram's
+    // "Sorry, this page isn't available" page — with no change on our side.
+    //
+    // Measured 2026-08-22: api.instagram.com/oauth/authorize returns 404 or 500
+    // NON-DETERMINISTICALLY (the same URL alternates between them across requests,
+    // regardless of client_id or scopes), which is why the breakage looked
+    // intermittent — some users could still connect while others could not.
+    // www.instagram.com/oauth/authorize returned 200 on 8/8 attempts.
+    //
+    // Only /authorize is affected. api.instagram.com/oauth/access_token (token
+    // exchange, below) and graph.instagram.com were both verified healthy the same
+    // day, so do NOT "helpfully" move those hosts too.
+    this.authURL = 'https://www.instagram.com/oauth/authorize';
     this.tokenURL = 'https://api.instagram.com/oauth/access_token';
     this.graphURL = 'https://graph.instagram.com';
   }
