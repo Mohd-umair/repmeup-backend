@@ -118,20 +118,66 @@ async function registerWaba({ wabaId, phoneNumber } = {}) {
 }
 
 /**
- * Point a business phone number's webhooks at us.
+ * Register our callback URL for a WABA.
  *
- * This is the endpoint that answers "unhe apna webhook kaise dein" — once set,
- * Interakt delivers inbound messages AND delivery statuses (sent / delivered /
+ * This is the endpoint that answers "Interakt ko apna webhook kaise dein" — once
+ * set, Interakt delivers inbound messages AND delivery statuses (sent / delivered /
  * read / failed) to override_callback_uri in Meta's exact webhook format.
+ *
+ * Shape follows Interakt's "Add/Update Webhook URL" onboarding doc:
+ *   POST {proxy}/v17.0/{WABA_ID}/subscribed_apps
+ *   headers: x-access-token, x-waba-id
+ *   body:    { override_callback_uri, verify_token }     <- FLAT, not nested
+ *
+ * Note this is WABA-level, not per phone number. Interakt's Postman collection also
+ * documents a per-number variant (POST {proxy}/v17.0/{PHONE_NUMBER_ID} with the body
+ * wrapped in `webhook_configuration`) — see configureNumberWebhook below. The
+ * WABA-level call is used by default because it is what the onboarding doc
+ * prescribes and it covers every number on the account.
  */
-async function configureWebhook({ phoneNumberId, wabaId } = {}) {
-  if (!phoneNumberId) throw new Error('configureWebhook: phoneNumberId is required.');
+async function configureWebhook({ wabaId, callbackUrl } = {}) {
   if (!wabaId) throw new Error('configureWebhook: wabaId is required.');
+
+  const url = `${proxyBase()}/${WEBHOOK_CONFIG_API_VERSION}/${wabaId}/subscribed_apps`;
+  const body = {
+    override_callback_uri: callbackUrl || webhookUrl(),
+    verify_token: verifyToken()
+  };
+
+  try {
+    const res = await axios.post(url, body, {
+      headers: {
+        'x-access-token': isvToken(),
+        'x-waba-id': String(wabaId),
+        'Content-Type': 'application/json'
+      },
+      timeout: 20000
+    });
+    logger.info('[Interakt] Webhook configured for WABA', { wabaId, callbackUri: body.override_callback_uri });
+    return { success: res.data?.success !== false, data: res.data };
+  } catch (error) {
+    const message = describeError(error);
+    logger.error('[Interakt] Webhook configuration failed', { wabaId, status: error?.response?.status, message });
+    const err = new Error(`Interakt webhook configuration failed: ${message}`);
+    err.httpStatus = error?.response?.status;
+    throw err;
+  }
+}
+
+/**
+ * Per-phone-number webhook override (Postman: "Number-Level Webhook Configuration").
+ * Only needed when one number in a WABA must post somewhere different from the rest.
+ * Body is nested under `webhook_configuration` here — deliberately different from the
+ * WABA-level call above; do not "unify" them.
+ */
+async function configureNumberWebhook({ phoneNumberId, wabaId, callbackUrl } = {}) {
+  if (!phoneNumberId) throw new Error('configureNumberWebhook: phoneNumberId is required.');
+  if (!wabaId) throw new Error('configureNumberWebhook: wabaId is required.');
 
   const url = `${proxyBase()}/${WEBHOOK_CONFIG_API_VERSION}/${phoneNumberId}`;
   const body = {
     webhook_configuration: {
-      override_callback_uri: webhookUrl(),
+      override_callback_uri: callbackUrl || webhookUrl(),
       verify_token: verifyToken()
     }
   };
@@ -146,12 +192,12 @@ async function configureWebhook({ phoneNumberId, wabaId } = {}) {
       },
       timeout: 20000
     });
-    logger.info('[Interakt] Webhook configured', { phoneNumberId, callbackUri: body.webhook_configuration.override_callback_uri });
+    logger.info('[Interakt] Number-level webhook configured', { phoneNumberId, wabaId });
     return { success: res.data?.success !== false, data: res.data };
   } catch (error) {
     const message = describeError(error);
-    logger.error('[Interakt] Webhook configuration failed', { phoneNumberId, wabaId, status: error?.response?.status, message });
-    const err = new Error(`Interakt webhook configuration failed: ${message}`);
+    logger.error('[Interakt] Number-level webhook configuration failed', { phoneNumberId, wabaId, message });
+    const err = new Error(`Interakt number webhook configuration failed: ${message}`);
     err.httpStatus = error?.response?.status;
     throw err;
   }
@@ -187,6 +233,7 @@ function isConfigured() {
 module.exports = {
   registerWaba,
   configureWebhook,
+  configureNumberWebhook,
   unsubscribe,
   isConfigured,
   webhookUrl,
