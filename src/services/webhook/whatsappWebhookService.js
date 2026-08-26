@@ -537,6 +537,85 @@ async function handleWhatsAppMessage(payload, organizationId) {
  * @param {object} payload  The raw req.body
  * @returns {Promise<void>}
  */
+/**
+ * Handle Meta's `account_update` webhook for partner-solution onboarding.
+ *
+ * Payload (Meta -> our app, object: whatsapp_business_account):
+ *   changes[].field = "account_update"
+ *   changes[].value = { event: "PARTNER_ADDED",
+ *                       waba_info: { waba_id, owner_business_id, solution_id,
+ *                                    solution_partner_business_ids: [...] } }
+ *
+ * Note there is NO phone_number_id here — Meta identifies the customer by WABA.
+ * We record the onboarding against the matching connection; the phone number id
+ * arrives separately via Interakt's WABA_ONBOARDED callback or from the signup
+ * response itself.
+ *
+ * @see Interakt "How to Onboard as a Tech Provider" — Listening for Onboarded Customers
+ */
+async function processAccountUpdate(change, entry) {
+  const value = change.value || {};
+  const event = value.event;
+  const info = value.waba_info || {};
+  const wabaId = info.waba_id;
+
+  logger.info('[WhatsApp Webhook] account_update received', {
+    event,
+    wabaId,
+    solutionId: info.solution_id,
+    ownerBusinessId: info.owner_business_id,
+    entryId: entry?.id
+  });
+
+  if (event !== 'PARTNER_ADDED') {
+    // Other account_update events exist (e.g. bans, verification changes). Log and
+    // move on rather than guessing at semantics we have not seen.
+    logger.info('[WhatsApp Webhook] account_update event not handled', { event, wabaId });
+    return;
+  }
+  if (!wabaId) {
+    logger.warn('[WhatsApp Webhook] PARTNER_ADDED without waba_id — ignoring');
+    return;
+  }
+
+  const PlatformConnection = require('../../models/PlatformConnection');
+  const connections = await PlatformConnection.find({
+    platform: 'whatsapp',
+    $or: [
+      { 'platformData.wabaId': String(wabaId) },
+      { 'platformData.businessAccountId': String(wabaId) }
+    ]
+  });
+
+  if (!connections.length) {
+    // Normal race: Meta can fire before our signup handler has written the row.
+    // The signup path stamps the same fields itself, so nothing is lost.
+    logger.warn('[WhatsApp Webhook] PARTNER_ADDED but no connection for this WABA yet', { wabaId });
+    return;
+  }
+
+  for (const connection of connections) {
+    if (!connection.platformData) connection.platformData = {};
+    connection.platformData.provider = 'interakt';
+    connection.platformData.wabaId = String(wabaId);
+    connection.platformData.businessAccountId = String(wabaId);
+    if (info.solution_id) connection.platformData.interaktSolutionId = String(info.solution_id);
+    if (info.owner_business_id) connection.platformData.businessId = String(info.owner_business_id);
+    connection.platformData.interaktRegisteredAt = new Date();
+    connection.platformData.interaktLastError = null;
+    connection.markModified('platformData');
+    connection.status = 'connected';
+    connection.isActive = true;
+    await connection.save();
+
+    logger.info('[WhatsApp Webhook] PARTNER_ADDED applied', {
+      connectionId: connection._id.toString(),
+      organization: connection.organization?.toString(),
+      wabaId
+    });
+  }
+}
+
 async function processWhatsAppWebhook(payload) {
   if (!payload?.entry || payload.entry.length === 0) {
     logger.info('[WhatsApp Webhook] No entries to process');
@@ -549,6 +628,20 @@ async function processWhatsAppWebhook(payload) {
     if (!entry.changes || entry.changes.length === 0) continue;
 
     for (const change of entry.changes) {
+      // Partner-solution onboarding. Meta fires this on the `account_updates` field
+      // when a customer finishes Embedded Signup configured with our solution id —
+      // it is delivered to BOTH us and Interakt, and is the PRIMARY onboarding
+      // signal (Interakt's tp-signup API is only the 5-7 minute fallback).
+      // Without this branch the event was silently dropped by the field filter below.
+      if (change.field === 'account_update' || change.field === 'account_updates') {
+        try {
+          await processAccountUpdate(change, entry);
+        } catch (auErr) {
+          logger.error('[WhatsApp Webhook] processAccountUpdate failed', { error: auErr.message });
+        }
+        continue;
+      }
+
       if (change.field !== 'messages') {
         logger.debug('[WhatsApp Webhook] Skipping change (handler only processes field=messages)', {
           field: change.field

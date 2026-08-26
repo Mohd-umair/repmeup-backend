@@ -897,37 +897,44 @@ exports.completeWhatsAppEmbeddedSignup = async (req, res, next) => {
       { provider: 'interakt', connectionType: 'whatsapp_interakt_signup' }
     );
 
-    // 5. Register with Interakt and hand them our webhook. If this fails the number
-    //    cannot actually send, so mark the connection in error rather than showing a
-    //    green "connected" that silently drops every message.
-    let interaktStatus = { registered: false, webhookConfigured: false, error: null };
+    // 5. Hand Interakt our callback URL, then nudge their onboarding.
+    //
+    // Per Interakt's onboarding doc, Meta fires PARTNER_ADDED to BOTH us and Interakt
+    // automatically when Embedded Signup completes with our solution id — that is the
+    // primary onboarding trigger (handled in whatsappWebhookService.processAccountUpdate).
+    // The tp-signup API is explicitly the fallback "if the event is not received within
+    // 5-7 minutes". We still call it immediately because it is idempotent and removes
+    // the wait, but a failure here must NOT fail the connection: Meta's own event may
+    // still complete the onboarding moments later.
+    const interaktStatus = { registered: false, webhookConfigured: false, error: null };
+
+    try {
+      await interakt.configureWebhook({ wabaId });
+      interaktStatus.webhookConfigured = true;
+      connection.platformData.interaktWebhookConfiguredAt = new Date();
+    } catch (whErr) {
+      // This one genuinely matters — without a callback URL we receive nothing.
+      interaktStatus.error = whErr.message;
+      connection.platformData.interaktLastError = String(whErr.message).slice(0, 500);
+      console.error('[WhatsApp/ES] Interakt webhook configuration failed:', whErr.message);
+    }
+
     try {
       await interakt.registerWaba({ wabaId });
       interaktStatus.registered = true;
-
-      await interakt.configureWebhook({ phoneNumberId, wabaId });
-      interaktStatus.webhookConfigured = true;
-
-      connection.platformData.interaktSolutionId = interakt.solutionId();
       connection.platformData.interaktRegisteredAt = new Date();
-      connection.platformData.interaktWebhookConfiguredAt = new Date();
-      connection.platformData.interaktLastError = null;
-      connection.markModified('platformData');
-      await connection.save();
-    } catch (interaktErr) {
-      interaktStatus.error = interaktErr.message;
-      connection.status = 'error';
-      connection.platformData.interaktLastError = String(interaktErr.message).slice(0, 500);
-      connection.markModified('platformData');
-      await connection.save();
-      console.error('[WhatsApp/ES] Interakt onboarding failed:', interaktErr.message);
-
-      return res.status(502).json({
-        success: false,
-        error: `Number connected, but Interakt onboarding failed: ${interaktErr.message}`,
-        data: { connectionId: connection._id, interakt: interaktStatus }
-      });
+    } catch (regErr) {
+      // Non-fatal by design — see note above.
+      interaktStatus.error = interaktStatus.error || regErr.message;
+      connection.platformData.interaktLastError = String(regErr.message).slice(0, 500);
+      console.warn('[WhatsApp/ES] tp-signup fallback failed (Meta PARTNER_ADDED may still complete it):', regErr.message);
     }
+
+    connection.platformData.interaktSolutionId = interakt.solutionId();
+    // Only the missing callback URL is bad enough to surface as an error state.
+    if (!interaktStatus.webhookConfigured) connection.status = 'error';
+    connection.markModified('platformData');
+    await connection.save();
 
     return res.status(201).json({
       success: true,
