@@ -67,6 +67,9 @@ router.get('/google/connect', checkConnectionLimit, requireChannel('google'), pl
 router.get('/whatsapp/connect', checkConnectionLimit, requireChannel('whatsapp'), platformController.initiateWhatsAppConnection);
 router.post('/whatsapp/connect', checkConnectionLimit, requireChannel('whatsapp'), platformController.connectWhatsApp);
 router.post('/whatsapp/connect-direct', checkConnectionLimit, requireChannel('whatsapp'), platformController.connectWhatsApp);
+// POST /whatsapp/embedded-signup → completes FB-JS-SDK Embedded Signup started with the
+// Interakt solution ID. Body: { code, wabaId, phoneNumberId } straight from the SDK.
+router.post('/whatsapp/embedded-signup', checkConnectionLimit, requireChannel('whatsapp'), platformController.completeWhatsAppEmbeddedSignup);
 router.delete('/whatsapp/disconnect', platformController.disconnectWhatsApp);
 router.get('/whatsapp/status', platformController.getWhatsAppStatus);
 // Manually register a Pending phone number for Cloud API (moves status → Active)

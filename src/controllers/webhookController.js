@@ -663,11 +663,146 @@ exports.verifyWhatsAppWebhook = (req, res) => {
  * @route   POST /api/webhooks/whatsapp
  * @access  Public (called by Meta)
  */
+/**
+ * @desc    Verify the Interakt partner webhook (some consoles probe with a GET).
+ * @route   GET /api/webhooks/interakt
+ * @access  Public
+ */
+exports.verifyInteraktWebhook = async (req, res) => {
+  // Meta-style handshake, in case Interakt's console uses one.
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  const expected =
+    process.env.INTERAKT_WEBHOOK_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+
+  if (mode === 'subscribe' && challenge && expected && token === expected) {
+    logger.info('[Interakt Webhook] Verification succeeded');
+    return res.status(200).send(challenge);
+  }
+  // Plain reachability probe.
+  if (!mode && !challenge) return res.status(200).send('OK');
+
+  logger.warn('[Interakt Webhook] Verification failed', { mode, hasChallenge: Boolean(challenge) });
+  return res.sendStatus(403);
+};
+
+/**
+ * @desc    Interakt partner (tech-partner) webhook — onboarding lifecycle events.
+ *
+ * This is the partner-level callback shared between us and Interakt. It is NOT the
+ * per-number message webhook (that is /api/webhooks/whatsapp, which carries Meta-format
+ * messages and delivery statuses). Interakt posts here when a WABA/phone number
+ * finishes onboarding against our solution:
+ *
+ *   { "event": "WABA_ONBOARDED",
+ *     "isv_name_token": "<our ISV token>",
+ *     "waba_id": "...",
+ *     "phone_number_id": "..." }
+ *
+ * Authentication is the echoed `isv_name_token` — Interakt sends our own partner token
+ * back to us, so a constant-time compare against INTERAKT_ISV_TOKEN proves the sender.
+ *
+ * Only WABA_ONBOARDED is documented today; anything else is acknowledged and logged in
+ * full rather than dropped, so we can see what Interakt actually sends on failure.
+ *
+ * @route   POST /api/webhooks/interakt
+ * @access  Public (authenticated by the echoed ISV token in the body)
+ */
+exports.handleInteraktWebhook = async (req, res) => {
+  const body = req.body || {};
+  const { event, isv_name_token: isvToken, waba_id: wabaId, phone_number_id: phoneNumberId } = body;
+
+  const expected = process.env.INTERAKT_ISV_TOKEN;
+  if (!expected) {
+    logger.error('[Interakt Webhook] INTERAKT_ISV_TOKEN not configured — cannot authenticate');
+    return res.sendStatus(503);
+  }
+
+  const crypto = require('crypto');
+  const a = Buffer.from(String(isvToken || ''));
+  const b = Buffer.from(String(expected));
+  const authed = a.length === b.length && crypto.timingSafeEqual(a, b);
+  if (!authed) {
+    logger.warn('[Interakt Webhook] Rejected: isv_name_token mismatch', { event, wabaId });
+    return res.sendStatus(403);
+  }
+
+  // ACK before doing any work — Interakt should never wait on our DB.
+  res.sendStatus(200);
+
+  logger.info('[Interakt Webhook] Event received', { event, wabaId, phoneNumberId });
+
+  if (event !== 'WABA_ONBOARDED') {
+    // Undocumented event (likely a failure variant). Log the whole payload minus the
+    // token so we can implement it properly once we have seen a real one.
+    const { isv_name_token, ...safe } = body;
+    logger.warn('[Interakt Webhook] Unhandled event type — logging payload for follow-up', { payload: safe });
+    return;
+  }
+
+  if (!phoneNumberId && !wabaId) {
+    logger.warn('[Interakt Webhook] WABA_ONBOARDED without waba_id or phone_number_id — ignoring');
+    return;
+  }
+
+  try {
+    const PlatformConnection = require('../models/PlatformConnection');
+    const or = [];
+    if (phoneNumberId) {
+      or.push({ 'platformData.phoneNumberId': String(phoneNumberId) });
+      or.push({ platformUserId: String(phoneNumberId) });
+    }
+    if (wabaId) {
+      or.push({ 'platformData.wabaId': String(wabaId) });
+      or.push({ 'platformData.businessAccountId': String(wabaId) });
+    }
+
+    const connection = await PlatformConnection.findOne({ platform: 'whatsapp', $or: or });
+    if (!connection) {
+      // Interakt can confirm before our signup handler has finished writing. Not an
+      // error — the signup path sets the same fields itself.
+      logger.warn('[Interakt Webhook] No matching connection yet', { wabaId, phoneNumberId });
+      return;
+    }
+
+    if (!connection.platformData) connection.platformData = {};
+    connection.platformData.provider = 'interakt';
+    if (wabaId) {
+      connection.platformData.wabaId = String(wabaId);
+      connection.platformData.businessAccountId = String(wabaId);
+    }
+    if (phoneNumberId) connection.platformData.phoneNumberId = String(phoneNumberId);
+    connection.platformData.interaktRegisteredAt = new Date();
+    connection.platformData.interaktLastError = null;
+    connection.markModified('platformData');
+    connection.status = 'connected';
+    connection.isActive = true;
+    await connection.save();
+
+    logger.info('[Interakt Webhook] Connection marked onboarded', {
+      connectionId: connection._id.toString(),
+      organization: connection.organization?.toString()
+    });
+  } catch (err) {
+    logger.error('[Interakt Webhook] Failed to apply WABA_ONBOARDED', { error: err.message, wabaId, phoneNumberId });
+  }
+};
+
 exports.handleWhatsAppWebhook = async (req, res) => {
   logger.info('[WhatsApp Webhook] Received event');
 
+  // Signature verification.
+  //
+  // Meta signs with OUR app secret, so the HMAC below is authoritative for
+  // Meta-direct numbers. Interakt-proxied deliveries are signed by Interakt's app
+  // (or unsigned), so that HMAC can never match — a mismatch there means "different
+  // sender", not "forged". We therefore verify whenever a signature is present and
+  // it validates, and only hard-reject when it is present AND provably wrong AND we
+  // are not expecting Interakt traffic.
   const signature = req.headers['x-hub-signature-256'];
   const appSecret = process.env.META_APP_SECRET || process.env.FACEBOOK_APP_SECRET;
+
   if (signature && appSecret) {
     const crypto = require('crypto');
     const raw =
@@ -681,13 +816,32 @@ exports.handleWhatsAppWebhook = async (req, res) => {
     }
     const expected =
       'sha256=' + crypto.createHmac('sha256', appSecret).update(raw).digest('hex');
-    if (signature !== expected) {
-      logger.error('[WhatsApp Webhook] Invalid signature', { expected, received: signature });
-      return res.sendStatus(403);
+
+    // Constant-time compare, and never log `expected` — that hands out a valid
+    // signature for this exact body to anyone who can read the logs.
+    const expectedBuf = Buffer.from(expected);
+    const receivedBuf = Buffer.from(String(signature));
+    const valid =
+      expectedBuf.length === receivedBuf.length &&
+      crypto.timingSafeEqual(expectedBuf, receivedBuf);
+
+    if (!valid) {
+      const interaktEnabled = Boolean(process.env.INTERAKT_ISV_TOKEN);
+      if (!interaktEnabled) {
+        logger.error('[WhatsApp Webhook] Invalid signature — rejecting', {
+          received: String(signature).slice(0, 16) + '…'
+        });
+        return res.sendStatus(403);
+      }
+      // Interakt is configured: accept, but make it visible rather than silent.
+      logger.warn(
+        '[WhatsApp Webhook] Signature did not match our app secret; accepting as Interakt-proxied delivery',
+        { received: String(signature).slice(0, 16) + '…' }
+      );
     }
   } else {
     logger.warn(
-      '[WhatsApp Webhook] Signature verification skipped (no signature or META_APP_SECRET / FACEBOOK_APP_SECRET)'
+      '[WhatsApp Webhook] Signature verification skipped (no signature header, or META_APP_SECRET / FACEBOOK_APP_SECRET unset)'
     );
   }
 

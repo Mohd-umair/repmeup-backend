@@ -117,9 +117,22 @@ async function disconnect(organizationId, connectionId) {
     throw err;
   }
 
-  // Unsubscribe WABA from webhooks before marking disconnected
-  const wabaId = connection.platformData?.wabaId;
-  if (wabaId && connection.accessToken) {
+  // Unsubscribe WABA from webhooks before marking disconnected.
+  // Both paths are best-effort — a remote failure must not block local cleanup,
+  // otherwise a number stays stuck in a workspace it has already left.
+  const wabaId = connection.platformData?.wabaId || connection.platformData?.businessAccountId;
+  const phoneNumberId = connection.platformData?.phoneNumberId || connection.platformUserId;
+
+  if (connection.platformData?.provider === 'interakt') {
+    // Interakt owns the subscription for these numbers; releasing it there also
+    // clears the override_callback_uri pointing at us.
+    const interakt = require('../integrations/whatsapp/interaktPartnerService');
+    if (wabaId) {
+      await interakt.unsubscribe({ wabaId, phoneNumberId }).catch(err => {
+        logger.warn('[whatsappConnectionService] Interakt unsubscribe failed (non-fatal)', { error: err.message });
+      });
+    }
+  } else if (wabaId && connection.accessToken) {
     const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
     await whatsappLoginAuth.unsubscribeFromWebhook(wabaId, connection.accessToken).catch(err => {
       logger.warn('[whatsappConnectionService] Webhook unsubscribe failed (non-fatal)', { error: err.message });

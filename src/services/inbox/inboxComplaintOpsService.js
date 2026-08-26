@@ -327,8 +327,64 @@ async function raiseComplaint(orgId, interactionId, { issueSummary, priority } =
   return { detail: await getComplaintDetail(orgId, interactionId) };
 }
 
+/**
+ * Channels a manually-logged complaint may be attributed to. Constrained to the
+ * Interaction.platform enum — a value outside it makes the document unsavable.
+ */
+const MANUAL_COMPLAINT_CHANNELS = ['whatsapp', 'instagram', 'facebook', 'email', 'website'];
+
+/**
+ * Log a complaint that never arrived through a connected channel — a walk-in, a
+ * phone call, or something reported outside the inbox.
+ *
+ * Complaints are stored ON an Interaction (there is no Complaint collection), so a
+ * manual complaint needs a synthetic Interaction to hang from. It is created with a
+ * `manual-` prefixed platformId, which is what distinguishes it from real channel
+ * traffic without needing a schema change.
+ */
+async function createManualComplaint(orgId, { customerName, customerHandle, channel, issueSummary, priority } = {}) {
+  const summary = String(issueSummary || '').trim().replace(/\s+/g, ' ').substring(0, 280);
+  if (summary.length < 5) return { error: 'issue_summary_too_short' };
+
+  const name = String(customerName || '').trim().substring(0, 120);
+  if (!name) return { error: 'customer_name_required' };
+
+  const safeChannel = MANUAL_COMPLAINT_CHANNELS.includes(channel) ? channel : 'website';
+  const safePriority = ['low', 'medium', 'high', 'urgent'].includes(priority) ? priority : 'medium';
+  const handle = String(customerHandle || '').trim().substring(0, 160);
+
+  const { displayRef } = await generateOpsRef(orgId, 'complaint');
+  const now = new Date();
+
+  const interaction = await Interaction.create({
+    organization: orgId,
+    platform: safeChannel,
+    type: 'dm',
+    // Deterministic and unique; also the marker for "this was entered by hand".
+    platformId: `manual-complaint-${displayRef}`,
+    content: summary,
+    author: { name, username: handle || undefined },
+    // listComplaints sorts on platformCreatedAt desc. Leaving it unset would sort
+    // the row LAST (missing values sort last on a descending sort), so a freshly
+    // logged complaint would appear at the bottom of the list instead of the top.
+    platformCreatedAt: now,
+    status: 'read',
+    priority: safePriority,
+    complaint: {
+      displayRef,
+      status: 'open',
+      issueSummary: summary,
+      priority: safePriority,
+      timeline: [{ event: 'Complaint logged manually', at: now, note: summary }]
+    }
+  });
+
+  return { detail: await getComplaintDetail(orgId, interaction._id) };
+}
+
 module.exports = {
   listComplaints,
+  createManualComplaint,
   getComplaintStats,
   getComplaintDetail,
   acknowledgeComplaint,

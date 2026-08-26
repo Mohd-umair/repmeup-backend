@@ -52,12 +52,43 @@ const platformConnectionSchema = new mongoose.Schema({
     businessAccountId: String,
     catalogId: String,        // Meta Commerce Catalog ID linked to this WABA phone number
 
+    // WABA identity written by the embedded-signup flow.
+    //
+    // These MUST stay declared. Mongoose runs in strict mode, so an undeclared
+    // path is silently dropped on save — which is exactly what used to happen to
+    // `wabaId`. Because whatsappService falls back
+    // `wabaId || businessAccountId || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID`,
+    // every embedded-signup tenant silently resolved to the shared env WABA.
+    wabaId: String,
+    wabaName: String,
+    businessId: String,
+    verifiedName: String,
+    qualityRating: String,
+    codeVerificationStatus: String,
+
+    /**
+     * Which transport carries this connection's API calls.
+     *   'meta'    — direct Meta Graph (graph.facebook.com)
+     *   'interakt'— Interakt tech-partner proxy (amped-express.interakt.ai)
+     * Absent means 'meta', which is correct for every pre-Interakt connection,
+     * so no migration is required.
+     */
+    provider: {
+      type: String,
+      enum: ['meta', 'interakt'],
+      default: 'meta'
+    },
+    interaktSolutionId: String,
+    interaktRegisteredAt: Date,
+    interaktWebhookConfiguredAt: Date,
+    interaktLastError: String,
+
     /** Campaign governance — Meta tier / quality / pause state */
     wabaMessagingTier: String,
     wabaQualityRating: String,
     campaignPausedUntil: Date,
     campaignPauseReason: String,
-    
+
     // For LinkedIn
     organizationId: String,
     organizationName: String,
@@ -121,9 +152,18 @@ const platformConnectionSchema = new mongoose.Schema({
     //  - facebook_login            : Instagram via Facebook Login / Page Manager (EAA tokens)
     //  - whatsapp_embedded_signup  : WhatsApp via Meta Embedded Signup OAuth (per-tenant)
     //  - whatsapp_direct_env       : WhatsApp using shared env-level credentials (dev/single-tenant)
+    //  - whatsapp_interakt_signup  : WhatsApp via Embedded Signup with the Interakt solution ID,
+    //                                registered with Interakt as tech partner (platformData.provider='interakt')
     connectionType: {
       type: String,
-      enum: ['instagram_login', 'facebook_login', 'whatsapp_embedded_signup', 'whatsapp_direct_env', null],
+      enum: [
+        'instagram_login',
+        'facebook_login',
+        'whatsapp_embedded_signup',
+        'whatsapp_direct_env',
+        'whatsapp_interakt_signup',
+        null
+      ],
       default: null
     },
     // Instagram Login flow: the app-scoped Instagram User ID (ISUID) returned by

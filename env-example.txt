@@ -84,6 +84,27 @@ WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
 WHATSAPP_BUSINESS_ACCOUNT_ID=your_business_account_id
 WHATSAPP_ACCESS_TOKEN=your_whatsapp_access_token
 
+# ── Interakt tech-partner (BSP) ──────────────────────────────────────────────
+# Set these to onboard new WhatsApp numbers through Interakt instead of Meta direct.
+# Existing Meta-direct connections keep working either way: the transport is chosen
+# per connection from platformData.provider, so leaving these blank changes nothing.
+#
+# INTERAKT_ISV_TOKEN   the single partner access token Interakt issues you. Used as
+#                      `Authorization: <token>` on api.interakt.ai and as
+#                      `x-access-token` on the amped-express Graph proxy.
+# INTERAKT_SOLUTION_ID the Partner Solution ID passed to Embedded Signup as
+#                      extras.setup.solutionID. Presence of this value is what makes
+#                      the frontend use the FB JS SDK flow.
+INTERAKT_ISV_TOKEN=
+INTERAKT_SOLUTION_ID=
+INTERAKT_API_BASE=https://amped-express.interakt.ai/api
+INTERAKT_PARTNER_API_BASE=https://api.interakt.ai/v1
+INTERAKT_DATA_LOCALIZATION_REGION=IN
+# Optional. Only needed if Interakt's console probes the partner webhook with a
+# Meta-style hub.challenge handshake. Falls back to WHATSAPP_WEBHOOK_VERIFY_TOKEN.
+# The POST webhook itself is authenticated by the isv_name_token Interakt echoes back.
+INTERAKT_WEBHOOK_VERIFY_TOKEN=
+
 # New support ticket alerts (POST /api/tickets) — email only
 # Default recipient: umair9317@gmail.com (override with ADMIN_SUPPORT_TICKET_EMAIL)
 # ADMIN_SUPPORT_TICKET_EMAIL=umair9317@gmail.com

@@ -29,6 +29,12 @@ router.post('/instagram-login', webhookController.handleInstagramLoginWebhook);
 router.get('/linkedin', webhookController.verifyLinkedInWebhook);
 router.post('/linkedin', webhookController.handleLinkedInWebhook);
 
+// Interakt tech-partner webhook — onboarding lifecycle (WABA_ONBOARDED).
+// Partner-level, shared only between us and Interakt. Distinct from the per-number
+// message webhook on /whatsapp below, which carries Meta-format messages/statuses.
+router.get('/interakt', webhookController.verifyInteraktWebhook);
+router.post('/interakt', webhookController.handleInteraktWebhook);
+
 // WhatsApp webhooks
 router.get('/whatsapp', webhookController.verifyWhatsAppWebhook);
 router.post('/whatsapp', webhookController.handleWhatsAppWebhook);

@@ -25,10 +25,18 @@ const {
   deriveSalePrice
 } = require('../../utils/productCommerceFields');
 
-const API_VERSION = 'v23.0';
-const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
+const { resolveTransport } = require('./whatsappTransport');
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+//
+// Host and auth resolve per connection via whatsappTransport, so catalog calls
+// reach Meta Graph or the Interakt proxy with identical payloads.
+// Do not reintroduce a hardcoded BASE_URL here.
+
+/** Per-connection API host. */
+function _base(connection) {
+  return resolveTransport(connection).baseUrl;
+}
 
 function _token(connection) {
   return connection?.accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
@@ -43,14 +51,11 @@ function _phoneNumberId(connection) {
 }
 
 function _authHeader(connection) {
-  return { Authorization: `Bearer ${_token(connection)}` };
+  return resolveTransport(connection).authHeaders();
 }
 
 function _jsonHeaders(connection) {
-  return {
-    Authorization: `Bearer ${_token(connection)}`,
-    'Content-Type': 'application/json'
-  };
+  return resolveTransport(connection).jsonHeaders();
 }
 
 function _wabaId(connection) {
@@ -332,7 +337,7 @@ async function getWabaCatalogIds(connection) {
 
   try {
     const res = await axios.get(
-      `${BASE_URL}/${wabaId}/product_catalogs`,
+      `${_base(connection)}/${wabaId}/product_catalogs`,
       {
         headers: _authHeader(connection),
         params: { fields: 'id,name' },
@@ -562,7 +567,7 @@ async function getCommerceSettings(connection) {
   const phoneNumberId = _phoneNumberId(connection);
   try {
     const res = await axios.get(
-      `${BASE_URL}/${phoneNumberId}/whatsapp_commerce_settings`,
+      `${_base(connection)}/${phoneNumberId}/whatsapp_commerce_settings`,
       { headers: _authHeader(connection), timeout: 15000 }
     );
     const data = _parseCommerceSettingsPayload(res.data);
@@ -620,7 +625,7 @@ async function updateCommerceSettings(connection, catalogId, { enableVisibility 
   if (enableVisibility) {
     try {
       commerceRes = await axios.post(
-        `${BASE_URL}/${phoneNumberId}/whatsapp_commerce_settings`,
+        `${_base(connection)}/${phoneNumberId}/whatsapp_commerce_settings`,
         null,
         {
           headers: _authHeader(connection),
@@ -682,7 +687,7 @@ async function linkCatalogToWaba(connection, catalogId) {
 
   try {
     const res = await axios.post(
-      `${BASE_URL}/${wabaId}/product_catalogs`,
+      `${_base(connection)}/${wabaId}/product_catalogs`,
       { catalog_id: trimmed },
       { headers: _jsonHeaders(connection), timeout: 15000 }
     );
@@ -757,7 +762,7 @@ async function upsertProduct(connection, catalogId, product) {
     let res;
     try {
       res = await axios.post(
-        `${BASE_URL}/${catalogId}/items_batch`,
+        `${_base(connection)}/${catalogId}/items_batch`,
         batchBody,
         { headers: _jsonHeaders(connection), timeout: 60000 }
       );
@@ -766,7 +771,7 @@ async function upsertProduct(connection, catalogId, product) {
       // Fallback: some tokens accept /products but not items_batch (or vice versa)
       if (/does not exist|missing permissions|does not support/i.test(batchMsg)) {
         res = await axios.post(
-          `${BASE_URL}/${catalogId}/products`,
+          `${_base(connection)}/${catalogId}/products`,
           payload,
           { headers: _jsonHeaders(connection), timeout: 60000 }
         );
@@ -807,7 +812,7 @@ async function upsertProduct(connection, catalogId, product) {
 async function deleteProduct(connection, catalogItemId) {
   try {
     await axios.delete(
-      `${BASE_URL}/${catalogItemId}`,
+      `${_base(connection)}/${catalogItemId}`,
       { headers: _authHeader(connection), timeout: 15000 }
     );
     return { success: true };
@@ -829,7 +834,7 @@ async function deleteProduct(connection, catalogItemId) {
 async function deleteProductByRetailerId(connection, catalogId, retailerId) {
   try {
     await axios.post(
-      `${BASE_URL}/${catalogId}/items_batch`,
+      `${_base(connection)}/${catalogId}/items_batch`,
       {
         allow_upsert: false,
         item_type: 'PRODUCT_ITEM',
@@ -874,7 +879,7 @@ async function batchSync(connection, catalogId, products) {
 
     try {
       const res = await axios.post(
-        `${BASE_URL}/${catalogId}/items_batch`,
+        `${_base(connection)}/${catalogId}/items_batch`,
         {
           allow_upsert: true,
           item_type: 'PRODUCT_ITEM',
@@ -953,7 +958,7 @@ async function sendProductMessage(connection, to, catalogId, retailerId, bodyTex
     if (!interactive.body) delete interactive.body;
 
     const res = await axios.post(
-      `${BASE_URL}/${phoneNumberId}/messages`,
+      `${_base(connection)}/${phoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
@@ -1014,7 +1019,7 @@ async function sendProductListMessage(
     if (!interactive.footer) delete interactive.footer;
 
     const res = await axios.post(
-      `${BASE_URL}/${phoneNumberId}/messages`,
+      `${_base(connection)}/${phoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
