@@ -698,9 +698,24 @@ exports.initiateWhatsAppConnection = async (req, res, next) => {
 
     const authUrl = whatsappLoginAuth.getAuthURL(userId, organizationId);
 
+    // Embedded Signup config for the Facebook JS SDK path. Returned from the server so
+    // the app id / config id / solution id are never hardcoded in the frontend bundle
+    // (they differ per environment). `solutionId` present => use the SDK flow and POST
+    // to /whatsapp/embedded-signup; absent => fall back to the redirect flow via authUrl.
+    const interakt = require('../integrations/whatsapp/interaktPartnerService');
+    const embeddedSignup = {
+      appId: process.env.META_APP_ID || process.env.FACEBOOK_APP_ID || null,
+      configId:
+        process.env.META_WHATSAPP_CONFIG_ID ||
+        process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ||
+        null,
+      solutionId: interakt.isConfigured() ? process.env.INTERAKT_SOLUTION_ID : null,
+      graphVersion: process.env.META_WHATSAPP_OAUTH_DIALOG_VERSION || 'v23.0'
+    };
+
     res.status(200).json({
       success: true,
-      data: { authUrl }
+      data: { authUrl, embeddedSignup }
     });
   } catch (error) {
     console.error('❌ [WhatsApp] Initiate connection error:', error);
@@ -807,6 +822,129 @@ exports.handleWhatsAppCallback = async (req, res, next) => {
         whatsapp_error: error.message || 'WhatsApp connection failed'
       })
     );
+  }
+};
+
+/**
+ * @desc    Complete WhatsApp Embedded Signup started with the Interakt solution ID.
+ *
+ * The Facebook JS SDK returns waba_id and phone_number_id directly (sessionInfoVersion 3)
+ * alongside the exchangeable code, so this path skips the multi-step debug_token
+ * discovery cascade the redirect flow needs. After the connection is saved we register
+ * the WABA with Interakt and point its webhooks back at us.
+ *
+ * @route   POST /api/platforms/whatsapp/embedded-signup
+ * @access  Private (admin/manager, connection-limit gated)
+ */
+exports.completeWhatsAppEmbeddedSignup = async (req, res, next) => {
+  const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+  const interakt = require('../integrations/whatsapp/interaktPartnerService');
+
+  try {
+    const { code, wabaId, phoneNumberId } = req.body || {};
+    if (!code || !wabaId || !phoneNumberId) {
+      return res.status(400).json({
+        success: false,
+        error: 'code, wabaId and phoneNumberId are all required.'
+      });
+    }
+
+    const userId = req.user._id.toString();
+    const organizationId = req.user.organization._id.toString();
+
+    // 1. Code -> short-lived -> long-lived token (reuses the existing redirect-flow helpers).
+    const shortToken = await whatsappLoginAuth.exchangeCode(code);
+    const { accessToken, expiresIn } = await whatsappLoginAuth.getLongLivedToken(shortToken);
+
+    // 2. Enrich the number for display. Non-fatal: the SDK already gave us the ids we
+    //    actually need, so a failure here costs metadata, not the connection.
+    let phoneMeta = {};
+    try {
+      const rows = await whatsappLoginAuth.getPhoneNumbers(wabaId, accessToken);
+      const match = rows.find((r) => String(r.id) === String(phoneNumberId)) || rows[0] || {};
+      phoneMeta = {
+        displayPhoneNumber: match.display_phone_number,
+        verifiedName: match.verified_name,
+        qualityRating: match.quality_rating,
+        codeVerificationStatus: match.code_verification_status
+      };
+    } catch (metaErr) {
+      console.warn('[WhatsApp/ES] Could not fetch phone number details:', metaErr.message);
+    }
+
+    // 3. Move the number from Pending to Active. Without this it can never receive
+    //    messages. Tolerant of "already registered" (Meta code 80007).
+    try {
+      await whatsappLoginAuth.registerPhoneNumber(phoneNumberId, accessToken);
+    } catch (regErr) {
+      console.warn('[WhatsApp/ES] registerPhoneNumber:', regErr.message);
+    }
+
+    // 4. Persist, marked as an Interakt-transported connection.
+    const connection = await whatsappLoginAuth.saveConnection(
+      userId,
+      organizationId,
+      accessToken,
+      expiresIn,
+      {
+        wabaId,
+        phoneNumberId,
+        displayPhoneNumber: phoneMeta.displayPhoneNumber || phoneNumberId,
+        verifiedName: phoneMeta.verifiedName || null,
+        qualityRating: phoneMeta.qualityRating || null,
+        codeVerificationStatus: phoneMeta.codeVerificationStatus || null
+      },
+      { provider: 'interakt', connectionType: 'whatsapp_interakt_signup' }
+    );
+
+    // 5. Register with Interakt and hand them our webhook. If this fails the number
+    //    cannot actually send, so mark the connection in error rather than showing a
+    //    green "connected" that silently drops every message.
+    let interaktStatus = { registered: false, webhookConfigured: false, error: null };
+    try {
+      await interakt.registerWaba({ wabaId });
+      interaktStatus.registered = true;
+
+      await interakt.configureWebhook({ phoneNumberId, wabaId });
+      interaktStatus.webhookConfigured = true;
+
+      connection.platformData.interaktSolutionId = interakt.solutionId();
+      connection.platformData.interaktRegisteredAt = new Date();
+      connection.platformData.interaktWebhookConfiguredAt = new Date();
+      connection.platformData.interaktLastError = null;
+      connection.markModified('platformData');
+      await connection.save();
+    } catch (interaktErr) {
+      interaktStatus.error = interaktErr.message;
+      connection.status = 'error';
+      connection.platformData.interaktLastError = String(interaktErr.message).slice(0, 500);
+      connection.markModified('platformData');
+      await connection.save();
+      console.error('[WhatsApp/ES] Interakt onboarding failed:', interaktErr.message);
+
+      return res.status(502).json({
+        success: false,
+        error: `Number connected, but Interakt onboarding failed: ${interaktErr.message}`,
+        data: { connectionId: connection._id, interakt: interaktStatus }
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        connectionId: connection._id,
+        phoneNumberId,
+        wabaId,
+        displayPhoneNumber: connection.platformData.displayPhoneNumber,
+        interakt: interaktStatus
+      }
+    });
+  } catch (error) {
+    if (error.code === 'CROSS_ORG_CONFLICT') {
+      return res.status(409).json({ success: false, error: error.message });
+    }
+    console.error('❌ [WhatsApp/ES] Embedded signup failed:', error);
+    return next(error);
   }
 };
 

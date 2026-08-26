@@ -70,7 +70,20 @@ const organizationSchema = new mongoose.Schema({
   subscription: {
     plan: {
       type: String,
-      enum: ['free', 'starter', 'professional', 'enterprise', 'demo'],
+      // Deliberately NOT an enum.
+      //
+      // Plans are dynamic rows in the Plan collection, created at runtime via
+      // POST /api/plans/admin — so any hardcoded list here goes stale the moment
+      // someone adds a plan. And because Mongoose validates the WHOLE document on
+      // save (not just modified paths), one stale value makes the org completely
+      // unsavable: unrelated edits (name, logo, settings) and background jobs that
+      // call organization.save() all fail with a confusing validation error.
+      //
+      // That is exactly what happened with 'growth' — it was added to the Plan
+      // collection but not to this list, and 4 orgs could not be written at all.
+      //
+      // This field is a deprecated display mirror. The authoritative plan lives on
+      // Subscription -> Plan; read entitlements via services/entitlementsService.js.
       default: 'free'
     },
     status: {

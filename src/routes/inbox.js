@@ -78,6 +78,8 @@ router.get('/ops/complaints', inboxOpsController.listComplaints);
 router.get('/ops/complaints/stats', inboxOpsController.getComplaintStats);
 // Must be before /:id to avoid param conflict
 router.post('/ops/complaints/from-interaction/:interactionId', requireComplaintsBasic, inboxOpsController.createComplaintFromInteraction);
+// Manual entry — a complaint with no originating chat (walk-in, phone, offline)
+router.post('/ops/complaints/manual', requireComplaintsBasic, inboxOpsController.createManualComplaint);
 router.get('/ops/complaints/:id', inboxOpsController.getComplaintDetail);
 router.post('/ops/complaints/:id/acknowledge', requireComplaintsBasic, inboxOpsController.acknowledgeComplaint);
 router.post('/ops/complaints/:id/assign', requireComplaintsAdvanced, inboxOpsController.assignComplaint);

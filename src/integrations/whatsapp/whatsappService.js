@@ -1,5 +1,6 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
+const { resolveTransport, enrichApiError, DEFAULT_API_VERSION } = require('./whatsappTransport');
 
 /**
  * WhatsApp Business Cloud API Service
@@ -7,12 +8,15 @@ const Interaction = require('../../models/Interaction');
  * instead of reading from process.env. This allows each customer to use their own
  * WhatsApp Business Account credentials stored in the database.
  *
+ * The API host and auth headers are resolved per connection by whatsappTransport,
+ * so the same payloads reach either Meta directly or Interakt's tech-partner proxy.
+ * Do not hardcode graph.facebook.com anywhere in this file.
+ *
  * Documentation: https://developers.facebook.com/docs/whatsapp/cloud-api
  */
 class WhatsAppService {
   constructor() {
-    this.apiVersion = 'v23.0';
-    this.apiURL = `https://graph.facebook.com/${this.apiVersion}`;
+    this.apiVersion = DEFAULT_API_VERSION;
   }
 
   // ---------------------------------------------------------------------------
@@ -25,27 +29,38 @@ class WhatsAppService {
    */
   _phoneNumberId(connection) {
     return connection.platformData?.phoneNumberId
-      || connection.platformData?.phoneNumberId
       || connection.platformUserId
       || process.env.WHATSAPP_PHONE_NUMBER_ID;
   }
 
   /**
    * Extract access token from a PlatformConnection, falling back to env.
+   * Meta transport only — Interakt authenticates with the platform ISV token.
    */
   _accessToken(connection) {
     return connection?.accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
   }
 
+  /** Per-connection API host — Meta Graph or the Interakt proxy. */
+  _baseUrl(connection) {
+    return resolveTransport(connection).baseUrl;
+  }
+
   _authHeader(connection) {
-    return { Authorization: `Bearer ${this._accessToken(connection)}` };
+    return resolveTransport(connection).authHeaders();
   }
 
   _jsonHeaders(connection) {
-    return {
-      Authorization: `Bearer ${this._accessToken(connection)}`,
-      'Content-Type': 'application/json'
-    };
+    return resolveTransport(connection).jsonHeaders();
+  }
+
+  /**
+   * Normalise an API failure into an Error carrying httpStatus / metaCode so the
+   * campaign governance layer can classify it. Use this in every catch block that
+   * rethrows — a bare `new Error(msg)` loses the 429 signal and disables retry.
+   */
+  _apiError(error, fallbackMessage) {
+    return enrichApiError(error, fallbackMessage);
   }
 
   // ---------------------------------------------------------------------------
@@ -58,15 +73,17 @@ class WhatsAppService {
    */
   async verifyConnection(connection = null) {
     const phoneNumberId = this._phoneNumberId(connection || {});
-    const token = this._accessToken(connection || {});
+    const transport = resolveTransport(connection);
 
-    if (!phoneNumberId || !token) {
+    // Interakt authenticates with the platform-wide ISV token, so a per-connection
+    // access token is only required on the Meta path.
+    if (!phoneNumberId || (transport.provider === 'meta' && !this._accessToken(connection || {}))) {
       throw new Error('WhatsApp credentials not configured');
     }
 
     try {
-      const response = await axios.get(`${this.apiURL}/${phoneNumberId}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const response = await axios.get(`${transport.baseUrl}/${phoneNumberId}`, {
+        headers: transport.authHeaders(),
         timeout: 10000
       });
 
@@ -79,7 +96,7 @@ class WhatsAppService {
       };
     } catch (error) {
       console.error('[WhatsApp] Connection verification failed:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to verify WhatsApp connection');
+      throw this._apiError(error, 'Failed to verify WhatsApp connection');
     }
   }
 
@@ -97,7 +114,7 @@ class WhatsAppService {
     const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -112,7 +129,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id, status: 'sent' };
     } catch (error) {
       console.error('[WhatsApp] Failed to send message:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp message');
+      throw this._apiError(error, 'Failed to send WhatsApp message');
     }
   }
 
@@ -128,7 +145,7 @@ class WhatsAppService {
     const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -141,12 +158,8 @@ class WhatsAppService {
 
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
-      const metaErr = error.response?.data?.error;
       console.error('[WhatsApp] Failed to send template:', error.response?.data || error.message);
-      const err = new Error(metaErr?.message || 'Failed to send WhatsApp template');
-      err.httpStatus = error.response?.status;
-      err.metaCode = metaErr?.code;
-      throw err;
+      throw this._apiError(error, 'Failed to send WhatsApp template');
     }
   }
 
@@ -161,8 +174,8 @@ class WhatsAppService {
     const FormData = require('form-data');
     const fs = require('fs');
     const phoneNumberId = this._phoneNumberId(connection);
-    const token = this._accessToken(connection);
-    if (!phoneNumberId || !token) {
+    const transport = resolveTransport(connection);
+    if (!phoneNumberId || (transport.provider === 'meta' && !this._accessToken(connection))) {
       throw new Error('WhatsApp credentials not configured');
     }
     if (!fs.existsSync(filePath)) {
@@ -174,11 +187,10 @@ class WhatsAppService {
     form.append('file', fs.createReadStream(filePath));
 
     try {
-      const response = await axios.post(`${this.apiURL}/${phoneNumberId}/media`, form, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...form.getHeaders()
-        },
+      const response = await axios.post(`${this._baseUrl(connection)}/${phoneNumberId}/media`, form, {
+        // Multipart: transport supplies auth (Bearer for Meta, x-access-token +
+        // x-waba-id for Interakt) and merges the form's own boundary headers.
+        headers: resolveTransport(connection).formHeaders(form),
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
         timeout: 120000
@@ -190,7 +202,7 @@ class WhatsAppService {
       return id;
     } catch (error) {
       console.error('[WhatsApp] Media upload failed-', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to upload media to WhatsApp');
+      throw this._apiError(error, 'Failed to upload media to WhatsApp');
     }
   }
 
@@ -217,7 +229,7 @@ class WhatsAppService {
       };
 
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         messageData,
         { headers: this._jsonHeaders(connection), timeout: 15000 }
       );
@@ -225,7 +237,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
       console.error('[WhatsApp] Failed to send media:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp media');
+      throw this._apiError(error, 'Failed to send WhatsApp media');
     }
   }
 
@@ -251,7 +263,7 @@ class WhatsAppService {
       }
 
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -264,7 +276,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
       console.error('[WhatsApp] Failed to send media by url:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp media');
+      throw this._apiError(error, 'Failed to send WhatsApp media');
     }
   }
 
@@ -285,7 +297,7 @@ class WhatsAppService {
       if (location.address) payload.address = String(location.address);
 
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -298,7 +310,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
       console.error('[WhatsApp] Failed to send location:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp location');
+      throw this._apiError(error, 'Failed to send WhatsApp location');
     }
   }
 
@@ -329,7 +341,7 @@ class WhatsAppService {
       if (opts.footerText) interactive.footer = { text: String(opts.footerText) };
 
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -342,7 +354,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
       console.error('[WhatsApp] Failed to send reply buttons:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp buttons');
+      throw this._apiError(error, 'Failed to send WhatsApp buttons');
     }
   }
 
@@ -379,7 +391,7 @@ class WhatsAppService {
       if (opts.footerText) interactive.footer = { text: String(opts.footerText) };
 
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -392,7 +404,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
       console.error('[WhatsApp] Failed to send list message:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp list');
+      throw this._apiError(error, 'Failed to send WhatsApp list');
     }
   }
 
@@ -407,7 +419,7 @@ class WhatsAppService {
     const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -454,7 +466,7 @@ class WhatsAppService {
       if (opts.footerText) interactive.footer = { text: String(opts.footerText) };
 
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -467,7 +479,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id };
     } catch (error) {
       console.error('[WhatsApp] Failed to send catalog message:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp catalog');
+      throw this._apiError(error, 'Failed to send WhatsApp catalog');
     }
   }
 
@@ -516,7 +528,7 @@ class WhatsAppService {
   async _sendFlowSessionMode(phoneNumberId, connection, to, flowId, flowToken, flowCta) {
     try {
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -542,7 +554,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id, mode: 'session' };
     } catch (error) {
       console.error('[WhatsApp] Failed to send flow (session mode):', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp flow');
+      throw this._apiError(error, 'Failed to send WhatsApp flow');
     }
   }
 
@@ -555,7 +567,7 @@ class WhatsAppService {
       }
 
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         {
           messaging_product: 'whatsapp',
           to,
@@ -589,7 +601,7 @@ class WhatsAppService {
       return { success: true, messageId: response.data.messages[0].id, mode: 'template' };
     } catch (error) {
       console.error('[WhatsApp] Failed to send flow (template mode):', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp flow');
+      throw this._apiError(error, 'Failed to send WhatsApp flow');
     }
   }
 
@@ -602,7 +614,7 @@ class WhatsAppService {
     const phoneNumberId = this._phoneNumberId(connection);
     try {
       await axios.post(
-        `${this.apiURL}/${phoneNumberId}/messages`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/messages`,
         { messaging_product: 'whatsapp', status: 'read', message_id: messageId },
         { headers: this._jsonHeaders(connection), timeout: 10000 }
       );
@@ -625,7 +637,7 @@ class WhatsAppService {
    */
   async getMediaUrl(connection, mediaId) {
     try {
-      const response = await axios.get(`${this.apiURL}/${mediaId}`, {
+      const response = await axios.get(`${this._baseUrl(connection)}/${mediaId}`, {
         headers: this._authHeader(connection),
         timeout: 10000
       });
@@ -638,7 +650,7 @@ class WhatsAppService {
       };
     } catch (error) {
       console.error('[WhatsApp] Failed to get media URL:', error.response?.data || error.message);
-      throw new Error('Failed to get media URL');
+      throw this._apiError(error, 'Failed to get media URL');
     }
   }
 
@@ -657,7 +669,7 @@ class WhatsAppService {
       return { success: true, data: response.data, contentType: response.headers['content-type'] };
     } catch (error) {
       console.error('[WhatsApp] Failed to download media:', error.message);
-      throw new Error('Failed to download media');
+      throw this._apiError(error, 'Failed to download media');
     }
   }
 
@@ -850,7 +862,7 @@ class WhatsAppService {
     const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.get(
-        `${this.apiURL}/${phoneNumberId}/whatsapp_business_profile`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/whatsapp_business_profile`,
         {
           params: { fields: 'about,address,description,email,profile_picture_url,websites,vertical' },
           headers: this._authHeader(connection),
@@ -930,14 +942,14 @@ class WhatsAppService {
     const phoneNumberId = this._phoneNumberId(connection);
     try {
       const response = await axios.post(
-        `${this.apiURL}/${phoneNumberId}/whatsapp_business_profile`,
+        `${this._baseUrl(connection)}/${phoneNumberId}/whatsapp_business_profile`,
         { messaging_product: 'whatsapp', ...profileData },
         { headers: this._jsonHeaders(connection), timeout: 10000 }
       );
       return { success: true, data: response.data };
     } catch (error) {
       console.error('[WhatsApp] Failed to update business profile:', error.response?.data || error.message);
-      throw new Error('Failed to update business profile');
+      throw this._apiError(error, 'Failed to update business profile');
     }
   }
 
@@ -953,13 +965,13 @@ class WhatsAppService {
 
     try {
       const response = await axios.get(
-        `${this.apiURL}/${wabaId}/message_templates`,
+        `${this._baseUrl(connection)}/${wabaId}/message_templates`,
         { headers: this._authHeader(connection), timeout: 10000 }
       );
       return { success: true, templates: response.data.data };
     } catch (error) {
       console.error('[WhatsApp] Failed to get templates:', error.response?.data || error.message);
-      throw new Error('Failed to get message templates');
+      throw this._apiError(error, 'Failed to get message templates');
     }
   }
 }

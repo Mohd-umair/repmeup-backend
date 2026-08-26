@@ -20,13 +20,35 @@ const PlatformConnection = require('../models/PlatformConnection');
 const logger = require('../config/logger');
 const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
 
-const GRAPH_BASE = 'https://graph.facebook.com/v23.0';
+const { resolveTransport } = require('../integrations/whatsapp/whatsappTransport');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+//
+// Host and auth are resolved per connection by whatsappTransport, so template
+// calls reach Meta Graph or the Interakt proxy without changing any payload.
+// Do not reintroduce a hardcoded GRAPH_BASE here.
 
 function _token(connection) {
   return connection?.accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
 }
+
+/** Per-connection API host. Templates live on the WABA object, never the phone number. */
+function _base(connection) {
+  return resolveTransport(connection).baseUrl;
+}
+
+/**
+ * Meta Graph host, pinned regardless of provider.
+ *
+ * Used ONLY for the resumable-upload handshake (`/{app-id}/uploads`), which is an
+ * APP-level endpoint authenticated with our own Meta app credentials. Interakt's
+ * proxy is WABA-scoped (x-waba-id) and does not carry app-level routes — its
+ * equivalent is `/{PHONE_NUMBER_ID}/media_handle`, a different call with a
+ * different response shape. Sending the upload handshake through Interakt would
+ * 404. Header-example uploads therefore stay on Meta for every tenant; the
+ * resulting handle is accepted by both transports when creating the template.
+ */
+const META_GRAPH_BASE = 'https://graph.facebook.com/v23.0';
 
 function _wabaId(connection) {
   const pd = connection?.platformData || {};
@@ -40,10 +62,7 @@ function _wabaId(connection) {
 }
 
 function _authHeaders(connection) {
-  return {
-    Authorization: `Bearer ${_token(connection)}`,
-    'Content-Type': 'application/json'
-  };
+  return resolveTransport(connection).jsonHeaders();
 }
 
 /** Resolve the active WhatsApp PlatformConnection for an organisation. */
@@ -143,7 +162,7 @@ async function _fetchMessageTemplatesFromMeta(connection, wabaId, filters = {}) 
   });
   if (filters.category) params.append('category', filters.category);
   const response = await axios.get(
-    `${GRAPH_BASE}/${wabaId}/message_templates?${params.toString()}`,
+    `${_base(connection)}/${wabaId}/message_templates?${params.toString()}`,
     { headers: _authHeaders(connection) }
   );
   return response.data?.data || [];
@@ -231,7 +250,7 @@ async function uploadHeaderExampleAsset(organizationId, connectionId, file) {
     });
 
     const r1 = await axios.post(
-      `${GRAPH_BASE}/${appId}/uploads?${params.toString()}`,
+      `${META_GRAPH_BASE}/${appId}/uploads?${params.toString()}`,
       null,
       {
         headers: { Authorization: `Bearer ${_token(connection)}` },
@@ -250,7 +269,7 @@ async function uploadHeaderExampleAsset(organizationId, connectionId, file) {
 
   let handle;
   try {
-    const r2 = await axios.post(`${GRAPH_BASE}/${sessionId}`, buffer, {
+    const r2 = await axios.post(`${META_GRAPH_BASE}/${sessionId}`, buffer, {
       headers: {
         ..._authHeaderBinary(connection),
         file_offset: '0',
@@ -400,7 +419,7 @@ async function createTemplate(organizationId, userId, connectionId, payload) {
   let metaResponse;
   try {
     const response = await axios.post(
-      `${GRAPH_BASE}/${wabaId}/message_templates`,
+      `${_base(connection)}/${wabaId}/message_templates`,
       metaPayload,
       { headers: _authHeaders(connection) }
     );
@@ -412,7 +431,7 @@ async function createTemplate(organizationId, userId, connectionId, payload) {
       wabaId = recovered;
       try {
         const response = await axios.post(
-          `${GRAPH_BASE}/${wabaId}/message_templates`,
+          `${_base(connection)}/${wabaId}/message_templates`,
           metaPayload,
           { headers: _authHeaders(connection) }
         );
@@ -551,7 +570,7 @@ async function getTemplate(organizationId, connectionId, metaTemplateId) {
 
   try {
     const response = await axios.get(
-      `${GRAPH_BASE}/${metaTemplateId}?fields=id,name,status,category,language,quality_score,components,parameter_format,rejected_reason`,
+      `${_base(connection)}/${metaTemplateId}?fields=id,name,status,category,language,quality_score,components,parameter_format,rejected_reason`,
       { headers: _authHeaders(connection) }
     );
     return response.data;
@@ -572,7 +591,7 @@ async function deleteTemplate(organizationId, connectionId, metaTemplateId, temp
 
   const doDelete = async (id) =>
     axios.delete(
-      `${GRAPH_BASE}/${id}/message_templates?hsm_id=${metaTemplateId}&name=${encodeURIComponent(templateName)}`,
+      `${_base(connection)}/${id}/message_templates?hsm_id=${metaTemplateId}&name=${encodeURIComponent(templateName)}`,
       { headers: _authHeaders(connection) }
     );
 

@@ -128,6 +128,33 @@ exports.createComplaintFromInteraction = async (req, res, next) => {
   }
 };
 
+/**
+ * Log a complaint that did not come through a connected channel (walk-in, phone
+ * call, reported offline). Unlike createComplaintFromInteraction there is no
+ * existing chat, so the service creates the backing Interaction itself.
+ */
+exports.createManualComplaint = async (req, res, next) => {
+  try {
+    const { customerName, customerHandle, channel, issueSummary, priority } = req.body;
+    const result = await complaintOps.createManualComplaint(orgId(req), {
+      customerName,
+      customerHandle,
+      channel,
+      issueSummary,
+      priority
+    });
+    if (result.error === 'customer_name_required') {
+      return res.status(400).json({ success: false, error: 'Customer name is required' });
+    }
+    if (result.error === 'issue_summary_too_short') {
+      return res.status(400).json({ success: false, error: 'Describe the issue in at least 5 characters' });
+    }
+    res.status(201).json({ success: true, data: result.detail });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.listComplaints = async (req, res, next) => {
   try {
     const data = await complaintOps.listComplaints(orgId(req), req.query);

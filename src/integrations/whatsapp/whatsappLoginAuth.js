@@ -593,7 +593,15 @@ class WhatsAppLoginAuthService {
    *  - platformData.verifiedName
    *  - metadata.connectionType = 'whatsapp_embedded_signup'
    */
-  async saveConnection(userId, organizationId, accessToken, expiresIn, phoneNumberData) {
+  /**
+   * Persist a WhatsApp connection from the embedded-signup flow.
+   *
+   * @param {object} [options]
+   * @param {'meta'|'interakt'} [options.provider='meta'] which transport carries this
+   *        connection's API calls (see PlatformConnection.platformData.provider)
+   * @param {string} [options.connectionType='whatsapp_embedded_signup']
+   */
+  async saveConnection(userId, organizationId, accessToken, expiresIn, phoneNumberData, options = {}) {
     const {
       wabaId,
       wabaName,
@@ -605,6 +613,11 @@ class WhatsAppLoginAuthService {
       codeVerificationStatus
     } = phoneNumberData;
 
+    const provider = options.provider === 'interakt' ? 'interakt' : 'meta';
+    const connectionType =
+      options.connectionType ||
+      (provider === 'interakt' ? 'whatsapp_interakt_signup' : 'whatsapp_embedded_signup');
+
     const existing = await PlatformConnection.findOne({
       organization: organizationId,
       platform: 'whatsapp',
@@ -614,13 +627,20 @@ class WhatsAppLoginAuthService {
     if (existing) {
       console.log(`[WhatsAppLogin] Updating connection for ${displayPhoneNumber}`);
       existing.accessToken = accessToken;
-      existing.tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+      // Schema path is `tokenExpiry`. This used to write `tokenExpiresAt`, which is
+      // not a declared path and was therefore stripped on save — leaving WhatsApp
+      // connections with no expiry tracking at all while the 60-day token lapsed.
+      existing.tokenExpiry = new Date(Date.now() + expiresIn * 1000);
       existing.status = 'connected';
       existing.isActive = true;
       existing.lastSyncAt = new Date();
       existing.platformDisplayName = verifiedName || displayPhoneNumber;
       if (!existing.platformData) existing.platformData = {};
       existing.platformData.wabaId = wabaId;
+      // Write both keys: readers across the codebase check `wabaId` first and fall
+      // back to `businessAccountId`. Keeping them in sync stops the fallback chain
+      // from ever reaching the shared env WABA.
+      existing.platformData.businessAccountId = wabaId;
       existing.platformData.wabaName = wabaName;
       existing.platformData.businessId = businessId;
       existing.platformData.phoneNumberId = phoneNumberId;
@@ -628,12 +648,19 @@ class WhatsAppLoginAuthService {
       existing.platformData.verifiedName = verifiedName;
       existing.platformData.qualityRating = qualityRating;
       existing.platformData.codeVerificationStatus = codeVerificationStatus;
+      existing.platformData.provider = provider;
+      existing.markModified('platformData');
       if (!existing.metadata) existing.metadata = {};
-      existing.metadata.connectionType = 'whatsapp_embedded_signup';
+      existing.metadata.connectionType = connectionType;
       await existing.save();
       console.log(`[WhatsAppLogin] Updated connection for ${displayPhoneNumber}`);
       await this.registerPhoneNumber(phoneNumberId, accessToken);
-      await this.subscribeToWebhook(wabaId, accessToken);
+      // Interakt owns the webhook subscription for its numbers and sets
+      // override_callback_uri itself (interaktPartnerService.configureWebhook).
+      // Subscribing our own app here would fight it for the callback.
+      if (provider !== 'interakt') {
+        await this.subscribeToWebhook(wabaId, accessToken);
+      }
       await whatsappService.applyProfilePictureToConnection(existing).catch((e) =>
         console.warn('[WhatsAppLogin] applyProfilePictureToConnection:', e.message)
       );
@@ -652,29 +679,33 @@ class WhatsAppLoginAuthService {
 
     console.log(`[WhatsAppLogin] Creating new connection for ${displayPhoneNumber}`);
     const connection = await PlatformConnection.create({
-      user: userId,
       organization: organizationId,
       createdBy: userId,
       platform: 'whatsapp',
       platformUserId: phoneNumberId,
       platformDisplayName: verifiedName || displayPhoneNumber,
       accessToken,
-      tokenExpiresAt: new Date(Date.now() + expiresIn * 1000),
-      scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      // `tokenExpiry` / `scope` are the declared schema paths. The previous
+      // `tokenExpiresAt` / `scopes` (and a `user` field that does not exist on the
+      // schema at all) were silently dropped by Mongoose strict mode.
+      tokenExpiry: new Date(Date.now() + expiresIn * 1000),
+      scope: ['whatsapp_business_management', 'whatsapp_business_messaging'],
       status: 'connected',
       isActive: true,
       platformData: {
         wabaId,
+        businessAccountId: wabaId,   // keep both keys in sync — see update branch above
         wabaName,
         businessId,
         phoneNumberId,
         displayPhoneNumber,
         verifiedName,
         qualityRating,
-        codeVerificationStatus
+        codeVerificationStatus,
+        provider
       },
       metadata: {
-        connectionType: 'whatsapp_embedded_signup'
+        connectionType
       }
     });
 
@@ -683,7 +714,10 @@ class WhatsAppLoginAuthService {
 
     console.log(`[WhatsAppLogin] Connection saved for ${displayPhoneNumber}`);
     await this.registerPhoneNumber(phoneNumberId, accessToken);
-    await this.subscribeToWebhook(wabaId, accessToken);
+    // See note in the update branch above — Interakt manages its own subscription.
+    if (provider !== 'interakt') {
+      await this.subscribeToWebhook(wabaId, accessToken);
+    }
     await whatsappService.applyProfilePictureToConnection(connection).catch((e) =>
       console.warn('[WhatsAppLogin] applyProfilePictureToConnection:', e.message)
     );
