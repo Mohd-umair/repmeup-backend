@@ -576,6 +576,17 @@ class WhatsAppLoginAuthService {
         console.log(`[WhatsAppLogin] Phone ${phoneNumberId} is already registered — skipping`);
         return true;
       }
+      // Code 133005 = two-step verification PIN mismatch. This means the number is
+      // ALREADY registered with a PIN the customer set themselves, so our default
+      // '000000' is rejected. Re-registration is not needed in that case — the number
+      // is live — so this is informational, not a failure worth alarming about.
+      if (code === 133005 || /pin mismatch/i.test(msg || '')) {
+        console.log(
+          `[WhatsAppLogin] Phone ${phoneNumberId} already has two-step verification set ` +
+          '— skipping re-registration (number is already active).'
+        );
+        return true;
+      }
       console.warn(`[WhatsAppLogin] Could not register phone ${phoneNumberId}: ${msg}`);
       return false;
     }
@@ -699,7 +710,11 @@ class WhatsAppLoginAuthService {
       existing.platformData.verifiedName = verifiedName;
       existing.platformData.qualityRating = qualityRating;
       existing.platformData.codeVerificationStatus = codeVerificationStatus;
-      existing.platformData.provider = provider;
+      // Never downgrade a connection that is already live on Interakt back to 'meta'
+      // — a re-run of signup must not silently move a working account's transport.
+      if (provider === 'interakt' || !existing.platformData.provider) {
+        existing.platformData.provider = provider;
+      }
       existing.markModified('platformData');
       if (!existing.metadata) existing.metadata = {};
       existing.metadata.connectionType = connectionType;

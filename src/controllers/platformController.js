@@ -900,7 +900,12 @@ exports.completeWhatsAppEmbeddedSignup = async (req, res, next) => {
         qualityRating: phoneMeta.qualityRating || null,
         codeVerificationStatus: phoneMeta.codeVerificationStatus || null
       },
-      { provider: 'interakt', connectionType: 'whatsapp_interakt_signup' }
+      // Saved as 'meta' on purpose. The transport provider is only flipped to
+      // 'interakt' AFTER Interakt has actually accepted the WABA (below, or via the
+      // WABA_ONBOARDED webhook). Flipping it up front meant a failed onboarding left
+      // a previously-working Meta connection routed to a provider that rejects it —
+      // every Graph call then returned 400 and the account looked broken.
+      { provider: 'meta', connectionType: 'whatsapp_interakt_signup' }
     );
 
     // 5. Hand Interakt our callback URL, then nudge their onboarding.
@@ -942,6 +947,12 @@ exports.completeWhatsAppEmbeddedSignup = async (req, res, next) => {
     }
 
     connection.platformData.interaktSolutionId = interakt.solutionId();
+
+    // Flip the transport only when Interakt is genuinely ready for this WABA.
+    // Until then the connection keeps working against Meta directly.
+    if (interaktStatus.registered && interaktStatus.webhookConfigured) {
+      connection.platformData.provider = 'interakt';
+    }
     // Deliberately do NOT downgrade status here.
     //
     // Onboarding is asynchronous: Interakt confirms on our partner webhook with
