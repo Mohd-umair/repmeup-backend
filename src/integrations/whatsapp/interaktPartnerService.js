@@ -18,6 +18,7 @@
 
 const axios = require('axios');
 const logger = require('../../config/logger');
+const interaktLog = require('../../services/interaktLogService');
 
 const DEFAULT_PARTNER_BASE = 'https://api.interakt.ai/v1';
 const DEFAULT_PROXY_BASE = 'https://amped-express.interakt.ai/api';
@@ -85,7 +86,7 @@ function describeError(error) {
  * @param {string} [params.phoneNumber] E.164. Send ONLY when the WABA holds more
  *        than one number — Interakt's docs say to omit the field otherwise.
  */
-async function registerWaba({ wabaId, phoneNumber } = {}) {
+async function registerWaba({ wabaId, phoneNumber, organization = null, platformConnection = null } = {}) {
   if (!wabaId) throw new Error('registerWaba: wabaId is required.');
 
   const wabaInfo = {
@@ -101,16 +102,29 @@ async function registerWaba({ wabaId, phoneNumber } = {}) {
     object: 'tech_partner'
   };
 
+  const endpoint = `${partnerBase()}/organizations/tp-signup/`;
+  const startedAt = Date.now();
+
   try {
-    const res = await axios.post(`${partnerBase()}/organizations/tp-signup/`, body, {
+    const res = await axios.post(endpoint, body, {
       headers: { Authorization: isvToken(), 'Content-Type': 'application/json' },
       timeout: 20000
     });
     logger.info('[Interakt] WABA registered', { wabaId, success: res.data?.success });
+    await interaktLog.logOutbound({
+      action: 'tp_signup', success: true, organization, platformConnection,
+      wabaId, solutionId: wabaInfo.solution_id, endpoint,
+      request: body, response: res.data, startedAt
+    });
     return { success: res.data?.success !== false, data: res.data };
   } catch (error) {
     const message = describeError(error);
     logger.error('[Interakt] tp-signup failed', { wabaId, status: error?.response?.status, message });
+    await interaktLog.logOutbound({
+      action: 'tp_signup', success: false, organization, platformConnection,
+      wabaId, solutionId: wabaInfo.solution_id, endpoint,
+      request: body, error, startedAt
+    });
     const err = new Error(`Interakt registration failed: ${message}`);
     err.httpStatus = error?.response?.status;
     throw err;
@@ -135,17 +149,18 @@ async function registerWaba({ wabaId, phoneNumber } = {}) {
  * WABA-level call is used by default because it is what the onboarding doc
  * prescribes and it covers every number on the account.
  */
-async function configureWebhook({ wabaId, callbackUrl } = {}) {
+async function configureWebhook({ wabaId, callbackUrl, organization = null, platformConnection = null } = {}) {
   if (!wabaId) throw new Error('configureWebhook: wabaId is required.');
 
-  const url = `${proxyBase()}/${WEBHOOK_CONFIG_API_VERSION}/${wabaId}/subscribed_apps`;
+  const endpoint = `${proxyBase()}/${WEBHOOK_CONFIG_API_VERSION}/${wabaId}/subscribed_apps`;
   const body = {
     override_callback_uri: callbackUrl || webhookUrl(),
     verify_token: verifyToken()
   };
+  const startedAt = Date.now();
 
   try {
-    const res = await axios.post(url, body, {
+    const res = await axios.post(endpoint, body, {
       headers: {
         'x-access-token': isvToken(),
         'x-waba-id': String(wabaId),
@@ -154,10 +169,18 @@ async function configureWebhook({ wabaId, callbackUrl } = {}) {
       timeout: 20000
     });
     logger.info('[Interakt] Webhook configured for WABA', { wabaId, callbackUri: body.override_callback_uri });
+    await interaktLog.logOutbound({
+      action: 'configure_webhook', success: true, organization, platformConnection,
+      wabaId, endpoint, request: body, response: res.data, startedAt
+    });
     return { success: res.data?.success !== false, data: res.data };
   } catch (error) {
     const message = describeError(error);
     logger.error('[Interakt] Webhook configuration failed', { wabaId, status: error?.response?.status, message });
+    await interaktLog.logOutbound({
+      action: 'configure_webhook', success: false, organization, platformConnection,
+      wabaId, endpoint, request: body, error, startedAt
+    });
     const err = new Error(`Interakt webhook configuration failed: ${message}`);
     err.httpStatus = error?.response?.status;
     throw err;
@@ -207,20 +230,31 @@ async function configureNumberWebhook({ phoneNumberId, wabaId, callbackUrl } = {
  * Detach a number from our Interakt solution. Best-effort by design: it runs on
  * the disconnect path, where a remote failure must not block the local cleanup.
  */
-async function unsubscribe({ wabaId, phoneNumberId } = {}) {
+async function unsubscribe({ wabaId, phoneNumberId, organization = null } = {}) {
   if (!wabaId) throw new Error('unsubscribe: wabaId is required.');
 
+  const endpoint = `${partnerBase()}/organizations/tp-unsubscribe/`;
+  const body = { waba_id: String(wabaId), phone_number_id: phoneNumberId ? String(phoneNumberId) : undefined };
+  const startedAt = Date.now();
+
   try {
-    const res = await axios.post(
-      `${partnerBase()}/organizations/tp-unsubscribe/`,
-      { waba_id: String(wabaId), phone_number_id: phoneNumberId ? String(phoneNumberId) : undefined },
-      { headers: { Authorization: isvToken(), 'Content-Type': 'application/json' }, timeout: 15000 }
-    );
+    const res = await axios.post(endpoint, body, {
+      headers: { Authorization: isvToken(), 'Content-Type': 'application/json' },
+      timeout: 15000
+    });
     logger.info('[Interakt] Unsubscribed', { wabaId, phoneNumberId, message: res.data?.message });
+    await interaktLog.logOutbound({
+      action: 'unsubscribe', success: true, organization,
+      wabaId, phoneNumberId, endpoint, request: body, response: res.data, startedAt
+    });
     return { success: true, data: res.data };
   } catch (error) {
     const message = describeError(error);
     logger.warn('[Interakt] Unsubscribe failed (continuing with local disconnect)', { wabaId, phoneNumberId, message });
+    await interaktLog.logOutbound({
+      action: 'unsubscribe', success: false, organization,
+      wabaId, phoneNumberId, endpoint, request: body, error, startedAt
+    });
     return { success: false, error: message };
   }
 }

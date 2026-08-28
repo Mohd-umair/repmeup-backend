@@ -128,7 +128,7 @@ async function disconnect(organizationId, connectionId) {
     // clears the override_callback_uri pointing at us.
     const interakt = require('../integrations/whatsapp/interaktPartnerService');
     if (wabaId) {
-      await interakt.unsubscribe({ wabaId, phoneNumberId }).catch(err => {
+      await interakt.unsubscribe({ wabaId, phoneNumberId, organization: connection.organization }).catch(err => {
         logger.warn('[whatsappConnectionService] Interakt unsubscribe failed (non-fatal)', { error: err.message });
       });
     }

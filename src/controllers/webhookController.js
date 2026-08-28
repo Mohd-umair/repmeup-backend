@@ -733,11 +733,67 @@ exports.handleInteraktWebhook = async (req, res) => {
 
   logger.info('[Interakt Webhook] Event received', { event, wabaId, phoneNumberId });
 
+  // Onboarding failure. Observed shape (note the doubly-nested error):
+  //   { event: 'WABA_ONBOARDING_FAILED', waba_id, phone_number_id,
+  //     error: { error: { message, type, code, fbtrace_id } } }
+  if (event === 'WABA_ONBOARDING_FAILED') {
+    const metaError = body.error?.error || body.error || {};
+    const reason = metaError.message || 'Interakt could not complete onboarding for this WABA.';
+    logger.error('[Interakt Webhook] Onboarding failed', {
+      wabaId, phoneNumberId, code: metaError.code, reason
+    });
+
+    const interaktLog = require('../services/interaktLogService');
+    await interaktLog.logInbound({
+      event, success: false, reason, wabaId, phoneNumberId,
+      errorCode: metaError.code, payload: body
+    });
+
+    try {
+      const PlatformConnection = require('../models/PlatformConnection');
+      const or = [];
+      if (phoneNumberId) {
+        or.push({ 'platformData.phoneNumberId': String(phoneNumberId) });
+        or.push({ platformUserId: String(phoneNumberId) });
+      }
+      if (wabaId) {
+        or.push({ 'platformData.wabaId': String(wabaId) });
+        or.push({ 'platformData.businessAccountId': String(wabaId) });
+      }
+      // Only the Interakt-transported rows — a pre-existing Meta-direct connection on
+      // the same WABA is still perfectly healthy and must not be marked failed.
+      const connections = await PlatformConnection.find({
+        platform: 'whatsapp',
+        'platformData.provider': 'interakt',
+        $or: or
+      });
+
+      for (const connection of connections) {
+        if (!connection.platformData) connection.platformData = {};
+        connection.platformData.interaktLastError = String(reason).slice(0, 500);
+        connection.markModified('platformData');
+        connection.status = 'error';
+        await connection.save();
+      }
+      logger.info('[Interakt Webhook] Marked connections failed', { count: connections.length, wabaId });
+    } catch (err) {
+      logger.error('[Interakt Webhook] Could not apply onboarding failure', { error: err.message, wabaId });
+    }
+    return;
+  }
+
   if (event !== 'WABA_ONBOARDED') {
-    // Undocumented event (likely a failure variant). Log the whole payload minus the
-    // token so we can implement it properly once we have seen a real one.
+    // Still-unseen event type. Log the payload (minus the token) rather than guessing
+    // at semantics, so it can be implemented once a real one has been observed.
     const { isv_name_token, ...safe } = body;
     logger.warn('[Interakt Webhook] Unhandled event type — logging payload for follow-up', { payload: safe });
+    // Recorded as failed so it surfaces in the super-admin panel rather than only
+    // existing in pm2 logs — that is how WABA_ONBOARDING_FAILED was discovered.
+    const interaktLogUnknown = require('../services/interaktLogService');
+    await interaktLogUnknown.logInbound({
+      event, success: false, reason: `Unhandled Interakt event: ${event}`,
+      wabaId, phoneNumberId, payload: body
+    });
     return;
   }
 
@@ -783,6 +839,14 @@ exports.handleInteraktWebhook = async (req, res) => {
     logger.info('[Interakt Webhook] Connection marked onboarded', {
       connectionId: connection._id.toString(),
       organization: connection.organization?.toString()
+    });
+
+    const interaktLogOk = require('../services/interaktLogService');
+    await interaktLogOk.logInbound({
+      event, success: true, wabaId, phoneNumberId,
+      organization: connection.organization || null,
+      platformConnection: connection._id,
+      payload: body
     });
   } catch (err) {
     logger.error('[Interakt Webhook] Failed to apply WABA_ONBOARDED', { error: err.message, wabaId, phoneNumberId });
