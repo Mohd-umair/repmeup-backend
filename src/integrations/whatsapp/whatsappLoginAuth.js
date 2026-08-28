@@ -155,7 +155,58 @@ class WhatsAppLoginAuthService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Exchange authorization code for a short-lived user access token.
+   * Exchange an Embedded Signup code obtained via the Facebook JS SDK.
+   *
+   * CRITICAL: this must NOT send `redirect_uri`.
+   *
+   * `FB.login()` with `response_type: 'code'` issues the code without any redirect
+   * URI, so including one makes Meta reject the exchange with
+   *   code 100 / subcode 36008 — "Error validating verification code. Please make
+   *   sure your redirect_uri is identical to the one you used in the OAuth dialog"
+   * The redirect-flow variant below DOES need it, which is exactly why these are two
+   * separate methods — do not merge them.
+   *
+   * The token returned here is a business-integration system user token: it is
+   * already long-lived and carries no `expires_in`, so it must NOT be put through
+   * the fb_exchange_token swap either.
+   *
+   * @returns {Promise<{accessToken: string, expiresIn: number|null}>}
+   *          expiresIn is null when Meta issues a non-expiring token.
+   */
+  async exchangeCodeFromSdk(code) {
+    const appId = process.env.META_APP_ID;
+    const appSecret = process.env.META_APP_SECRET;
+    if (!appId || !appSecret) throw new Error('META_APP_ID or META_APP_SECRET not configured.');
+
+    try {
+      const response = await axios.get(this.tokenURL, {
+        params: { client_id: appId, client_secret: appSecret, code },
+        timeout: 10000
+      });
+
+      const accessToken = response.data?.access_token;
+      if (!accessToken) throw new Error('Meta returned no access_token for the signup code.');
+
+      const expiresIn = response.data?.expires_in ?? null;
+      console.log(
+        `[WhatsAppLogin] Embedded Signup token obtained (${expiresIn ? expiresIn + 's' : 'non-expiring'})`
+      );
+      return { accessToken, expiresIn };
+    } catch (error) {
+      const meta = error.response?.data?.error;
+      console.error('[WhatsAppLogin] Embedded Signup token exchange error:', error.response?.data || error.message);
+      const err = new Error(
+        meta?.message || 'Failed to exchange the WhatsApp signup code for a token'
+      );
+      err.metaCode = meta?.code;
+      err.metaSubcode = meta?.error_subcode;
+      throw err;
+    }
+  }
+
+  /**
+   * Exchange a code from the REDIRECT flow (Meta bounces back to WHATSAPP_CALLBACK_URL).
+   * This one MUST send redirect_uri — see exchangeCodeFromSdk above for why they differ.
    */
   async exchangeCode(code) {
     const appId = process.env.META_APP_ID;

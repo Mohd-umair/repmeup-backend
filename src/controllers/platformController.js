@@ -852,9 +852,13 @@ exports.completeWhatsAppEmbeddedSignup = async (req, res, next) => {
     const userId = req.user._id.toString();
     const organizationId = req.user.organization._id.toString();
 
-    // 1. Code -> short-lived -> long-lived token (reuses the existing redirect-flow helpers).
-    const shortToken = await whatsappLoginAuth.exchangeCode(code);
-    const { accessToken, expiresIn } = await whatsappLoginAuth.getLongLivedToken(shortToken);
+    // 1. Exchange the SDK code.
+    //
+    // Uses exchangeCodeFromSdk, NOT exchangeCode: FB.login() issues the code with no
+    // redirect_uri, so sending one fails with code 100 / subcode 36008. The token that
+    // comes back is a business-integration system user token — already long-lived, so
+    // there is no fb_exchange_token step here either.
+    const { accessToken, expiresIn } = await whatsappLoginAuth.exchangeCodeFromSdk(code);
 
     // 2. Enrich the number for display. Non-fatal: the SDK already gave us the ids we
     //    actually need, so a failure here costs metadata, not the connection.
@@ -885,7 +889,9 @@ exports.completeWhatsAppEmbeddedSignup = async (req, res, next) => {
       userId,
       organizationId,
       accessToken,
-      expiresIn,
+      // Non-expiring system user token -> park the expiry far out rather than writing
+      // an immediate/NaN date that would make the connection look already-lapsed.
+      expiresIn ?? 60 * 60 * 24 * 365 * 5,
       {
         wabaId,
         phoneNumberId,
