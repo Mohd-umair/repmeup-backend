@@ -19,11 +19,19 @@ const ticketController = require('../../controllers/ticketController');
 const superAdminFaqController = require('../../controllers/superAdminFaqController');
 const inspirationAdminController = require('../../controllers/inspirationAdminController');
 const featureController = require('../../controllers/featureController');
+const interaktAdminController = require('../../controllers/interaktAdminController');
 const multer = require('multer');
 
 // ── Authentication gates ─────────────────────────────────────────────────────
 router.use(protectAdmin);            // 1. Verify admin JWT (SUPER_ADMIN_JWT_SECRET)
 router.use(requireSuperAdminAccess); // 2. Role double-check on loaded user doc
+
+// Interakt integration — onboarding logs + every tenant's connected accounts.
+// /logs/:id must stay below /logs/stats-free paths; ordered specific-first here.
+router.get('/interakt/stats', interaktAdminController.getStats);
+router.get('/interakt/logs', interaktAdminController.listLogs);
+router.get('/interakt/logs/:id', interaktAdminController.getLog);
+router.get('/connections', interaktAdminController.listConnections);
 
 // Groups & Permissions
 router.get('/permissions/meta', gpController.getPermissionMeta);
