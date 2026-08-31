@@ -717,7 +717,29 @@ async function handleInstagramMessage(payload, organizationId) {
           return null;
         }
 
-        const parentCommentId = comment.parent_id != null && comment.parent_id !== '' ? String(comment.parent_id) : null;
+        let parentCommentId = comment.parent_id != null && comment.parent_id !== '' ? String(comment.parent_id) : null;
+
+        // Collab (co-authored) posts: Instagram/Meta shares one comment thread across
+        // both collaborating accounts, and sometimes reports a *top-level* comment on
+        // our side with a `parent_id` that only exists in the other collaborator's
+        // copy of the thread. If we blindly trust `parent_id`, that comment gets
+        // nested under a parent we never received — it is excluded from the top-level
+        // inbox list (parentId must be null there) and never surfaces anywhere.
+        // Guard: only treat it as a reply if the parent interaction actually exists
+        // in our org; otherwise fall back to a top-level comment so it's still visible.
+        if (parentCommentId) {
+          const parentExists = await Interaction.exists({
+            platformId: parentCommentId,
+            organization: organizationId
+          });
+          if (!parentExists) {
+            logger.info('[instagramWebhookService] parent_id set but parent not found — treating as top-level comment (likely collab post)', {
+              commentId: comment.id,
+              parentCommentId
+            });
+            parentCommentId = null;
+          }
+        }
         const isReply = !!parentCommentId;
 
         const authorId = comment.from?.id;

@@ -61,6 +61,10 @@ const appointmentReminderQueue = new Queue('appointment-reminder', queueOptions)
 // Review request delivery — send WhatsApp flows with delay/reminder support.
 const reviewRequestQueue = new Queue('review-request', queueOptions);
 
+// Payment webhook fulfilment — processes provider events after signature verification.
+// Kept separate from webhook-processing to allow independent concurrency tuning.
+const paymentWebhookQueue = new Queue('payment-webhook', queueOptions);
+
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
 // Kept in place so existing Bull Board dashboards and imports keep working.
@@ -102,7 +106,8 @@ const queues = [
   demoExpiryQueue,
   appointmentReminderQueue,
   publicAuditQueue,
-  reviewRequestQueue
+  reviewRequestQueue,
+  paymentWebhookQueue
 ];
 
 queues.forEach(queue => {
@@ -153,6 +158,7 @@ module.exports = {
   appointmentReminderQueue,
   publicAuditQueue,
   reviewRequestQueue,
+  paymentWebhookQueue,
   queueConfig,
   // Helper to get the queue (called from services)
   getReviewRequestQueue: () => reviewRequestQueue

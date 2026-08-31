@@ -19,11 +19,12 @@ const {
   kbCrawlQueue,
   demoExpiryQueue,
   appointmentReminderQueue,
-  publicAuditQueue
+  publicAuditQueue,
+  paymentWebhookQueue
 } = require('./config/queue');
+const processPaymentWebhook = require('./jobs/processPaymentWebhook');
 const processWebhook = require('./jobs/processWebhook');
 const processAI = require('./jobs/processAI');
-const processAutoReply = require('./jobs/processAutoReply');
 const processScheduledPublish = require('./jobs/processScheduledPublish');
 const processBrandAnalysis = require('./jobs/processBrandAnalysis');
 const processEmailWebhook = require('./jobs/processEmailWebhook');
@@ -249,6 +250,14 @@ async function startWorker() {
     });
     logger.info('[Worker] review-request processor started', { concurrency: 2 });
 
+    // Payment webhook queue — confirmation DMs and (Phase 2+) provider event fulfilment
+    const PAYMENT_WEBHOOK_CONCURRENCY = parseInt(process.env.PAYMENT_WEBHOOK_CONCURRENCY) || 5;
+    paymentWebhookQueue.process(PAYMENT_WEBHOOK_CONCURRENCY, async (job) => {
+      logger.debug('[Worker:payment-webhook] picked up job', { jobId: job.id, type: job.data?.type });
+      return await processPaymentWebhook(job);
+    });
+    logger.info('[Worker] payment-webhook processor started', { concurrency: PAYMENT_WEBHOOK_CONCURRENCY });
+
     if (campaignConfig.enableInCoreWorker) {
       await registerCampaignWorkers();
       logger.info('[Worker] campaign queues registered in core worker (set ENABLE_CAMPAIGN_IN_CORE_WORKER=false + run campaignWorker.js in production)');
@@ -284,7 +293,8 @@ async function startWorker() {
           campaignInboxQueue.close(),
           flowTickQueue.close(),
           publicAuditQueue.close(),
-          reviewRequestQueue.close()
+          reviewRequestQueue.close(),
+          paymentWebhookQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

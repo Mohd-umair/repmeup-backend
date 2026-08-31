@@ -130,6 +130,7 @@ const { checkConnectionLimit } = require('../middlewares/platformLimitMiddleware
 
 // LinkedIn OAuth routes
 const linkedinAuth = require('../integrations/linkedin/linkedinAuth');
+const { isComingSoonPlatform, COMING_SOON_PLATFORM_MESSAGE } = require('../constants/platformAvailability');
 
 // Google OAuth for authentication (login/signup)
 const googleAuthService = require('../integrations/google/googleAuthService');
@@ -646,6 +647,14 @@ router.get('/instagram-login/callback', async (req, res) => {
 // LinkedIn OAuth
 router.get('/linkedin', protect, async (req, res, next) => {
   try {
+    if (isComingSoonPlatform('linkedin')) {
+      return res.status(403).json({
+        success: false,
+        error: COMING_SOON_PLATFORM_MESSAGE,
+        code: 'PLATFORM_COMING_SOON'
+      });
+    }
+
     const state = linkedinAuth.generateState(
       String(req.user._id),
       String(req.user.organization?._id || req.user.organization)

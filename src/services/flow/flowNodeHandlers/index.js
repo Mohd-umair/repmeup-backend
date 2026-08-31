@@ -1117,7 +1117,70 @@ async function handleAction(node, ctx) {
         nextNodeId: pickEdge(ctx.edges)?.target
       };
     }
-    case 'action.assign_bucket': {
+    case 'action.payment.request': {
+      // Create or reuse a payment link for the open order in this conversation.
+      // Amount is resolved from the CommerceOrder — never from flow config.
+      const conversationalPayments = require('../../payments/conversationalPaymentOrchestrator');
+      const result = await conversationalPayments.handlePaymentIntent({
+        intentType: 'payment_request',
+        organizationId,
+        contactId: interaction?.contact ? String(interaction.contact) : null,
+        interactionId: interaction?._id ? String(interaction._id) : null,
+        channel: interaction?.platform || config.channel || 'manual',
+        orderId: enrollment?.variables?.orderId || null,
+        createdBy: 'system'
+      });
+
+      if (result.action === 'payment_link_ready') {
+        const msg = conversationalPayments.buildPayNowMessage({
+          paymentUrl: result.payment.shortUrl || result.payment.paymentUrl,
+          orderRef: result.order?.ref || '—',
+          amount: result.payment.amount,
+          currency: result.payment.currency
+        });
+        await sendTextForInteraction(interaction, organizationId, msg).catch((err) =>
+          logger.warn('[FlowHandler] payment.request send failed', { error: err.message })
+        );
+        return {
+          status: 'continue',
+          variables: {
+            paymentId: String(result.payment._id),
+            paymentUrl: result.payment.shortUrl || result.payment.paymentUrl,
+            paymentStatus: result.payment.status
+          },
+          nextNodeId: pickEdge(ctx.edges, 'sent')?.target || pickEdge(ctx.edges)?.target
+        };
+      }
+      logger.info('[FlowHandler] payment.request: no link created', { action: result.action, reason: result.reason });
+      return {
+        status: 'continue',
+        variables: { paymentId: null, paymentUrl: null, paymentStatus: result.action },
+        nextNodeId: pickEdge(ctx.edges, result.action)?.target || pickEdge(ctx.edges)?.target
+      };
+    }
+    case 'action.payment.send_reminder': {
+      // Send reminder only if active payment exists and is still unpaid.
+      const paymentId = enrollment?.variables?.paymentId;
+      if (!paymentId) {
+        logger.info('[FlowHandler] payment.send_reminder: no paymentId in variables — skipping');
+        return { status: 'continue', nextNodeId: pickEdge(ctx.edges)?.target };
+      }
+      const Payment = require('../../../models/Payment');
+      const payment = await Payment.findOne({ _id: paymentId, organization: organizationId })
+        .select('status shortUrl paymentUrl amount currency').lean();
+      if (!payment || !['created', 'pending'].includes(payment.status)) {
+        logger.info('[FlowHandler] payment.send_reminder: payment not active — skipping', {
+          paymentId,
+          status: payment?.status
+        });
+        return { status: 'continue', nextNodeId: pickEdge(ctx.edges, 'already_paid')?.target || pickEdge(ctx.edges)?.target };
+      }
+      const reminderText = config.message || `Hi! Just a reminder — your payment link is still active: ${payment.shortUrl || payment.paymentUrl}`;
+      await sendTextForInteraction(interaction, organizationId, reminderText).catch((err) =>
+        logger.warn('[FlowHandler] payment.send_reminder send failed', { error: err.message })
+      );
+      return { status: 'continue', nextNodeId: pickEdge(ctx.edges, 'sent')?.target || pickEdge(ctx.edges)?.target };
+    }
       if (config.bucketId && interaction?._id) {
         const Interaction = require('../../../models/Interaction');
         await Interaction.findByIdAndUpdate(interaction._id, { intentBucket: config.bucketId });
@@ -1289,6 +1352,24 @@ async function handleCondition(node, ctx) {
       // True (yes branch) while under the per-contact daily cap; increments the
       // counter only when allowed so the gate is idempotent per pass.
       match = await checkRateLimit(ctx, config);
+      break;
+    }
+    case 'condition.payment.status': {
+      // Check the payment status stored in flow variables against a configured status.
+      const paymentId = ctx.enrollment?.variables?.paymentId;
+      const targetStatus = config.status || 'paid';
+      if (!paymentId) {
+        match = false;
+      } else {
+        try {
+          const Payment = require('../../../models/Payment');
+          const p = await Payment.findOne({ _id: paymentId, organization: ctx.organizationId })
+            .select('status').lean();
+          match = p ? p.status === targetStatus : false;
+        } catch {
+          match = false;
+        }
+      }
       break;
     }
     default:

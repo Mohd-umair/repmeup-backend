@@ -10,6 +10,7 @@ const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
 const platformSyncService = require('../services/platformSyncService');
 const whatsappConnectionService = require('../services/whatsappConnectionService');
+const { isComingSoonPlatform, COMING_SOON_PLATFORM_MESSAGE } = require('../constants/platformAvailability');
 
 /**
  * Lightweight public SPA URL so the OAuth popup can postMessage to opener and window.close().
@@ -28,6 +29,14 @@ function buildWhatsAppOAuthCallbackUrl(frontendUrl, queryObj) {
 exports.initiateGoogleConnection = async (req, res, next) => {
   try {
     const { type = 'reviews' } = req.query; // 'reviews' or 'youtube'
+
+    if (type !== 'youtube' && isComingSoonPlatform('google')) {
+      return res.status(403).json({
+        success: false,
+        error: COMING_SOON_PLATFORM_MESSAGE,
+        code: 'PLATFORM_COMING_SOON'
+      });
+    }
     
     // Generate state token for security
     const state = crypto.randomBytes(32).toString('hex');
