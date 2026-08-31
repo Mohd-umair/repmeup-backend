@@ -99,6 +99,10 @@ const FEATURE_KEYS = Object.freeze({
   CONTACTS_MAX: 'contacts.max',
   CHANNELS_ALLOWED: 'channels.allowed',
 
+  // ── Payment gateways (org-owned commerce checkout) ───────────────────────
+  PAYMENTS_ENABLED: 'commerce.payments.enabled',
+  PAYMENTS_GATEWAY_MAX: 'commerce.payments.gateways.max',
+
   // ── Account-level / general ───────────────────────────────────────────────
   BRANDING_REMOVED: 'branding.removed',
   RBAC_LEVEL: 'rbac.level',
@@ -717,6 +721,31 @@ const CATALOG = [
     metering: 'NAC',
     enforcement: 'manual',
     sortOrder: 30
+  },
+
+  // ── Payment gateways ──────────────────────────────────────────────────────
+  {
+    key: FEATURE_KEYS.PAYMENTS_ENABLED,
+    label: 'Payment gateways (org-owned commerce checkout)',
+    description: 'Allow organizations to connect their own payment gateway for collecting customer payments.',
+    category: 'commerce',
+    kind: 'boolean',
+    defaultValue: false,
+    metering: 'NAC',
+    enforcement: 'code',
+    sortOrder: 55
+  },
+  {
+    key: FEATURE_KEYS.PAYMENTS_GATEWAY_MAX,
+    label: 'Connected payment gateways',
+    description: 'Maximum number of payment gateway integrations per organization.',
+    category: 'commerce',
+    kind: 'limit',
+    defaultValue: 0,
+    unit: 'count',
+    metering: 'AC',
+    enforcement: 'code',
+    sortOrder: 56
   }
 ];
 

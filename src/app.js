@@ -45,7 +45,11 @@ app.use(cors({
 // Razorpay webhook — MUST be registered before express.json() to receive raw Buffer for HMAC verification
 app.use('/api/razorpay', require('./routes/razorpay'));
 
+// Razorpay commerce payment webhook (per-org payment events) — raw body required
+app.use('/api/webhooks/payments/razorpay', require('./routes/paymentWebhookRazorpay'));
+
 // Body parser — capture raw JSON for Meta WhatsApp webhook signature (HMAC over exact bytes)
+// Also capture for product-payment and org payment gateway webhooks
 app.use(
   express.json({
     limit: '10mb',
@@ -53,6 +57,10 @@ app.use(
       const path = req.originalUrl || req.url || '';
       // Mounted at /api/webhooks/whatsapp and /api/v1/webhooks/whatsapp
       if (path.includes('/webhooks/whatsapp')) {
+        req.rawBody = buf;
+      }
+      // Product payment legacy webhook and new per-org gateway webhooks
+      if (path.includes('/webhooks/product-payment') || path.includes('/webhooks/payments/')) {
         req.rawBody = buf;
       }
     }
@@ -237,6 +245,9 @@ const routeMap = [
   ['/reports/number',       './routes/numberReports'],
   ['/commerce-orders',      './routes/commerceOrders'],
   ['/appointments',         './routes/appointments'],
+  ['/payment-gateways',     './routes/paymentGateways'],
+  ['/payments',             './routes/payments'],
+  ['/payment-analytics',   './routes/paymentAnalytics'],
   // ['/labels',      './routes/labels'],
   // ['/templates',   './routes/templates'],
 ];

@@ -302,6 +302,8 @@ async function getOrderDetail(orgId, orderId) {
       canUpdateStatus: (VALID_STATUS_TRANSITIONS[order.status] || []).length > 0,
       nextStatuses: VALID_STATUS_TRANSITIONS[order.status] || []
     },
+    totalAmount: order.totalAmount || 0,
+    currency: order.currency || 'INR',
     chatDeepLink: chatDeepLink(interactionId)
   };
 }

@@ -654,6 +654,84 @@ const FLOW_NODE_CATALOG = [
     description: 'Pick one outgoing connection at random (useful for spreading message variants).',
     defaultConfig: {},
     fields: []
+  }),
+
+  // ── Payment triggers ──────────────────────────────────────────────────────
+  node('trigger.payment.created', 'trigger', 'Payment link created', CHANNELS, {
+    icon: 'fas fa-money-bill-wave',
+    description: 'Triggers when a payment request link is generated for an order.',
+    defaultConfig: {},
+    fields: []
+  }),
+  node('trigger.payment.paid', 'trigger', 'Payment received', CHANNELS, {
+    icon: 'fas fa-circle-check',
+    description: 'Triggers when a customer completes payment via any connected gateway.',
+    defaultConfig: {},
+    fields: []
+  }),
+  node('trigger.payment.failed', 'trigger', 'Payment failed', CHANNELS, {
+    icon: 'fas fa-circle-xmark',
+    description: 'Triggers when a payment attempt fails.',
+    defaultConfig: {},
+    fields: []
+  }),
+  node('trigger.payment.expired', 'trigger', 'Payment link expired', CHANNELS, {
+    icon: 'fas fa-hourglass-end',
+    description: 'Triggers when a payment link expires without payment.',
+    defaultConfig: {},
+    fields: []
+  }),
+
+  // ── Payment conditions ────────────────────────────────────────────────────
+  node('condition.payment.status', 'condition', 'Payment status is', CHANNELS, {
+    icon: 'fas fa-credit-card',
+    description: 'Branch based on the current payment status for the order.',
+    defaultConfig: { status: 'paid' },
+    fields: [
+      {
+        key: 'status',
+        type: 'select',
+        label: 'Status',
+        options: ['created', 'pending', 'authorized', 'paid', 'failed', 'expired', 'cancelled', 'partially_refunded', 'refunded'],
+        default: 'paid'
+      }
+    ]
+  }),
+
+  // ── Payment actions ───────────────────────────────────────────────────────
+  node('action.payment.request', 'action', 'Request payment', CHANNELS, {
+    icon: 'fas fa-paper-plane',
+    description: 'Creates a payment link for the open order and sends it on the conversation channel. Amount is resolved from the order — never set manually here.',
+    defaultConfig: { channel: 'auto', description: '' },
+    fields: [
+      {
+        key: 'channel',
+        type: 'select',
+        label: 'Send on',
+        options: ['auto', 'whatsapp', 'instagram'],
+        default: 'auto'
+      },
+      {
+        key: 'description',
+        type: 'string',
+        label: 'Payment note',
+        hint: 'Shown to customer on payment page',
+        default: ''
+      }
+    ]
+  }),
+  node('action.payment.send_reminder', 'action', 'Send payment reminder', CHANNELS, {
+    icon: 'fas fa-bell',
+    description: 'Sends a friendly payment reminder if the link is still unpaid. Idempotent — will not send if already paid.',
+    defaultConfig: { message: 'Hi! Just a reminder that your payment link is still active. Please complete payment at your convenience.' },
+    fields: [
+      {
+        key: 'message',
+        type: 'textarea',
+        label: 'Reminder message',
+        default: 'Hi! Just a reminder that your payment link is still active. Please complete payment at your convenience.'
+      }
+    ]
   })
 ];
 

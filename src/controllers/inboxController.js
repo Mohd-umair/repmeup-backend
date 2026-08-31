@@ -2532,3 +2532,61 @@ exports.saveSummary = async (req, res, next) => {
     next(error);
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversational Payment Intent
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/inbox/:id/payment-intent
+ *
+ * Resolves a payment link for an open order attached to a conversation.
+ * The backend resolves order, amount, and currency from DB — the client
+ * never supplies amount values.
+ *
+ * Body:
+ *   { intentType: 'payment_request'|'purchase_intent'|'payment_status', orderId?: string }
+ */
+exports.handlePaymentIntent = async (req, res) => {
+  try {
+    const organizationId = String(req.user.organization._id || req.user.organization);
+    const { intentType = 'payment_request', orderId } = req.body || {};
+
+    const interaction = await Interaction.findOne({
+      _id: req.params.id,
+      organization: organizationId
+    }).select('organization contact channel').lean();
+
+    if (!interaction) {
+      return res.status(404).json({ success: false, error: 'Interaction not found' });
+    }
+
+    const conversationalPayments = require('../services/payments/conversationalPaymentOrchestrator');
+
+    const result = await conversationalPayments.handlePaymentIntent({
+      intentType,
+      organizationId,
+      contactId: interaction.contact ? String(interaction.contact) : null,
+      interactionId: String(interaction._id),
+      channel: interaction.channel || 'manual',
+      orderId: orderId || undefined,
+      createdBy: 'agent'
+    });
+
+    // Build channel-safe message if a link was created/reused
+    if (result.action === 'payment_link_ready') {
+      const msg = conversationalPayments.buildPayNowMessage({
+        paymentUrl: result.payment.shortUrl || result.payment.paymentUrl,
+        orderRef: result.order?.ref || '—',
+        amount: result.payment.amount,
+        currency: result.payment.currency
+      });
+      return res.json({ success: true, result, message: msg });
+    }
+
+    return res.json({ success: true, result });
+  } catch (err) {
+    logger.error('[inboxController] handlePaymentIntent error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to process payment intent' });
+  }
+};

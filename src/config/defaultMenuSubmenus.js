@@ -148,6 +148,22 @@ const DEFAULT_SUBMENU_PACKS = [
         order: 7,
         requiredRoles: ['admin', 'manager'],
         requiredPermissions: ['settings.read']
+      },
+      {
+        label: 'Payment Gateways',
+        icon: 'fas fa-credit-card',
+        route: '/app/settings/payment-gateways',
+        order: 8,
+        requiredRoles: ['admin', 'manager'],
+        requiredPermissions: ['settings.read']
+      },
+      {
+        label: 'Payment Analytics',
+        icon: 'fas fa-chart-bar',
+        route: '/app/payments/analytics',
+        order: 9,
+        requiredRoles: ['admin', 'manager'],
+        requiredPermissions: ['settings.read']
       }
     ]
   }

@@ -120,6 +120,9 @@ router.put('/:id/summary', inboxController.saveSummary);
 // Generate AI-assisted replies (short, detailed, sales)
 router.post('/:id/ai-assist', requireSuggestions, inboxController.aiAssist);
 
+// Conversational payment intent — safely resolve payment link for a conversation
+router.post('/:id/payment-intent', protect, inboxController.handlePaymentIntent);
+
 // Regenerate a single AI reply type
 router.post('/:id/ai-assist/regenerate', requireSuggestions, inboxController.aiAssistRegenerate);
 
