@@ -199,9 +199,11 @@ async function runFullSync(connection) {
     stats.errors++;
   }
 
-  // Stamp last sync time
+  // Stamp last sync time (lastSyncAt drives the Connected Accounts UI)
+  const syncedAt = new Date();
   await PlatformConnection.findByIdAndUpdate(connId, {
-    'metadata.lastFullSyncAt': new Date(),
+    lastSyncAt: syncedAt,
+    'metadata.lastFullSyncAt': syncedAt,
     'metadata.lastSyncStats': stats
   });
 
