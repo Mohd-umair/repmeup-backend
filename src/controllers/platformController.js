@@ -437,6 +437,10 @@ exports.disconnectPlatform = async (req, res, next) => {
     const platformType = connection.platform; // Store before saving
     connection.isActive = false;
     connection.status = 'disconnected';
+    connection.disconnectedAt = new Date();
+    if (!connection.createdBy) {
+      connection.createdBy = req.user._id;
+    }
     await connection.save();
 
     // For Instagram Login connections, revoke the Meta webhook subscription so
@@ -521,9 +525,10 @@ exports.syncPlatform = async (req, res, next) => {
       });
     }
 
-    const { count, autoReplyQueued, linkedInSyncHint, aiSkippedBackfill = 0 } = syncResult;
-    const message =
-      count > 0
+    const { count, autoReplyQueued, linkedInSyncHint, aiSkippedBackfill = 0, shopifyStats } = syncResult;
+    const message = shopifyStats
+      ? `Shopify sync completed. ${shopifyStats.products} product(s), ${shopifyStats.customers} customer(s), ${shopifyStats.orders} order(s) synced.`
+      : count > 0
         ? `Sync completed. Found ${count} new interactions. ${autoReplyQueued} auto-replies queued.`
         : linkedInSyncHint
           ? 'Sync completed. No new interactions. LinkedIn did not allow listing posts (read access).'
@@ -536,6 +541,7 @@ exports.syncPlatform = async (req, res, next) => {
         interactionsAdded: count,
         autoRepliesQueued: autoReplyQueued,
         aiSkippedBackfill,
+        ...(shopifyStats && { shopifyStats }),
         ...(linkedInSyncHint && { linkedInSyncHint })
       }
     });

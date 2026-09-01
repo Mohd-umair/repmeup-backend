@@ -76,7 +76,8 @@ exports.connectShopify = async (req, res, next) => {
           accessToken,
           isActive: true,
           status: 'connected',
-          connectedBy: req.user._id,
+          createdBy: req.user._id,
+          connectedAt: new Date(),
           platformData: {
             shopDomain: shopInfo.shopDomain,
             shopName: shopInfo.shopName,
@@ -102,21 +103,12 @@ exports.connectShopify = async (req, res, next) => {
       logger.warn('[shopifyController] Webhook registration failed (non-fatal)', { shopDomain, error: err.message });
     }
 
-    // 5. Kick off async full backfill (fire-and-forget; returns immediately to the user)
+    // 5. Kick off async full backfill in the API process (do not rely on worker queue alone)
     setImmediate(async () => {
       try {
-        const { platformSyncQueue } = require('../config/queue');
-        if (platformSyncQueue) {
-          await platformSyncQueue.add(
-            { connectionId: connection._id.toString(), orgId: orgId.toString(), trigger: 'connect' },
-            { attempts: 2, backoff: { type: 'exponential', delay: 5000 } }
-          );
-        } else {
-          // Queue not available — run inline (e.g. local dev without Redis)
-          await runFullSync(connection);
-        }
+        await runFullSync(connection);
       } catch (err) {
-        logger.error('[shopifyController] Failed to enqueue backfill', { error: err.message });
+        logger.error('[shopifyController] Initial backfill failed', { shopDomain, error: err.message });
       }
     });
 
@@ -165,9 +157,13 @@ exports.disconnectShopify = async (req, res, next) => {
       });
     }
 
-    // Mark as disconnected
+    // Mark as disconnected (backfill createdBy for legacy Shopify rows missing it)
     connection.isActive = false;
     connection.status = 'disconnected';
+    connection.disconnectedAt = new Date();
+    if (!connection.createdBy) {
+      connection.createdBy = req.user._id;
+    }
     await connection.save();
 
     // Decrement usage counter
