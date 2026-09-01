@@ -57,6 +57,22 @@ module.exports = async function processWebhook(job) {
       case 'linkedin':
         interaction = await handleLinkedInWebhook(payload, organizationId);
         break;
+
+      case 'shopify': {
+        // Shopify webhook — delegate to shopifySyncService topic dispatcher
+        const shopifySyncService = require('../services/shopifySyncService');
+        const PlatformConnectionModel = require('../models/PlatformConnection');
+        const { topic, payload: shopifyPayload, connectionId } = job.data;
+        const conn = connectionId
+          ? await PlatformConnectionModel.findById(connectionId).lean()
+          : await PlatformConnectionModel.findOne({ organization: organizationId, platform: 'shopify', isActive: true }).lean();
+        if (conn) {
+          await shopifySyncService.handleWebhookTopic(conn, topic, shopifyPayload || payload);
+        } else {
+          jobLogger.warn('[processWebhook] No Shopify connection found for org', { organizationId });
+        }
+        break;
+      }
       
       default:
         jobLogger.warn('Unknown platform', { platform });

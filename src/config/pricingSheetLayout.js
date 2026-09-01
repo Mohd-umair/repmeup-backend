@@ -194,7 +194,8 @@ const CHANNEL_LABELS = Object.freeze({
   facebook: 'Facebook',
   google: 'Google',
   linkedin: 'LinkedIn',
-  twitter: 'X'
+  twitter: 'X',
+  shopify: 'Shopify'
 });
 
 module.exports = { SECTIONS, ENUM_CELL_LABELS, CHANNEL_LABELS, HEADLINE_METRIC_LABELS };

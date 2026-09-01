@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const platformController = require('../controllers/platformController');
+const shopifyController = require('../controllers/shopifyController');
 const { protect, authorize } = require('../middlewares/auth');
 const { checkConnectionLimit, attachConnectionLimits } = require('../middlewares/platformLimitMiddleware');
 const { requireChannel } = require('../middlewares/requireFeature');
@@ -74,6 +75,11 @@ router.delete('/whatsapp/disconnect', platformController.disconnectWhatsApp);
 router.get('/whatsapp/status', platformController.getWhatsAppStatus);
 // Manually register a Pending phone number for Cloud API (moves status → Active)
 router.post('/whatsapp/register-phone', platformController.registerWhatsAppPhone);
+
+// ── Shopify (Custom App token flow) ─────────────────────────────────────────
+router.post('/shopify/connect', checkConnectionLimit, requireChannel('shopify'), shopifyController.connectShopify);
+router.post('/shopify/:id/sync', shopifyController.syncShopify);
+router.delete('/shopify/:id', shopifyController.disconnectShopify);
 
 // Platform management
 router.get('/', attachConnectionLimits, platformController.getPlatformConnections);

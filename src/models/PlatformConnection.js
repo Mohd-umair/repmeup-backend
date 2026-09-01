@@ -9,7 +9,7 @@ const platformConnectionSchema = new mongoose.Schema({
   
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin', 'email'],
+    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin', 'email', 'shopify'],
     required: true
   },
   
@@ -94,6 +94,12 @@ const platformConnectionSchema = new mongoose.Schema({
     organizationName: String,
     organizationUrn: String,
     personUrn: String,
+
+    // For Shopify (Custom App)
+    shopDomain: String,    // e.g. my-store.myshopify.com
+    shopName: String,
+    shopId: String,
+    apiVersion: { type: String, default: '2024-10' },
 
     // For Email (Gmail / Outlook / IMAP)
     emailProvider: {

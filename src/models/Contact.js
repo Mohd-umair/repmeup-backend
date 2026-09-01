@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const channelSchema = new mongoose.Schema({
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'whatsapp', 'youtube', 'google', 'website', 'linkedin', 'twitter'],
+    enum: ['instagram', 'facebook', 'whatsapp', 'youtube', 'google', 'website', 'linkedin', 'twitter', 'shopify'],
     required: true
   },
   platformUserId: { type: String, required: true },

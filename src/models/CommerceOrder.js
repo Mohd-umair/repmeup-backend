@@ -65,7 +65,7 @@ const commerceOrderSchema = new mongoose.Schema({
   // ── Channel ────────────────────────────────────────────────────────────────
   channel: {
     type: String,
-    enum: ['instagram', 'whatsapp', 'voice', 'manual'],
+    enum: ['instagram', 'whatsapp', 'voice', 'manual', 'shopify'],
     required: true,
     index: true
   },
@@ -119,6 +119,10 @@ const commerceOrderSchema = new mongoose.Schema({
   whatsappMessageId: { type: String, trim: true },
   /** Meta Commerce order id from WhatsApp native cart webhook */
   metaOrderId: { type: String, trim: true, index: true, sparse: true },
+  /** Shopify order id (e.g. gid://shopify/Order/123) for idempotent webhook upserts */
+  shopifyOrderId: { type: String, trim: true, index: true, sparse: true },
+  /** Shopify human-readable order name, e.g. #1001 */
+  externalOrderNumber: { type: String, trim: true },
   /** Instagram user id (migrated from ProductOrder) */
   instagramUserId: { type: String, trim: true },
   /** Correlation token embedded in payment URL (migrated from ProductOrder) */
@@ -184,5 +188,6 @@ commerceOrderSchema.index({ organization: 1, channel: 1, createdAt: -1 });
 commerceOrderSchema.index({ organization: 1, contact: 1 });
 commerceOrderSchema.index({ organization: 1, 'lineItems.product': 1 });
 commerceOrderSchema.index({ organization: 1, displayRef: 1 }, { unique: true, sparse: true });
+commerceOrderSchema.index({ organization: 1, shopifyOrderId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('CommerceOrder', commerceOrderSchema);

@@ -234,6 +234,25 @@ const productSchema = new mongoose.Schema({
     ref: 'User'
   },
 
+  /** Where the product originated (manual creation or platform import/sync). */
+  source: {
+    type: String,
+    enum: ['manual', 'shopify', 'woocommerce', 'custom_url'],
+    default: 'manual'
+  },
+
+  /**
+   * Shopify sync state — populated for products synced from a Shopify store.
+   * productId  — Shopify product GID (gid://shopify/Product/123)
+   * variantId  — Shopify variant GID (used for per-variant upsert keying)
+   * syncedAt   — timestamp of last successful sync for this product/variant
+   */
+  shopify: {
+    productId: String,
+    variantId: String,
+    syncedAt: Date
+  },
+
   /**
    * WhatsApp Commerce Catalog sync state.
    * catalogItemId — Meta's product item id returned after a successful sync.
@@ -257,6 +276,10 @@ productSchema.index({ organization: 1, isActive: 1 });
 productSchema.index({ organization: 1, instagramPostIds: 1 });
 productSchema.index({ organization: 1, sku: 1 }, { unique: true, partialFilterExpression: { sku: { $exists: true, $type: 'string' } } });
 productSchema.index({ organization: 1, 'whatsapp.syncStatus': 1 });
+productSchema.index(
+  { organization: 1, 'shopify.productId': 1, 'shopify.variantId': 1 },
+  { unique: true, sparse: true }
+);
 // Text index for AI product search — enables $text queries in productSearchService
 productSchema.index({ name: 'text', description: 'text', sku: 'text' }, { weights: { name: 10, sku: 5, description: 1 } });
 

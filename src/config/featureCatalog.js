@@ -680,7 +680,7 @@ const CATALOG = [
     category: 'integrations',
     kind: 'list',
     defaultValue: [],
-    enumOptions: ['instagram', 'whatsapp', 'youtube', 'facebook', 'google', 'linkedin', 'twitter'],
+    enumOptions: ['instagram', 'whatsapp', 'youtube', 'facebook', 'google', 'linkedin', 'twitter', 'shopify'],
     metering: 'AC',
     enforcement: 'code',
     sortOrder: 40
