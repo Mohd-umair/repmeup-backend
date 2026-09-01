@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const webhookController = require('../controllers/webhookController');
+const shopifyController = require('../controllers/shopifyController');
 
 // Webhook routes are public (called by external services)
 // But we verify signatures/tokens
@@ -47,6 +48,9 @@ router.post('/outlook', webhookController.handleOutlookWebhook);
 
 // Product payment confirmation (from any payment provider)
 router.post('/product-payment', webhookController.handleProductPaymentWebhook);
+
+// Shopify webhooks (real-time product/customer/order events)
+router.post('/shopify', shopifyController.handleShopifyWebhook);
 
 // Health check
 router.get('/health', webhookController.webhookHealth);

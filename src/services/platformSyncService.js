@@ -94,6 +94,17 @@ async function syncPlatform(connection, organizationId) {
       result = await linkedinService.fetchAllInteractions(connection);
       break;
 
+    case 'shopify': {
+      // Shopify sync = full backfill of products, customers, and orders.
+      // This is data-store sync (not inbox interactions), so we return count=0
+      // for the interaction counter but trigger the actual sync in the background.
+      const shopifySyncService = require('./shopifySyncService');
+      shopifySyncService.runFullSync(connection).catch(err => {
+        logger.error('[platformSyncService] Shopify background sync error', { error: err.message });
+      });
+      return { count: 0, autoReplyQueued: 0, sentimentAnalyzed: 0, aiSkippedBackfill: 0 };
+    }
+
     case 'whatsapp': {
       // WhatsApp Cloud API has no "fetch history" endpoint.
       // Refresh the connection health/quality info instead.

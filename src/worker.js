@@ -20,7 +20,8 @@ const {
   demoExpiryQueue,
   appointmentReminderQueue,
   publicAuditQueue,
-  paymentWebhookQueue
+  paymentWebhookQueue,
+  platformSyncQueue
 } = require('./config/queue');
 const processPaymentWebhook = require('./jobs/processPaymentWebhook');
 const processWebhook = require('./jobs/processWebhook');
@@ -258,6 +259,53 @@ async function startWorker() {
     });
     logger.info('[Worker] payment-webhook processor started', { concurrency: PAYMENT_WEBHOOK_CONCURRENCY });
 
+    // ── Shopify platform-sync queue ──────────────────────────────────────────
+    // Processor handles two job types:
+    //   1. Explicit jobs (connectionId provided) — full backfill on connect or manual sync
+    //   2. Repeatable safety-net (every 6h) — iterates ALL active Shopify connections
+    platformSyncQueue.process(2, async (job) => {
+      const { runFullSync } = require('./services/shopifySyncService');
+      const PlatformConnection = require('./models/PlatformConnection');
+      const { connectionId, orgId } = job.data || {};
+
+      if (connectionId) {
+        // Targeted sync for one connection
+        const conn = await PlatformConnection.findById(connectionId);
+        if (conn && conn.isActive) {
+          logger.info('[Worker:platform-sync] Running targeted Shopify sync', { connectionId });
+          return runFullSync(conn);
+        }
+        logger.warn('[Worker:platform-sync] Connection not found or inactive', { connectionId });
+        return;
+      }
+
+      // Safety-net sweep — sync every active Shopify connection
+      const connections = await PlatformConnection.find({ platform: 'shopify', isActive: true });
+      logger.info(`[Worker:platform-sync] Safety-net sweep: ${connections.length} Shopify connection(s)`);
+      for (const conn of connections) {
+        try {
+          await runFullSync(conn);
+        } catch (err) {
+          logger.error('[Worker:platform-sync] Safety-net sync failed', { connId: conn._id, error: err.message });
+        }
+      }
+    });
+
+    // Register the 6-hour repeatable safety-net job (idempotent — won't duplicate on restart)
+    const existingPlatformSyncJobs = await platformSyncQueue.getRepeatableJobs();
+    const shopifySafetyNetExists = existingPlatformSyncJobs.some(j => j.id === 'shopify-safety-net');
+    if (!shopifySafetyNetExists) {
+      await platformSyncQueue.add({}, {
+        repeat: { cron: '0 */6 * * *' },
+        jobId: 'shopify-safety-net',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] Shopify safety-net sync registered (every 6h)');
+    } else {
+      logger.info('[Worker] Shopify safety-net sync already registered');
+    }
+    logger.info('[Worker] platform-sync processor started', { concurrency: 2 });
+
     if (campaignConfig.enableInCoreWorker) {
       await registerCampaignWorkers();
       logger.info('[Worker] campaign queues registered in core worker (set ENABLE_CAMPAIGN_IN_CORE_WORKER=false + run campaignWorker.js in production)');
@@ -294,7 +342,8 @@ async function startWorker() {
           flowTickQueue.close(),
           publicAuditQueue.close(),
           reviewRequestQueue.close(),
-          paymentWebhookQueue.close()
+          paymentWebhookQueue.close(),
+          platformSyncQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

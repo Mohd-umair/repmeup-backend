@@ -63,6 +63,10 @@ app.use(
       if (path.includes('/webhooks/product-payment') || path.includes('/webhooks/payments/')) {
         req.rawBody = buf;
       }
+      // Shopify webhooks — HMAC verified over raw body
+      if (path.includes('/webhooks/shopify')) {
+        req.rawBody = buf;
+      }
     }
   })
 );

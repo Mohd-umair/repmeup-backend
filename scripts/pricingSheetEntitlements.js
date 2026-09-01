@@ -14,7 +14,7 @@
 
 const { FEATURE_KEYS: K } = require('../src/config/featureCatalog');
 
-const ALL_CHANNELS = ['instagram', 'whatsapp', 'youtube', 'facebook'];
+const ALL_CHANNELS = ['instagram', 'whatsapp', 'youtube', 'facebook', 'shopify'];
 /** What Starter buys, per the sheet — and the ceiling for the unpaid tier. */
 const STARTER_CHANNELS = ['instagram', 'whatsapp'];
 

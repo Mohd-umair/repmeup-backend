@@ -140,6 +140,7 @@ queues.forEach(queue => {
 module.exports = {
   webhookQueue,
   syncQueue,
+  platformSyncQueue: syncQueue, // Alias used by Shopify connect/sync (same Bull queue)
   aiQueue,
   notificationQueue,
   autoReplyQueue,
