@@ -15,6 +15,8 @@ const PlatformConnection = require('../models/PlatformConnection');
 const platformConnectionService = require('../services/platformConnectionService');
 const {
   verifyToken,
+  verifyAccessScopes,
+  formatMissingScopesError,
   registerWebhooks,
   unregisterWebhooks,
   verifyWebhookHmac
@@ -61,6 +63,30 @@ exports.connectShopify = async (req, res, next) => {
       }
       logger.error('[shopifyController] Token verify failed', { shopDomain, error: err.message });
       return res.status(502).json({ success: false, error: `Could not reach Shopify store: ${err.message}` });
+    }
+
+    // 1b. Verify sync scopes — shop.json alone is not enough for products/customers/orders
+    try {
+      const { missing, missingRecommended } = await verifyAccessScopes(shopDomain, accessToken);
+      if (missing.length > 0) {
+        return res.status(400).json({ success: false, error: formatMissingScopesError(missing) });
+      }
+      if (missingRecommended.length > 0) {
+        logger.warn('[shopifyController] Shopify token missing recommended scopes', {
+          shopDomain,
+          missingRecommended
+        });
+      }
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 401 || status === 403) {
+        return res.status(400).json({
+          success: false,
+          error: formatMissingScopesError(['read_products', 'read_customers', 'read_orders'])
+        });
+      }
+      logger.error('[shopifyController] Scope verify failed', { shopDomain, error: err.message });
+      return res.status(502).json({ success: false, error: `Could not verify Shopify API scopes: ${err.message}` });
     }
 
     // 2. Upsert PlatformConnection
