@@ -18,6 +18,11 @@ const { coerceCommerceFields, DEFAULT_CURRENCY } = require('../../utils/productC
 const API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-10';
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || process.env.SHOPIFY_API_SECRET || '';
 
+/** Scopes required to sync products, customers, and orders */
+const REQUIRED_SYNC_SCOPES = ['read_products', 'read_customers', 'read_orders'];
+/** Optional but needed for automatic webhook registration */
+const RECOMMENDED_SCOPES = ['write_webhooks'];
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function shopifyBase(shopDomain) {
@@ -91,6 +96,35 @@ async function verifyToken(shopDomain, accessToken) {
     shopDomain: shop.myshopify_domain || shopDomain,
     currency: shop.currency || 'INR'
   };
+}
+
+/**
+ * Return granted/missing Admin API scopes for an access token.
+ * Connect can succeed with shop.json alone, but sync needs read_products/customers/orders.
+ */
+async function verifyAccessScopes(shopDomain, accessToken) {
+  const url = `${shopifyBase(shopDomain)}/oauth/access_scopes.json`;
+  const res = await axios.get(url, {
+    headers: shopifyHeaders(accessToken),
+    timeout: 15000
+  });
+  const granted = (res.data?.access_scopes || []).map((scope) => scope.handle);
+  const missing = REQUIRED_SYNC_SCOPES.filter((scope) => !granted.includes(scope));
+  const missingRecommended = RECOMMENDED_SCOPES.filter((scope) => !granted.includes(scope));
+  return { granted, missing, missingRecommended };
+}
+
+function formatMissingScopesError(missing) {
+  const scopeList = missing.join(', ');
+  return (
+    `Missing Shopify API scopes: ${scopeList}. ` +
+    'In Shopify Admin go to Settings → Apps → Develop apps → your app → Configuration, ' +
+    'enable these Admin API access scopes, click Save, reinstall the app, then paste the new Admin API access token in RepMeUp.'
+  );
+}
+
+function isForbiddenError(err) {
+  return err?.response?.status === 403;
 }
 
 // ─── Webhook management ───────────────────────────────────────────────────────
@@ -383,6 +417,9 @@ function mapShopifyOrderToCommerceOrder(shopifyOrder, organizationId, contactId)
 
 module.exports = {
   verifyToken,
+  verifyAccessScopes,
+  formatMissingScopesError,
+  isForbiddenError,
   registerWebhooks,
   unregisterWebhooks,
   fetchAllProducts,
@@ -394,5 +431,7 @@ module.exports = {
   mapShopifyCustomerToContactPayload,
   mapShopifyOrderToCommerceOrder,
   WEBHOOK_TOPICS,
+  REQUIRED_SYNC_SCOPES,
+  RECOMMENDED_SCOPES,
   API_VERSION
 };

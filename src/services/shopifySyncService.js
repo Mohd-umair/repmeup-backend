@@ -19,6 +19,9 @@ const {
   fetchAllProducts,
   fetchAllCustomers,
   fetchAllOrders,
+  verifyAccessScopes,
+  formatMissingScopesError,
+  isForbiddenError,
   mapShopifyProductVariants,
   mapShopifyCustomerToContactPayload,
   mapShopifyOrderToCommerceOrder
@@ -147,6 +150,22 @@ async function runFullSync(connection) {
   logger.info(`[shopifySyncService] Starting full sync for connection ${connId} (${shopDomain})`);
 
   const stats = { products: 0, customers: 0, orders: 0, errors: 0 };
+  let scopeError = null;
+
+  try {
+    const { missing } = await verifyAccessScopes(shopDomain, connection.accessToken);
+    if (missing.length > 0) {
+      scopeError = formatMissingScopesError(missing);
+      throw new Error(scopeError);
+    }
+  } catch (e) {
+    if (scopeError) throw e;
+    if (isForbiddenError(e)) {
+      scopeError = formatMissingScopesError(['read_products', 'read_customers', 'read_orders']);
+      throw new Error(scopeError);
+    }
+    logger.warn('[shopifySyncService] Could not verify scopes before sync; continuing', { error: e.message });
+  }
 
   // ── Products ────────────────────────────────────────────────────────────────
   try {
@@ -161,8 +180,12 @@ async function runFullSync(connection) {
       }
     }
   } catch (e) {
-    logger.error(`[shopifySyncService] Failed to fetch products`, { error: e.message });
+    logger.error(`[shopifySyncService] Failed to fetch products`, {
+      error: e.message,
+      status: e.response?.status
+    });
     stats.errors++;
+    if (isForbiddenError(e)) scopeError = formatMissingScopesError(['read_products']);
   }
 
   // ── Customers ───────────────────────────────────────────────────────────────
@@ -178,8 +201,12 @@ async function runFullSync(connection) {
       }
     }
   } catch (e) {
-    logger.error(`[shopifySyncService] Failed to fetch customers`, { error: e.message });
+    logger.error(`[shopifySyncService] Failed to fetch customers`, {
+      error: e.message,
+      status: e.response?.status
+    });
     stats.errors++;
+    if (isForbiddenError(e)) scopeError = formatMissingScopesError(['read_customers']);
   }
 
   // ── Orders ──────────────────────────────────────────────────────────────────
@@ -195,8 +222,24 @@ async function runFullSync(connection) {
       }
     }
   } catch (e) {
-    logger.error(`[shopifySyncService] Failed to fetch orders`, { error: e.message });
+    logger.error(`[shopifySyncService] Failed to fetch orders`, {
+      error: e.message,
+      status: e.response?.status
+    });
     stats.errors++;
+    if (isForbiddenError(e)) scopeError = formatMissingScopesError(['read_orders']);
+  }
+
+  if (
+    scopeError &&
+    stats.products === 0 &&
+    stats.customers === 0 &&
+    stats.orders === 0
+  ) {
+    await PlatformConnection.findByIdAndUpdate(connId, {
+      lastError: { message: scopeError, code: 'SHOPIFY_MISSING_SCOPES', timestamp: new Date() }
+    });
+    throw new Error(scopeError);
   }
 
   // Stamp last sync time (lastSyncAt drives the Connected Accounts UI)
@@ -204,7 +247,8 @@ async function runFullSync(connection) {
   await PlatformConnection.findByIdAndUpdate(connId, {
     lastSyncAt: syncedAt,
     'metadata.lastFullSyncAt': syncedAt,
-    'metadata.lastSyncStats': stats
+    'metadata.lastSyncStats': stats,
+    lastError: null
   });
 
   logger.info(`[shopifySyncService] Full sync complete for ${shopDomain}`, stats);
