@@ -1181,6 +1181,7 @@ async function handleAction(node, ctx) {
       );
       return { status: 'continue', nextNodeId: pickEdge(ctx.edges, 'sent')?.target || pickEdge(ctx.edges)?.target };
     }
+    case 'action.assign_bucket': {
       if (config.bucketId && interaction?._id) {
         const Interaction = require('../../../models/Interaction');
         await Interaction.findByIdAndUpdate(interaction._id, { intentBucket: config.bucketId });
