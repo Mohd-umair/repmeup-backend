@@ -32,6 +32,7 @@ const PlatformConnection = require('../../models/PlatformConnection');
 const { generateChatRef } = require('../../utils/chatRefHelper');
 const { resetAutoReplyCountersForNewInbound } = require('../../utils/interactionThreadDm');
 const { emitToOrg } = require('../../utils/socketEmitter');
+const cacheService = require('../cacheService');
 const { resolveContact, normalizeAuthorForPlatform } = require('../contactService');
 const logger = require('../../config/logger');
 const campaignConfig = require('../../config/campaignConfig');
@@ -948,6 +949,10 @@ async function processIncomingMessage(change, connection, rawPayload) {
   } catch (socketErr) {
     logger.error('[WhatsApp] Socket emit failed', { error: socketErr.message });
   }
+
+  cacheService.invalidateInteractionCaches(organizationId).catch((err) => {
+    logger.warn('[WhatsApp] Failed to invalidate interaction caches', { error: err.message });
+  });
 
   // ── Workflow-first routing → AI fallback (per-channel automation mode) ──────
   // Flows are the core engine; AI runs only as a fallback when no flow took the

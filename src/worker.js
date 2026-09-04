@@ -25,6 +25,7 @@ const {
 } = require('./config/queue');
 const processPaymentWebhook = require('./jobs/processPaymentWebhook');
 const processWebhook = require('./jobs/processWebhook');
+const processAutoReply = require('./jobs/processAutoReply');
 const processAI = require('./jobs/processAI');
 const processScheduledPublish = require('./jobs/processScheduledPublish');
 const processBrandAnalysis = require('./jobs/processBrandAnalysis');
