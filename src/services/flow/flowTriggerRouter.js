@@ -281,6 +281,10 @@ class FlowTriggerRouter {
         const platformUserId = interaction?.author?.platformId || payload.platformUserId || '';
         const isOneShotTrigger =
           triggerNode.type === 'trigger.first_message' || triggerNode.type === 'trigger.new_lead';
+        // Best-effort business guard: don't stack a second run of this flow on top of one
+        // that's already in progress for this contact. (This alone is a check-then-create
+        // race under heavy concurrency — the triggerMid upsert below is the hard backstop
+        // that makes duplicate creation impossible regardless of timing.)
         const existing = await FlowEnrollment.findOne(
           isOneShotTrigger
             ? { organization: organizationId, flow: flow._id, platformUserId }
@@ -320,18 +324,80 @@ class FlowTriggerRouter {
           }
         }
 
-        const enrollment = await FlowEnrollment.create({
-          organization: organizationId,
-          flow: flow._id,
-          flowVersion: flow.version || 1,
-          platform,
-          platformUserId,
-          contact: interaction?.contact,
-          interaction: interaction?._id,
-          currentNodeId: startNodeId,
-          variables: { triggerEvent: eventType, ...orderVars },
-          status: 'active'
-        });
+        // Hard idempotency backstop: atomic upsert keyed on the exact triggering message
+        // (flow + platformUserId + triggerMid), enforced by a unique DB index. If two
+        // concurrent requests somehow reach this point for the SAME inbound message (e.g. a
+        // webhook retry that slipped past the queue/dedup layers upstream, or a future code
+        // path we haven't audited yet), only one can win — the loser gets the winner's
+        // enrollment back instead of creating and running a second one.
+        const triggerMid = payload.mid || interaction?.metadata?.lastMid || '';
+        let enrollment;
+        let isNewEnrollment = true;
+
+        if (triggerMid) {
+          let upsertResult;
+          try {
+            upsertResult = await FlowEnrollment.findOneAndUpdate(
+              { organization: organizationId, flow: flow._id, platformUserId, triggerMid },
+              {
+                $setOnInsert: {
+                  organization: organizationId,
+                  flow: flow._id,
+                  flowVersion: flow.version || 1,
+                  platform,
+                  platformUserId,
+                  contact: interaction?.contact,
+                  interaction: interaction?._id,
+                  currentNodeId: startNodeId,
+                  variables: { triggerEvent: eventType, ...orderVars },
+                  status: 'active',
+                  triggerMid
+                }
+              },
+              { upsert: true, new: true, includeResultMetadata: true }
+            );
+          } catch (raceErr) {
+            if (raceErr?.code === 11000) {
+              // Lost the insert race to a concurrent request — fetch the winner's doc.
+              upsertResult = null;
+            } else {
+              throw raceErr;
+            }
+          }
+
+          if (!upsertResult) {
+            const winner = await FlowEnrollment.findOne({ organization: organizationId, flow: flow._id, platformUserId, triggerMid });
+            if (winner) enrollments.push(winner);
+            continue;
+          }
+
+          enrollment = upsertResult.value;
+          isNewEnrollment = upsertResult.lastErrorObject?.updatedExisting !== true;
+          if (!isNewEnrollment) {
+            // This exact message already has an enrollment — do NOT run the flow again
+            // (that would resend whatever the flow sends). Just report the existing one.
+            logger.warn('[FlowTriggerRouter] duplicate triggerMid caught by upsert guard — not re-running', {
+              flowId: String(flow._id), platformUserId, triggerMid
+            });
+            enrollments.push(enrollment);
+            continue;
+          }
+        } else {
+          // No mid available (non-message trigger, e.g. an appointment lifecycle event) —
+          // the triggerMid guard doesn't apply; fall back to a plain insert.
+          enrollment = await FlowEnrollment.create({
+            organization: organizationId,
+            flow: flow._id,
+            flowVersion: flow.version || 1,
+            platform,
+            platformUserId,
+            contact: interaction?.contact,
+            interaction: interaction?._id,
+            currentNodeId: startNodeId,
+            variables: { triggerEvent: eventType, ...orderVars },
+            status: 'active'
+          });
+        }
 
         await AutomationFlow.updateOne({ _id: flow._id }, { $inc: { 'stats.triggered': 1 } });
 

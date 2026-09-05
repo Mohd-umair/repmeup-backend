@@ -294,10 +294,31 @@ async function handleWhatsAppInteractive(node, ctx) {
   switch (node.type) {
     case 'action.send_media': {
       const waType = config.mediaType || 'image';
-      await whatsappService.sendMediaByUrl(
-        conn, recipient, waType, config.mediaUrl,
-        config.caption || '', config.filename || ''
-      );
+      // Pre-upload to WhatsApp's media store first: an id-based send delivers from
+      // Meta's own CDN at the same speed as a text/interactive message, whereas a
+      // link-based send makes Meta fetch our URL AFTER accepting the API call — a
+      // variable delay that is the documented cause of a "Send photo" node arriving
+      // on the customer's phone AFTER a message sent right after it. Falls back to
+      // the link-based send on any pre-upload failure so a slow/unreachable media
+      // host never blocks the message going out at all — never worse than before.
+      let preUploadFailed = false;
+      try {
+        const mediaId = await whatsappService.uploadMediaFromUrl(conn, config.mediaUrl, waType);
+        await whatsappService.sendMediaMessage(
+          conn, recipient, waType, mediaId, config.caption || '', config.filename || ''
+        );
+      } catch (uploadErr) {
+        preUploadFailed = true;
+        logger.warn('[FlowHandler] media pre-upload failed — falling back to link-based send', {
+          error: uploadErr.message, mediaUrl: config.mediaUrl
+        });
+      }
+      if (preUploadFailed) {
+        await whatsappService.sendMediaByUrl(
+          conn, recipient, waType, config.mediaUrl,
+          config.caption || '', config.filename || ''
+        );
+      }
       // Map WhatsApp media type → inbox attachment type so the inbox renders the
       // actual file (image/video/audio/file) instead of an "[image]" placeholder.
       const attachmentType =

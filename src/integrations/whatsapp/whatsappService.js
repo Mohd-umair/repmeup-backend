@@ -207,6 +207,71 @@ class WhatsAppService {
   }
 
   /**
+   * Fetch a media file from a public URL and pre-upload it to WhatsApp's media
+   * store, returning a Graph media id.
+   *
+   * Why this exists: `sendMediaByUrl` hands Meta a bare `link` and Meta fetches the
+   * asset itself, AFTER our API call already returned — that fetch+transcode happens
+   * asynchronously on Meta's side and its duration is outside our control. A message
+   * sent moments later (e.g. an interactive question) has no such fetch step and is
+   * delivered near-instantly, so it can reach the customer's phone BEFORE the photo
+   * even though our code sent the photo first and awaited it. This is the documented
+   * cause of "Send photo" flow nodes appearing to arrive after a later text/question
+   * node. Pre-uploading here means the asset is already sitting on Meta's own CDN by
+   * the time we call `sendMediaMessage` with the id, which delivers consistently fast —
+   * the same as a text/interactive message — restoring the intended send order.
+   * @param {Object} connection
+   * @param {string} url     Public https URL of the file (e.g. our media library / S3)
+   * @param {string} waType  'image' | 'video' | 'audio' | 'document' | 'sticker'
+   * @returns {Promise<string>} Graph media id
+   */
+  async uploadMediaFromUrl(connection, url, waType) {
+    const FormData = require('form-data');
+    const phoneNumberId = this._phoneNumberId(connection);
+    if (!phoneNumberId) {
+      throw new Error('WhatsApp credentials not configured');
+    }
+    if (!url) {
+      throw new Error('WhatsApp media pre-upload: no URL provided');
+    }
+
+    // Bounded download — WhatsApp's own per-type limits top out at 100MB (documents);
+    // capping here keeps a single flow-node execution from holding an unbounded buffer
+    // in memory if config.mediaUrl ever points at something unexpectedly large.
+    const MAX_MEDIA_BYTES = 90 * 1024 * 1024;
+    const fileResp = await axios.get(url, {
+      responseType: 'arraybuffer',
+      timeout: 20000,
+      maxContentLength: MAX_MEDIA_BYTES,
+      maxBodyLength: MAX_MEDIA_BYTES
+    });
+    const buffer = Buffer.from(fileResp.data);
+    const contentType = fileResp.headers?.['content-type'] || undefined;
+
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', waType);
+    form.append('file', buffer, { filename: `flow-media-${Date.now()}`, contentType });
+
+    try {
+      const response = await axios.post(`${this._baseUrl(connection)}/${phoneNumberId}/media`, form, {
+        headers: resolveTransport(connection).formHeaders(form),
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 30000
+      });
+      const id = response.data?.id;
+      if (!id) {
+        throw new Error(response.data?.error?.message || 'WhatsApp media upload returned no id');
+      }
+      return id;
+    } catch (error) {
+      console.error('[WhatsApp] Media pre-upload from URL failed:', error.response?.data || error.message);
+      throw this._apiError(error, 'Failed to pre-upload media to WhatsApp');
+    }
+  }
+
+  /**
    * @param {string} [documentFilename] Required for type `document` (customer-visible filename)
    */
   async sendMediaMessage(connection, to, mediaType, mediaId, caption = '', documentFilename = null) {
