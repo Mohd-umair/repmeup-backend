@@ -132,6 +132,10 @@ async function upsertOrderFromShopifyOrder(shopifyOrder, organizationId) {
     { $set: payload, $setOnInsert: { createdAt: new Date() } },
     { upsert: true, new: true }
   );
+  if (result?.contact) {
+    const { onOrderUpserted } = require('./commerceMetricsService');
+    onOrderUpserted(organizationId, result).catch(() => null);
+  }
   return result;
 }
 

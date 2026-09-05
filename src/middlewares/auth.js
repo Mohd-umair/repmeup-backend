@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const User = require('../models/User');
+const Group = require('../models/Group');
 const cacheService = require('../services/cacheService');
 
 // User cache TTL: 5 minutes. Short enough that deactivation takes effect quickly.
@@ -168,6 +169,71 @@ exports.authorize = (...roles) => {
     }
 
     next();
+  };
+};
+
+/**
+ * Permission guard with rollout-safe defaults for legacy system groups.
+ * Custom groups are always governed by their explicit Permission documents.
+ */
+exports.requirePermission = (...requiredCodes) => {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ success: false, error: 'Not authorized' });
+      }
+      if (['super_admin', 'admin'].includes(req.user.role)) return next();
+
+      let group = null;
+      if (req.user.group?._id || req.user.group) {
+        const groupId = req.user.group?._id || req.user.group;
+        group = await Group.findById(groupId)
+          .populate('permissions', 'code isActive')
+          .select('slug isSystem isActive permissions')
+          .lean();
+      } else {
+        const roleSlug = { manager: 'manager', agent: 'agent', viewer: 'viewer' }[req.user.role];
+        if (roleSlug) {
+          group = await Group.findOne({ slug: roleSlug, isActive: true })
+            .populate('permissions', 'code isActive')
+            .select('slug isSystem isActive permissions')
+            .lean();
+        }
+      }
+
+      const explicit = new Set([
+        ...(Array.isArray(req.user.permissions) ? req.user.permissions : []),
+        ...((group?.permissions || [])
+          .filter((permission) => permission && permission.isActive !== false)
+          .map((permission) => typeof permission === 'string' ? permission : permission.code))
+      ]);
+      if (requiredCodes.some((code) => explicit.has(code))) return next();
+
+      // Existing installations may not have re-run permission seeding yet.
+      // Preserve only the historical system-role grants; custom groups do not
+      // receive this fallback.
+      const legacySystemGrants = {
+        manager: new Set([
+          'contacts.read', 'contacts.update', 'contacts.delete', 'contacts.merge',
+          'contacts.export', 'contacts.import', 'contacts.bulk_actions',
+          'segments.manage', 'customfields.manage',
+          'campaigns.create', 'campaigns.send', 'campaigns.manage'
+        ]),
+        agent: new Set(['contacts.read'])
+      };
+      const isLegacySystemRole = !group || (group.isSystem && group.slug === req.user.role);
+      if (
+        isLegacySystemRole &&
+        requiredCodes.some((code) => legacySystemGrants[req.user.role]?.has(code))
+      ) return next();
+
+      return res.status(403).json({
+        success: false,
+        error: 'You do not have permission to perform this action'
+      });
+    } catch (error) {
+      next(error);
+    }
   };
 };
 

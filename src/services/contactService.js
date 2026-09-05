@@ -347,8 +347,10 @@ async function resolveContact(payload, organizationId, options = {}) {
 async function updateAIInsights(contactId, insights = {}) {
   if (!contactId) return;
   try {
+    const { sanitizeAiIntent } = require('../utils/aiInsightsDisplay');
     const update = { 'aiInsights.updatedAt': new Date() };
-    if (insights.intent) update['aiInsights.intent'] = insights.intent;
+    const intent = sanitizeAiIntent(insights.intent);
+    if (intent) update['aiInsights.intent'] = intent;
     if (insights.sentiment) update['aiInsights.sentiment'] = insights.sentiment;
     if (insights.priority) update['aiInsights.priority'] = insights.priority;
 

@@ -70,8 +70,8 @@ exports.getHubOverview = async (req, res, next) => {
     const modules = [
       {
         id: 'ai-replies',
-        label: 'AI Auto Replies',
-        description: 'Reply instantly to DMs, comments, stories and mentions using Reppy.',
+        label: 'AI replies',
+        description: 'Let Reppy answer DMs, comments, stories and mentions on its own.',
         icon: 'fas fa-comment-dots',
         route: '/app/automation/ai-replies',
         active: org?.autoReplySettings?.enabled ?? false
@@ -86,8 +86,8 @@ exports.getHubOverview = async (req, res, next) => {
       },
       {
         id: 'flow-builder',
-        label: 'Flow Builder',
-        description: 'Visual automations for WhatsApp, Instagram, and Facebook with drag-and-drop nodes.',
+        label: 'Flow Automation',
+        description: 'Build step-by-step replies — welcome messages, buttons, and wait-for-reply.',
         icon: 'fas fa-project-diagram',
         route: '/app/automation/flows',
         active: activeWaFlow > 0

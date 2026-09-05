@@ -21,7 +21,12 @@ const {
   appointmentReminderQueue,
   publicAuditQueue,
   paymentWebhookQueue,
-  platformSyncQueue
+  platformSyncQueue,
+  audienceMaterializeQueue,
+  socialCampaignSendQueue,
+  activationCampaignLaunchQueue,
+  contactIntelligenceQueue,
+  duplicateScanQueue
 } = require('./config/queue');
 const processPaymentWebhook = require('./jobs/processPaymentWebhook');
 const processWebhook = require('./jobs/processWebhook');
@@ -307,6 +312,32 @@ async function startWorker() {
     }
     logger.info('[Worker] platform-sync processor started', { concurrency: 2 });
 
+    audienceMaterializeQueue.process(2, (job) => require('./jobs/processAudienceMaterialize')(job));
+    socialCampaignSendQueue.process(2, (job) => require('./jobs/processSocialCampaign')(job));
+    activationCampaignLaunchQueue.process(2, (job) => require('./jobs/processActivationCampaignLaunch')(job));
+    contactIntelligenceQueue.process(2, (job) => require('./jobs/processContactIntelligence')(job));
+    duplicateScanQueue.process(1, (job) => require('./jobs/processDuplicateScan')(job));
+
+    const activationRepeatables = await activationCampaignLaunchQueue.getRepeatableJobs();
+    if (!activationRepeatables.some((j) => j.id === 'activation-scheduled-sweep')) {
+      await activationCampaignLaunchQueue.add(
+        { sweep: true },
+        { repeat: { every: 5 * 60 * 1000 }, jobId: 'activation-scheduled-sweep', removeOnComplete: 5 }
+      );
+      logger.info('[Worker] activation scheduled-campaign sweep registered (every 5 min)');
+    }
+
+    const duplicateRepeatables = await duplicateScanQueue.getRepeatableJobs();
+    if (!duplicateRepeatables.some((j) => j.id === 'duplicate-scan-nightly')) {
+      await duplicateScanQueue.add(
+        { nightly: true },
+        { repeat: { cron: '0 3 * * *' }, jobId: 'duplicate-scan-nightly', removeOnComplete: 5 }
+      );
+      logger.info('[Worker] duplicate-scan nightly coordinator registered (03:00 UTC)');
+    }
+
+    logger.info('[Worker] contact activation queues registered');
+
     if (campaignConfig.enableInCoreWorker) {
       await registerCampaignWorkers();
       logger.info('[Worker] campaign queues registered in core worker (set ENABLE_CAMPAIGN_IN_CORE_WORKER=false + run campaignWorker.js in production)');
@@ -344,7 +375,12 @@ async function startWorker() {
           publicAuditQueue.close(),
           reviewRequestQueue.close(),
           paymentWebhookQueue.close(),
-          platformSyncQueue.close()
+          platformSyncQueue.close(),
+          audienceMaterializeQueue.close(),
+          socialCampaignSendQueue.close(),
+          activationCampaignLaunchQueue.close(),
+          contactIntelligenceQueue.close(),
+          duplicateScanQueue.close()
         ]);
         process.exit(0);
       } catch (err) {

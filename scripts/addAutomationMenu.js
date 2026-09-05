@@ -20,7 +20,7 @@ const ITEMS = [
     description: 'Automation dashboard — all your automations at a glance'
   },
   {
-    label: 'AI Auto Replies',
+    label: 'AI replies',
     icon: 'fas fa-comment-dots',
     route: '/app/automation/ai-replies',
     order: 21,

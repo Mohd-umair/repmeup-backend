@@ -18,6 +18,11 @@ const defaultMenus = [
     description: 'View and respond to customer interactions'
   },
   {
+    label: 'Contacts', icon: 'fas fa-address-book', route: '/app/contacts', order: 4, group: 'main',
+    requiredRoles: ['admin', 'manager', 'agent'], isActive: true,
+    description: 'Customer 360, segments, and activation'
+  },
+  {
     label: 'Bucket Board', icon: 'fas fa-columns', route: '/app/inbox/buckets', order: 4, group: 'main',
     requiredRoles: ['admin', 'manager', 'agent'], requiredPermissions: ['inbox.read'], isActive: true,
     description: 'Intent bucket kanban board for conversations'

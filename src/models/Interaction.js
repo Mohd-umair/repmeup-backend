@@ -625,6 +625,8 @@ interactionSchema.index({ organization: 1, status: 1, platformCreatedAt: -1, _id
 interactionSchema.index({ 'assignmentHistory.assignedTo': 1 });
 interactionSchema.index({ organization: 1, 'complaint.status': 1, platformCreatedAt: -1 });
 interactionSchema.index({ organization: 1, type: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, contact: 1, platform: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, contact: 1, platform: 1, 'metadata.incomingMessages.timestamp': -1 });
 interactionSchema.index({ organization: 1, 'complaint.displayRef': 1 }, { sparse: true });
 
 // Update response count when adding replies
