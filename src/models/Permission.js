@@ -2,7 +2,8 @@ const mongoose = require('mongoose');
 
 const CATEGORIES = [
   'inbox', 'analytics', 'users', 'settings', 'integrations',
-  'knowledge_base', 'posts', 'media', 'organization', 'billing'
+  'knowledge_base', 'posts', 'media', 'organization', 'billing',
+  'accounts', 'contacts', 'campaigns'
 ];
 
 const ACTIONS = ['create', 'read', 'update', 'delete', 'manage', 'export', 'assign'];
@@ -45,7 +46,6 @@ const permissionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-permissionSchema.index({ code: 1 });
 permissionSchema.index({ category: 1 });
 
 permissionSchema.statics.CATEGORIES = CATEGORIES;

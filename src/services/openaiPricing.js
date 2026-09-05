@@ -40,8 +40,32 @@ function estimateImageUsd(size = '1024x1024', quality = 'medium') {
     const n = parseFloat(raw);
     if (Number.isFinite(n)) return n;
   }
-  if (q === 'high') return 0.13;
-  return 0.05;
+  if (q === 'high') return 0.167;
+  if (q === 'low') return 0.011;
+  return 0.042; // medium
+}
+
+/**
+ * Calculate actual USD cost from token counts returned by gpt-image-1.
+ * gpt-image-1 pricing: $5/1M text input, $10/1M image input, $40/1M output (image) tokens.
+ * Falls back to flat-rate estimate if tokens are not available.
+ * @param {number} inputTextTokens
+ * @param {number} inputImageTokens
+ * @param {number} outputTokens
+ * @param {string} size
+ * @param {string} quality
+ */
+function estimateImageUsdFromTokens(inputTextTokens, inputImageTokens, outputTokens, size, quality) {
+  const iText = Math.max(0, Number(inputTextTokens) || 0);
+  const iImg  = Math.max(0, Number(inputImageTokens) || 0);
+  const oTok  = Math.max(0, Number(outputTokens) || 0);
+  if (iText === 0 && iImg === 0 && oTok === 0) {
+    return estimateImageUsd(size, quality); // fall back to flat rate
+  }
+  const usdPerMInputText  = parseUsdPerMillion(process.env.OPENAI_IMAGE_USD_PER_1M_INPUT_TEXT,   5.0);
+  const usdPerMInputImage = parseUsdPerMillion(process.env.OPENAI_IMAGE_USD_PER_1M_INPUT_IMAGE,  10.0);
+  const usdPerMOutput     = parseUsdPerMillion(process.env.OPENAI_IMAGE_USD_PER_1M_OUTPUT,       40.0);
+  return (iText / 1e6) * usdPerMInputText + (iImg / 1e6) * usdPerMInputImage + (oTok / 1e6) * usdPerMOutput;
 }
 
 function estimateVideoUsd(durationSeconds = 4) {
@@ -58,5 +82,6 @@ module.exports = {
   getChatPricingUsdPer1M,
   estimateChatUsd,
   estimateImageUsd,
+  estimateImageUsdFromTokens,
   estimateVideoUsd
 };

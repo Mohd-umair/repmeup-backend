@@ -80,12 +80,26 @@ const userSchema = new mongoose.Schema({
     default: false
   },
   emailVerificationToken: String,
+  /** When the pending verification link expires */
+  emailVerificationExpires: Date,
+  /** Throttle resend-verification emails */
+  emailVerificationLastSent: Date,
   passwordResetToken: String,
   passwordResetExpires: Date,
+  /** AES-encrypted password last set via super-admin (create/reset) — select: false */
+  adminRecoverablePassword: { type: String, select: false },
+  adminPasswordSetAt: { type: Date, select: false },
+  adminPasswordSetBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', select: false },
 
   // Email OTP login (6-digit, expires in 10 minutes)
   loginOtpCode: { type: String, select: false },
   loginOtpExpires: { type: Date, select: false },
+
+  // Demo prospect magic-link login: SHA-256 hash of a one-time token the prospect
+  // clicks to auto-login to their demo workspace (no password needed up front).
+  demoMagicToken: { type: String, select: false },
+  demoMagicTokenExpires: { type: Date, select: false },
+
   lastLogin: Date,
   preferences: {
     notifications: {
@@ -95,6 +109,14 @@ const userSchema = new mongoose.Schema({
     emailDigest: {
       type: Boolean,
       default: true
+    },
+    negativeSentimentAlerts: {
+      type: Boolean,
+      default: true
+    },
+    weeklyReports: {
+      type: Boolean,
+      default: false
     },
     emailFrequency: {
       type: String,
@@ -118,7 +140,9 @@ const userSchema = new mongoose.Schema({
   metadata: {
     signupSource: String,
     signupIp: String,
-    deviceInfo: String
+    deviceInfo: String,
+    /** True for the auto-created admin of a demo/trial workspace. */
+    isDemoProspect: { type: Boolean, default: false }
   },
   risc: {
     googleSignInDisabled: {
@@ -182,6 +206,8 @@ userSchema.methods.toJSON = function() {
   delete user.password;
   delete user.passwordResetToken;
   delete user.emailVerificationToken;
+  delete user.emailVerificationExpires;
+  delete user.emailVerificationLastSent;
   return user;
 };
 

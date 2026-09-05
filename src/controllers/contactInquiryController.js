@@ -1,5 +1,6 @@
 const ContactInquiry = require('../models/ContactInquiry');
 const userActivityLogService = require('../services/userActivityLogService');
+const leadCaptureService = require('../services/crm/leadCaptureService');
 const { sanitizeString, escapeRegex } = require('../utils/sanitize');
 
 /**
@@ -9,7 +10,7 @@ exports.submit = async (req, res, next) => {
   try {
     const { name, email, phone, company, subject, message, intent } = req.body;
 
-    await ContactInquiry.create({
+    const inquiry = await ContactInquiry.create({
       name: sanitizeString(name, { maxLength: 200 }),
       email: sanitizeString(email, { maxLength: 320 }).toLowerCase(),
       phone: sanitizeString(phone || '', { maxLength: 40 }),
@@ -20,6 +21,11 @@ exports.submit = async (req, res, next) => {
       source: 'website',
       ip: userActivityLogService.clientIp(req),
       userAgent: String(req.headers['user-agent'] || '').slice(0, 500)
+    });
+
+    // Fire-and-forget: the public form must never fail on CRM issues
+    leadCaptureService.captureFromContactInquiry(inquiry).catch((err) => {
+      console.error('[contactInquiry] CRM lead capture failed:', err?.message || err);
     });
 
     res.status(201).json({

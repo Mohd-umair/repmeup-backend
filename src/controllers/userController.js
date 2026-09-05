@@ -5,6 +5,9 @@ const Interaction = require('../models/Interaction');
 const { escapeRegex } = require('../utils/sanitize');
 const userActivityLogService = require('../services/userActivityLogService');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
+const cacheService = require('../services/cacheService');
+const entitlementsService = require('../services/entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
 
 // @desc    Get all users in organization
 // @route   GET /api/users
@@ -130,6 +133,43 @@ exports.getUserById = async (req, res, next) => {
   }
 };
 
+/**
+ * RBAC ladder: single → roles → advanced.
+ *
+ *   single   — everyone is a plain agent; there is no role model to speak of
+ *   roles    — assign the built-in roles (admin / manager / agent)
+ *   advanced — custom permission sets
+ *
+ * This gates ROLE ASSIGNMENT only, never user creation — how many users an org may have
+ * is already metered by `users.max`, and conflating the two would refuse a legitimate
+ * seat purchase with a confusing "permissions" error.
+ *
+ * The default role is exempt: creating a plain agent is not using the roles feature.
+ */
+const DEFAULT_ROLE = 'agent';
+
+async function assertCanAssignRole(organizationId, role) {
+  if (!role || role === DEFAULT_ROLE) return;
+  await entitlementsService.assertLevel(
+    organizationId.toString(),
+    FEATURE_KEYS.RBAC_LEVEL,
+    'roles'
+  );
+}
+
+/** Map an EntitlementError onto the standard response, else rethrow. */
+function sendEntitlementError(err, res) {
+  if (err?.name !== 'EntitlementError') return false;
+  res.status(err.statusCode || 403).json({
+    success: false,
+    code: err.code,
+    error: err.message,
+    featureKey: err.featureKey,
+    meta: err.meta
+  });
+  return true;
+}
+
 // @desc    Create new user (agent/team member)
 // @route   POST /api/users
 // @access  Private (Admin/Manager only)
@@ -155,17 +195,35 @@ exports.createUser = async (req, res, next) => {
       });
     }
 
-    // Check user limits: prefer Subscription (plan from DB) when present, else Organization limits
-    const organization = await Organization.findById(organizationId);
-    const subscription = await Subscription.findOne({ organization: organizationId });
+    // Check user limits via entitlementsService (single source of truth).
     const currentUserCount = await User.countDocuments({ organization: organizationId, isActive: true });
+    try {
+      await entitlementsService.assert(organizationId.toString(), FEATURE_KEYS.AGENTS_ENABLED);
+    } catch (err) {
+      if (err?.name === 'EntitlementError') {
+        return res.status(err.statusCode || 403).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+          featureKey: err.featureKey
+        });
+      }
+      throw err;
+    }
+    try {
+      await assertCanAssignRole(organizationId, role);
+    } catch (err) {
+      if (sendEntitlementError(err, res)) return;
+      throw err;
+    }
 
-    const maxUsers = subscription
-      ? subscription.limits.maxUsers
-      : (organization.limits?.maxUsers ?? 3);
-    const isUnlimited = maxUsers === -1;
+    const { allowed, limit: maxUsers } = await entitlementsService.canAddResource(
+      organizationId,
+      'users',
+      currentUserCount
+    );
 
-    if (!isUnlimited && currentUserCount >= maxUsers) {
+    if (!allowed) {
       return res.status(400).json({
         success: false,
         error: `User limit reached. Your plan allows ${maxUsers} users. Upgrade to add more team members.`
@@ -187,15 +245,17 @@ exports.createUser = async (req, res, next) => {
 
     const user = await User.create(userData);
 
-    // Update organization and subscription user counts
-    await Organization.findByIdAndUpdate(organizationId, {
-      $inc: { 'usage.currentUsers': 1 }
-    });
-    if (subscription) {
-      await Subscription.findByIdAndUpdate(subscription._id, {
-        $inc: { 'usage.activeUsers': 1 }
-      });
-    }
+    // Update usage counters on both the (legacy) Organization doc and the Subscription doc.
+    // Both are kept in lockstep during the deprecation period; entitlementsService picks
+    // the correct one automatically at read time.
+    await Promise.all([
+      Organization.findByIdAndUpdate(organizationId, { $inc: { 'usage.currentUsers': 1 } }),
+      Subscription.updateOne(
+        { organization: organizationId },
+        { $inc: { 'usage.activeUsers': 1 } }
+      )
+    ]);
+    await entitlementsService.invalidateEntitlements(organizationId);
 
     // Return user without password
     const userResponse = await User.findById(user._id).select('-password');
@@ -269,6 +329,15 @@ exports.updateUser = async (req, res, next) => {
       }
     }
 
+    if (role && canUpdateOthers && role !== userToUpdate.role) {
+      try {
+        await assertCanAssignRole(req.user.organization._id, role);
+      } catch (err) {
+        if (sendEntitlementError(err, res)) return;
+        throw err;
+      }
+    }
+
     // Update fields
     const updateData = {};
     if (firstName) updateData.firstName = firstName;
@@ -284,6 +353,9 @@ exports.updateUser = async (req, res, next) => {
       updateData,
       { new: true, runValidators: true }
     ).select('-password');
+
+    // Invalidate cached user so protect middleware picks up the changes on next request
+    cacheService.del(cacheService.userKey(id)).catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -345,24 +417,25 @@ exports.deleteUser = async (req, res, next) => {
     // Soft delete - just deactivate
     await User.findByIdAndUpdate(id, { isActive: false });
 
+    // Invalidate cached user so protect middleware immediately sees deactivation
+    cacheService.del(cacheService.userKey(id)).catch(() => {});
+
     // Unassign all interactions from this user
     await Interaction.updateMany(
       { assignedTo: id },
       { $unset: { assignedTo: '', assignedAt: '' } }
     );
 
-    // Update organization and subscription user counts
-    await Organization.findByIdAndUpdate(req.user.organization._id, {
-      $inc: { 'usage.currentUsers': -1 }
-    });
-    const subscription = await Subscription.findOne({
-      organization: req.user.organization._id
-    });
-    if (subscription) {
-      await Subscription.findByIdAndUpdate(subscription._id, {
-        $inc: { 'usage.activeUsers': -1 }
-      });
-    }
+    // Decrement usage counters on both the (legacy) Organization doc and the Subscription doc.
+    const orgId = req.user.organization._id;
+    await Promise.all([
+      Organization.findByIdAndUpdate(orgId, { $inc: { 'usage.currentUsers': -1 } }),
+      Subscription.updateOne(
+        { organization: orgId, 'usage.activeUsers': { $gt: 0 } },
+        { $inc: { 'usage.activeUsers': -1 } }
+      )
+    ]);
+    await entitlementsService.invalidateEntitlements(orgId);
 
     res.status(200).json({
       success: true,

@@ -1,11 +1,18 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
+const { generateChatRef } = require('../../utils/chatRefHelper');
 
 class InstagramService {
   constructor() {
+    // graph.facebook.com: stable on v18.0 for Facebook-Login Instagram flow.
     this.apiVersion = 'v18.0';
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
-    this.instagramGraphUrl = `https://graph.instagram.com/${this.apiVersion}`;
+
+    // graph.instagram.com: Instagram API with Instagram Login requires v20.0+
+    // for messaging endpoints. Using v18.0 causes a misleading 2534037
+    // "not the thread owner" error even when token and payload are correct.
+    this.instagramApiVersion = 'v23.0';
+    this.instagramGraphUrl = `https://graph.instagram.com/${this.instagramApiVersion}`;
   }
 
   /**
@@ -17,8 +24,25 @@ class InstagramService {
     const token = typeof accessToken === 'string' ? accessToken.trim() : null;
     if (!token) return null;
 
-    // For Instagram DM senders (IGSID), name+profile_pic works without Advanced Access.
-    // username requires instagram_manage_messages Advanced Access — try it, but fall back gracefully.
+    const isIgLoginToken = token.startsWith('IGAA');
+
+    // Instagram Login (IGAA) user tokens can only query /me — they cannot look
+    // up arbitrary IGSIDs. Skip the attempt to avoid noisy 190 errors.
+    if (isIgLoginToken) {
+      try {
+        const response = await axios.get(`${this.instagramGraphUrl}/${userId}`, {
+          params: { fields: 'name,username', access_token: token },
+          timeout: 5000
+        });
+        const data = response.data || null;
+        if (data && (data.name || data.username)) return data;
+      } catch (_) {
+        // Instagram Login tokens can't look up other users — this is expected
+      }
+      return null;
+    }
+
+    // Facebook Login path: try graph.facebook.com first, then graph.instagram.com
     const attemptsPerUrl = [
       { url: `${this.baseUrl}/${userId}`, name: 'graph.facebook.com', fieldSets: ['name,profile_pic,username', 'name,profile_pic'] },
       { url: `${this.instagramGraphUrl}/${userId}`, name: 'graph.instagram.com', fieldSets: ['name,username,profile_pic', 'name,profile_pic'] }
@@ -33,7 +57,6 @@ class InstagramService {
           });
           const data = response.data || null;
           if (data && (data.name || data.username || data.profile_pic)) {
-            // Normalize: always expose profile_pic as the avatar field
             if (!data.profile_pic && data.profile_picture_url) {
               data.profile_pic = data.profile_picture_url;
             }
@@ -43,7 +66,6 @@ class InstagramService {
           const msg = err.response?.data?.error?.message || err.message;
           const code = err.response?.data?.error?.code;
           if (code === 200 || code === 190 || code === 100) {
-            // Permissions or token issue — try the reduced field set next
             if (!this._profileFailLogged) this._profileFailLogged = new Set();
             const logKey = `${userId}_${fields}`;
             if (!this._profileFailLogged.has(logKey)) {
@@ -53,7 +75,6 @@ class InstagramService {
           } else {
             console.warn(`[Instagram] User profile ${urlName} failed for userId=${userId}:`, msg, code ? `(code ${code})` : '');
           }
-          // Try next field set or next URL
         }
       }
     }
@@ -70,6 +91,60 @@ class InstagramService {
   }
 
   /**
+   * Query params merged into Meta Graph calls. Including `locale` makes
+   * `error_user_title` / `error_user_msg` follow that locale (often Arabic/Gulf
+   * when omitted, based on IG/Facebook Business asset settings). Override with
+   * META_GRAPH_LOCALE (underscore form, e.g. en_US, ar_AR).
+   */
+  _metaGraphParams(params = {}) {
+    const locale = process.env.META_GRAPH_LOCALE || 'en_US';
+    return { locale, ...params };
+  }
+
+  /**
+   * Returns the correct Graph API base URL depending on how Instagram was connected.
+   *
+   * - Facebook Login (default):  https://graph.facebook.com/v18.0
+   * - Instagram Login (new):     https://graph.instagram.com/v23.0
+   *
+   * @param {string|null} connectionType - platformConnection.metadata.connectionType
+   */
+  _getApiBase(connectionType) {
+    if (connectionType === 'instagram_login') {
+      return this.instagramGraphUrl; // https://graph.instagram.com/v23.0
+    }
+    return this.baseUrl; // https://graph.facebook.com/v18.0
+  }
+
+  /**
+   * Extract connection type string from a platformConnection document or metadata object.
+   * Returns 'instagram_login' or null (null = default Facebook Login behaviour).
+   *
+   * Fallback: Instagram Login tokens always start with 'IGAA', Facebook Page
+   * tokens start with 'EAA'. Use the prefix when metadata is missing.
+   */
+  _connectionType(platformConnection) {
+    const explicit = platformConnection?.metadata?.connectionType;
+    if (explicit) return explicit;
+
+    const token = platformConnection?.accessToken || platformConnection?.access_token || '';
+    if (typeof token === 'string' && token.startsWith('IGAA')) {
+      return 'instagram_login';
+    }
+    return null;
+  }
+
+  /**
+   * For Instagram Login, the Graph API requires /me/{edge} instead of /{id}/{edge}.
+   * Returns 'me' for instagram_login, otherwise the businessAccountId.
+   */
+  _accountPath(platformConnection) {
+    const connType = this._connectionType(platformConnection);
+    if (connType === 'instagram_login') return 'me';
+    return this._getBusinessAccountId(platformConnection);
+  }
+
+  /**
    * Fetch Instagram media (posts, reels) only. Used for Content / platform posts listing.
    * @param {Object} platformConnection - Must have accessToken and business account ID
    * @returns {Promise<Array>} Array of { id, caption, media_type, timestamp, permalink, media_url }
@@ -77,11 +152,16 @@ class InstagramService {
   async getMedia(platformConnection) {
     const accessToken = platformConnection.accessToken || platformConnection.access_token;
     const businessAccountId = this._getBusinessAccountId(platformConnection);
+    const connType = this._connectionType(platformConnection);
+    const apiBase = this._getApiBase(connType);
+    const isIgLogin = connType === 'instagram_login';
     if (!businessAccountId) {
       throw new Error('Instagram Business Account ID not found in connection');
     }
     let allMedia = [];
-    let nextPage = `${this.baseUrl}/${businessAccountId}/media`;
+    let nextPage = isIgLogin
+      ? `${apiBase}/me/media`
+      : `${apiBase}/${businessAccountId}/media`;
     let pageCount = 0;
     const maxPages = 10;
     while (nextPage && pageCount < maxPages) {
@@ -109,7 +189,7 @@ class InstagramService {
         const batch = allMedia.slice(i, i + BATCH);
         await Promise.all(batch.map(async (media) => {
           try {
-            const res = await axios.get(`${this.baseUrl}/${media.id}/insights`, {
+            const res = await axios.get(`${apiBase}/${media.id}/insights`, {
               params: { metric: 'shares', access_token: accessToken }
             });
             const sharesEntry = (res.data.data || []).find(d => d.name === 'shares');
@@ -137,16 +217,22 @@ class InstagramService {
     try {
       const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const connType = this._connectionType(platformConnection);
+      const apiBase = this._getApiBase(connType);
+      const isIgLogin = connType === 'instagram_login';
 
       if (!businessAccountId) {
         throw new Error('Instagram Business Account ID not found in connection');
       }
 
-      console.log(`📸 [Instagram] Fetching comments for account: ${businessAccountId}`);
+      console.log(`📸 [Instagram] Fetching comments for account: ${businessAccountId} [${connType || 'facebook_login'}]`);
 
-      // Get recent media (posts, reels, stories)
+      // Facebook Login: /{businessAccountId}/media
+      // Instagram Login: /me/media (User token)
       let allMedia = [];
-      let nextPage = `${this.baseUrl}/${businessAccountId}/media`;
+      let nextPage = isIgLogin
+        ? `${apiBase}/me/media`
+        : `${apiBase}/${businessAccountId}/media`;
       let pageCount = 0;
       const maxPages = 10; // Limit to prevent excessive API calls
 
@@ -183,7 +269,7 @@ class InstagramService {
       for (const media of allMedia) {
         try {
           let allComments = [];
-          let commentsNextPage = `${this.baseUrl}/${media.id}/comments`;
+          let commentsNextPage = `${apiBase}/${media.id}/comments`;
           let commentsPageCount = 0;
           const maxCommentPages = 5; // Limit comment pages per media
 
@@ -227,6 +313,7 @@ class InstagramService {
                 postId: media.id,
                 postUrl: media.permalink,
                 mediaType: media.media_type,
+                mediaCaption: media.caption ? String(media.caption).slice(0, 200) : null,
                 likeCount: comment.like_count || 0
               },
               platformCreatedAt: new Date(comment.timestamp),
@@ -258,6 +345,7 @@ class InstagramService {
                   metadata: {
                     postId: media.id,
                     postUrl: media.permalink,
+                    mediaCaption: media.caption ? String(media.caption).slice(0, 200) : null,
                     parentCommentId: comment.id,
                     isReply: true
                   },
@@ -298,14 +386,26 @@ class InstagramService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
+        const orgId = platformConnection.organization;
+        const existingIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const chatRefMap = {};
+        for (const interaction of interactions) {
+          if (!existingIds.has(interaction.platformId)) {
+            chatRefMap[interaction.platformId] = await generateChatRef(orgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = chatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }
@@ -337,8 +437,11 @@ class InstagramService {
     try {
       const accessToken = platformConnection.accessToken || platformConnection.access_token;
       const businessAccountId = this._getBusinessAccountId(platformConnection);
-      // Facebook Login flow: conversations must be fetched via the Page ID,
-      // not the Instagram Business Account ID (which requires Instagram Login).
+      const connType = this._connectionType(platformConnection);
+      const apiBase = this._getApiBase(connType);
+
+      // Facebook Login: use Page ID for conversations endpoint.
+      // Instagram Login: platformPageId === platformUserId (IG account ID), so same fallback works.
       const pageId = platformConnection.platformPageId ||
         platformConnection.platformData?.pageId ||
         businessAccountId;
@@ -355,12 +458,16 @@ class InstagramService {
       const tokenPreview = accessToken
         ? `${String(accessToken).slice(0, 8)}...${String(accessToken).slice(-4)}`
         : '(missing)';
-      console.log(`💬 [Instagram] Fetching DMs via Page ID: ${pageId} (IG account: ${businessAccountId})`);
+      console.log(`💬 [Instagram] Fetching DMs via Page ID: ${pageId} (IG account: ${businessAccountId}) [${connType || 'facebook_login'}]`);
       console.log(`💬 [Instagram] Using token: ${tokenPreview}`);
 
-      // Get conversations using Page ID (Facebook Login flow requires /{page-id}/conversations?platform=instagram)
+      // Facebook Login:  graph.facebook.com/{page-id}/conversations?platform=instagram
+      // Instagram Login: graph.instagram.com/me/conversations?platform=instagram
+      const isIgLogin = connType === 'instagram_login';
       let allConversations = [];
-      let nextPage = `${this.baseUrl}/${pageId}/conversations`;
+      let nextPage = isIgLogin
+        ? `${apiBase}/me/conversations`
+        : `${apiBase}/${pageId}/conversations`;
       let pageCount = 0;
       const maxPages = 10;
 
@@ -395,8 +502,27 @@ class InstagramService {
             console.error('  Trace ID:', apiError.fbtrace_id);
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
-            // Check for specific permission errors
-            if (apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
+            // Subcode 2534041 = account owner has turned off DM access from their Instagram settings.
+            // This is an account-side toggle, NOT a developer/app permission issue.
+            if (apiError.code === 200 && apiError.error_subcode === 2534041) {
+              console.warn('⚠️  [Instagram DM] Account-level DM access is disabled for this user.');
+              console.warn('   The Instagram account owner needs to enable messaging access:');
+              console.warn('   Instagram → Settings → Privacy → Messages → Allow message requests');
+              console.warn('   OR: Settings → Business tools and controls → Connected tools (for Business/Creator accounts)');
+              console.warn('   Comments will continue to work normally.');
+
+              // Persist the flag so the UI can show a clear warning to the account owner
+              if (platformConnection._id) {
+                const PlatformConnection = require('../../models/PlatformConnection');
+                PlatformConnection.findByIdAndUpdate(platformConnection._id, {
+                  $set: {
+                    'metadata.instagramDmEnabled': false,
+                    'metadata.instagramDmDisabledReason': 'Account owner has disabled Instagram DM access. Go to Instagram → Settings → Privacy → Messages and enable message requests, then resync.'
+                  }
+                }).catch(() => {});
+              }
+            } else if (apiError.code === 10 || apiError.code === 200 || apiError.code === 190) {
+              // Generic permission error — likely a developer/app setup issue
               console.warn('');
               console.warn('⚠️  [Instagram DM] PERMISSION ERROR DETECTED');
               console.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -435,6 +561,13 @@ class InstagramService {
 
       if (allConversations.length > 0) {
         console.log(`✅ [Instagram] Found ${allConversations.length} conversations - DMs are working!`);
+        // DMs working — ensure flag is cleared
+        if (platformConnection._id) {
+          const PlatformConnection = require('../../models/PlatformConnection');
+          PlatformConnection.findByIdAndUpdate(platformConnection._id, {
+            $set: { 'metadata.instagramDmEnabled': true, 'metadata.instagramDmDisabledReason': null }
+          }).catch(() => {});
+        }
       } else if (pageCount === 0) {
         console.warn(`⚠️  [Instagram] No conversations found - DMs likely not enabled (see error above)`);
       } else {
@@ -461,7 +594,7 @@ class InstagramService {
           const threadPlatformId = `dm_${String(businessAccountId)}_${String(otherParticipantId)}`;
 
           let allMessages = [];
-          let messagesNextPage = `${this.baseUrl}/${conversation.id}/messages`;
+          let messagesNextPage = `${apiBase}/${conversation.id}/messages`;
           let messagesPageCount = 0;
           const maxMessagePages = 10;
 
@@ -492,7 +625,11 @@ class InstagramService {
                             message.from?.id === platformConnection.platformPageId;
             if (!isFromUs && message.message) {
               const ts = message.created_time;
-              const timestamp = typeof ts === 'number' ? ts : (new Date(ts).getTime() / 1000);
+              // Store timestamp in MILLISECONDS for consistent frontend rendering.
+              // created_time from Graph API is an ISO string; getTime() returns ms.
+              const timestamp = typeof ts === 'number'
+                ? (ts < 10_000_000_000 ? ts * 1000 : ts)  // if already seconds, convert to ms
+                : new Date(ts).getTime();
               incomingMessages.push({
                 mid: message.id,
                 text: message.message,
@@ -513,8 +650,8 @@ class InstagramService {
           }
           const profile = profileCache.get(authorId);
           let authorName = profile?.name || otherParticipant?.username || 'Unknown User';
-          let avatarUrl = profile?.profile_pic || profile?.profile_picture_url;
-          if (!avatarUrl) avatarUrl = `${this.baseUrl}/${authorId}/picture?type=normal`;
+          let avatarUrl = profile?.profile_pic || profile?.profile_picture_url || undefined;
+          // Do not store Graph redirect URLs — browser cannot load them; inbox uses API proxy instead.
 
           const interaction = {
             organization: platformConnection.organization,
@@ -559,14 +696,26 @@ class InstagramService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
+        const orgId = platformConnection.organization;
+        const existingDmIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const dmChatRefMap = {};
+        for (const interaction of interactions) {
+          if (!existingDmIds.has(interaction.platformId)) {
+            dmChatRefMap[interaction.platformId] = await generateChatRef(orgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = dmChatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }
@@ -636,18 +785,37 @@ class InstagramService {
 
   /**
    * Reply to an Instagram comment
+   * @param {string|null} [connectionType=null] - 'instagram_login' or null (Facebook Login default)
    */
-  async replyToComment(commentId, message, accessToken) {
+  async replyToComment(commentId, message, accessToken, connectionType = null) {
+    const cid =
+      commentId == null || commentId === undefined ? '' : String(commentId).trim();
+    const text =
+      message == null || message === undefined ? '' : String(message).trim();
+
+    if (!cid) {
+      return {
+        success: false,
+        error: 'Missing Instagram comment id for reply.'
+      };
+    }
+    if (!text) {
+      return {
+        success: false,
+        error:
+          'Instagram comment replies require a non-empty text message. Add text and try again.'
+      };
+    }
+
+    const apiBase = this._getApiBase(connectionType);
     try {
       const response = await axios.post(
-        `${this.baseUrl}/${commentId}/replies`,
+        `${apiBase}/${cid}/replies`,
         {
-          message: message
+          message: text
         },
         {
-          params: {
-            access_token: accessToken
-          }
+          params: this._metaGraphParams({ access_token: accessToken })
         }
       );
 
@@ -688,7 +856,7 @@ class InstagramService {
         return null;
       }
       const res = await axios.get(`${this.baseUrl}/me`, {
-        params: { fields: 'id', access_token: accessToken },
+        params: this._metaGraphParams({ fields: 'id', access_token: accessToken }),
         timeout: 5000
       });
       return res.data?.id || null;
@@ -703,28 +871,50 @@ class InstagramService {
    * Uses HUMAN_AGENT message tag when useHumanAgentTag is true (default), per Meta App Review requirements.
    * @param {string} recipientId - Instagram recipient user ID (PSID)
    * @param {string} message - Text to send
-   * @param {string} accessToken - Page access token
-   * @param {string} pageId - Facebook Page ID (owns the Instagram account)
+   * @param {string} accessToken - Page / user access token
+   * @param {string} pageId - Facebook Page ID (Facebook Login) OR Instagram user ID (Instagram Login)
    * @param {boolean} [useHumanAgentTag=true] - Send with MESSAGE_TAG + HUMAN_AGENT for human agent replies
+   * @param {string|null} [connectionType=null] - 'instagram_login' or null (Facebook Login default)
    */
-  async sendMessage(recipientId, message, accessToken, pageId, useHumanAgentTag = true) {
+  async sendMessage(recipientId, message, accessToken, pageId, useHumanAgentTag = true, connectionType = null) {
+    const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
     let tokenPageId = null;
+
     try {
-      // Take thread control before replying — required when app receives DMs via standby channel.
-      // This makes our app the thread owner so the reply succeeds.
+      // ── Instagram Login path (graph.instagram.com) ──
+      // Token is a User access token; no thread control, no messaging_type/tag.
+      // Endpoint: POST /{ig-user-id}/messages
+      if (isIgLogin) {
+        const body = {
+          recipient: { id: recipientId },
+          message: { text: message }
+        };
+        console.log(`[Instagram] sendMessage (IG Login): POST ${apiBase}/${pageId}/messages to ${recipientId}`);
+        const response = await axios.post(
+          `${apiBase}/${pageId}/messages`,
+          body,
+          { params: this._metaGraphParams({ access_token: accessToken }) }
+        );
+        return {
+          success: true,
+          platformResponseId: response.data.message_id
+        };
+      }
+
+      // ── Facebook Login path (graph.facebook.com) ──
       try {
-        await axios.post(`${this.baseUrl}/${pageId}/take_thread_control`, null, {
-          params: { recipient_id: recipientId, access_token: accessToken }
+        await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
+          params: this._metaGraphParams({ recipient_id: recipientId, access_token: accessToken })
         });
         console.log('[Instagram] Thread control taken for recipient:', recipientId);
       } catch (ttcErr) {
-        // Non-fatal: if we're already the thread owner this may fail or be a no-op
         console.warn('[Instagram] take_thread_control failed (may already be owner):', ttcErr.response?.data?.error?.message || ttcErr.message);
       }
 
       try {
-        const meRes = await axios.get(`${this.baseUrl}/me`, {
-          params: { fields: 'id', access_token: accessToken },
+        const meRes = await axios.get(`${apiBase}/me`, {
+          params: this._metaGraphParams({ fields: 'id', access_token: accessToken }),
           timeout: 3000
         });
         tokenPageId = meRes.data?.id ? String(meRes.data.id) : null;
@@ -737,7 +927,6 @@ class InstagramService {
         console.warn('[Instagram] sendMessage: /me check failed (code', code, '). Cannot confirm token matches pageId.', msg?.substring(0, 80));
       }
 
-      // Try sending; if HUMAN_AGENT tag is not approved (error 10), fall back to RESPONSE.
       const attemptSend = async (useTag) => {
         const body = {
           recipient: { id: recipientId },
@@ -750,9 +939,9 @@ class InstagramService {
           body.messaging_type = 'RESPONSE';
         }
         return axios.post(
-          `${this.baseUrl}/${pageId}/messages`,
+          `${apiBase}/${pageId}/messages`,
           body,
-          { params: { access_token: accessToken } }
+          { params: this._metaGraphParams({ access_token: accessToken }) }
         );
       };
 
@@ -777,7 +966,8 @@ class InstagramService {
     } catch (error) {
       const data = error.response?.data;
       const apiError = data?.error;
-      let userMsg = apiError?.error_user_msg || apiError?.message || error.message;
+      // Prefer `message` — English (#code) developer text. `error_user_msg` follows Meta/account locale (often Arabic for MENA Pages).
+      let userMsg = apiError?.message || apiError?.error_user_msg || error.message;
       if (apiError?.code === 200 && userMsg && userMsg.includes('instagram_manage_messages')) {
         userMsg = 'Instagram messaging requires Advanced Access for instagram_manage_messages (App Review). Until approved, you can only reply to users who are Testers on your Meta app. Add the recipient as a Tester in your app’s Roles, or complete App Review for Advanced Access.';
       }
@@ -802,11 +992,178 @@ class InstagramService {
   }
 
   /**
+   * Send a Private Reply DM to the author of an Instagram comment.
+   *
+   * Uses `recipient.comment_id` instead of `recipient.id`, which bypasses the
+   * 24-hour messaging window and works for brand-new users who have never
+   * messaged the business before. Valid within 7 days of the comment.
+   *
+   * @param {string} commentId  - IG comment ID (the platformId stored on the Interaction)
+   * @param {string} message    - Text to send
+   * @param {string} accessToken - Page / user access token
+   * @param {string} pageId     - Facebook Page ID (Facebook Login) or IG user ID (Instagram Login)
+   * @param {string|null} [connectionType=null] - 'instagram_login' or null
+   * @returns {{ success: true, platformResponseId: string }}
+   */
+  async sendPrivateReply(commentId, message, accessToken, pageId, connectionType = null) {
+    const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
+    try {
+      const body = {
+        recipient: { comment_id: String(commentId) },
+        message: { text: message }
+      };
+      if (!isIgLogin) {
+        body.messaging_type = 'RESPONSE';
+      }
+      const response = await axios.post(
+        `${apiBase}/${pageId}/messages`,
+        body,
+        { params: this._metaGraphParams({ access_token: accessToken }) }
+      );
+
+      return {
+        success: true,
+        platformResponseId: response.data.message_id
+      };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const userMsg = apiError?.message || error.message;
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
+    }
+  }
+
+  /**
+   * Private reply to an Instagram comment with a Generic Template (e.g. Follow web_url button).
+   * Same window rules as sendPrivateReply (7 days, comment_id recipient).
+   *
+   * @param {string} commentId
+   * @param {object} element - output of buildFollowInviteGenericElement()
+   * @param {string} accessToken
+   * @param {string} pageId
+   * @param {string|null} [connectionType=null]
+   */
+  async sendPrivateReplyGenericTemplate(commentId, elementOrElements, accessToken, pageId, connectionType = null) {
+    const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
+    const elements = Array.isArray(elementOrElements)
+      ? elementOrElements
+      : [elementOrElements];
+    const body = {
+      recipient: { comment_id: String(commentId) },
+      message: {
+        attachment: {
+          type: 'template',
+          payload: {
+            template_type: 'generic',
+            elements
+          }
+        }
+      }
+    };
+    if (!isIgLogin) {
+      body.messaging_type = 'RESPONSE';
+    }
+    try {
+      const response = await axios.post(
+        `${apiBase}/${pageId}/messages`,
+        body,
+        { params: this._metaGraphParams({ access_token: accessToken }) }
+      );
+      return {
+        success: true,
+        platformResponseId: response.data.message_id
+      };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const userMsg = apiError?.message || error.message;
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
+    }
+  }
+
+  /**
+   * Send a Generic Template DM to an Instagram user (not a private comment reply).
+   * @param {string} recipientId - IG-scoped user id
+   * @param {object|object[]} elementOrElements
+   */
+  async sendGenericTemplateMessage(recipientId, elementOrElements, accessToken, pageId, connectionType = null) {
+    const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
+    const elements = Array.isArray(elementOrElements)
+      ? elementOrElements
+      : [elementOrElements];
+    const body = {
+      recipient: { id: String(recipientId) },
+      message: {
+        attachment: {
+          type: 'template',
+          payload: {
+            template_type: 'generic',
+            elements
+          }
+        }
+      }
+    };
+    if (!isIgLogin) {
+      body.messaging_type = 'RESPONSE';
+    }
+    try {
+      const response = await axios.post(
+        `${apiBase}/${pageId}/messages`,
+        body,
+        { params: this._metaGraphParams({ access_token: accessToken }) }
+      );
+      return {
+        success: true,
+        platformResponseId: response.data.message_id
+      };
+    } catch (error) {
+      const apiError = error.response?.data?.error;
+      const userMsg = apiError?.message || error.message;
+      const err = new Error(userMsg);
+      err.platformError = apiError;
+      err.statusCode = error.response?.status;
+      throw err;
+    }
+  }
+
+  /**
+   * User-facing copy for Instagram Send API attachment failures.
+   */
+  _mapInstagramAttachmentSendError(apiError, fallbackMessage) {
+    const raw = apiError?.message || apiError?.error_user_msg || fallbackMessage || '';
+    const msg = String(raw);
+    const lower = msg.toLowerCase();
+    if (
+      lower.includes('unsupported') ||
+      lower.includes('invalid attachment') ||
+      lower.includes('cannot be fetched') ||
+      lower.includes('could not be downloaded') ||
+      lower.includes('media download') ||
+      lower.includes('failed to fetch media')
+    ) {
+      return (
+        'Instagram could not use this attachment. Try a PDF under 25MB that is not password-protected, sent from your media library. If it still fails, paste a public HTTPS link to the PDF in the message text instead.'
+      );
+    }
+    if (lower.includes('too large') || lower.includes('file size') || String(apiError?.code) === '413') {
+      return 'Attachment is too large for Instagram direct messages.';
+    }
+    return msg || 'Failed to send attachment to Instagram.';
+  }
+
+  /**
    * Send an attachment (image, video, or file) to an Instagram DM recipient.
    * @param {string} [localFilePath] - If provided, uploads the file directly via
    *   multipart form-data instead of passing a URL for the platform to download.
    */
-  async sendMessageWithAttachment(recipientId, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = true, localFilePath = null) {
+  async sendMessageWithAttachment(recipientId, attachmentType, attachmentUrl, caption, accessToken, pageId, useHumanAgentTag = true, localFilePath = null, connectionType = null) {
     if (!recipientId || !attachmentType || !accessToken || !pageId) {
       return { success: false, error: 'Missing recipientId, attachmentType, accessToken, or pageId' };
     }
@@ -814,17 +1171,73 @@ class InstagramService {
     if (!allowedTypes.includes(attachmentType)) {
       return { success: false, error: `attachmentType must be one of: ${allowedTypes.join(', ')}` };
     }
+    const apiBase = this._getApiBase(connectionType);
+    const isIgLogin = connectionType === 'instagram_login';
     const fs = require('fs');
+    const pathLib = require('path');
     const FormData = require('form-data');
     const useDirectUpload = localFilePath && fs.existsSync(localFilePath);
 
-    try {
-      await axios.post(`${this.baseUrl}/${pageId}/take_thread_control`, null, {
-        params: { recipient_id: recipientId, access_token: accessToken }
-      }).catch(() => {});
+    const appendFiledataField = (form, absolutePath) => {
+      if (attachmentType === 'file') {
+        const base = pathLib.basename(absolutePath) || 'document.pdf';
+        const filename = /\.pdf$/i.test(base) ? base : `${base.replace(/\.[^/.]+$/, '') || 'document'}.pdf`;
+        form.append('filedata', fs.createReadStream(absolutePath), {
+          filename,
+          contentType: 'application/pdf'
+        });
+      } else {
+        form.append('filedata', fs.createReadStream(absolutePath));
+      }
+    };
 
-      const apiUrl = `${this.baseUrl}/${pageId}/messages`;
+    if (attachmentType === 'file' && !useDirectUpload) {
+      console.warn('[Instagram] Sending file attachment via URL (multipart preferred). Meta may fail if the URL is not public HTTPS.');
+    }
+
+    try {
+      const apiUrl = `${apiBase}/${pageId}/messages`;
       const platformType = attachmentType;
+
+      // ── Instagram Login path: simple body, no messaging_type/tag ──
+      if (isIgLogin) {
+        const sendIgLogin = async () => {
+          if (useDirectUpload) {
+            const form = new FormData();
+            form.append('recipient', JSON.stringify({ id: recipientId }));
+            form.append('message', JSON.stringify({
+              attachment: { type: platformType, payload: { is_reusable: false } }
+            }));
+            appendFiledataField(form, localFilePath);
+            return axios.post(apiUrl, form, {
+              params: this._metaGraphParams({ access_token: accessToken }),
+              headers: form.getHeaders(),
+              timeout: 30000,
+              maxContentLength: 100 * 1024 * 1024
+            });
+          }
+          return axios.post(apiUrl, {
+            recipient: { id: recipientId },
+            message: {
+              attachment: {
+                type: platformType,
+                payload: { url: attachmentUrl, is_reusable: false }
+              }
+            }
+          }, { params: this._metaGraphParams({ access_token: accessToken }) });
+        };
+
+        const response = await sendIgLogin();
+        if (caption && caption.trim()) {
+          await this.sendMessage(recipientId, caption.trim(), accessToken, pageId, false, connectionType);
+        }
+        return { success: true, platformResponseId: response.data?.message_id };
+      }
+
+      // ── Facebook Login path: thread control + messaging_type/tag ──
+      await axios.post(`${apiBase}/${pageId}/take_thread_control`, null, {
+        params: this._metaGraphParams({ recipient_id: recipientId, access_token: accessToken })
+      }).catch(() => {});
 
       const sendRequest = async (useTag) => {
         if (useDirectUpload) {
@@ -835,9 +1248,9 @@ class InstagramService {
           form.append('message', JSON.stringify({
             attachment: { type: platformType, payload: { is_reusable: false } }
           }));
-          form.append('filedata', fs.createReadStream(localFilePath));
+          appendFiledataField(form, localFilePath);
           return axios.post(apiUrl, form, {
-            params: { access_token: accessToken },
+            params: this._metaGraphParams({ access_token: accessToken }),
             headers: form.getHeaders(),
             timeout: 30000,
             maxContentLength: 100 * 1024 * 1024
@@ -856,7 +1269,7 @@ class InstagramService {
         };
         if (!useTag) delete body.tag;
         return axios.post(apiUrl, body, {
-          params: { access_token: accessToken }
+          params: this._metaGraphParams({ access_token: accessToken })
         });
       };
 
@@ -876,33 +1289,117 @@ class InstagramService {
       return { success: true, platformResponseId: response.data?.message_id };
     } catch (error) {
       const apiError = error.response?.data?.error;
-      const msg = apiError?.error_user_msg || apiError?.message || error.message;
-      console.error('[Instagram] sendMessageWithAttachment error:', msg);
-      return { success: false, error: msg };
+      const friendly = this._mapInstagramAttachmentSendError(apiError, error.message);
+      console.error('[Instagram] sendMessageWithAttachment error:', apiError?.message || error.message);
+      return { success: false, error: friendly };
     }
   }
 
   /**
+   * Resolve a /api/posts/media/:filename URL to the local disk path.
+   * Returns null when the URL is not a local media URL or the file is absent.
+   */
+  _resolveLocalMediaPath(mediaUrl) {
+    if (!mediaUrl) return null;
+    const match = String(mediaUrl).match(/\/api\/posts\/media\/([^?#]+)$/);
+    if (!match) return null;
+    const fsSync = require('fs');
+    const pathLib = require('path');
+    const filename = pathLib.basename(match[1]);
+    const candidate = pathLib.join(__dirname, '../../../uploads/posts', filename);
+    return fsSync.existsSync(candidate) ? candidate : null;
+  }
+
+  /**
+   * Upload an image binary directly to Meta's servers using multipart/form-data
+   * (source parameter). This bypasses the URL-fetch step entirely, which avoids
+   * the "media could not be fetched" CDN error (9004 / 2207052) that occurs when
+   * Meta's CDN cannot reach the hosting server from the public internet.
+   *
+   * Supported by graph.facebook.com (Facebook Login) and graph.instagram.com
+   * (Instagram Login) for image containers. Videos require the resumable upload
+   * API and are not handled here.
+   *
+   * @returns {Promise<string>} container ID
+   * @throws if the API call fails
+   */
+  async _createImageContainerBinary(platformConnection, { caption, localFilePath }) {
+    const FormData = require('form-data');
+    const fsLib = require('fs');
+
+    const { accessToken } = platformConnection;
+    const accountPath = this._accountPath(platformConnection);
+    const apiBase = this._getApiBase(this._connectionType(platformConnection));
+
+    const form = new FormData();
+    form.append('source', fsLib.createReadStream(localFilePath));
+    form.append('caption', caption || '');
+    form.append('access_token', accessToken);
+
+    console.log(`📤 [Instagram] Binary image upload to ${apiBase}/${accountPath}/media`);
+
+    const response = await axios.post(
+      `${apiBase}/${accountPath}/media`,
+      form,
+      {
+        headers: form.getHeaders(),
+        timeout: 60000,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+
+    console.log(`✅ [Instagram] Binary container created: ${response.data.id}`);
+    return response.data.id;
+  }
+
+  /**
    * Create Instagram Media Container
-   * Step 1 of publishing process
+   * Step 1 of publishing process.
+   *
+   * Strategy for images:
+   *   1. If the mediaUrl resolves to a local disk file, attempt a binary
+   *      (multipart source) upload — this bypasses Meta's CDN fetch step,
+   *      which can fail when the hosting server is not reachable from Meta's
+   *      IP ranges (error 9004 / subcode 2207052).
+   *   2. On any binary-upload failure, fall back to the image_url approach.
+   *
+   * Videos always use the URL approach (resumable upload is handled elsewhere).
    */
   async createMediaContainer(platformConnection, { caption, mediaUrl, mediaType }) {
-    try {
-      const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+    const { accessToken } = platformConnection;
+    const accountPath = this._accountPath(platformConnection);
+    const apiBase = this._getApiBase(this._connectionType(platformConnection));
 
-      if (!businessAccountId) {
-        throw new Error('Instagram Business Account ID not found');
+    if (!accountPath || accountPath === 'undefined') {
+      throw new Error('Instagram Business Account ID not found');
+    }
+
+    console.log(`📸 [Instagram] Creating media container for account: ${accountPath}`);
+
+    // ── Binary-first path for images ──────────────────────────────────────────
+    if (mediaType === 'image') {
+      const localFilePath = this._resolveLocalMediaPath(mediaUrl);
+      if (localFilePath) {
+        try {
+          const containerId = await this._createImageContainerBinary(
+            platformConnection, { caption, localFilePath }
+          );
+          return { containerId, mediaType };
+        } catch (binaryErr) {
+          const apiErr = binaryErr.response?.data?.error;
+          console.warn(
+            `⚠️  [Instagram] Binary upload failed (${apiErr?.code ?? binaryErr.message}), falling back to image_url`
+          );
+          // Fall through to URL-based approach below
+        }
       }
+    }
 
-      console.log(`📸 [Instagram] Creating media container for account: ${businessAccountId}`);
+    // ── URL-based path (images without local file, or binary-upload fallback) ─
+    try {
+      const params = { access_token: accessToken, caption: caption || '' };
 
-      const params = {
-        access_token: accessToken,
-        caption: caption || ''
-      };
-
-      // Add media based on type
       if (mediaType === 'image') {
         params.image_url = mediaUrl;
       } else if (mediaType === 'video') {
@@ -913,34 +1410,29 @@ class InstagramService {
       }
 
       const response = await axios.post(
-        `${this.baseUrl}/${businessAccountId}/media`,
+        `${apiBase}/${accountPath}/media`,
         null,
         { params }
       );
 
       console.log(`✅ [Instagram] Media container created:`, response.data.id);
-
-      return {
-        containerId: response.data.id,
-        mediaType
-      };
+      return { containerId: response.data.id, mediaType };
     } catch (error) {
       console.error('❌ [Instagram] Create container error:', error.response?.data || error.message);
-      
-      // Extract detailed error info from Instagram API
+
       const apiError = error.response?.data?.error;
       if (apiError) {
         const detailedError = new Error(apiError.message || 'Failed to create media container');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
         };
         throw detailedError;
       }
-      
+
       throw new Error('Failed to create media container');
     }
   }
@@ -949,13 +1441,14 @@ class InstagramService {
    * Check Media Container Status
    * Required for videos to ensure processing is complete
    */
-  async checkContainerStatus(accessToken, containerId, maxAttempts = 30) {
+  async checkContainerStatus(accessToken, containerId, maxAttempts = 30, connectionType = null) {
+    const apiBase = this._getApiBase(connectionType);
     console.log(`⏳ [Instagram] Checking container status: ${containerId}`);
 
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const response = await axios.get(
-          `${this.baseUrl}/${containerId}`,
+          `${apiBase}/${containerId}`,
           {
             params: {
               access_token: accessToken,
@@ -1045,12 +1538,13 @@ class InstagramService {
   async publishMediaContainer(platformConnection, containerId) {
     try {
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
+      const apiBase = this._getApiBase(this._connectionType(platformConnection));
 
       console.log(`📤 [Instagram] Publishing container: ${containerId}`);
 
       const response = await axios.post(
-        `${this.baseUrl}/${businessAccountId}/media_publish`,
+        `${apiBase}/${accountPath}/media_publish`,
         null,
         {
           params: {
@@ -1067,7 +1561,7 @@ class InstagramService {
       let postUrl = `https://www.instagram.com/p/${postId}/`; // Fallback
       try {
         const mediaResponse = await axios.get(
-          `${this.baseUrl}/${postId}`,
+          `${apiBase}/${postId}`,
           {
             params: {
               access_token: accessToken,
@@ -1097,7 +1591,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to publish media');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1132,7 +1626,7 @@ class InstagramService {
       });
 
       // Step 2: Wait for media to be ready (videos need processing; images need a brief moment)
-      await this.checkContainerStatus(platformConnection.accessToken, containerId, mediaType === 'video' ? 30 : 5);
+      await this.checkContainerStatus(platformConnection.accessToken, containerId, mediaType === 'video' ? 30 : 5, this._connectionType(platformConnection));
 
       // Step 3: Publish the container
       const result = await this.publishMediaContainer(platformConnection, containerId);
@@ -1161,46 +1655,59 @@ class InstagramService {
       }
 
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
+      const connType = this._connectionType(platformConnection);
+      const apiBase = this._getApiBase(connType);
 
-      console.log(`📖 [Instagram] Starting story creation for account: ${businessAccountId}`);
+      console.log(`📖 [Instagram] Starting story creation for account: ${accountPath}`);
 
-      // Pre-check: Verify URL is publicly accessible
-      await this.verifyMediaUrlAccessible(mediaUrl);
-
-      // Step 1: Create story container
-      const params = {
-        access_token: accessToken,
-        media_type: 'STORIES' // This tells Instagram it's a story
-      };
+      // Pre-check: Verify URL is publicly accessible (skipped when binary upload succeeds)
+      // Step 1: Create story container — binary-first for local images
+      let containerId;
 
       if (mediaType === 'image') {
-        params.image_url = mediaUrl;
-      } else if (mediaType === 'video') {
-        params.video_url = mediaUrl;
-      } else {
-        throw new Error('Invalid media type. Must be "image" or "video"');
+        const localFilePath = this._resolveLocalMediaPath(mediaUrl);
+        if (localFilePath) {
+          try {
+            const FormData = require('form-data');
+            const fsLib = require('fs');
+            const form = new FormData();
+            form.append('source', fsLib.createReadStream(localFilePath));
+            form.append('media_type', 'STORIES');
+            form.append('access_token', accessToken);
+            console.log(`📤 [Instagram] Binary story upload`);
+            const bRes = await axios.post(`${apiBase}/${accountPath}/media`, form, {
+              headers: form.getHeaders(), timeout: 60000,
+              maxContentLength: Infinity, maxBodyLength: Infinity
+            });
+            containerId = bRes.data.id;
+            console.log(`✅ [Instagram] Story container (binary) created: ${containerId}`);
+          } catch (bErr) {
+            console.warn(`⚠️  [Instagram] Binary story upload failed, falling back to image_url: ${bErr.response?.data?.error?.message ?? bErr.message}`);
+          }
+        }
       }
 
-      console.log(`📸 [Instagram] Creating story container`);
-      const containerResponse = await axios.post(
-        `${this.baseUrl}/${businessAccountId}/media`,
-        null,
-        { params }
-      );
+      if (!containerId) {
+        // URL-based fallback (or video path)
+        await this.verifyMediaUrlAccessible(mediaUrl);
+        const params = { access_token: accessToken, media_type: 'STORIES' };
+        if (mediaType === 'image') params.image_url = mediaUrl;
+        else if (mediaType === 'video') params.video_url = mediaUrl;
+        else throw new Error('Invalid media type. Must be "image" or "video"');
+        console.log(`📸 [Instagram] Creating story container (URL)`);
+        const containerResponse = await axios.post(`${apiBase}/${accountPath}/media`, null, { params });
+        containerId = containerResponse.data.id;
+        console.log(`✅ [Instagram] Story container created: ${containerId}`);
+      }
 
-      const containerId = containerResponse.data.id;
-      console.log(`✅ [Instagram] Story container created: ${containerId}`);
-
-      // Step 2: For videos, wait for processing
       if (mediaType === 'video') {
-        await this.checkContainerStatus(accessToken, containerId);
+        await this.checkContainerStatus(accessToken, containerId, 30, connType);
       }
 
-      // Step 3: Publish the story
       console.log(`📤 [Instagram] Publishing story container: ${containerId}`);
       const publishResponse = await axios.post(
-        `${this.baseUrl}/${businessAccountId}/media_publish`,
+        `${apiBase}/${accountPath}/media_publish`,
         null,
         {
           params: {
@@ -1225,7 +1732,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to create story');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Story Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1287,21 +1794,21 @@ class InstagramService {
       }
 
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
+      const connType = this._connectionType(platformConnection);
+      const apiBase = this._getApiBase(connType);
 
-      console.log(`🎬 [Instagram] Starting reel creation for account: ${businessAccountId}`);
+      console.log(`🎬 [Instagram] Starting reel creation for account: ${accountPath}`);
       console.log(`📹 [Instagram] Video URL: ${mediaUrl}`);
 
-      // Pre-check: Verify URL is publicly accessible before sending to Instagram
       await this.verifyMediaUrlAccessible(mediaUrl);
 
-      // Step 1: Create reel container
       const params = {
         access_token: accessToken,
-        media_type: 'REELS', // This tells Instagram it's a reel
+        media_type: 'REELS',
         video_url: mediaUrl,
         caption: caption || '',
-        share_to_feed: true // Also share to main feed
+        share_to_feed: true
       };
 
       console.log(`📹 [Instagram] Creating reel container with params:`, {
@@ -1310,7 +1817,7 @@ class InstagramService {
         share_to_feed: params.share_to_feed
       });
       const containerResponse = await axios.post(
-        `${this.baseUrl}/${businessAccountId}/media`,
+        `${apiBase}/${accountPath}/media`,
         null,
         { params }
       );
@@ -1318,13 +1825,11 @@ class InstagramService {
       const containerId = containerResponse.data.id;
       console.log(`✅ [Instagram] Reel container created: ${containerId}`);
 
-      // Step 2: Wait for video processing
-      await this.checkContainerStatus(accessToken, containerId);
+      await this.checkContainerStatus(accessToken, containerId, 30, connType);
 
-      // Step 3: Publish the reel
       console.log(`📤 [Instagram] Publishing reel container: ${containerId}`);
       const publishResponse = await axios.post(
-        `${this.baseUrl}/${businessAccountId}/media_publish`,
+        `${apiBase}/${accountPath}/media_publish`,
         null,
         {
           params: {
@@ -1341,7 +1846,7 @@ class InstagramService {
       let reelUrl = `https://www.instagram.com/reel/${reelId}/`;
       try {
         const mediaResponse = await axios.get(
-          `${this.baseUrl}/${reelId}`,
+          `${apiBase}/${reelId}`,
           {
             params: {
               access_token: accessToken,
@@ -1370,7 +1875,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to create reel');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Reel Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1388,7 +1893,8 @@ class InstagramService {
   async createCarouselPost(platformConnection, { caption, mediaUrls }) {
     try {
       const { accessToken } = platformConnection;
-      const businessAccountId = this._getBusinessAccountId(platformConnection);
+      const accountPath = this._accountPath(platformConnection);
+      const apiBase = this._getApiBase(this._connectionType(platformConnection));
 
       if (!mediaUrls || mediaUrls.length === 0) {
         throw new Error('At least one media URL is required for carousel posts');
@@ -1400,41 +1906,54 @@ class InstagramService {
 
       console.log(`📸 [Instagram] Creating carousel with ${mediaUrls.length} items`);
 
-      // Pre-check: Verify all URLs are publicly accessible
+      // Step 1: Create containers for each media item (binary-first for images)
+      const containerIds = [];
       for (let i = 0; i < mediaUrls.length; i++) {
         const mediaItem = mediaUrls[i];
-        console.log(`🔍 [Instagram] Verifying carousel item ${i + 1}/${mediaUrls.length}`);
-        await this.verifyMediaUrlAccessible(mediaItem.url);
-      }
-
-      // Step 1: Create containers for each media item
-      const containerIds = [];
-      for (const mediaItem of mediaUrls) {
-        const params = {
-          access_token: accessToken,
-          is_carousel_item: true
-        };
+        let itemContainerId = null;
 
         if (mediaItem.type === 'image') {
-          params.image_url = mediaItem.url;
-        } else if (mediaItem.type === 'video') {
-          params.media_type = 'VIDEO';
-          params.video_url = mediaItem.url;
+          const localFilePath = this._resolveLocalMediaPath(mediaItem.url);
+          if (localFilePath) {
+            try {
+              const FormData = require('form-data');
+              const fsLib = require('fs');
+              const form = new FormData();
+              form.append('source', fsLib.createReadStream(localFilePath));
+              form.append('is_carousel_item', 'true');
+              form.append('access_token', accessToken);
+              const bRes = await axios.post(`${apiBase}/${accountPath}/media`, form, {
+                headers: form.getHeaders(), timeout: 60000,
+                maxContentLength: Infinity, maxBodyLength: Infinity
+              });
+              itemContainerId = bRes.data.id;
+              console.log(`✅ [Instagram] Carousel item ${i + 1} binary created: ${itemContainerId}`);
+            } catch (bErr) {
+              console.warn(`⚠️  [Instagram] Binary carousel item ${i + 1} failed, falling back to URL: ${bErr.response?.data?.error?.message ?? bErr.message}`);
+            }
+          }
         }
 
-        const response = await axios.post(
-          `${this.baseUrl}/${businessAccountId}/media`,
-          null,
-          { params }
-        );
+        if (!itemContainerId) {
+          await this.verifyMediaUrlAccessible(mediaItem.url);
+          const params = { access_token: accessToken, is_carousel_item: true };
+          if (mediaItem.type === 'image') {
+            params.image_url = mediaItem.url;
+          } else if (mediaItem.type === 'video') {
+            params.media_type = 'VIDEO';
+            params.video_url = mediaItem.url;
+          }
+          const response = await axios.post(`${apiBase}/${accountPath}/media`, null, { params });
+          itemContainerId = response.data.id;
+          console.log(`✅ [Instagram] Carousel item ${i + 1} (URL) created: ${itemContainerId}`);
+        }
 
-        containerIds.push(response.data.id);
-        console.log(`✅ [Instagram] Carousel item ${containerIds.length} created`);
+        containerIds.push(itemContainerId);
       }
 
       // Step 2: Create carousel container
       const carouselResponse = await axios.post(
-        `${this.baseUrl}/${businessAccountId}/media`,
+        `${apiBase}/${accountPath}/media`,
         null,
         {
           params: {
@@ -1464,7 +1983,7 @@ class InstagramService {
         const detailedError = new Error(apiError.message || 'Failed to create carousel post');
         detailedError.platformError = {
           title: apiError.error_user_title || 'Instagram Error',
-          message: apiError.error_user_msg || apiError.message,
+          message: apiError.message || apiError.error_user_msg,
           code: apiError.code,
           subcode: apiError.error_subcode,
           type: apiError.type
@@ -1473,6 +1992,120 @@ class InstagramService {
       }
       
       throw new Error('Failed to create carousel post');
+    }
+  }
+
+  /**
+   * Given an Instagram URL or shortcode (e.g. "DWmafyLADDF" or
+   * "https://www.instagram.com/p/DWmafyLADDF/"), look up all media for the
+   * connected Instagram account and return the numeric media ID that matches.
+   *
+   * Returns { numericId, shortcode } on success, or null if not found / on error.
+   * Scans up to the 200 most-recent posts (2 pages of 100).
+   *
+   * @param {string} igUserId  - The connected IG business account user ID
+   * @param {string} accessToken
+   * @param {string} input     - shortcode or full Instagram post URL
+   */
+  async resolveShortcodeToMediaId(igUserId, accessToken, input) {
+    // Extract shortcode — handles instagram.com/p/SC and instagram.com/username/p/SC
+    const urlMatch = input && input.match(/instagram\.com\/(?:[^/?#]+\/)?p\/([A-Za-z0-9_-]+)/);
+    const shortcode = urlMatch ? urlMatch[1] : (input || '').trim();
+
+    if (!shortcode) return null;
+
+    // If the input is already a numeric ID, no resolution needed
+    if (/^\d+$/.test(shortcode)) {
+      return { numericId: shortcode, shortcode: null };
+    }
+
+    const fields = 'id,shortcode';
+    let url = `${this.baseUrl}/${igUserId}/media`;
+    let pagesChecked = 0;
+
+    try {
+      while (url && pagesChecked < 2) {
+        const response = await axios.get(url, {
+          params: pagesChecked === 0 ? { fields, limit: 100, access_token: accessToken } : { access_token: accessToken },
+          timeout: 10000
+        });
+
+        const items = response.data?.data || [];
+        const match = items.find(m => m.shortcode === shortcode);
+        if (match) {
+          return { numericId: match.id, shortcode: match.shortcode };
+        }
+
+        // Next page
+        url = response.data?.paging?.next || null;
+        pagesChecked++;
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error?.message || err.message;
+      console.warn(`[Instagram] resolveShortcodeToMediaId failed for shortcode="${shortcode}":`, msg);
+    }
+
+    return null;
+  }
+
+  /**
+   * Resolve a numeric Graph API media ID to its public Instagram shortcode permalink.
+   * e.g. "18104377792903993" → "https://www.instagram.com/p/DWfGl70lIGM/"
+   * Returns null if the call fails or the ID is not a valid media.
+   */
+  async fetchMediaPermalink(accessToken, mediaId, connectionType = null) {
+    if (!accessToken || !mediaId) return null;
+    try {
+      const apiBase = this._getApiBase(connectionType);
+      const response = await axios.get(`${apiBase}/${mediaId}`, {
+        params: { fields: 'permalink', access_token: accessToken },
+        timeout: 8000
+      });
+      const permalink = response.data?.permalink;
+      if (permalink) {
+        console.log(`[Instagram] Resolved media ${mediaId} → ${permalink}`);
+        return permalink;
+      }
+    } catch (err) {
+      console.warn(`[Instagram] fetchMediaPermalink failed for ${mediaId}:`, err?.response?.data?.error?.message || err.message);
+    }
+    return null;
+  }
+
+  /**
+   * Resolve a shared IG post/reel media id from DM webhooks to preview URLs + permalink.
+   * @param {string} accessToken
+   * @param {string} mediaId
+   * @param {string|null} connectionType
+   * @returns {Promise<{ id: string, mediaType: string|null, mediaUrl: string|null, thumbnailUrl: string|null, permalink: string|null, shortcode: string|null }|null>}
+   */
+  async fetchMediaPreview(accessToken, mediaId, connectionType = null) {
+    if (!accessToken || !mediaId) return null;
+    const apiBase = this._getApiBase(connectionType);
+    try {
+      const response = await axios.get(`${apiBase}/${mediaId}`, {
+        params: {
+          fields: 'id,media_type,media_url,thumbnail_url,permalink,shortcode',
+          access_token: accessToken
+        },
+        timeout: 8000
+      });
+      const d = response.data;
+      if (!d?.id) return null;
+      return {
+        id: String(d.id),
+        mediaType: d.media_type || null,
+        mediaUrl: d.media_url || null,
+        thumbnailUrl: d.thumbnail_url || d.media_url || null,
+        permalink: d.permalink || null,
+        shortcode: d.shortcode || null
+      };
+    } catch (err) {
+      console.warn(
+        `[Instagram] fetchMediaPreview failed for ${mediaId}:`,
+        err?.response?.data?.error?.message || err.message
+      );
+      return null;
     }
   }
 }

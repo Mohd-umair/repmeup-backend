@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -44,8 +45,31 @@ app.use(cors({
 // Razorpay webhook — MUST be registered before express.json() to receive raw Buffer for HMAC verification
 app.use('/api/razorpay', require('./routes/razorpay'));
 
-// Body parser (applied after Razorpay webhook so its raw middleware is not overridden)
-app.use(express.json());
+// Razorpay commerce payment webhook (per-org payment events) — raw body required
+app.use('/api/webhooks/payments/razorpay', require('./routes/paymentWebhookRazorpay'));
+
+// Body parser — capture raw JSON for Meta WhatsApp webhook signature (HMAC over exact bytes)
+// Also capture for product-payment and org payment gateway webhooks
+app.use(
+  express.json({
+    limit: '10mb',
+    verify: (req, res, buf) => {
+      const path = req.originalUrl || req.url || '';
+      // Mounted at /api/webhooks/whatsapp and /api/v1/webhooks/whatsapp
+      if (path.includes('/webhooks/whatsapp')) {
+        req.rawBody = buf;
+      }
+      // Product payment legacy webhook and new per-org gateway webhooks
+      if (path.includes('/webhooks/product-payment') || path.includes('/webhooks/payments/')) {
+        req.rawBody = buf;
+      }
+      // Shopify webhooks — HMAC verified over raw body
+      if (path.includes('/webhooks/shopify')) {
+        req.rawBody = buf;
+      }
+    }
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
 // Request logger middleware (adds req.log and requestId)
@@ -81,8 +105,12 @@ let limiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => {
     if (rateLimitDisabled) return true;
-    if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
-    if (req.path.startsWith('/api/webhooks/')) return true;
+    // req.path inside app.use('/api/', ...) is RELATIVE to the /api/ mount point,
+    // so it starts with /posts/media/ not /api/posts/media/.
+    if (req.path === '/health' || req.path.startsWith('/posts/media/')) return true;
+    if (req.path.startsWith('/webhooks/')) return true;
+    // Voice IVR webhooks (Twilio retries aggressively; rate-limiting here would break calls)
+    if (req.path.startsWith('/voice/webhooks/')) return true;
     // Inbox avatar/attachment proxies (many small requests when loading inbox; all authenticated)
     if (req.path.includes('inbox/avatar/') || req.path.includes('inbox/attachment')) return true;
     return false;
@@ -107,47 +135,134 @@ if (rateLimitDisabled) {
 }
 
 // Health check route
-app.get('/health', (req, res) => {
-  res.status(200).json({
+app.get('/health', async (req, res) => {
+  const payload = {
     success: true,
     message: 'ORM System API is running',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV
-  });
+    environment: process.env.NODE_ENV,
+    workers: {
+      campaignInCoreWorker: process.env.ENABLE_CAMPAIGN_IN_CORE_WORKER !== 'false',
+      dedicatedCampaignWorkerRecommended: process.env.NODE_ENV === 'production'
+    }
+  };
+
+  if (req.query.campaignMetrics === '1') {
+    try {
+      const campaignMetrics = require('./services/campaignMetricsService');
+      payload.campaignMetrics = await campaignMetrics.getSnapshot();
+    } catch {
+      payload.campaignMetrics = { error: 'metrics_unavailable' };
+    }
+  }
+
+  res.status(200).json(payload);
 });
 
-// Bull Board monitoring UI
+// Bull Board monitoring UI — MUST be authenticated. It exposes raw job
+// payloads (webhook bodies, access tokens, PII) and allows retry/delete/purge.
+// Guarded with HTTP Basic Auth (browser-friendly) using dedicated credentials.
 const bullBoardAdapter = require('./config/bullBoard');
-app.use('/admin/queues', bullBoardAdapter.getRouter());
+const bullBoardAuth = (req, res, next) => {
+  const user = process.env.BULL_BOARD_USER;
+  const pass = process.env.BULL_BOARD_PASSWORD;
 
-// API routes
-app.use('/api/contact', require('./routes/contact'));
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/inbox', require('./routes/inbox'));
-app.use('/api/knowledge-base', require('./routes/knowledgeBase'));
-app.use('/api/platforms', require('./routes/platforms'));
-app.use('/api/webhooks', require('./routes/webhooks'));
-app.use('/api/organizations', require('./routes/organizations'));
-app.use('/api/users', require('./routes/users'));
-app.use('/api/diagnostics', require('./routes/diagnostics'));
-app.use('/api/analytics', require('./routes/analytics'));
-app.use('/api/data-delete', require('./routes/dataDelete'));
-app.use('/api/posts', require('./routes/postRoutes'));
-app.use('/api/platform-posts', require('./routes/platformPosts'));
-app.use('/api/media-library', require('./routes/mediaLibrary'));
-app.use('/api/meta', require('./routes/meta'));
-app.use('/api/notifications', require('./routes/notifications'));
-app.use('/api/menus', require('./routes/menus'));
-app.use('/api/subscription', require('./routes/subscription'));
-app.use('/api/social-accounts', require('./routes/socialAccounts'));
-app.use('/api/plans', require('./routes/plans'));
-app.use('/api/super-admin', require('./routes/super-admin'));
-app.use('/api/brand-config', require('./routes/brandConfig'));
-app.use('/api/intent-buckets', require('./routes/intentBuckets'));
-app.use('/api/trends', require('./routes/trends'));
-app.use('/api/audit-logs', require('./routes/auditLog'));
-// app.use('/api/labels', require('./routes/labels'));
-// app.use('/api/templates', require('./routes/templates'));
+  // Fail closed: if no credentials are configured, the dashboard is disabled
+  // rather than served openly.
+  if (!user || !pass) {
+    return res.status(404).json({ success: false, error: 'Route not found' });
+  }
+
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Basic ')) {
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    const idx = decoded.indexOf(':');
+    const providedUser = decoded.slice(0, idx);
+    const providedPass = decoded.slice(idx + 1);
+
+    // Constant-time compare to avoid credential timing leaks.
+    const expected = `${user}:${pass}`;
+    const got = `${providedUser}:${providedPass}`;
+    const a = Buffer.from(expected);
+    const b = Buffer.from(got);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      return next();
+    }
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Queue Dashboard"');
+  return res.status(401).json({ success: false, error: 'Authentication required' });
+};
+app.use('/admin/queues', bullBoardAuth, bullBoardAdapter.getRouter());
+
+// ── Route definitions ─────────────────────────────────────────────────────────
+// Each route module is loaded once and mounted at BOTH the legacy /api/ prefix
+// AND the versioned /api/v1/ prefix.  Existing clients continue to work;
+// new integrations should use /api/v1/.
+const routeMap = [
+  ['/public',         './routes/public'],
+  ['/public/growth-audit', './routes/growthAudit'],
+  ['/growth-intelligence', './routes/growthIntelligence'],
+  ['/contact',        './routes/contact'],
+  ['/demo',           './routes/demo'],
+  ['/auth',           './routes/auth'],
+  ['/inbox',          './routes/inbox'],
+  ['/knowledge-base', './routes/knowledgeBase'],
+  ['/platforms',      './routes/platforms'],
+  ['/webhooks',       './routes/webhooks'],
+  ['/organizations',  './routes/organizations'],
+  ['/users',          './routes/users'],
+  ['/diagnostics',    './routes/diagnostics'],
+  ['/analytics',      './routes/analytics'],
+  ['/data-delete',    './routes/dataDelete'],
+  ['/posts',          './routes/postRoutes'],
+  ['/platform-posts', './routes/platformPosts'],
+  ['/media-library',  './routes/mediaLibrary'],
+  ['/meta',           './routes/meta'],
+  ['/notifications',  './routes/notifications'],
+  ['/menus',          './routes/menus'],
+  ['/subscription',   './routes/subscription'],
+  ['/addons',         './routes/addons'],
+  ['/social-accounts','./routes/socialAccounts'],
+  ['/plans',          './routes/plans'],
+  ['/super-admin',    './routes/super-admin'],
+  ['/entitlements',   './routes/entitlements'],
+  ['/brand-config',   './routes/brandConfig'],
+  ['/inspirations',   './routes/inspirations'],
+  ['/event-templates','./routes/eventTemplates'],
+  ['/post-templates', './routes/postTemplates'],
+  ['/intent-buckets', './routes/intentBuckets'],
+  ['/products',       './routes/products'],
+  ['/trends',         './routes/trends'],
+  ['/audit-logs',     './routes/auditLog'],
+  ['/tickets',        './routes/tickets'],
+  ['/contacts',             './routes/contacts'],
+  ['/activation',           './routes/activation'],
+  ['/email',                './routes/emailAccounts'],
+  ['/whatsapp-templates',   './routes/whatsappTemplates'],
+  ['/whatsapp-catalog',     './routes/whatsappCatalog'],
+  ['/voice',                './routes/voiceIvr'],
+  ['/automation',           './routes/automation'],
+  ['/retargeting',          './routes/retargeting'],
+  ['/whatsapp-flows',       './routes/whatsappFlows'],
+  ['/whatsapp-form-flows',  './routes/whatsappFormFlows'],
+  ['/campaigns',            './routes/campaigns'],
+  ['/reports/number',       './routes/numberReports'],
+  ['/commerce-orders',      './routes/commerceOrders'],
+  ['/appointments',         './routes/appointments'],
+  ['/payment-gateways',     './routes/paymentGateways'],
+  ['/payments',             './routes/payments'],
+  ['/payment-analytics',   './routes/paymentAnalytics'],
+  // ['/labels',      './routes/labels'],
+  // ['/templates',   './routes/templates'],
+];
+
+// Mount at both /api (legacy compat) and /api/v1 (canonical versioned path)
+for (const [path, routeFile] of routeMap) {
+  const router = require(routeFile);
+  app.use(`/api${path}`, router);
+  app.use(`/api/v1${path}`, router);
+}
 
 // 404 handler
 app.use((req, res) => {
@@ -173,8 +288,9 @@ const upgradeRateLimiting = () => {
       legacyHeaders: false,
       skip: (req) => {
         if (rateLimitDisabled) return true;
-        if (req.path === '/health' || req.path.startsWith('/api/posts/media/')) return true;
-        if (req.path.startsWith('/api/webhooks/')) return true;
+        if (req.path === '/health' || req.path.startsWith('/posts/media/')) return true;
+        if (req.path.startsWith('/webhooks/')) return true;
+        if (req.path.startsWith('/voice/webhooks/')) return true;
         return false;
       },
       store: new RedisStore({

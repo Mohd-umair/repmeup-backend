@@ -6,6 +6,13 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const Plan = require('../src/models/Plan');
+const {
+  FREE_ENTITLEMENTS,
+  STARTER_ENTITLEMENTS,
+  PRO_ENTITLEMENTS,
+  BUSINESS_ENTITLEMENTS,
+  ENTERPRISE_ENTITLEMENTS
+} = require('./planTierEntitlements');
 
 // MongoDB connection
 const connectDB = async () => {
@@ -27,11 +34,13 @@ const defaultPlans = [
     tier: 0,
     price: 0,
     billingCycle: 'monthly',
+    // Legacy `limits` retained for backward-compat reads; the engine prefers
+    // `entitlements` below.
     limits: {
       maxAccounts: 1,
       maxUsers: 1,
-      maxPostsPerMonth: 10,
-      maxAutoRepliesPerMonth: 50,
+      maxPostsPerMonth: 50,            // capped to creation credits
+      maxAutoRepliesPerMonth: 100,
       maxAICreditsPerMonth: 100,
       maxStorageGB: 1,
       maxAPICallsPerDay: 100
@@ -42,6 +51,13 @@ const defaultPlans = [
       'manual_replies',
       'basic_analytics'
     ],
+    // Catalog-keyed entitlements per the Free-tier spec. These are the values
+    // the new entitlementsService consumes first; legacy `limits` is the
+    // back-compat fallback only.
+    entitlements: {
+      ...FREE_ENTITLEMENTS,
+      'inbox.uniqueContacts.monthly': { limit: 200 }
+    },
     isActive: true,
     isPublic: true,
     displayOrder: 1
@@ -51,7 +67,8 @@ const defaultPlans = [
     name: 'Starter',
     description: 'Great for small teams and growing businesses',
     tier: 1,
-    price: 29,
+    price: 2499,
+    priceInr: 249900,
     billingCycle: 'monthly',
     limits: {
       maxAccounts: 3,
@@ -70,6 +87,7 @@ const defaultPlans = [
       'team_collaboration',
       'email_support'
     ],
+    entitlements: STARTER_ENTITLEMENTS,
     isActive: true,
     isPublic: true,
     displayOrder: 2,
@@ -80,7 +98,8 @@ const defaultPlans = [
     name: 'Pro',
     description: 'Perfect for professionals and agencies managing multiple clients',
     tier: 2,
-    price: 79,
+    price: 6599,
+    priceInr: 659900,
     billingCycle: 'monthly',
     limits: {
       maxAccounts: 10,
@@ -102,6 +121,7 @@ const defaultPlans = [
       'bulk_scheduling',
       'advanced_reporting'
     ],
+    entitlements: PRO_ENTITLEMENTS,
     badge: 'MOST POPULAR',
     badgeColor: 'blue',
     highlightColor: '#3B82F6',
@@ -115,7 +135,8 @@ const defaultPlans = [
     name: 'Business',
     description: 'For large teams and businesses with advanced needs',
     tier: 3,
-    price: 199,
+    price: 16499,
+    priceInr: 1649900,
     billingCycle: 'monthly',
     limits: {
       maxAccounts: 50,
@@ -138,6 +159,7 @@ const defaultPlans = [
       'advanced_security',
       'audit_logs'
     ],
+    entitlements: BUSINESS_ENTITLEMENTS,
     badge: 'BEST VALUE',
     badgeColor: 'purple',
     highlightColor: '#8B5CF6',
@@ -174,6 +196,7 @@ const defaultPlans = [
       'compliance_certifications',
       '24_7_phone_support'
     ],
+    entitlements: ENTERPRISE_ENTITLEMENTS,
     badge: 'CONTACT SALES',
     badgeColor: 'indigo',
     highlightColor: '#6366F1',
@@ -209,9 +232,9 @@ async function seedPlans() {
     
     console.log('📋 Plans created:');
     plans.forEach(plan => {
-      const priceDisplay = plan.price === 0 ? 'Free' : 
-                          plan.price === 'custom' ? 'Custom' : 
-                          `$${plan.price}/mo`;
+      const priceDisplay = plan.price === 0 ? 'Free' :
+                          plan.price === 'custom' ? 'Custom' :
+                          `₹${Number(plan.price).toLocaleString('en-IN')}/mo`;
       console.log(`   - ${plan.name.padEnd(12)} (${plan.planId.padEnd(10)}) - ${priceDisplay.padEnd(12)} - Tier ${plan.tier}`);
       console.log(`     Limits: ${plan.limits.maxAccounts === -1 ? '∞' : plan.limits.maxAccounts} accounts, ${plan.limits.maxUsers === -1 ? '∞' : plan.limits.maxUsers} users`);
       console.log(`     Features: ${plan.features.length} features`);

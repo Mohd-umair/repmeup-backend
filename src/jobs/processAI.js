@@ -1,15 +1,20 @@
 const Interaction = require('../models/Interaction');
 const IntentBucket = require('../models/IntentBucket');
-const KnowledgeBase = require('../models/KnowledgeBase');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { resolveEscalationAssignmentUsers } = require('../services/autoAssignmentPoolService');
 const { runWithAiContext } = require('../services/aiRequestContext');
 const aiService = require('../services/aiService');
+const audioTranscriptionService = require('../services/ai/audioTranscriptionService');
 const emailService = require('../services/emailService');
+const cacheService = require('../services/cacheService');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
 const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const {
+  shouldSkipAiProcessingForSyncedInteraction,
+  shouldApplyHeuristicIntentBucket
+} = require('../utils/syncInteractionBackfillGuard');
 
 /**
  * Process AI analysis for an interaction
@@ -28,7 +33,8 @@ module.exports = async function processAI(job) {
 
     // Get interaction
     const interaction = await Interaction.findById(interactionId)
-      .populate('organization');
+      .populate('organization')
+      .populate({ path: 'platformConnection', select: 'connectedAt createdAt' });
 
     if (!interaction) {
       jobLogger.info('Interaction not found - skipping');
@@ -49,83 +55,86 @@ module.exports = async function processAI(job) {
 
     const orgIdCtx = interaction.organization?._id || interaction.organization;
 
-    // Step 1: Analyze sentiment
-    jobLogger.debug('Analyzing sentiment');
-    const sentimentResult = await runWithAiContext(
-      { organizationId: orgIdCtx, feature: 'processAI.sentiment' },
-      () => aiService.analyzeSentiment(interaction.content)
-    );
-    
-    interaction.sentiment = sentimentResult.sentiment;
-    interaction.sentimentScore = sentimentResult.sentimentScore;
-    interaction.sentimentConfidence = sentimentResult.sentimentConfidence;
-
-    // Step 2: Detect intent
-    jobLogger.debug('Detecting intent');
-    const intent = await runWithAiContext(
-      { organizationId: orgIdCtx, feature: 'processAI.detect_intent' },
-      () => aiService.detectIntent(interaction.content)
-    );
-    interaction.intent = intent;
-
-    // Step 2b: Classify into intent bucket
-    jobLogger.debug('Classifying into intent bucket');
-    try {
-      const orgId = interaction.organization?._id || interaction.organization;
-      const activeBuckets = await IntentBucket.find({ organization: orgId, isActive: true }).sort({ order: 1 }).lean();
-      if (activeBuckets.length > 0) {
-        const bucketResult = await runWithAiContext(
-          { organizationId: orgIdCtx, feature: 'processAI.classify_bucket' },
-          () => aiService.classifyIntoBucket(interaction.content, activeBuckets)
+    // Synced backlog: no paid analysis/credits — keyword/default bucket only (matches platformSyncService)
+    if (shouldSkipAiProcessingForSyncedInteraction(interaction, interaction.platformConnection)) {
+      jobLogger.debug('Skipping paid AI for sync backfill — heuristic bucket only', { interactionId });
+      const activeBuckets = await IntentBucket.find({ organization: orgIdCtx, isActive: true })
+        .sort({ order: 1 })
+        .lean();
+      if (shouldApplyHeuristicIntentBucket(interaction)) {
+        const bucketRes = aiService.resolveIntentBucketWithoutAi(
+          interaction.content == null ? '' : String(interaction.content),
+          activeBuckets
         );
-        if (bucketResult.bucketId) {
-          interaction.intentBucket = bucketResult.bucketId;
-          interaction.bucketAssignedBy = bucketResult.method;
-          jobLogger.debug('Bucket assigned', { bucketId: bucketResult.bucketId, method: bucketResult.method });
+        if (bucketRes.bucketId) {
+          await Interaction.findByIdAndUpdate(
+            interactionId,
+            { $set: { intentBucket: bucketRes.bucketId, bucketAssignedBy: bucketRes.method } },
+            { new: false }
+          );
+          cacheService.invalidateAnalytics(orgIdCtx).catch(() => {});
+          cacheService.invalidateInteractionCaches(orgIdCtx).catch(() => {});
         }
       }
-    } catch (bucketErr) {
-      jobLogger.warn('Bucket classification failed (non-fatal)', { error: bucketErr.message });
+      return { skipped: true, reason: 'sync_backfill_no_paid_ai' };
     }
 
-    // Step 3: Extract topics
-    jobLogger.debug('Extracting topics');
-    const topics = await runWithAiContext(
-      { organizationId: orgIdCtx, feature: 'processAI.extract_topics' },
-      () => aiService.extractTopics(interaction.content)
-    );
-    interaction.topics = topics;
+    // Step 0: Transcribe voice note (if audio content)
+    if (audioTranscriptionService.isAudioInteraction(interaction)) {
+      try {
+        const transcript = await audioTranscriptionService.transcribeInteractionAudio(interaction);
+        if (transcript && transcript.trim()) {
+          interaction.content = transcript;
+          // Persist so processAutoReply reads the transcript, not the placeholder
+          await Interaction.findByIdAndUpdate(interactionId, {
+            $set: { content: transcript, contentType: 'text' }
+          });
+          jobLogger.info('Voice note transcribed', { interactionId, preview: transcript.slice(0, 80) });
+        }
+      } catch (transcribeErr) {
+        jobLogger.warn('Voice note transcription failed — proceeding with placeholder', {
+          interactionId,
+          error: transcribeErr.message
+        });
+      }
+    }
 
-    // Step 4: Get knowledge base for AI response
-    const knowledgeBase = await KnowledgeBase.find({
-      organization: interaction.organization,
-      isActive: true,
-      isTrainingData: true
-    }).sort({ trainingWeight: -1 }).limit(10);
+    // Steps 1-3: Combined single AI call — sentiment + intent + topics + bucket classification
+    jobLogger.debug('Running combined interaction analysis');
+    const orgIdForBuckets = interaction.organization?._id || interaction.organization;
+    const activeBuckets = await IntentBucket.find({ organization: orgIdForBuckets, isActive: true })
+      .sort({ order: 1 })
+      .lean();
+
+    const analysis = await runWithAiContext(
+      { organizationId: orgIdCtx, feature: 'processAI.analyze_interaction' },
+      () => aiService.analyzeInteraction(interaction.content, activeBuckets)
+    );
+
+    interaction.sentiment = analysis.sentiment;
+    interaction.sentimentScore = analysis.sentimentScore;
+    interaction.sentimentConfidence = analysis.sentimentConfidence;
+    interaction.intent = analysis.intent;
+    interaction.topics = analysis.topics;
+
+    if (analysis.bucketResult?.bucketId) {
+      interaction.intentBucket = analysis.bucketResult.bucketId;
+      interaction.bucketAssignedBy = analysis.bucketResult.method;
+      jobLogger.debug('Bucket assigned', {
+        bucketId: analysis.bucketResult.bucketId,
+        method: analysis.bucketResult.method
+      });
+    }
 
     const populatedOrg = interaction.organization && typeof interaction.organization === 'object'
       ? interaction.organization
       : null;
-    const orgId = populatedOrg?._id || interaction.organization;
 
-    // Step 5: Generate AI response suggestion
-    jobLogger.debug('Generating AI response');
-    const aiResponse = await runWithAiContext(
-      { organizationId: orgIdCtx, feature: 'processAI.generate_response' },
-      () => aiService.generateResponse(interaction, orgId, knowledgeBase)
-    );
-    
-    if (aiResponse) {
-      interaction.aiSuggestion = aiResponse;
-    }
-
-    // Step 6: Determine if auto-reply eligible (pass populated org so settings are evaluated)
+    // Step 4: Determine if auto-reply eligible (pass populated org so settings are evaluated)
     interaction.autoReplyEligible = await aiService.canAutoReply(interaction, populatedOrg || {});
 
-    // Step 7: Check if should auto-reply or assign to agent
-    if (interaction.autoReplyEligible && aiResponse) {
-      jobLogger.debug('Interaction eligible for auto-reply');
-    } else {
+    // Step 5: Auto-assign to agent when auto-reply won't handle this interaction
+    if (!interaction.autoReplyEligible) {
       const autoAssign = populatedOrg?.escalationSettings?.autoAssign !== false;
       if (autoAssign) {
         jobLogger.debug('Assigning to agent (auto-assign enabled)');
@@ -133,17 +142,58 @@ module.exports = async function processAI(job) {
       } else {
         jobLogger.debug('Skipping assignment (auto-assign disabled, manual assign)');
       }
+    } else {
+      jobLogger.debug('Interaction eligible for auto-reply');
     }
 
-    // Step 8: Check for negative spike (3+ negative comments on same post)
+    // Step 6: Check for negative spike (3+ negative comments on same post)
     if (interaction.type === 'comment' && interaction.sentiment === 'negative') {
       await checkNegativeSpike(interaction);
     }
 
-    // Save interaction
-    await interaction.save();
+    // Persist only the AI-derived fields using a targeted $set update.
+    // Using interaction.save() causes a Mongoose VersionError when processWebhook
+    // concurrently writes metadata.incomingMessages between our findById and this
+    // save — the document version increments and save() finds a stale __v.
+    const aiUpdate = {
+      sentiment:             interaction.sentiment,
+      sentimentScore:        interaction.sentimentScore,
+      sentimentConfidence:   interaction.sentimentConfidence,
+      intent:                interaction.intent,
+      topics:                interaction.topics,
+      autoReplyEligible:     interaction.autoReplyEligible,
+    };
+    if (interaction.intentBucket)       aiUpdate.intentBucket       = interaction.intentBucket;
+    if (interaction.bucketAssignedBy)   aiUpdate.bucketAssignedBy   = interaction.bucketAssignedBy;
+    if (interaction.assignedTo)         aiUpdate.assignedTo         = interaction.assignedTo;
+    if (interaction.assignedBy)         aiUpdate.assignedBy         = interaction.assignedBy;
+    if (interaction.assignedAt)         aiUpdate.assignedAt         = interaction.assignedAt;
+    if (interaction.assignmentReason)   aiUpdate.assignmentReason   = interaction.assignmentReason;
+    // assignToAgent() already persists assignment fields via interaction.save().
+    // Only $set the AI-derived fields here; never $push assignmentHistory — doing
+    // so would re-push the entire in-memory array (loaded at job start) and cause
+    // exponential duplication of history entries.
+    await Interaction.findByIdAndUpdate(interactionId, { $set: aiUpdate }, { new: false });
 
-    console.log(`AI processing completed for interaction: ${interactionId}`);
+    try {
+      const { ensureComplaintFromIntent } = require('../services/inbox/complaintAutoCreateService');
+      await ensureComplaintFromIntent(interaction, analysis.intent);
+    } catch (_complaintErr) {
+      /* non-fatal */
+    }
+
+    cacheService.invalidateAnalytics(orgIdCtx).catch(() => {});
+
+    // Trigger follow-invite DM after AI is done so sentiment + intent are available for filtering
+    if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+      const commentFollowInviteService = require('../services/commentFollowInviteService');
+      const orgId = orgIdCtx || interaction.organization?.toString();
+      commentFollowInviteService.processCommentFollowInvite(interaction, orgId).catch(err => {
+        jobLogger.warn('commentFollowInvite error (non-fatal)', { error: err.message });
+      });
+    }
+
+    jobLogger.info('AI processing completed', { interactionId });
 
     return {
       success: true,
@@ -171,6 +221,17 @@ module.exports = async function processAI(job) {
  */
 async function assignToAgent(interaction, reason) {
   try {
+    // Thread DMs re-run processAI on every new customer message; do not re-auto-assign if someone already owns it.
+    const latestAssign = await Interaction.findById(interaction._id).select('assignedTo').lean();
+    if (latestAssign?.assignedTo) {
+      interaction.assignedTo = latestAssign.assignedTo;
+      logger.info('Skipping auto-assign — interaction already has an assignee', {
+        interactionId: interaction._id.toString(),
+        assignedTo: String(latestAssign.assignedTo)
+      });
+      return;
+    }
+
     const orgId = interaction.organization?._id || interaction.organization;
     const orgDoc =
       interaction.organization &&

@@ -39,23 +39,32 @@ class EmailService {
 
     const auth = { user, pass };
 
-    // Allow overriding auth method via env (LOGIN, PLAIN, etc.)
+    // Allow overriding auth method via env (LOGIN, PLAIN, etc.). Some GoDaddy /
+    // Microsoft 365 servers accept AUTH LOGIN but reject AUTH PLAIN.
     const authMethod = smtpEnv('SMTP_AUTH_METHOD').toUpperCase();
     if (authMethod) auth.method = authMethod;
+
+    // Port 465 = implicit TLS (secure); 587/25 = plain socket then STARTTLS.
+    // SMTP_SECURE=true|false overrides the port-based default when needed.
+    const secureEnv = smtpEnv('SMTP_SECURE').toLowerCase();
+    const secure = secureEnv ? secureEnv === 'true' : port === 465;
 
     const options = {
       host,
       port,
       auth,
-      secureConnection: false,
-      requireTLS: true,
-      tls: { ciphers: 'SSLv3' }
+      secure,
+      requireTLS: !secure // force STARTTLS on 587/25
     };
 
-    if (port === 465) {
-      options.secure = true;
-    } else {
-      options.secure = false; // VERY IMPORTANT for port 587: plain socket → STARTTLS
+    // Legacy SSLv3 cipher pinning is ONLY needed by GoDaddy's old Workspace Email
+    // (smtpout.secureserver.net). Forcing it on Microsoft 365 (smtp.office365.com)
+    // breaks the TLS handshake, so only apply it for the legacy host — or when
+    // explicitly opted in with SMTP_LEGACY_CIPHERS=true.
+    const legacyCiphers =
+      smtpEnv('SMTP_LEGACY_CIPHERS') === 'true' || /secureserver\.net$/i.test(host);
+    if (legacyCiphers) {
+      options.tls = { ciphers: 'SSLv3' };
     }
 
     if (smtpEnv('SMTP_DEBUG') === 'true') {
@@ -109,6 +118,81 @@ class EmailService {
         error: error.message
       };
     }
+  }
+
+  /**
+   * Send email-verification link after email/password registration.
+   */
+  async sendEmailVerificationEmail(user, rawToken) {
+    const baseUrl = String(process.env.FRONTEND_URL || 'http://localhost:4200').replace(/\/$/, '');
+    const verifyUrl = `${baseUrl}/auth/verify-email?token=${encodeURIComponent(rawToken)}`;
+    const expiryHours =
+      Math.round((parseInt(process.env.EMAIL_VERIFICATION_EXPIRY_MS || '', 10) || 48 * 60 * 60 * 1000) / (60 * 60 * 1000)) ||
+      48;
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+
+    const subject = `Verify your email for ${appName}`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff;padding:40px 20px;">
+          <tr>
+            <td align="center">
+              <table width="520" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+                <tr>
+                  <td style="background-color:#ffffff;padding:32px;text-align:center;border-bottom:3px solid #c8f135;">
+                    <span style="font-size:28px;font-weight:900;color:#c8f135;letter-spacing:-1px;">${appName}</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:40px 36px;">
+                    <h2 style="margin:0 0 8px;font-size:22px;color:#0a0a0a;">Confirm your email</h2>
+                    <p style="margin:0 0 24px;color:#555;font-size:15px;">Hi ${user.firstName},</p>
+                    <p style="margin:0 0 28px;color:#555;font-size:15px;line-height:1.6;">
+                      Thanks for signing up. Please verify your email address to activate your account. This link expires in <strong>${expiryHours} hours</strong>.
+                    </p>
+                    <table cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td align="center">
+                          <a href="${verifyUrl}"
+                            style="display:inline-block;background-color:#c8f135;color:#0a0a0a;font-weight:700;font-size:16px;text-decoration:none;padding:14px 40px;border-radius:10px;">
+                            Verify email
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                    <p style="margin:28px 0 0;color:#888;font-size:13px;line-height:1.6;">
+                      If the button doesn't work, copy and paste this link into your browser:<br>
+                      <a href="${verifyUrl}" style="color:#c8f135;word-break:break-all;">${verifyUrl}</a>
+                    </p>
+                    <hr style="border:none;border-top:1px solid #eee;margin:28px 0;">
+                    <p style="margin:0;color:#aaa;font-size:13px;">
+                      If you didn't create an account, you can ignore this email.
+                    </p>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="background-color:#f9f9f9;padding:20px 36px;text-align:center;border-top:1px solid #eee;">
+                    <p style="margin:0;color:#aaa;font-size:12px;">© ${new Date().getFullYear()} ${appName}. All rights reserved.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    const text = `Hi ${user.firstName},\n\nVerify your email for ${appName} by opening this link (expires in ${expiryHours} hours):\n${verifyUrl}\n\nIf you didn't sign up, ignore this email.\n`;
+
+    return this.sendEmail({
+      to: user.email,
+      subject,
+      html,
+      text
+    });
   }
 
   /**
@@ -344,6 +428,100 @@ class EmailService {
     `;
 
     return this.sendEmail({ to: email, subject, html });
+  }
+
+  /**
+   * Notify internal admin inbox when a user raises a support ticket.
+   */
+  async sendSupportTicketAdminAlert({ to, ticket, raiser, organizationName }) {
+    const esc = (v) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+    const safeOrg = esc(organizationName || '—');
+    const raiserName = esc(
+      raiser
+        ? `${raiser.firstName || ''} ${raiser.lastName || ''}`.trim() || raiser.email
+        : 'Unknown'
+    );
+    const raiserEmail = esc(raiser?.email || '—');
+    const descPreview =
+      ticket.description.length > 2000
+        ? `${ticket.description.slice(0, 2000)}…`
+        : ticket.description;
+    const descHtml = esc(descPreview);
+
+    const subject = `[${appName}] New ticket: ${ticket.subject}`;
+    const html = wrapSimpleEmailHtml(`
+      <h2>New support ticket</h2>
+      <p><strong>Ticket ID:</strong> ${ticket._id}</p>
+      <p><strong>Subject:</strong> ${esc(ticket.subject)}</p>
+      <p><strong>Category:</strong> ${esc(ticket.category)}</p>
+      <p><strong>Priority:</strong> ${esc(ticket.priority)}</p>
+      <p><strong>Organization:</strong> ${safeOrg}</p>
+      <p><strong>Raised by:</strong> ${raiserName} &lt;${raiserEmail}&gt;</p>
+      <h3>Description</h3>
+      <pre style="white-space:pre-wrap;font-family:inherit;background:#f3f4f6;padding:12px;border-radius:8px;">${descHtml}</pre>
+      <p style="color:#6b7280;font-size:13px;">Reply in the admin panel or your ticket workflow.</p>
+    `);
+
+    const text = [
+      `New support ticket (${appName})`,
+      `ID: ${ticket._id}`,
+      `Subject: ${ticket.subject}`,
+      `Category: ${ticket.category}`,
+      `Priority: ${ticket.priority}`,
+      `Organization: ${safeOrg}`,
+      `Raised by: ${raiserName} <${raiserEmail}>`,
+      '',
+      ticket.description
+    ].join('\n');
+
+    return this.sendEmail({ to, subject, html, text });
+  }
+
+  /**
+   * Notify sales when someone books a product demo from the marketing site.
+   */
+  async sendDemoBookingAlert({ to, inquiry }) {
+    const esc = (v) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    const appName = process.env.APP_PUBLIC_NAME || process.env.FROM_NAME || 'RepMeUp';
+
+    const subject = `[${appName}] New demo booking — ${inquiry.name}${inquiry.company ? ` (${inquiry.company})` : ''}`;
+    const html = wrapSimpleEmailHtml(`
+      <h2>New demo booking</h2>
+      <p><strong>Name:</strong> ${esc(inquiry.name)}</p>
+      <p><strong>Email:</strong> <a href="mailto:${esc(inquiry.email)}">${esc(inquiry.email)}</a></p>
+      <p><strong>Phone:</strong> ${esc(inquiry.phone || '—')}</p>
+      <p><strong>Company:</strong> ${esc(inquiry.company || '—')}</p>
+      ${inquiry.teamSize ? `<p><strong>Team size:</strong> ${esc(inquiry.teamSize)}</p>` : ''}
+      <p><strong>Preferred date:</strong> ${esc(inquiry.demoDate)}</p>
+      <p><strong>Preferred time:</strong> ${esc(inquiry.demoTime)} (${esc(inquiry.timezone || 'Asia/Kolkata')})</p>
+      ${inquiry.notes ? `<h3>Notes</h3><pre style="white-space:pre-wrap;font-family:inherit;background:#f3f4f6;padding:12px;border-radius:8px;">${esc(inquiry.notes)}</pre>` : ''}
+      <p style="color:#6b7280;font-size:13px;margin-top:24px;">Submitted from repmeup.in/book-demo</p>
+    `);
+
+    const text = [
+      `New demo booking (${appName})`,
+      `Name: ${inquiry.name}`,
+      `Email: ${inquiry.email}`,
+      `Phone: ${inquiry.phone || '—'}`,
+      `Company: ${inquiry.company || '—'}`,
+      inquiry.teamSize ? `Team size: ${inquiry.teamSize}` : null,
+      `Date: ${inquiry.demoDate}`,
+      `Time: ${inquiry.demoTime} (${inquiry.timezone || 'Asia/Kolkata'})`,
+      inquiry.notes ? `\nNotes:\n${inquiry.notes}` : null
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    return this.sendEmail({ to, subject, html, text });
   }
 }
 

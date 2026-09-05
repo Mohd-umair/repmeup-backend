@@ -1,6 +1,8 @@
 const superAdminService = require('../services/superAdminService');
 const Transaction = require('../models/Transaction');
 const aiUsageReportService = require('../services/aiUsageReportService');
+const userActivityLogService = require('../services/userActivityLogService');
+const demoWorkspaceService = require('../services/demoWorkspaceService');
 
 /**
  * GET /api/super-admin/plans
@@ -64,12 +66,15 @@ exports.createOrganizationUser = async (req, res, next) => {
   try {
     const data = await superAdminService.createUserForOrganization(
       req.params.organizationId,
-      req.body
+      req.body,
+      req.user._id
     );
+    const { provisionalPassword, ...userData } = data || {};
     res.status(201).json({
       success: true,
-      data,
-      message: 'User created successfully'
+      data: userData,
+      message: 'User created successfully',
+      provisionalPassword: provisionalPassword || undefined
     });
   } catch (error) {
     if (error.statusCode) {
@@ -174,6 +179,113 @@ exports.setUserActive = async (req, res, next) => {
 };
 
 /**
+ * GET /api/super-admin/users/:id/password — reveal admin-stored password if available
+ */
+exports.getUserPassword = async (req, res, next) => {
+  try {
+    const data = await superAdminService.getUserPasswordReveal(req.params.id);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/users/:id/reset-password
+ * Body: { password? } — optional custom password; otherwise auto-generated
+ */
+exports.resetUserPassword = async (req, res, next) => {
+  try {
+    const data = await superAdminService.resetUserPasswordReveal(
+      req.user._id,
+      req.params.id,
+      req.body
+    );
+    res.status(200).json({
+      success: true,
+      data,
+      message: 'Password reset successfully'
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/users/:id/impersonate — issue short-lived JWT for main app
+ */
+exports.impersonateUser = async (req, res, next) => {
+  try {
+    const data = await superAdminService.impersonateUser(req.user._id, req.params.id);
+    userActivityLogService.recordAuthEvent({
+      userId: req.user._id,
+      organizationId: req.user.organization?._id || req.user.organization,
+      action: 'super_admin_impersonate_user',
+      path: `/api/super-admin/users/${req.params.id}/impersonate`,
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent'],
+      metadata: { targetUserId: req.params.id, targetEmail: data.user?.email }
+    });
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/organizations/:id/impersonate — login as org primary admin
+ */
+exports.impersonateOrganization = async (req, res, next) => {
+  try {
+    const data = await superAdminService.impersonateOrganization(req.user._id, req.params.id);
+    userActivityLogService.recordAuthEvent({
+      userId: req.user._id,
+      organizationId: req.user.organization?._id || req.user.organization,
+      action: 'super_admin_impersonate_org',
+      path: `/api/super-admin/organizations/${req.params.id}/impersonate`,
+      method: 'POST',
+      statusCode: 200,
+      ip: userActivityLogService.clientIp(req),
+      userAgent: req.headers['user-agent'],
+      metadata: {
+        organizationId: req.params.id,
+        targetUserId: data.user?._id,
+        targetEmail: data.user?.email
+      }
+    });
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message
+      });
+    }
+    next(error);
+  }
+};
+
+/**
  * DELETE /api/super-admin/users/:id — soft delete (sets deletedAt, isActive false).
  */
 exports.softDeleteUser = async (req, res, next) => {
@@ -211,6 +323,38 @@ exports.getAiUsage = async (req, res, next) => {
     }
     const data = await aiUsageReportService.aggregateReport(req.query);
     res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/ai-usage/records
+ * Same filters as aggregate + page, limit — paginated rows (excludes stored prompts).
+ */
+exports.getAiUsageRecords = async (req, res, next) => {
+  try {
+    const data = await aiUsageReportService.listRecords(req.query);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/ai-usage/records/:id
+ * Single row including promptMessages + completionText where stored.
+ */
+exports.getAiUsageRecordById = async (req, res, next) => {
+  try {
+    const row = await aiUsageReportService.getRecordById(req.params.id);
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: 'Record not found'
+      });
+    }
+    res.status(200).json({ success: true, data: row });
   } catch (error) {
     next(error);
   }
@@ -264,6 +408,152 @@ exports.listTransactions = async (req, res, next) => {
       }
     });
   } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/demo-workspaces
+ * Create a full-featured demo/trial workspace for a prospect.
+ * Body: { prospect: { name, email, company?, phone? }, planId?, trialDays? }
+ *
+ * Returns login credentials + a magic link the team can share. The workspace is
+ * a real tenant; when the prospect purchases, it becomes their production
+ * account with no data migration.
+ */
+exports.createDemoWorkspace = async (req, res, next) => {
+  try {
+    const { prospect, planId, trialDays, aiCreditsCap } = req.body || {};
+    if (!prospect || !prospect.email) {
+      return res.status(400).json({ success: false, error: 'prospect.email is required' });
+    }
+
+    const result = await demoWorkspaceService.createDemoWorkspace({
+      prospect,
+      planId,
+      trialDays: trialDays != null ? Number(trialDays) : undefined,
+      // null/'' → unlimited; a number → cap. Undefined leaves it default (unlimited).
+      aiCreditsCap: aiCreditsCap === '' || aiCreditsCap == null ? null : Number(aiCreditsCap),
+      actorUserId: req.user._id
+    });
+
+    // Build the magic link from the configured frontend URL.
+    const base = (process.env.FRONTEND_URL || 'http://localhost:4200').split(',')[0].trim().replace(/\/$/, '');
+    const magicLink = `${base}/demo-login?token=${result.magicLinkToken}`;
+
+    res.status(201).json({
+      success: true,
+      message: 'Demo workspace created successfully',
+      data: {
+        organizationId: String(result.organization._id),
+        organizationName: result.organization.name,
+        userId: String(result.user._id),
+        loginEmail: result.user.email,
+        provisionalPassword: result.provisionalPassword,
+        magicLink,
+        trialEndsAt: result.trialEndsAt,
+        planId: result.subscription.planId,
+        planName: result.subscription.planName
+      }
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, error: error.message });
+    }
+    next(error);
+  }
+};
+
+/**
+ * GET /api/super-admin/demo-workspaces
+ * List demo workspaces with live trial status. Query: status?, page?, limit?
+ */
+exports.listDemoWorkspaces = async (req, res, next) => {
+  try {
+    const data = await demoWorkspaceService.listDemoWorkspaces(req.query);
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/demo-workspaces/:organizationId/extend
+ * Body: { days }. Extends (and unlocks) a demo trial.
+ */
+exports.extendDemoTrial = async (req, res, next) => {
+  try {
+    const { days } = req.body || {};
+    const result = await demoWorkspaceService.extendTrial(req.params.organizationId, days);
+    res.status(200).json({ success: true, data: { trialEndsAt: result.trialEndsAt }, message: 'Trial extended successfully' });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+    next(error);
+  }
+};
+
+/**
+ * POST /api/super-admin/demo-workspaces/:organizationId/convert
+ * Body: { planId }. Converts the demo to a paid plan IN PLACE (no migration).
+ */
+exports.convertDemoWorkspace = async (req, res, next) => {
+  try {
+    const { planId } = req.body || {};
+    if (!planId) return res.status(400).json({ success: false, error: 'planId is required' });
+    const result = await demoWorkspaceService.convertToPaid(req.params.organizationId, planId, req.user._id);
+    res.status(200).json({
+      success: true,
+      data: { planId: result.subscription.planId, planName: result.subscription.planName, status: result.subscription.status },
+      message: 'Demo workspace converted to a paid plan'
+    });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+    next(error);
+  }
+};
+
+/**
+ * PATCH /api/super-admin/demo-workspaces/:organizationId
+ * Update a demo workspace's prospect details and/or trial length.
+ * Body: { name?, email?, company?, phone?, trialDays? }
+ * Changing the email also updates the prospect's login email; trialDays resets
+ * the trial to end that many days from now (and unlocks it).
+ */
+exports.updateDemoWorkspace = async (req, res, next) => {
+  try {
+    const { name, email, company, phone, trialDays, aiCreditsCap } = req.body || {};
+    // Only forward keys that were actually provided (partial update).
+    const prospect = {};
+    if (name !== undefined) prospect.name = name;
+    if (email !== undefined) prospect.email = email;
+    if (company !== undefined) prospect.company = company;
+    if (phone !== undefined) prospect.phone = phone;
+
+    const opts = {};
+    if (trialDays !== undefined && trialDays !== null && trialDays !== '') {
+      opts.trialDays = Number(trialDays);
+    }
+    // aiCreditsCap is intentionally forwarded even when '' (=> unlimited) so the
+    // admin can clear a cap; only `undefined` means "leave unchanged".
+    if (aiCreditsCap !== undefined) {
+      opts.aiCreditsCap = aiCreditsCap;
+    }
+
+    if (Object.keys(prospect).length === 0 && opts.trialDays === undefined && opts.aiCreditsCap === undefined) {
+      return res.status(400).json({ success: false, error: 'No fields to update' });
+    }
+
+    const result = await demoWorkspaceService.updateDemoProspect(req.params.organizationId, prospect, opts);
+    res.status(200).json({
+      success: true,
+      data: result,
+      message: result.loginEmailChanged
+        ? 'Prospect updated. Login email changed.'
+        : (result.trialEndsAt ? 'Demo workspace updated. Trial period changed.' : 'Prospect details updated')
+    });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
     next(error);
   }
 };

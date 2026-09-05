@@ -12,6 +12,9 @@ router.use(protect);
 // Get subscription limits and usage
 router.get('/limits', subscriptionController.getLimits);
 
+// WhatsApp pass-through message spend (Meta conversation charges)
+router.get('/whatsapp-spend', subscriptionController.getWhatsAppSpend);
+
 // Check if can connect more accounts
 router.post('/check-limit', subscriptionController.checkLimit);
 

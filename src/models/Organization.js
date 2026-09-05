@@ -15,17 +15,75 @@ const organizationSchema = new mongoose.Schema({
   logo: String,
   website: String,
   industry: String,
+  orgCode: {
+    type: String,
+    trim: true,
+    maxlength: 6,
+    uppercase: true,
+    default: ''
+  },
+  chatCounter: {
+    type: Number,
+    default: 100
+  },
+  /** Inbox ops display refs: ORD-2847, CMP-0041, REV-0088, APT-0128 */
+  orderCounter: { type: Number, default: 1000 },
+  complaintCounter: { type: Number, default: 1000 },
+  reviewCounter: { type: Number, default: 1000 },
+  appointmentCounter: { type: Number, default: 100 },
+
+  // ── Demo / Trial workspace ────────────────────────────────────────────────
+  // A demo workspace is a REAL tenant put on a full-featured trial. On purchase
+  // it becomes the production account with zero data migration (the same
+  // Subscription doc is mutated by the normal upgrade/payment path).
+  // The authoritative trial state lives on the Subscription model; these fields
+  // are denormalized prospect/admin metadata for the super-admin demo console.
+  demo: {
+    isDemo: { type: Boolean, default: false, index: true },
+    prospect: {
+      name:    { type: String, trim: true, default: '' },
+      email:   { type: String, trim: true, lowercase: true, default: '' },
+      company: { type: String, trim: true, default: '' },
+      phone:   { type: String, trim: true, default: '' }
+    },
+    createdViaSuperAdmin: { type: Boolean, default: false },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    seededAt:  { type: Date },
+    lockedAt:  { type: Date },     // set when the trial expires and the workspace is locked
+    convertedAt: { type: Date }    // set when the prospect purchases a paid plan
+  },
   size: {
     type: String,
     enum: ['', '1-10', '11-50', '51-200', '201-500', '501-1000', '1000+', 'small', 'medium', 'large', 'enterprise'],
     default: ''
   },
   
-  // Subscription details
+  // ────────────────────────────────────────────────────────────────────────────
+  // @deprecated Subscription details (legacy embedded copy).
+  //
+  // The authoritative subscription record is the Subscription model, and the
+  // authoritative plan definition is the Plan model. Always read entitlements
+  // via services/entitlementsService.js — never read these fields directly in
+  // new code. Kept here so that orgs migrated before the Subscription model
+  // existed still have resolvable defaults.
+  // ────────────────────────────────────────────────────────────────────────────
   subscription: {
     plan: {
       type: String,
-      enum: ['free', 'starter', 'professional', 'enterprise'],
+      // Deliberately NOT an enum.
+      //
+      // Plans are dynamic rows in the Plan collection, created at runtime via
+      // POST /api/plans/admin — so any hardcoded list here goes stale the moment
+      // someone adds a plan. And because Mongoose validates the WHOLE document on
+      // save (not just modified paths), one stale value makes the org completely
+      // unsavable: unrelated edits (name, logo, settings) and background jobs that
+      // call organization.save() all fail with a confusing validation error.
+      //
+      // That is exactly what happened with 'growth' — it was added to the Plan
+      // collection but not to this list, and 4 orgs could not be written at all.
+      //
+      // This field is a deprecated display mirror. The authoritative plan lives on
+      // Subscription -> Plan; read entitlements via services/entitlementsService.js.
       default: 'free'
     },
     status: {
@@ -37,8 +95,14 @@ const organizationSchema = new mongoose.Schema({
     endDate: Date,
     billingEmail: String
   },
-  
-  // Plan limits
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // @deprecated Plan limits (legacy embedded copy).
+  //
+  // Read limits through services/entitlementsService.js — do NOT read these
+  // fields in new code. They drift from Plan.limits whenever a plan definition
+  // is updated and are only kept as a fallback for orgs without a Subscription.
+  // ────────────────────────────────────────────────────────────────────────────
   limits: {
     maxUsers: {
       type: Number,
@@ -105,7 +169,7 @@ const organizationSchema = new mongoose.Schema({
     },
     enabledPlatforms: {
       type: [String],
-      default: ['youtube', 'instagram', 'facebook', 'google']
+      default: ['youtube', 'instagram', 'facebook', 'google', 'linkedin', 'whatsapp']
     },
     enabledTypes: {
       type: [String],
@@ -134,11 +198,11 @@ const organizationSchema = new mongoose.Schema({
     },
     autoSend: {
       type: Boolean,
-      default: false // If true, automatically send; if false, save as draft
+      default: true
     },
     requireApproval: {
       type: Boolean,
-      default: true // Require human approval before sending
+      default: false
     },
     maxRepliesPerDay: {
       type: Number,
@@ -162,7 +226,35 @@ const organizationSchema = new mongoose.Schema({
     },
     webhookDelay: {
       type: Number,
-      default: 5 // Delay in minutes before processing webhook auto-reply
+      default: 60, // Fixed delay in SECONDS before sending webhook auto-reply (0 = immediate)
+      min: 0,
+      max: 7200
+    },
+    replyDelayMode: {
+      type: String,
+      enum: ['fixed', 'human'],
+      default: 'fixed' // fixed = exact minutes; human = random range
+    },
+    humanDelayMinMinutes: {
+      type: Number,
+      default: 1,
+      min: 0,
+      max: 120
+    },
+    humanDelayMaxMinutes: {
+      type: Number,
+      default: 3,
+      min: 0,
+      max: 120
+    },
+    // Hold AI auto-reply while a human agent is actively handling a chat.
+    // If an agent OPENED or manually REPLIED to the conversation within this many
+    // minutes, ReppyAI stays silent on new inbound messages. 0 = disabled.
+    agentActiveHoldMinutes: {
+      type: Number,
+      default: 5,
+      min: 0,
+      max: 60
     },
     scheduleInterval: {
       type: String,
@@ -173,7 +265,51 @@ const organizationSchema = new mongoose.Schema({
       type: Boolean,
       default: true // Enable scheduled processing
     },
-    lastScheduledRun: Date // Track last scheduled run time
+    lastScheduledRun: Date, // Track last scheduled run time
+
+    // AI Reply style/tone
+    tone: {
+      type: String,
+      enum: ['growth', 'balanced', 'safe', 'custom'],
+      default: 'balanced'
+    },
+    /** When tone === 'custom', appended to auto-reply system prompts (max length enforced in app layer). */
+    toneCustomText: {
+      type: String,
+      default: '',
+      maxlength: 800
+    },
+
+    // Quiet hours — AI will not auto-reply during this window
+    quietHours: {
+      enabled: { type: Boolean, default: false },
+      start: { type: String, default: '22:00' },
+      end: { type: String, default: '08:00' },
+      timezone: { type: String, default: 'Asia/Kolkata' }
+    },
+
+    // Keywords that suppress auto-reply (e.g. competitor names, blacklisted words)
+    skipNegativeKeywords: { type: [String], default: [] },
+
+    // Fallback settings — triggered when AI cannot respond for any reason
+    fallbackSettings: {
+      enabled: {
+        type: Boolean,
+        default: false
+      },
+      message: {
+        type: String,
+        default: 'Our Agent will contact you within 24 hours.'
+      },
+      assignToAgent: {
+        type: Boolean,
+        default: true
+      },
+      notifyByEmail: {
+        type: Boolean,
+        default: true
+      }
+    }
   },
   
   // Inbox UI settings
@@ -182,6 +318,236 @@ const organizationSchema = new mongoose.Schema({
       type: Boolean,
       default: true
     }
+  },
+
+  /**
+   * @deprecated Use `automationModeByChannel` instead. Retained for back-compat:
+   * replyEngineService falls back to this when a channel mode is unset
+   * (legacy→ai_only, flows_only→workflow_only, hybrid→hybrid).
+   */
+  automationFlowMode: {
+    type: String,
+    enum: ['legacy', 'hybrid', 'flows_only'],
+    default: 'hybrid'
+  },
+
+  /**
+   * Per-channel automation mode. The Workflow (Flow) Builder is the core engine;
+   * AI is subordinate (AI nodes inside flows + fallback when no flow matches).
+   *   - workflow_only : only flows run; no AI fallback
+   *   - ai_only       : flows skipped; AI auto-reply handles messages
+   *   - hybrid        : flows run; AI fills the gap only when no flow took the conversation
+   */
+  automationModeByChannel: {
+    whatsapp:  { type: String, enum: ['workflow_only', 'ai_only', 'hybrid'], default: 'hybrid' },
+    instagram: { type: String, enum: ['workflow_only', 'ai_only', 'hybrid'], default: 'hybrid' },
+    facebook:  { type: String, enum: ['workflow_only', 'ai_only', 'hybrid'], default: 'hybrid' }
+  },
+
+  // Instagram Comment-to-DM selling automation
+  commentToDmSettings: {
+    enabled: {
+      type: Boolean,
+      default: false
+    },
+    /**
+     * Keywords that signal purchase/buying intent in a comment.
+     * Case-insensitive, partial-word match (contains).
+     */
+    triggerKeywords: {
+      type: [String],
+      default: ['price', 'buy', 'cost', 'order', 'purchase', 'how much', 'interested', 'want this', 'where to buy', 'link']
+    },
+    /**
+     * Text posted publicly as a comment reply (safe stub — never contains payment link).
+     * Supports: {{username}}
+     */
+    publicReplyTemplate: {
+      type: String,
+      default: 'Hi {{username}}! 👋 We\'ve sent you the details in DM. 😊'
+    },
+    /**
+     * DM body template.
+     * Supports: {{product_name}}, {{price}}, {{currency}}, {{sizes}}, {{colors}}, {{payment_url}}, {{description}}
+     */
+    dmTemplate: {
+      type: String,
+      default: 'Hi {{username}}! 👋 Thanks for your interest.\n\n🛍️ *{{product_name}}*\n💵 Price: {{currency}} {{price}}\n📦 Sizes: {{sizes}}\n\n👉 Order here: {{payment_url}}\n\nFeel free to DM us if you have questions! 😊'
+    },
+    /**
+     * Confirmation DM sent after payment is received.
+     * Supports: {{product_name}}, {{username}}
+     */
+    confirmationTemplate: {
+      type: String,
+      default: 'Hi {{username}}! 🎉 Your order for *{{product_name}}* has been confirmed! We\'ll be in touch with shipping details soon. Thank you! 🙏'
+    },
+    /**
+     * Optional fallback product sent when a comment matches a keyword but the
+     * post has no product explicitly linked via instagramPostIds.
+     */
+    defaultProductId: {
+      type: require('mongoose').Schema.Types.ObjectId,
+      ref: 'Product',
+      default: null
+    },
+
+    /** Skip sending a DM if one was already sent to this user for this post */
+    deduplicateDms: {
+      type: Boolean,
+      default: true
+    },
+    /** Maximum product DMs to send per day across the whole org */
+    maxDmsPerDay: {
+      type: Number,
+      default: 200
+    },
+    dmsSentToday: {
+      type: Number,
+      default: 0
+    },
+    dmsSentResetDate: {
+      type: Date
+    },
+
+    /**
+     * When true (the default), any AI-generated or agent-approved reply to a
+     * comment on a product-linked post is routed through Instagram's Private
+     * Reply API (DM) instead of being posted as a public comment reply.
+     * This prevents prices, checkout links, and product-specific copy from
+     * appearing publicly in the comments thread.
+     * Set to false only if you explicitly want public comment replies on
+     * product posts.
+     */
+    forcePrivateReplyForLinkedProducts: {
+      type: Boolean,
+      default: true
+    }
+  },
+
+  // Instagram: top-level comment → private DM with Follow button (generic template)
+  commentFollowInviteSettings: {
+    enabled: { type: Boolean, default: false },
+    /** Generic template element title (max 80 in API — trim server-side) */
+    title: {
+      type: String,
+      default: 'Thanks for your comment!'
+    },
+    subtitle: {
+      type: String,
+      default: 'Tap below to follow us for more updates.'
+    },
+    imageUrl: { type: String, default: '' },
+    buttonTitle: { type: String, default: 'Follow us' },
+    /** Full URL; if empty, derived as https://www.instagram.com/{username}/ from connected IG account */
+    buttonUrl: { type: String, default: '' },
+    /** Optional public comment reply; supports {{username}} */
+    publicReplyTemplate: {
+      type: String,
+      default: ''
+    },
+    postPublicReply: { type: Boolean, default: false },
+    deduplicateDms: { type: Boolean, default: true },
+    maxDmsPerDay: { type: Number, default: 50, min: 1, max: 10000 },
+    dmsSentToday: { type: Number, default: 0 },
+    dmsSentResetDate: { type: Date },
+    /** If a product Comment-to-DM was sent for this comment, skip follow-invite */
+    skipIfProductDmSent: { type: Boolean, default: true },
+    filterNegativeSentiment: { type: Boolean, default: true },
+    filterSalesIntent: { type: Boolean, default: true }
+  },
+
+  // Instagram: sales-intent comment → multi-turn DM with CTA buttons + WhatsApp retargeting
+  salesFlowSettings: {
+    /** Master toggle — off by default until CTA URLs are configured */
+    enabled: { type: Boolean, default: false },
+
+    // ── Generic Template card copy ─────────────────────────────────────────
+    /** Card headline (max 80 chars per Meta limit) */
+    ctaTitle: { type: String, default: 'Check this out! 🛍️' },
+    /** Card subheading (max 80 chars per Meta limit) */
+    ctaSubtitle: { type: String, default: 'Tap a button below for more details.' },
+    /** Optional card image (must be https://) */
+    ctaImageUrl: { type: String, default: '' },
+
+    // ── CTA buttons array (web_url type, max 3 per Instagram Generic Template limit) ──
+    /**
+     * Each entry: { label: String (max 20), url: String (https://, supports {{orderToken}}) }
+     * Max 3 items enforced in the controller and on the frontend.
+     */
+    ctaButtons: {
+      type: [{
+        label:   { type: String, trim: true, maxlength: 20 },
+        /**
+         * Button type:
+         *  - 'postback' (default): tapping triggers a webhook; bot replies with a canned action
+         *  - 'web_url': tapping opens the configured URL in a browser
+         */
+        type:    { type: String, enum: ['postback', 'web_url'], default: 'postback' },
+        /**
+         * Postback action when type === 'postback'.
+         * Recognized values: 'details' | 'payment' | 'hesitant'
+         * Free-form values are echoed back as text replies.
+         */
+        payload: { type: String, trim: true, maxlength: 64 },
+        /** URL when type === 'web_url' (must be https://) */
+        url:     { type: String, trim: true }
+      }],
+      default: [
+        { label: 'Product Details', type: 'postback', payload: 'details' },
+        { label: 'Pay Now',         type: 'postback', payload: 'payment' },
+        { label: 'Maybe later',     type: 'postback', payload: 'hesitant' }
+      ]
+    },
+
+    // ── Hesitancy detection ────────────────────────────────────────────────
+    /** Case-insensitive keywords in a DM reply that signal purchase hesitancy */
+    hesitancyKeywords: {
+      type: [String],
+      default: ['no', 'nahi', 'not interested', 'later', 'abhi nahi', 'nope', 'not now', 'maybe later']
+    },
+
+    // ── WhatsApp retargeting capture ────────────────────────────────────────
+    /** DM message sent when hesitancy is detected, asking for WhatsApp number */
+    whatsappCaptureMessage: {
+      type: String,
+      default: 'No problem! Would you like us to reach you on WhatsApp? Just share your number and we\'ll be in touch. 😊'
+    },
+    /** Confirmation DM sent after a phone number is captured */
+    whatsappCaptureConfirmation: {
+      type: String,
+      default: 'Thank you! We\'ll contact you on WhatsApp soon. 🙏'
+    }
+  },
+
+  // Instagram: story reply / @mention → automated product DM
+  storyToDmSettings: {
+    enabled: { type: Boolean, default: false },
+    triggerOnReply: { type: Boolean, default: true },
+    triggerOnMention: { type: Boolean, default: true },
+    /** Optional keywords for story replies; empty = all replies qualify */
+    triggerKeywords: {
+      type: [String],
+      default: []
+    },
+    defaultProductId: {
+      type: require('mongoose').Schema.Types.ObjectId,
+      ref: 'Product',
+      default: null
+    },
+    deduplicateDms: { type: Boolean, default: true },
+    maxDmsPerDay: { type: Number, default: 200, min: 1, max: 10000 },
+    dmsSentToday: { type: Number, default: 0 },
+    dmsSentResetDate: { type: Date },
+    welcomeTitle: {
+      type: String,
+      default: ''
+    },
+    welcomeSubtitle: {
+      type: String,
+      default: ''
+    },
+    welcomeImageUrl: { type: String, default: '' }
   },
 
   // Human agent escalation settings
@@ -263,6 +629,18 @@ const organizationSchema = new mongoose.Schema({
         }
       }
     },
+    // Layer 1 — Intent-based hard routing: buckets that always skip AI and go straight to human
+    alwaysHumanBuckets: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'IntentBucket'
+    }],
+
+    // Handoff message sent to customer when AI routes to human (Layer 1 & 2)
+    handoffMessageTemplate: {
+      type: String,
+      default: "Thank you for reaching out. I'm connecting you with a team member who can better assist you with this."
+    },
+
     // Round-robin state
     lastAssignedAgentIndex: {
       type: Number,
@@ -272,6 +650,35 @@ const organizationSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
     }],
+    // Structured trigger, routing, notification settings (Automation Hub)
+    triggers: {
+      lowConfidence: { type: Boolean, default: true },
+      negativeSentiment: { type: Boolean, default: true },
+      complexRequests: { type: Boolean, default: false },
+      repeatedMessages: { type: Boolean, default: false },
+      keywords: { type: [String], default: [] },
+      outsideBusinessHours: { type: Boolean, default: false }
+    },
+    routing: {
+      strategy: {
+        type: String,
+        enum: ['round_robin', 'specific_team', 'skill_based', 'custom'],
+        default: 'round_robin'
+      },
+      teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      fallbackOption: {
+        type: String,
+        enum: ['queue', 'auto_resolve', 'notify_email'],
+        default: 'queue'
+      },
+      slaMinutes: { type: Number, default: 60 }
+    },
+    notifications: {
+      notifyAgents: { type: Boolean, default: true },
+      notifyCustomer: { type: Boolean, default: true },
+      addInternalNote: { type: Boolean, default: false },
+      slaBreachAlert: { type: Boolean, default: true }
+    },
     // Business hours (for escalation timing)
     businessHours: {
       enabled: {
@@ -326,10 +733,59 @@ const organizationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
-  
+
   isActive: {
     type: Boolean,
     default: true
+  },
+
+  // ── WhatsApp Catalog Keyword Automation ──────────────────────────────────
+  // When any of these keywords are received in a WA DM, the bot automatically
+  // replies with a product list message — no LLM required for Phase 1.
+  waKeywordAutomation: {
+    enabled: { type: Boolean, default: false },
+    keywords: {
+      type: [String],
+      default: ['catalog', 'price', 'menu', 'products', 'shop', 'buy', 'order']
+    },
+    /** Optional header text shown above the product list */
+    headerText: { type: String, default: 'Our Products' },
+    /** Optional body text */
+    bodyText: { type: String, default: 'Here are our available products. Tap one to learn more!' },
+    /** Max products to show per auto-response */
+    maxProducts: { type: Number, default: 10, min: 1, max: 30 }
+  },
+
+  // ── Commerce Guardrails (Phase 2 groundwork) ─────────────────────────────
+  autonomousCommerceEnabled: { type: Boolean, default: false },
+  autonomousCommerceMaxSendsPerUserPerDay: { type: Number, default: 3 },
+
+  // ── Appointment Booking ───────────────────────────────────────────────────
+  // Service businesses (clinics, spas) book appointments via flows or AI. Flow
+  // vs AI gating reuses automationModeByChannel; availability uses provider hours
+  // (falling back to businessHours) in defaultTimezone.
+  appointmentSettings: {
+    enabled: { type: Boolean, default: false },
+    /** Allow the AI agent to autonomously book appointments. */
+    aiBookingEnabled: { type: Boolean, default: false },
+    /** Slot grid granularity in minutes (e.g. 15 → :00, :15, :30, :45). */
+    slotGranularityMin: { type: Number, default: 15, min: 5 },
+    /** Earliest a customer may book from now (minutes). */
+    minNoticeMins: { type: Number, default: 120, min: 0 },
+    /** Furthest ahead a customer may book (days). */
+    maxAdvanceDays: { type: Number, default: 30, min: 1 },
+    /** When to remind before the appointment, in minutes (e.g. 1440=24h, 60=1h). */
+    reminderOffsetsMins: { type: [Number], default: [1440, 60] },
+    /** Auto-mark no_show this many minutes after start if not completed. */
+    noShowGraceMins: { type: Number, default: 20, min: 0 },
+    /** Default IANA tz when a provider has none set. */
+    defaultTimezone: { type: String, default: 'Asia/Kolkata' },
+    /** Per-customer/day cap on autonomous AI booking sends. */
+    aiMaxBookingsPerUserPerDay: { type: Number, default: 3 },
+    deposit: {
+      required: { type: Boolean, default: false },
+      amount: { type: Number, min: 0 }
+    }
   }
 }, {
   timestamps: true

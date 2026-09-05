@@ -8,6 +8,18 @@ const whatsappService = require('../integrations/whatsapp/whatsappService');
 const crypto = require('crypto');
 const logger = require('../config/logger');
 const logEvents = require('../utils/logEvents');
+const platformSyncService = require('../services/platformSyncService');
+const whatsappConnectionService = require('../services/whatsappConnectionService');
+const { isComingSoonPlatform, COMING_SOON_PLATFORM_MESSAGE } = require('../constants/platformAvailability');
+
+/**
+ * Lightweight public SPA URL so the OAuth popup can postMessage to opener and window.close().
+ */
+function buildWhatsAppOAuthCallbackUrl(frontendUrl, queryObj) {
+  const base = (frontendUrl || 'http://localhost:4200').replace(/\/$/, '');
+  const q = new URLSearchParams(queryObj).toString();
+  return `${base}/whatsapp-oauth-callback${q ? `?${q}` : ''}`;
+}
 
 /**
  * @desc    Initiate Google OAuth flow
@@ -17,6 +29,14 @@ const logEvents = require('../utils/logEvents');
 exports.initiateGoogleConnection = async (req, res, next) => {
   try {
     const { type = 'reviews' } = req.query; // 'reviews' or 'youtube'
+
+    if (type !== 'youtube' && isComingSoonPlatform('google')) {
+      return res.status(403).json({
+        success: false,
+        error: COMING_SOON_PLATFORM_MESSAGE,
+        code: 'PLATFORM_COMING_SOON'
+      });
+    }
     
     // Generate state token for security
     const state = crypto.randomBytes(32).toString('hex');
@@ -103,20 +123,11 @@ exports.handleGoogleCallback = async (req, res, next) => {
             const account = accounts[0];
             try {
               const locations = await googleService.getLocations(tokens.accessToken, account.name);
-              
-              platformData = {
-                accountId: account.name,
-                accountName: account.accountName || account.name,
-                locationIds: locations.map(loc => loc.name.split('/').pop())
-              };
+              platformData = googleService.buildLocationPlatformData(account, locations);
             } catch (locationError) {
               console.warn('Failed to get locations, continuing without location data:', locationError.message);
               // Still save connection even without locations
-              platformData = {
-                accountId: account.name,
-                accountName: account.accountName || account.name,
-                locationIds: []
-              };
+              platformData = googleService.buildLocationPlatformData(account, []);
             }
           } else {
             console.warn('No Google Business Profile accounts found for this user');
@@ -196,7 +207,9 @@ exports.handleGoogleCallback = async (req, res, next) => {
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken,
           tokenExpiry: tokenExpiry,
-          scope: ['business.manage', 'youtube.readonly'],
+          scope: type === 'youtube'
+            ? ['youtube.readonly', 'youtube.force-ssl']
+            : ['business.manage'],
           platformData: platformData,
           status: 'connected',
           isActive: true,
@@ -275,15 +288,27 @@ exports.getPlatformConnections = async (req, res, next) => {
 };
 
 /**
- * @desc    Refresh profile pictures for existing Meta (Facebook/Instagram) connections
- *          Uses current Meta API data to backfill platformProfilePicture / metadata.profilePicture
+ * @desc    Refresh profile pictures for Meta (Facebook/Instagram/WhatsApp Business)
  * @route   POST /api/platforms/refresh-profile-pictures
  * @access  Private
  */
 exports.refreshProfilePictures = async (req, res, next) => {
   try {
     const metaAuth = require('../integrations/meta/metaAuth');
+    const whatsappService = require('../integrations/whatsapp/whatsappService');
     const organizationId = req.user.organization._id || req.user.organization;
+
+    let updated = 0;
+
+    const waConnections = await PlatformConnection.find({
+      organization: organizationId,
+      platform: 'whatsapp',
+      isActive: true
+    });
+    for (const wa of waConnections) {
+      const changed = await whatsappService.applyProfilePictureToConnection(wa);
+      if (changed) updated++;
+    }
 
     const userConnection = await PlatformConnection.findOne({
       organization: organizationId,
@@ -291,15 +316,19 @@ exports.refreshProfilePictures = async (req, res, next) => {
       'metadata.type': 'user_token',
       isActive: true
     }).select('accessToken');
+
     if (!userConnection?.accessToken) {
-      return res.status(400).json({
-        success: false,
-        error: 'No Facebook user connection found. Connect a Facebook account first.'
+      return res.status(200).json({
+        success: true,
+        message:
+          updated > 0
+            ? `Refreshed profile pictures for ${updated} connection(s)`
+            : 'No Facebook user token for Pages/Instagram. WhatsApp Business photos were refreshed if a connection exists.',
+        updated
       });
     }
 
     const pages = await metaAuth.getUserPages(userConnection.accessToken);
-    let updated = 0;
     for (const page of pages) {
       const pagePictureUrl = page.picture?.data?.url || (typeof page.picture === 'string' ? page.picture : null) || null;
       const fbConn = await PlatformConnection.findOne({
@@ -408,7 +437,24 @@ exports.disconnectPlatform = async (req, res, next) => {
     const platformType = connection.platform; // Store before saving
     connection.isActive = false;
     connection.status = 'disconnected';
+    connection.disconnectedAt = new Date();
+    if (!connection.createdBy) {
+      connection.createdBy = req.user._id;
+    }
     await connection.save();
+
+    // For Instagram Login connections, revoke the Meta webhook subscription so
+    // Meta stops delivering events for this account. Fire-and-forget — DB is
+    // already updated so a failure here doesn't block the disconnect response.
+    if (
+      connection.platform === 'instagram' &&
+      (connection.metadata?.connectionType === 'instagram_login' ||
+        (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA')))
+    ) {
+      const igLoginAuth = require('../integrations/meta/instagramLoginAuth');
+      const isuid = connection.metadata?.igLoginScopedId || connection.platformUserId;
+      igLoginAuth.unsubscribeFromWebhook(isuid, connection.accessToken).catch(() => {});
+    }
 
     // Decrement usage counter if this connection was counted (Dependency Inversion)
     if (wasCounted) {
@@ -418,7 +464,7 @@ exports.disconnectPlatform = async (req, res, next) => {
     // Clear all cache for this organization's interactions
     // This is important because the inbox query now filters by active connections
     const cacheService = require('../services/cacheService');
-    await cacheService.delPattern(`interactions:${req.user.organization._id}*`);
+    await cacheService.invalidateInteractionCaches(req.user.organization._id);
 
     // Optionally: Archive or hide interactions from this disconnected platform
     // For now, they'll just be filtered out by the inbox query
@@ -464,180 +510,39 @@ exports.syncPlatform = async (req, res, next) => {
     });
 
     if (!connection) {
-      return res.status(404).json({
-        success: false,
-        error: 'Platform connection not found'
-      });
+      return res.status(404).json({ success: false, error: 'Platform connection not found' });
     }
 
     const organizationId = req.user.organization._id.toString();
-    let result = { count: 0, interactions: [] };
+    const syncResult = await platformSyncService.syncPlatform(connection, organizationId);
 
-    // Ensure token is valid and fetch data
-    if (connection.platform === 'youtube') {
-      await youtubeService.ensureValidToken(connection);
-      result = await youtubeService.fetchAllChannelComments(connection);
-      console.log('🔍 [Sync] YouTube sync result:', result);
-    } else if (connection.platform === 'google') {
-      await googleService.ensureValidToken(connection);
-      result = await googleService.fetchAllReviews(connection);
-      
-      if (!result.success && result.error) {
-        return res.status(400).json({
-          success: false,
-          error: result.error,
-          data: {
-            interactionsAdded: result.count || 0
-          }
-        });
-      }
-    } else if (connection.platform === 'instagram') {
-      // Check sync settings
-      const syncComments = connection.settings?.syncComments !== false; // Default true
-      const syncDMs = connection.settings?.syncDMs !== false; // Default true
-
-      if (syncComments && syncDMs) {
-        // Fetch both comments and DMs
-        result = await instagramService.fetchAllInteractions(connection);
-      } else if (syncComments) {
-        // Only fetch comments
-        result = await instagramService.fetchComments(connection);
-      } else if (syncDMs) {
-        // Only fetch DMs
-        result = await instagramService.fetchMessages(connection);
-      } else {
-        return res.status(400).json({
-          success: false,
-          error: 'Both comments and DMs sync are disabled for this connection'
-        });
-      }
-    } else if (connection.platform === 'facebook') {
-      // User-level Facebook connections (platformPageId null) are for listing pages only; they cannot sync comments
-      if (!connection.platformPageId) {
-        console.warn('⚠️ [Sync] Facebook connection has no Page ID (user-level connection). Sync comments from a connected Page in Page Manager.');
-        result = { count: 0, interactions: [] };
-      } else {
-        result = await facebookService.fetchAllInteractions(connection);
-      }
-    } else if (connection.platform === 'linkedin') {
-      try {
-        // Fetch LinkedIn posts and comments
-        result = await linkedinService.fetchAllInteractions(connection);
-      } catch (linkedinError) {
-        console.error('❌ [Sync] LinkedIn sync error:', linkedinError.message);
-        return res.status(400).json({
-          success: false,
-          error: linkedinError.message || 'LinkedIn sync failed',
-          data: {
-            interactionsAdded: 0
-          }
-        });
-      }
-    } else {
+    // Non-fatal platform-level error (e.g. sync disabled, unsupported platform)
+    if (syncResult.error) {
       return res.status(400).json({
         success: false,
-        error: 'Platform sync not implemented'
+        error: syncResult.error,
+        data: { interactionsAdded: syncResult.count || 0 }
       });
     }
 
-    // Queue auto-reply ONLY for newly synced interactions (not all)
-    let autoReplyQueued = 0;
-    let sentimentAnalyzed = 0;
-    
-    if (result.count > 0 && result.interactions && result.interactions.length > 0) {
-      const autoReplyScheduler = require('../services/autoReplyScheduler');
-      const { aiQueue } = require('../config/queue');
-      const Interaction = require('../models/Interaction');
-      const aiService = require('../services/aiService');
-      
-      // Get platform IDs from NEWLY synced interactions only
-      const platformIds = result.interactions.map(i => i.platformId);
-      
-      // Find the newly synced interactions that are unread and have no replies
-      const newInteractions = await Interaction.find({
-        platformId: { $in: platformIds },
-        organization: organizationId,
-        status: 'unread',
-        $or: [
-          { replies: { $size: 0 } },
-          { replies: { $exists: false } }
-        ]
-      });
-      
-      // AUTOMATIC SENTIMENT ANALYSIS: Analyze sentiment for new interactions immediately
-      for (const interaction of newInteractions) {
-        // Only analyze if sentiment is missing
-        if (!interaction.sentiment && interaction.content) {
-          try {
-            const sentimentResult = aiService.fallbackSentimentAnalysis(interaction.content);
-            interaction.sentiment = sentimentResult.sentiment;
-            interaction.sentimentScore = sentimentResult.sentimentScore;
-            interaction.sentimentConfidence = sentimentResult.sentimentConfidence;
-            await interaction.save();
-            sentimentAnalyzed++;
-          } catch (sentimentError) {
-            console.error(`⚠️ [Sync] Sentiment analysis failed for ${interaction._id}:`, sentimentError.message);
-          }
-        }
-      }
-      
-      for (const interaction of newInteractions) {
-        try {
-          // Double-check: Skip if already has replies (safety check)
-          if (interaction.replies && interaction.replies.length > 0) {
-            console.log(`⏭️  [Sync] Skipping AI queue for ${interaction._id} - already has replies`);
-            continue;
-          }
-
-          // Queue AI processing for new interactions only
-          await aiQueue.add({
-            interactionId: interaction._id
-          }, {
-            attempts: 3,
-            backoff: 2000,
-            jobId: `ai-${interaction._id}` // Use unique job ID to prevent duplicates
-          });
-
-          // Queue auto-reply
-          const queued = await autoReplyScheduler.queueImmediateAutoReply(
-            interaction._id.toString(),
-            organizationId
-          );
-          
-          if (queued) {
-            autoReplyQueued++;
-          }
-        } catch (queueError) {
-          console.error(`Error queueing interaction ${interaction._id}:`, queueError);
-        }
-      }
-    }
-    
-    console.log(`📊 [Sync] Total: ${result.count} new interactions, ${sentimentAnalyzed} sentiments analyzed, ${autoReplyQueued} auto-replies queued`)
-    
-    // Invalidate interactions cache so frontend sees new data immediately
-    if (result.count > 0) {
-      const cacheService = require('../services/cacheService');
-      const cachePattern = `interactions:${organizationId}:*`;
-      await cacheService.delPattern(cachePattern);
-      console.log(`🗑️  [Cache] Invalidated interaction cache: ${cachePattern}`);
-    }
-      
-    const linkedInHint = result.linkedInSyncHint;
-    const message =
-      result.count > 0
-        ? `Sync completed. Found ${result.count} new interactions. ${autoReplyQueued} auto-replies queued.`
-        : linkedInHint
-          ? 'Sync completed. No new interactions. LinkedIn did not allow listing posts (read access)—see data.linkedInSyncHint or server logs.'
+    const { count, autoReplyQueued, linkedInSyncHint, aiSkippedBackfill = 0, shopifyStats } = syncResult;
+    const message = shopifyStats
+      ? `Shopify sync completed. ${shopifyStats.products} product(s), ${shopifyStats.customers} customer(s), ${shopifyStats.orders} order(s) synced.`
+      : count > 0
+        ? `Sync completed. Found ${count} new interactions. ${autoReplyQueued} auto-replies queued.`
+        : linkedInSyncHint
+          ? 'Sync completed. No new interactions. LinkedIn did not allow listing posts (read access).'
           : 'Sync completed. No new interactions found.';
 
     res.status(200).json({
       success: true,
       message,
       data: {
-        interactionsAdded: result.count,
+        interactionsAdded: count,
         autoRepliesQueued: autoReplyQueued,
-        ...(linkedInHint && { linkedInSyncHint })
+        aiSkippedBackfill,
+        ...(shopifyStats && { shopifyStats }),
+        ...(linkedInSyncHint && { linkedInSyncHint })
       }
     });
   } catch (error) {
@@ -673,20 +578,49 @@ exports.refreshGoogleLocations = async (req, res, next) => {
 
     // Fetch accounts and locations
     try {
-      const accounts = await googleService.getAccounts(connection.accessToken);
-      
-      if (!accounts || accounts.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'No Google Business Profile accounts found',
-          message: 'Please set up a Google Business Profile at https://business.google.com/',
-          code: 'NO_ACCOUNTS'
-        });
+      // Skip accounts.list when accountId is known (body override, or cached).
+      // accounts.list hits mybusinessaccountmanagement.googleapis.com which often has 0 RPM.
+      let account = null;
+      const bodyAccountId = typeof req.body?.accountId === 'string'
+        ? req.body.accountId.trim()
+        : '';
+      const cachedAccountId = connection.platformData?.accountId;
+      const resolvedAccountId = bodyAccountId || cachedAccountId;
+
+      if (resolvedAccountId) {
+        // Accept "123", "accounts/123", or full resource paths
+        if (!/^(accounts\/)?\d+/.test(resolvedAccountId)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid account ID',
+            message: 'Enter a numeric Google Business account ID, e.g. 1234567890 or accounts/1234567890',
+            code: 'INVALID_ACCOUNT_ID'
+          });
+        }
+        account = {
+          name: resolvedAccountId,
+          accountName: connection.platformData?.accountName || resolvedAccountId
+        };
+        console.log(
+          `ℹ️ [Google] Using ${bodyAccountId ? 'manual' : 'cached'} accountId ${resolvedAccountId} (skip accounts.list)`
+        );
+      } else {
+        const accounts = await googleService.getAccounts(connection.accessToken);
+
+        if (!accounts || accounts.length === 0) {
+          return res.status(404).json({
+            success: false,
+            error: 'No Google Business Profile accounts found',
+            message: 'Please set up a Google Business Profile at https://business.google.com/',
+            code: 'NO_ACCOUNTS'
+          });
+        }
+
+        account = accounts[0];
       }
 
-      const account = accounts[0];
       const locations = await googleService.getLocations(connection.accessToken, account.name);
-      
+
       if (!locations || locations.length === 0) {
         return res.status(404).json({
           success: false,
@@ -697,18 +631,15 @@ exports.refreshGoogleLocations = async (req, res, next) => {
         });
       }
 
-      // Update connection with location IDs
-      const locationIds = locations.map(loc => loc.name.split('/').pop());
+      const built = googleService.buildLocationPlatformData(account, locations);
       connection.platformData = {
         ...connection.platformData,
-        accountId: account.name,
-        accountName: account.accountName || account.name,
-        locationIds: locationIds,
+        ...built,
         lastLocationRefresh: new Date()
       };
       await connection.save();
 
-      console.log(`✅ [Google] Refreshed locations for connection ${connection._id}: Found ${locationIds.length} location(s)`);
+      console.log(`✅ [Google] Refreshed locations for connection ${connection._id}: Found ${built.locationIds.length} location(s)`);
 
       res.json({
         success: true,
@@ -716,19 +647,37 @@ exports.refreshGoogleLocations = async (req, res, next) => {
         data: {
           locationsCount: locations.length,
           locationNames: locations.map(loc => loc.title || loc.name),
-          accountName: account.accountName || account.name
+          accountName: account.accountName || account.name,
+          locations: built.locations
         }
       });
     } catch (apiError) {
       console.error('❌ [Google] Location refresh API error:', apiError.message);
-      
-      // Handle specific API errors
-      if (apiError.message.includes('403')) {
+
+      if (apiError.code === 'GBP_QUOTA_EXCEEDED' || apiError.statusCode === 429 || apiError.message?.includes('429')) {
+        return res.status(429).json({
+          success: false,
+          error: 'Google Business Profile API quota exceeded',
+          message: apiError.message,
+          code: 'GBP_QUOTA_EXCEEDED'
+        });
+      }
+
+      if (apiError.code === 'API_ACCESS_DENIED' || apiError.statusCode === 403 || apiError.message?.includes('403')) {
         return res.status(403).json({
           success: false,
           error: 'Access denied to Google Business Profile API',
           message: 'Please ensure you have a Google Business Profile and granted all permissions during OAuth.',
           code: 'API_ACCESS_DENIED'
+        });
+      }
+
+      if (apiError.code === 'API_NOT_FOUND' || apiError.statusCode === 404) {
+        return res.status(404).json({
+          success: false,
+          error: 'Google Business Profile API not found',
+          message: apiError.message,
+          code: 'API_NOT_FOUND'
         });
       }
 
@@ -750,82 +699,327 @@ exports.refreshGoogleLocations = async (req, res, next) => {
  * @route   POST /api/platforms/whatsapp/connect
  * @access  Private
  */
-exports.connectWhatsApp = async (req, res, next) => {
+/**
+ * @desc    Initiate WhatsApp Embedded Signup OAuth flow
+ * @route   GET /api/platforms/whatsapp/connect
+ * @access  Private
+ * Returns an authUrl for the frontend to open in a popup/redirect.
+ */
+exports.initiateWhatsAppConnection = async (req, res, next) => {
   try {
-    const organizationId = req.user.organization._id;
+    const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+    const userId = req.user._id.toString();
+    const organizationId = req.user.organization._id.toString();
 
-    // Verify WhatsApp connection
-    const verificationResult = await whatsappService.verifyConnection();
+    const authUrl = whatsappLoginAuth.getAuthURL(userId, organizationId);
 
-    if (!verificationResult.success) {
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to verify WhatsApp connection',
-        message: 'Please check your WhatsApp credentials in environment variables'
-      });
-    }
-
-    // Check if already connected
-    const existingConnection = await PlatformConnection.findOne({
-      organization: organizationId,
-      platform: 'whatsapp',
-      isActive: true
-    });
-
-    if (existingConnection) {
-      return res.status(400).json({
-        success: false,
-        error: 'WhatsApp already connected',
-        message: 'This organization already has an active WhatsApp connection'
-      });
-    }
-
-    // Cross-org conflict check: block if this phone number is active in another workspace
-    const crossOrgConflict = await PlatformConnection.findCrossOrgConflict(
-      'whatsapp', whatsappService.phoneNumberId, organizationId
-    );
-    if (crossOrgConflict) {
-      return res.status(409).json({
-        success: false,
-        error: 'This WhatsApp number is already connected to another workspace.',
-        code: 'CROSS_ORG_CONFLICT'
-      });
-    }
-
-    // Get business profile
-    const profileResult = await whatsappService.getBusinessProfile();
-
-    // Create platform connection
-    const connection = await PlatformConnection.create({
-      organization: organizationId,
-      platform: 'whatsapp',
-      platformUserId: whatsappService.phoneNumberId,
-      platformDisplayName: verificationResult.verifiedName,
-      accessToken: whatsappService.accessToken, // Required field
-      createdBy: req.user._id, // Required field
-      platformData: {
-        phoneNumberId: whatsappService.phoneNumberId,
-        businessAccountId: whatsappService.businessAccountId,
-        displayPhoneNumber: verificationResult.phoneNumber,
-        verifiedName: verificationResult.verifiedName,
-        qualityRating: verificationResult.qualityRating,
-        codeVerificationStatus: verificationResult.codeVerificationStatus,
-        businessProfile: profileResult.profile
-      },
-      status: 'connected',
-      isActive: true
-    });
-
-    console.log('✅ [WhatsApp] Connection created:', connection._id);
+    // Embedded Signup config for the Facebook JS SDK path. Returned from the server so
+    // the app id / config id / solution id are never hardcoded in the frontend bundle
+    // (they differ per environment). `solutionId` present => use the SDK flow and POST
+    // to /whatsapp/embedded-signup; absent => fall back to the redirect flow via authUrl.
+    const interakt = require('../integrations/whatsapp/interaktPartnerService');
+    const embeddedSignup = {
+      appId: process.env.META_APP_ID || process.env.FACEBOOK_APP_ID || null,
+      configId:
+        process.env.META_WHATSAPP_CONFIG_ID ||
+        process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ||
+        null,
+      solutionId: interakt.isConfigured() ? process.env.INTERAKT_SOLUTION_ID : null,
+      graphVersion: process.env.META_WHATSAPP_OAUTH_DIALOG_VERSION || 'v23.0'
+    };
 
     res.status(200).json({
       success: true,
-      data: connection,
-      message: 'WhatsApp connected successfully'
+      data: { authUrl, embeddedSignup }
     });
+  } catch (error) {
+    console.error('❌ [WhatsApp] Initiate connection error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Handle WhatsApp OAuth callback (Embedded Signup)
+ * @route   GET /api/platforms/whatsapp/callback  (public — called by Meta redirect)
+ * @access  Public
+ */
+exports.handleWhatsAppCallback = async (req, res, next) => {
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
+
+  try {
+    const { code, state, error: oauthError, error_description } = req.query;
+
+    if (oauthError) {
+      console.error('[WhatsApp] OAuth error:', oauthError, error_description);
+      return res.redirect(
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error: error_description || oauthError
+        })
+      );
+    }
+
+    if (!code || !state) {
+      return res.redirect(
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error: 'Missing code or state parameter'
+        })
+      );
+    }
+
+    const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+
+    // Verify state and extract userId / organizationId
+    let stateData;
+    try {
+      stateData = whatsappLoginAuth.verifyState(state);
+    } catch (stateErr) {
+      return res.redirect(
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, { whatsapp_error: stateErr.message })
+      );
+    }
+
+    const { userId, organizationId } = stateData;
+
+    // Exchange code for short-lived token then long-lived token
+    const shortToken = await whatsappLoginAuth.exchangeCode(code);
+    const { accessToken, expiresIn } = await whatsappLoginAuth.getLongLivedToken(shortToken);
+
+    // Discover WABAs and phone numbers
+    const phoneNumbers = await whatsappLoginAuth.getWhatsAppAccounts(accessToken);
+
+    if (!phoneNumbers || phoneNumbers.length === 0) {
+      return res.redirect(
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error:
+            'No WhatsApp Business phone numbers found. Ensure the account has admin access to a WABA.'
+        })
+      );
+    }
+
+    // Save all discovered phone numbers as separate connections (or just the first)
+    const savedConnections = [];
+    for (const phoneData of phoneNumbers) {
+      try {
+        const conn = await whatsappLoginAuth.saveConnection(
+          userId, organizationId, accessToken, expiresIn, phoneData
+        );
+        savedConnections.push(conn);
+      } catch (saveErr) {
+        if (saveErr.code === 'CROSS_ORG_CONFLICT') {
+          console.warn(`[WhatsApp] Cross-org conflict for ${phoneData.displayPhoneNumber}, skipping`);
+        } else {
+          console.error(`[WhatsApp] Failed to save connection for ${phoneData.displayPhoneNumber}:`, saveErr.message);
+        }
+      }
+    }
+
+    if (savedConnections.length === 0) {
+      return res.redirect(
+        buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+          whatsapp_error:
+            'Could not save WhatsApp connection. The number may already be connected in another workspace.'
+        })
+      );
+    }
+
+    console.log(`✅ [WhatsApp] ${savedConnections.length} connection(s) saved for org ${organizationId}`);
+    return res.redirect(
+      buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+        whatsapp_connected: 'true',
+        count: String(savedConnections.length)
+      })
+    );
 
   } catch (error) {
-    console.error('❌ [WhatsApp] Connection error:', error);
+    console.error('❌ [WhatsApp] Callback error:', error);
+    return res.redirect(
+      buildWhatsAppOAuthCallbackUrl(frontendUrl, {
+        whatsapp_error: error.message || 'WhatsApp connection failed'
+      })
+    );
+  }
+};
+
+/**
+ * @desc    Complete WhatsApp Embedded Signup started with the Interakt solution ID.
+ *
+ * The Facebook JS SDK returns waba_id and phone_number_id directly (sessionInfoVersion 3)
+ * alongside the exchangeable code, so this path skips the multi-step debug_token
+ * discovery cascade the redirect flow needs. After the connection is saved we register
+ * the WABA with Interakt and point its webhooks back at us.
+ *
+ * @route   POST /api/platforms/whatsapp/embedded-signup
+ * @access  Private (admin/manager, connection-limit gated)
+ */
+exports.completeWhatsAppEmbeddedSignup = async (req, res, next) => {
+  const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+  const interakt = require('../integrations/whatsapp/interaktPartnerService');
+
+  try {
+    const { code, wabaId, phoneNumberId } = req.body || {};
+    if (!code || !wabaId || !phoneNumberId) {
+      return res.status(400).json({
+        success: false,
+        error: 'code, wabaId and phoneNumberId are all required.'
+      });
+    }
+
+    const userId = req.user._id.toString();
+    const organizationId = req.user.organization._id.toString();
+
+    // 1. Exchange the SDK code.
+    //
+    // Uses exchangeCodeFromSdk, NOT exchangeCode: FB.login() issues the code with no
+    // redirect_uri, so sending one fails with code 100 / subcode 36008. The token that
+    // comes back is a business-integration system user token — already long-lived, so
+    // there is no fb_exchange_token step here either.
+    const { accessToken, expiresIn } = await whatsappLoginAuth.exchangeCodeFromSdk(code);
+
+    // 2. Enrich the number for display. Non-fatal: the SDK already gave us the ids we
+    //    actually need, so a failure here costs metadata, not the connection.
+    let phoneMeta = {};
+    try {
+      const rows = await whatsappLoginAuth.getPhoneNumbers(wabaId, accessToken);
+      const match = rows.find((r) => String(r.id) === String(phoneNumberId)) || rows[0] || {};
+      phoneMeta = {
+        displayPhoneNumber: match.display_phone_number,
+        verifiedName: match.verified_name,
+        qualityRating: match.quality_rating,
+        codeVerificationStatus: match.code_verification_status
+      };
+    } catch (metaErr) {
+      console.warn('[WhatsApp/ES] Could not fetch phone number details:', metaErr.message);
+    }
+
+    // 3. Move the number from Pending to Active. Without this it can never receive
+    //    messages. Tolerant of "already registered" (Meta code 80007).
+    try {
+      await whatsappLoginAuth.registerPhoneNumber(phoneNumberId, accessToken);
+    } catch (regErr) {
+      console.warn('[WhatsApp/ES] registerPhoneNumber:', regErr.message);
+    }
+
+    // 4. Persist, marked as an Interakt-transported connection.
+    const connection = await whatsappLoginAuth.saveConnection(
+      userId,
+      organizationId,
+      accessToken,
+      // Non-expiring system user token -> park the expiry far out rather than writing
+      // an immediate/NaN date that would make the connection look already-lapsed.
+      expiresIn ?? 60 * 60 * 24 * 365 * 5,
+      {
+        wabaId,
+        phoneNumberId,
+        displayPhoneNumber: phoneMeta.displayPhoneNumber || phoneNumberId,
+        verifiedName: phoneMeta.verifiedName || null,
+        qualityRating: phoneMeta.qualityRating || null,
+        codeVerificationStatus: phoneMeta.codeVerificationStatus || null
+      },
+      // Saved as 'meta' on purpose. The transport provider is only flipped to
+      // 'interakt' AFTER Interakt has actually accepted the WABA (below, or via the
+      // WABA_ONBOARDED webhook). Flipping it up front meant a failed onboarding left
+      // a previously-working Meta connection routed to a provider that rejects it —
+      // every Graph call then returned 400 and the account looked broken.
+      { provider: 'meta', connectionType: 'whatsapp_interakt_signup' }
+    );
+
+    // 5. Hand Interakt our callback URL, then nudge their onboarding.
+    //
+    // Per Interakt's onboarding doc, Meta fires PARTNER_ADDED to BOTH us and Interakt
+    // automatically when Embedded Signup completes with our solution id — that is the
+    // primary onboarding trigger (handled in whatsappWebhookService.processAccountUpdate).
+    // The tp-signup API is explicitly the fallback "if the event is not received within
+    // 5-7 minutes". We still call it immediately because it is idempotent and removes
+    // the wait, but a failure here must NOT fail the connection: Meta's own event may
+    // still complete the onboarding moments later.
+    const interaktStatus = { registered: false, webhookConfigured: false, error: null };
+
+    // ORDER MATTERS: register the WABA with Interakt BEFORE configuring its webhook.
+    // Interakt rejects webhook configuration for a WABA it does not yet know about
+    // (observed: HTTP 400 "Invalid request"), so doing it the other way round always
+    // fails on a first-time connect.
+    try {
+      await interakt.registerWaba({ wabaId, organization: organizationId, platformConnection: connection._id });
+      interaktStatus.registered = true;
+      connection.platformData.interaktRegisteredAt = new Date();
+    } catch (regErr) {
+      // Non-fatal: Meta also fires PARTNER_ADDED to Interakt directly, so onboarding
+      // can still complete without this call (it is the documented 5-7 min fallback).
+      interaktStatus.error = regErr.message;
+      connection.platformData.interaktLastError = String(regErr.message).slice(0, 500);
+      console.warn('[WhatsApp/ES] tp-signup failed (Meta PARTNER_ADDED may still complete it):', regErr.message);
+    }
+
+    try {
+      await interakt.configureWebhook({ wabaId, organization: organizationId, platformConnection: connection._id });
+      interaktStatus.webhookConfigured = true;
+      connection.platformData.interaktWebhookConfiguredAt = new Date();
+      connection.platformData.interaktLastError = null;
+    } catch (whErr) {
+      interaktStatus.error = interaktStatus.error || whErr.message;
+      connection.platformData.interaktLastError = String(whErr.message).slice(0, 500);
+      console.error('[WhatsApp/ES] Interakt webhook configuration failed:', whErr.message);
+    }
+
+    connection.platformData.interaktSolutionId = interakt.solutionId();
+
+    // Flip the transport only when Interakt is genuinely ready for this WABA.
+    // Until then the connection keeps working against Meta directly.
+    if (interaktStatus.registered && interaktStatus.webhookConfigured) {
+      connection.platformData.provider = 'interakt';
+    }
+    // Deliberately do NOT downgrade status here.
+    //
+    // Onboarding is asynchronous: Interakt confirms on our partner webhook with
+    // WABA_ONBOARDED, or reports WABA_ONBOARDING_FAILED with a real reason. A failed
+    // webhook-config call on its own is recoverable and often just means Interakt has
+    // not finished registering the WABA yet. Marking 'error' here produced a red badge
+    // with no explanation while onboarding was still in flight; the authoritative
+    // event decides the final state instead. (There is no 'pending' in the status
+    // enum — available|connected|disconnected|error|token_expired.)
+    connection.markModified('platformData');
+    await connection.save();
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        connectionId: connection._id,
+        phoneNumberId,
+        wabaId,
+        displayPhoneNumber: connection.platformData.displayPhoneNumber,
+        interakt: interaktStatus
+      }
+    });
+  } catch (error) {
+    if (error.code === 'CROSS_ORG_CONFLICT') {
+      return res.status(409).json({ success: false, error: error.message });
+    }
+    console.error('❌ [WhatsApp/ES] Embedded signup failed:', error);
+    return next(error);
+  }
+};
+
+/**
+ * @desc    Connect WhatsApp using env credentials (dev/fallback — single-tenant)
+ * @route   POST /api/platforms/whatsapp/connect-direct
+ * @access  Private
+ */
+exports.connectWhatsApp = async (req, res, next) => {
+  try {
+    const { connection } = await whatsappConnectionService.connectDirect(
+      req.user.organization._id,
+      req.user._id
+    );
+    res.status(200).json({ success: true, data: connection, message: 'WhatsApp connected successfully' });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        ...(error.clientMessage && { message: error.clientMessage }),
+        ...(error.code && { code: error.code })
+      });
+    }
     next(error);
   }
 };
@@ -837,35 +1031,13 @@ exports.connectWhatsApp = async (req, res, next) => {
  */
 exports.disconnectWhatsApp = async (req, res, next) => {
   try {
-    const organizationId = req.user.organization._id;
-
-    const connection = await PlatformConnection.findOne({
-      organization: organizationId,
-      platform: 'whatsapp',
-      isActive: true
-    });
-
-    if (!connection) {
-      return res.status(404).json({
-        success: false,
-        error: 'WhatsApp connection not found'
-      });
-    }
-
-    // Deactivate connection
-    connection.isActive = false;
-    connection.status = 'disconnected';
-    await connection.save();
-
-    console.log('✅ [WhatsApp] Connection disconnected:', connection._id);
-
-    res.status(200).json({
-      success: true,
-      message: 'WhatsApp disconnected successfully'
-    });
-
+    const connectionId = req.query.connectionId || req.body?.connectionId || null;
+    await whatsappConnectionService.disconnect(req.user.organization._id, connectionId);
+    res.status(200).json({ success: true, message: 'WhatsApp disconnected successfully' });
   } catch (error) {
-    console.error('❌ [WhatsApp] Disconnect error:', error);
+    if (error.statusCode === 404) {
+      return res.status(404).json({ success: false, error: error.message });
+    }
     next(error);
   }
 };
@@ -877,40 +1049,75 @@ exports.disconnectWhatsApp = async (req, res, next) => {
  */
 exports.getWhatsAppStatus = async (req, res, next) => {
   try {
-    const organizationId = req.user.organization._id;
+    const status = await whatsappConnectionService.getStatus(req.user.organization._id);
+    res.status(200).json({ success: true, data: status });
+  } catch (error) {
+    next(error);
+  }
+};
 
-    const connection = await PlatformConnection.findOne({
-      organization: organizationId,
+/**
+ * @desc    Register an existing Pending WhatsApp phone number for Cloud API.
+ *          Calls POST /{phoneNumberId}/register which moves it from Pending → Active.
+ * @route   POST /api/platforms/whatsapp/register-phone
+ * @access  Private (org admin)
+ */
+exports.registerWhatsAppPhone = async (req, res, next) => {
+  try {
+    const whatsappLoginAuth = require('../integrations/whatsapp/whatsappLoginAuth');
+    const PlatformConnection = require('../models/PlatformConnection');
+
+    const { connectionId } = req.body;
+    const query = {
+      organization: req.user.organization._id,
       platform: 'whatsapp',
       isActive: true
-    });
+    };
+    if (connectionId) query._id = connectionId;
 
-    if (!connection) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          isConnected: false,
-          connection: null
-        }
+    const conn = await PlatformConnection.findOne(query).lean();
+    if (!conn) {
+      return res.status(400).json({ success: false, error: 'No active WhatsApp connection found.' });
+    }
+
+    const phoneNumberId =
+      conn.platformData?.phoneNumberId || conn.platformUserId;
+    const accessToken = conn.accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
+
+    if (!phoneNumberId || !accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number id or access token missing on connection.'
       });
     }
 
-    res.status(200).json({
-      success: true,
-      data: {
-        isConnected: true,
-        connection: {
-          id: connection._id,
-          displayPhoneNumber: connection.platformData.displayPhoneNumber,
-          verifiedName: connection.platformData.verifiedName,
-          qualityRating: connection.platformData.qualityRating,
-          status: connection.status
-        }
-      }
-    });
+    const ok = await whatsappLoginAuth.registerPhoneNumber(phoneNumberId, accessToken);
 
+    // Also (re)subscribe the WABA to webhooks
+    const wabaId =
+      conn.platformData?.wabaId ||
+      conn.platformData?.businessAccountId ||
+      process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+    if (wabaId) {
+      await whatsappLoginAuth.subscribeToWebhook(wabaId, accessToken);
+    }
+
+    const whatsappService = require('../integrations/whatsapp/whatsappService');
+    const fullConn = await PlatformConnection.findById(conn._id);
+    if (fullConn) {
+      await whatsappService.applyProfilePictureToConnection(fullConn).catch(() => {});
+    }
+
+    return res.status(200).json({
+      success: true,
+      registered: ok,
+      phoneNumberId,
+      wabaId: wabaId || null,
+      message: ok
+        ? 'Phone number registered. Status should change to Active within a few minutes.'
+        : 'Registration call made but Meta returned an unexpected response — check logs.'
+    });
   } catch (error) {
-    console.error('❌ [WhatsApp] Status check error:', error);
     next(error);
   }
 };

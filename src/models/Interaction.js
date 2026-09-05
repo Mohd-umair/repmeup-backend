@@ -11,7 +11,7 @@ const interactionSchema = new mongoose.Schema({
   // Platform information
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'whatsapp', 'youtube', 'google', 'website', 'linkedin'],
+    enum: ['instagram', 'facebook', 'whatsapp', 'youtube', 'google', 'website', 'linkedin', 'email'],
     required: true,
     index: true
   },
@@ -21,16 +21,19 @@ const interactionSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['comment', 'dm', 'review', 'mention'],
+    enum: ['comment', 'dm', 'review', 'mention', 'email'],
     required: true,
     index: true
   },
   
-  // Unique platform identifier
+  // Platform identifier — unique per organization (NOT globally).
+  // The compound unique index { organization: 1, platformId: 1 } is declared below.
+  // Without per-org scoping, two tenants sharing the same external thread id (e.g. a
+  // shared WhatsApp Business phone number, or an Instagram DM from the same customer
+  // reaching two of our customers) would silently drop messages on duplicate-key errors.
   platformId: {
     type: String,
-    required: true,
-    unique: true
+    required: true
   },
   platformUrl: String,
   
@@ -41,7 +44,7 @@ const interactionSchema = new mongoose.Schema({
   },
   contentType: {
     type: String,
-    enum: ['text', 'image', 'video', 'audio'],
+    enum: ['text', 'image', 'video', 'audio', 'html'],
     default: 'text'
   },
   language: String,
@@ -58,6 +61,26 @@ const interactionSchema = new mongoose.Schema({
     isVerified: Boolean
   },
   
+  // Linked unified contact (resolved from author identity)
+  contact: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Contact',
+    default: null,
+    index: true
+  },
+
+  // Support desk ticket reference
+  chatNumber: {
+    type: Number,
+    default: null,
+    index: true
+  },
+  chatRef: {
+    type: String,
+    default: null,
+    index: true
+  },
+
   // Threading support
   parentId: String,
   threadId: String,
@@ -140,6 +163,21 @@ const interactionSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Why the auto-reply was skipped (user-facing reasons only; null = not skipped or no data)
+  aiSkipReason: {
+    type: String,
+    enum: [
+      'quiet_hours',
+      'blocked_keyword',
+      'whatsapp_24h_window_closed',
+      'agent_recently_active',
+      'max_auto_replies_reached',
+      'auto_reply_disabled',
+      'credits_exhausted',
+      null
+    ],
+    default: null
+  },
   
   // Escalation tracking
   autoReplyCount: {
@@ -171,7 +209,21 @@ const interactionSchema = new mongoose.Schema({
   escalatedAt: Date,
   escalationType: {
     type: String,
-    enum: ['auto', 'manual', 'keyword', 'sentiment', 'reply_limit', 'ai_confidence']
+    enum: [
+      'auto',
+      'manual',
+      'keyword',
+      'sentiment',
+      'reply_limit',
+      'ai_confidence',
+      'intent_routing',
+      'ai_unresolvable',
+      'ai_no_kb_fallback',
+      // Flow builder escalation node
+      'automation',
+      // AI auto-reply fallback paths
+      'ai_fallback'
+    ]
   },
   escalationMetadata: {
     triggerKeywords: [String],
@@ -183,7 +235,12 @@ const interactionSchema = new mongoose.Schema({
       type: Number,
       default: 0
     },
-    customerFrustrationIndicators: [String]
+    customerFrustrationIndicators: [String],
+    // Layer 3: counts how many times customer returned after an AI reply without resolution
+    sameTopicReplies: {
+      type: Number,
+      default: 0
+    }
   },
   
   // Assignment
@@ -232,7 +289,8 @@ const interactionSchema = new mongoose.Schema({
   },
   bucketAssignedBy: {
     type: String,
-    enum: ['keyword', 'ai', 'manual'],
+    // 'default' = org fallback bucket (intentClassificationService when AI/name match uses default bucket)
+    enum: ['keyword', 'ai', 'manual', 'default'],
     default: 'ai'
   },
 
@@ -250,21 +308,43 @@ const interactionSchema = new mongoose.Schema({
   
   // Metadata
   metadata: {
+    /** True for demo/sample interactions seeded into a trial workspace. */
+    seeded: { type: Boolean, default: false },
     // For social posts
     postId: String,
     postUrl: String,
     postAuthor: String,
+    // Post/video title and thumbnail (stored at interaction creation time)
+    postTitle: String,        // Generic post title (Facebook, LinkedIn, Twitter/X)
+    postThumbnailUrl: String, // Generic post thumbnail
+    videoTitle: String,       // YouTube video title
+    videoThumbnailUrl: String, // YouTube video thumbnail
+    mediaCaption: String,     // Instagram/Facebook media caption (first 200 chars)
     
     // For Instagram/Facebook DM thread: history of incoming messages (chat-style)
+    // NOTE: `type` must use `{ type: String }` — bare `type: String` makes Mongoose treat
+    // the whole element as SchemaString ([String]), which breaks $push of message objects.
     incomingMessages: [{
       mid: String,
       text: String,
-      timestamp: Number,
-      attachmentUrl: String,  // e.g. Facebook Messenger image payload URL
-      attachmentType: String  // e.g. 'image', 'video'
+      timestamp: Date,
+      type: { type: String },
+      /** WhatsApp Cloud API media id — required to fetch binary via Graph */
+      mediaId: String,
+      attachmentUrl: String,  // e.g. Facebook Messenger CDN URL or app proxy URL
+      attachmentType: String,  // e.g. 'image', 'video', 'audio', 'document'
+      igPostMediaId: String
     }],
     lastMid: String,
     instagramAccountId: String,
+
+    /**
+     * Workflow ownership signal. True while an automation flow is actively
+     * handling this conversation (active/waiting enrollment); cleared on
+     * terminal status. Read by the AI-fallback gate (replyEngineService) so the
+     * AI auto-reply stands down while a workflow owns the conversation.
+     */
+    flowHandled: { type: Boolean, default: false },
 
     // For Facebook Messenger DM thread
     facebookPageId: String,
@@ -274,6 +354,8 @@ const interactionSchema = new mongoose.Schema({
       max: 5
     },
     reviewTitle: String,
+    /** Inbox ops display ref for inbound reviews (REV-xxxx) */
+    reviewDisplayRef: { type: String, trim: true },
     
     // Media attachments
     mediaUrls: [String],
@@ -284,9 +366,58 @@ const interactionSchema = new mongoose.Schema({
     latitude: Number,
     longitude: Number,
     
+    // Interactive reply identifiers (WhatsApp / Facebook button taps, list selections)
+    // buttonPayload: the row/button id that was tapped (e.g. "apptsvc:<id>", "apptslot:2")
+    // postback: generic postback payload (Facebook Messenger, Instagram quick-replies)
+    // Both MUST be in the schema — Mongoose strict mode silently strips unknown paths
+    // in findOneAndUpdate, which previously caused interactive list selections to be
+    // invisible to flow handlers (payloadValue always returned null).
+    buttonPayload: String,
+    postback: String,
+
     // Additional context
     deviceType: String,
-    appVersion: String
+    appVersion: String,
+
+    /** Trimmed by archiveInteractionReplies job when reply array exceeds limit */
+    archivedReplyCount: { type: Number, default: 0 },
+    lastReplyArchiveAt: Date,
+
+    // Email-specific metadata (platform === 'email')
+    email: {
+      subject: String,
+      from: {
+        name: String,
+        address: String
+      },
+      to: [{
+        _id: false,
+        name: String,
+        address: String
+      }],
+      cc: [{
+        _id: false,
+        name: String,
+        address: String
+      }],
+      // RFC 2822 Message-ID header — used for duplicate detection
+      messageId: String,
+      // Threading headers
+      inReplyTo: String,
+      references: [String],
+      // Full HTML body (sanitized on the frontend before rendering)
+      htmlBody: String,
+      // Plain-text fallback
+      textBody: String,
+      hasAttachments: { type: Boolean, default: false },
+      attachments: [{
+        _id: false,
+        filename: String,
+        mimeType: String,
+        size: Number,
+        storageKey: String   // reference to storageService / GCS key
+      }]
+    }
   },
   
   // Response tracking
@@ -319,7 +450,24 @@ const interactionSchema = new mongoose.Schema({
       default: 'sent'
     },
     attachmentUrl: String,
-    attachmentType: { type: String, enum: ['image', 'video', 'file', 'audio'] }
+    attachmentType: { type: String, enum: ['image', 'video', 'file', 'audio'] },
+    confidence: { type: Number, default: null },
+    messageType: { type: String, default: null },
+
+    /** WhatsApp Cloud API delivery lifecycle (mirrors Meta status webhook values) */
+    deliveryStatus: {
+      type: String,
+      enum: ['sent', 'delivered', 'read', 'failed'],
+      default: undefined
+    },
+    deliveryStatusAt: { type: Date, default: undefined },
+
+    /** Rich preview for outbound WhatsApp Cloud API templates (inbox display) */
+    whatsappTemplatePreview: { type: mongoose.Schema.Types.Mixed, default: undefined },
+
+    /** Rich product card for outbound catalog product messages (inbox display):
+     *  { productId, name, image, price, currency, sku } */
+    productPreview: { type: mongoose.Schema.Types.Mixed, default: undefined }
   }],
   
   responseCount: {
@@ -329,6 +477,24 @@ const interactionSchema = new mongoose.Schema({
   firstResponseTime: Number, // in milliseconds
   averageResponseTime: Number,
   
+  // Chat summary (manual or AI-generated)
+  summary: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  summarySuggestedAction: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  summaryGeneratedAt: Date,
+  summaryGeneratedBy: {
+    type: String,
+    enum: ['ai', 'manual'],
+    default: null
+  },
+
   // Internal collaboration
   internalNotes: [{
     _id: {
@@ -373,22 +539,95 @@ const interactionSchema = new mongoose.Schema({
   // Timestamps
   platformCreatedAt: Date,
   respondedAt: Date,
-  resolvedAt: Date
+  resolvedAt: Date,
+
+  /** Inbox complaint workflow (ops — CMP-xxxx) */
+  complaint: {
+    displayRef: { type: String, trim: true, index: true },
+    status: {
+      type: String,
+      enum: ['open', 'acknowledged', 'in_progress', 'resolved', 'closed'],
+      default: 'open'
+    },
+    issueSummary: { type: String, trim: true },
+    linkedOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'CommerceOrder' },
+    priority: {
+      type: String,
+      enum: ['low', 'medium', 'high', 'urgent'],
+      default: 'medium'
+    },
+    acknowledgedAt: Date,
+    acknowledgedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    resolvedAt: Date,
+    resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    closedAt: Date,
+    closedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    slaAckMinutes: Number,
+    resolutionNote: { type: String, trim: true },
+    timeline: [{
+      event: { type: String, trim: true },
+      at: { type: Date, default: Date.now },
+      by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      note: { type: String, trim: true }
+    }]
+  },
+
+  // How this interaction was created:
+  // - webhook: real-time platform event
+  // - sync: pulled during manual/initial account sync (suppress auto-reply on old messages)
+  // - campaign: outbound WhatsApp campaign thread
+  // - comment_to_dm_link: shadow DM row linked from a comment-to-DM flow
+  source: {
+    type: String,
+    enum: ['webhook', 'sync', 'campaign', 'comment_to_dm_link'],
+    default: 'webhook'
+  }
 }, {
   timestamps: true
 });
 
 // Indexes for performance
-// Note: platformId index is automatically created by unique: true
+// platformId is unique PER ORGANIZATION. See note on the field above.
+// Migration: scripts/migrations/2026-04-21-interaction-platformid-compound-unique.js
+interactionSchema.index({ organization: 1, platformId: 1 }, { unique: true });
 interactionSchema.index({ organization: 1, createdAt: -1 });
 interactionSchema.index({ organization: 1, status: 1 });
 interactionSchema.index({ organization: 1, platform: 1, createdAt: -1 });
+// Supports flow first-message / new-lead detection (count prior inbound by sender)
+// and per-contact thread lookups by platform-scoped author id.
+interactionSchema.index({ organization: 1, platform: 1, 'author.platformId': 1 });
 interactionSchema.index({ organization: 1, sentiment: 1 });
 interactionSchema.index({ assignedTo: 1, status: 1 });
 interactionSchema.index({ 'metadata.postId': 1 });
 interactionSchema.index({ requiresHumanResponse: 1, assignedTo: 1 });
 interactionSchema.index({ organization: 1, requiresHumanResponse: 1 });
 interactionSchema.index({ organization: 1, intentBucket: 1, platformCreatedAt: -1 });
+
+// Compound index for all analytics date-range queries (most expensive aggregations)
+interactionSchema.index({ organization: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, platform: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, sentiment: 1, platformCreatedAt: -1 });
+
+// Index for child-interaction lookup (getInteraction fetches children by parentId on every chat open).
+// Without this, every chat click triggers a full collection scan.
+interactionSchema.index({ parentId: 1, organization: 1 });
+
+// Covers the default inbox list sort (organization + platformCreatedAt desc) WITHOUT the
+// archived docs that we already filter out. Adding `_id` as a tie-breaker avoids the
+// "sort in memory exceeded" threshold on very busy orgs. For orgs with millions of rows
+// this turns the inbox list from a collection-scan-with-sort into an index scan.
+interactionSchema.index({ organization: 1, status: 1, platformCreatedAt: -1, _id: -1 });
+
+// Multikey index used by agent-scoped list queries (`{ 'assignmentHistory.assignedTo': userId }`).
+// Without this, every agent's first inbox load scans the whole collection picking apart
+// a large embedded array per document.
+interactionSchema.index({ 'assignmentHistory.assignedTo': 1 });
+interactionSchema.index({ organization: 1, 'complaint.status': 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, type: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, contact: 1, platform: 1, platformCreatedAt: -1 });
+interactionSchema.index({ organization: 1, contact: 1, platform: 1, 'metadata.incomingMessages.timestamp': -1 });
+interactionSchema.index({ organization: 1, 'complaint.displayRef': 1 }, { sparse: true });
 
 // Update response count when adding replies
 interactionSchema.pre('save', function(next) {
@@ -408,7 +647,14 @@ interactionSchema.pre('save', function(next) {
 });
 
 // Method to add reply
-interactionSchema.methods.addReply = function(content, userId, platformResponseId = null, wasAutoGenerated = false, attachmentUrl = null, attachmentType = null) {
+interactionSchema.methods.addReply = function(
+  content, userId, platformResponseId = null, wasAutoGenerated = false,
+  attachmentUrl = null, attachmentType = null,
+  confidence = null, messageType = null,
+  whatsappTemplatePreview = null,
+  deliveryStatus = null,
+  productPreview = null
+) {
   const reply = {
     content,
     sentBy: userId,
@@ -418,6 +664,18 @@ interactionSchema.methods.addReply = function(content, userId, platformResponseI
   };
   if (attachmentUrl) reply.attachmentUrl = attachmentUrl;
   if (attachmentType) reply.attachmentType = attachmentType;
+  if (confidence != null) reply.confidence = confidence;
+  if (messageType != null) reply.messageType = messageType;
+  if (whatsappTemplatePreview && typeof whatsappTemplatePreview === 'object') {
+    reply.whatsappTemplatePreview = whatsappTemplatePreview;
+  }
+  if (productPreview && typeof productPreview === 'object') {
+    reply.productPreview = productPreview;
+  }
+  if (deliveryStatus) {
+    reply.deliveryStatus = deliveryStatus;
+    reply.deliveryStatusAt = new Date();
+  }
   this.replies.push(reply);
   
   // Increment auto-reply count if this was auto-generated
@@ -427,6 +685,9 @@ interactionSchema.methods.addReply = function(content, userId, platformResponseI
   }
   
   this.status = 'replied';
+  if (!this.respondedAt) {
+    this.respondedAt = new Date();
+  }
   return this.save();
 };
 
@@ -436,7 +697,11 @@ interactionSchema.methods.assignTo = function(userId, assignedBy, reason = 'manu
   this.assignedBy = assignedBy;
   this.assignedAt = new Date();
   this.assignmentReason = reason;
-  this.status = 'assigned';
+  // Preserve 'replied'/'resolved' status — a replied chat assigned for follow-up should
+  // not lose its 'replied' status. Agents can still see assignedTo and act accordingly.
+  if (this.status !== 'replied' && this.status !== 'resolved') {
+    this.status = 'assigned';
+  }
   
   // Add to assignment history
   if (!this.assignmentHistory) {
@@ -473,8 +738,10 @@ interactionSchema.methods.escalateToHuman = function(reasons = [], escalationTyp
     ...this.escalationMetadata,
     ...metadata
   };
-  // Update status if not already assigned
-  if (this.status !== 'assigned') {
+  // Only change status when the conversation has NOT already been answered.
+  // A conversation where AI/human already sent a reply (status = 'replied' or 'resolved')
+  // should NOT be demoted back to 'assigned' — it was answered, just flagged for follow-up.
+  if (this.status !== 'replied' && this.status !== 'resolved' && this.status !== 'assigned') {
     this.status = 'assigned';
   }
   return this.save();

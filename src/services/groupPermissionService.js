@@ -331,6 +331,7 @@ class GroupPermissionService {
       { name: 'Connect Platforms', code: 'integrations.connect', category: 'integrations', actions: ['create'] },
       { name: 'Disconnect Platforms', code: 'integrations.disconnect', category: 'integrations', actions: ['delete'] },
       { name: 'Manage Integrations', code: 'integrations.manage', category: 'integrations', actions: ['manage'] },
+      { name: 'Switch Connected Accounts', code: 'accounts.switch', category: 'accounts', actions: ['read'] },
 
       { name: 'View Knowledge Base', code: 'knowledge_base.read', category: 'knowledge_base', actions: ['read'] },
       { name: 'Create KB Entries', code: 'knowledge_base.create', category: 'knowledge_base', actions: ['create'] },
@@ -351,7 +352,20 @@ class GroupPermissionService {
       { name: 'Edit Organization', code: 'organization.update', category: 'organization', actions: ['update'] },
 
       { name: 'View Billing', code: 'billing.read', category: 'billing', actions: ['read'] },
-      { name: 'Manage Billing', code: 'billing.manage', category: 'billing', actions: ['manage'] }
+      { name: 'Manage Billing', code: 'billing.manage', category: 'billing', actions: ['manage'] },
+
+      { name: 'View Contacts', code: 'contacts.read', category: 'contacts', actions: ['read'] },
+      { name: 'Update Contacts', code: 'contacts.update', category: 'contacts', actions: ['update'] },
+      { name: 'Delete Contacts', code: 'contacts.delete', category: 'contacts', actions: ['delete'] },
+      { name: 'Merge Contacts', code: 'contacts.merge', category: 'contacts', actions: ['manage'] },
+      { name: 'Export Contacts', code: 'contacts.export', category: 'contacts', actions: ['export'] },
+      { name: 'Import Contacts', code: 'contacts.import', category: 'contacts', actions: ['create'] },
+      { name: 'Bulk Contact Actions', code: 'contacts.bulk_actions', category: 'contacts', actions: ['manage'] },
+      { name: 'Manage Segments', code: 'segments.manage', category: 'contacts', actions: ['manage'] },
+      { name: 'Manage Custom Fields', code: 'customfields.manage', category: 'contacts', actions: ['manage'] },
+      { name: 'Create Campaigns', code: 'campaigns.create', category: 'campaigns', actions: ['create'] },
+      { name: 'Send Campaigns', code: 'campaigns.send', category: 'campaigns', actions: ['manage'] },
+      { name: 'Manage Campaigns', code: 'campaigns.manage', category: 'campaigns', actions: ['manage'] }
     ];
 
     let created = 0;
@@ -392,11 +406,15 @@ class GroupPermissionService {
         description: 'Manage inbox, posts, analytics, and knowledge base',
         permissionCodes: [
           'inbox.read', 'inbox.reply', 'inbox.assign', 'inbox.archive',
-          'analytics.read', 'analytics.export',
+          'analytics.read', 'analytics.export', 'accounts.switch',
           'posts.read', 'posts.create', 'posts.update', 'posts.publish',
           'media.upload', 'media.read',
           'knowledge_base.read', 'knowledge_base.create', 'knowledge_base.update',
-          'settings.read', 'organization.read'
+          'settings.read', 'organization.read',
+          'contacts.read', 'contacts.update', 'contacts.delete', 'contacts.merge',
+          'contacts.export', 'contacts.import', 'contacts.bulk_actions',
+          'segments.manage', 'customfields.manage',
+          'campaigns.create', 'campaigns.send', 'campaigns.manage'
         ],
         isSystem: true
       },
@@ -410,7 +428,8 @@ class GroupPermissionService {
           'knowledge_base.read',
           'media.read',
           'posts.read',
-          'settings.read'
+          'settings.read',
+          'contacts.read'
         ],
         isSystem: true
       },
@@ -420,7 +439,8 @@ class GroupPermissionService {
         description: 'Read-only access across the platform',
         permissionCodes: [
           'inbox.read', 'analytics.read', 'knowledge_base.read',
-          'media.read', 'posts.read', 'settings.read', 'organization.read'
+          'media.read', 'posts.read', 'settings.read', 'organization.read',
+          'contacts.read'
         ],
         isSystem: true
       }
@@ -430,10 +450,19 @@ class GroupPermissionService {
     let skipped = 0;
     for (const def of groupDefs) {
       const exists = await Group.findOne({ slug: def.slug });
-      if (exists) { skipped++; continue; }
       const permIds = def.permissionCodes
         .map(code => permsByCode[code])
         .filter(Boolean);
+      if (exists) {
+        if (exists.isSystem) {
+          await Group.updateOne(
+            { _id: exists._id },
+            { $addToSet: { permissions: { $each: permIds } } }
+          );
+        }
+        skipped++;
+        continue;
+      }
       await Group.create({
         name: def.name,
         slug: def.slug,

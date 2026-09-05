@@ -10,21 +10,21 @@ Choose the configuration based on your server size:
 
 ### Small Server (1GB RAM, 1-2 CPU cores)
 - **Cost**: ~$5-10/month
-- **Use**: `ecosystem.config.small.js`
+- **Use**: `ecosystem.small.config.js`
 - **Capacity**: ~500-1,000 msgs/hour
 - **Setup**: 1 API process, no separate workers
 - **Memory**: ~400MB per process
 
 ### Medium Server (2GB RAM, 2-4 CPU cores) - RECOMMENDED
 - **Cost**: ~$15-25/month
-- **Use**: `ecosystem.config.medium.js` or `ecosystem.config.js`
+- **Use**: `ecosystem.medium.config.js` or `ecosystem.config.js`
 - **Capacity**: ~5,000-10,000 msgs/hour
 - **Setup**: 2 API + 1 worker process
 - **Memory**: ~512MB per process
 
 ### Large Server (4GB+ RAM, 4+ CPU cores)
 - **Cost**: ~$40-80/month
-- **Use**: `ecosystem.config.large.js`
+- **Use**: `ecosystem.large.config.js`
 - **Capacity**: ~15,000-25,000 msgs/hour
 - **Setup**: 4 API + 2 worker processes
 - **Memory**: ~1GB per process
@@ -84,15 +84,15 @@ npm install --production
 
 ```bash
 # SMALL SERVER (1GB RAM)
-pm2 start ecosystem.config.small.js --env production
+pm2 start ecosystem.small.config.js --env production
 
 # MEDIUM SERVER (2GB RAM) - RECOMMENDED
-pm2 start ecosystem.config.medium.js --env production
+pm2 start ecosystem.medium.config.js --env production
 # OR use default
 pm2 start ecosystem.config.js --env production
 
 # LARGE SERVER (4GB+ RAM)
-pm2 start ecosystem.config.large.js --env production
+pm2 start ecosystem.large.config.js --env production
 
 # Or start individually
 pm2 start ecosystem.config.js --only orm-api --env production
@@ -217,7 +217,7 @@ free -h
 1. **Switch to smaller config:**
    ```bash
    pm2 delete all
-   pm2 start ecosystem.config.small.js --env production
+   pm2 start ecosystem.small.config.js --env production
    ```
 
 2. **Reduce concurrency in .env:**

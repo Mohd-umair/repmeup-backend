@@ -6,7 +6,8 @@ const DEFAULT_BUCKETS = [
   { name: 'Hot Leads', color: '#EF4444', icon: 'fas fa-fire', order: 0, keywords: ['price', 'buy', 'purchase', 'deal', 'quote', 'order', 'interested', 'cost', 'pricing', 'rates'], aiPromptHint: 'Messages showing purchase intent, asking about pricing, deals, or expressing interest in buying', isDefault: false },
   { name: 'Complaints', color: '#F59E0B', icon: 'fas fa-exclamation-triangle', order: 1, keywords: ['broken', 'damaged', 'refund', 'worst', 'terrible', 'not working', 'disappointed', 'poor', 'bad experience', 'issue', 'problem'], aiPromptHint: 'Messages expressing dissatisfaction, reporting problems, or requesting refunds', isDefault: false },
   { name: 'Sales Opportunities', color: '#8B5CF6', icon: 'fas fa-dollar-sign', order: 2, keywords: ['discount', 'bulk', 'wholesale', 'partnership', 'reseller', 'collaborate', 'distributor', 'b2b'], aiPromptHint: 'Messages about business partnerships, bulk orders, wholesale inquiries, or collaboration opportunities', isDefault: false },
-  { name: 'General Queries', color: '#3B82F6', icon: 'fas fa-comments', order: 3, keywords: [], aiPromptHint: 'General questions, information requests, or messages that do not fit other categories', isDefault: true }
+  { name: 'General Queries', color: '#3B82F6', icon: 'fas fa-comments', order: 3, keywords: [], aiPromptHint: 'General questions, information requests, or messages that do not fit other categories', isDefault: true },
+  { name: 'Needs Attention', color: '#EF4444', icon: 'fas fa-circle-exclamation', order: 4, keywords: [], aiPromptHint: 'Conversations the AI could not answer and escalated to a human agent', isDefault: false, isFallback: true }
 ];
 
 /**
@@ -64,8 +65,14 @@ exports.createBucket = async (req, res) => {
     const maxOrder = await IntentBucket.findOne({ organization: orgId }).sort({ order: -1 }).select('order').lean();
     const nextOrder = (maxOrder?.order ?? -1) + 1;
 
+    const { isFallback } = req.body;
+
     if (isDefault) {
       await IntentBucket.updateMany({ organization: orgId, isDefault: true }, { isDefault: false });
+    }
+
+    if (isFallback) {
+      await IntentBucket.updateMany({ organization: orgId, isFallback: true }, { isFallback: false });
     }
 
     const bucket = await IntentBucket.create({
@@ -77,6 +84,7 @@ exports.createBucket = async (req, res) => {
       keywords: (keywords || []).map(k => k.trim().toLowerCase()).filter(Boolean),
       aiPromptHint: aiPromptHint || '',
       isDefault: !!isDefault,
+      isFallback: !!isFallback,
       replyEnabled: replyEnabled !== false,
       replyTone: replyTone || null,
       replyLanguage: replyLanguage || 'auto',
@@ -96,7 +104,7 @@ exports.createBucket = async (req, res) => {
 exports.updateBucket = async (req, res) => {
   try {
     const orgId = req.user.organization._id;
-    const { name, color, icon, keywords, aiPromptHint, isDefault, isActive, replyEnabled, replyTone, replyLanguage, replyPrompt } = req.body;
+    const { name, color, icon, keywords, aiPromptHint, isDefault, isFallback, isActive, replyEnabled, replyTone, replyLanguage, replyPrompt } = req.body;
 
     const bucket = await IntentBucket.findOne({ _id: req.params.id, organization: orgId });
     if (!bucket) {
@@ -117,6 +125,13 @@ exports.updateBucket = async (req, res) => {
     if (isDefault === true) {
       await IntentBucket.updateMany({ organization: orgId, isDefault: true, _id: { $ne: bucket._id } }, { isDefault: false });
       bucket.isDefault = true;
+    }
+
+    if (isFallback === true) {
+      await IntentBucket.updateMany({ organization: orgId, isFallback: true, _id: { $ne: bucket._id } }, { isFallback: false });
+      bucket.isFallback = true;
+    } else if (isFallback === false) {
+      bucket.isFallback = false;
     }
 
     await bucket.save();

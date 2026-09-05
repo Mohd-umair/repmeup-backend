@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const metaPagesController = require('../controllers/metaPagesController');
 const { protect } = require('../middlewares/auth');
-const { checkConnectionLimit, attachConnectionLimits } = require('../middleware/platformLimitMiddleware');
+const { checkConnectionLimit, attachConnectionLimits } = require('../middlewares/platformLimitMiddleware');
 
 /**
  * Meta Pages Routes (Step 8)

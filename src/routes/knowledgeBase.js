@@ -10,8 +10,15 @@ router.use(protect);
 // Get all knowledge base entries
 router.get('/', knowledgeBaseController.getAllKnowledgeBase);
 
+// Lightweight existence check (used by inbox setup guide)
+router.get('/exists', knowledgeBaseController.knowledgeBaseExists);
+
 // Get categories
 router.get('/categories', knowledgeBaseController.getCategories);
+
+// Poll website-crawl status — MUST be registered before '/:id' so the literal
+// '/url' segment isn't captured as an :id.
+router.get('/url/crawl/:jobId', knowledgeBaseController.getCrawlStatus);
 
 // Get single knowledge base entry
 router.get('/:id', knowledgeBaseController.getKnowledgeBaseById);
@@ -22,7 +29,15 @@ router.post('/manual', validateKnowledgeBaseManual, knowledgeBaseController.crea
 // Create knowledge base from PDF
 router.post('/pdf', knowledgeBaseController.upload.single('file'), knowledgeBaseController.createPDFKnowledgeBase);
 
-// Create knowledge base from URL
+// Discover internal URLs on a website (no AI — returns a pick list for the user)
+// MUST be registered before '/url' so Express matches the more-specific path first.
+router.post('/url/discover', knowledgeBaseController.discoverWebsiteUrls);
+
+// Create knowledge base by crawling the ENTIRE website (internal pages)
+// MUST be registered before '/url' for the same reason.
+router.post('/url/crawl', knowledgeBaseController.createCrawlKnowledgeBase);
+
+// Create knowledge base from a single URL (homepage only) — catch-all, keep last.
 router.post('/url', knowledgeBaseController.createURLKnowledgeBase);
 
 // Update knowledge base entry

@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const { escapeRegex } = require('../utils/sanitize');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
-const { runWithAiContext } = require('../services/aiRequestContext');
+const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
 
 const KB_SOURCE_ENUM = ['manual', 'pdf', 'url', 'import'];
 
@@ -108,6 +108,38 @@ function formatKbAnalytics(facetRow) {
 const webScraperService = require('../services/webScraperService');
 const contentSummarizerService = require('../services/contentSummarizerService');
 const aiCreditService = require('../services/aiCreditService');
+const entitlementsService = require('../services/entitlementsService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
+const KbCrawlJob = require('../models/KbCrawlJob');
+const { kbCrawlQueue, queueConfig } = require('../config/queue');
+
+/** Hard ceiling on pages a single crawl may fetch (also bounded by plan/KB cap). */
+const KB_CRAWL_MAX_PAGES = 25;
+
+/**
+ * Helper: enforce the org-wide KB entry cap (boolean+limit feature `kb.entries.max`).
+ * Counts ARE LIVE — KB rows can be deleted, so a cached counter would drift.
+ * Throws an EntitlementError on quota exceeded; caller maps to HTTP via the
+ * shared error handler.
+ */
+async function assertKbEntryCapAvailable(organizationId) {
+  const q = await entitlementsService.quota(organizationId, FEATURE_KEYS.KB_ENTRIES_MAX);
+  if (q.isUnlimited) return;
+  if (q.used >= q.limit) {
+    const err = new Error(`You've reached your knowledge base entries limit (${q.used}/${q.limit}). Upgrade to add more.`);
+    err.name = 'EntitlementError';
+    err.statusCode = 402;
+    err.code = 'QUOTA_EXCEEDED';
+    err.featureKey = FEATURE_KEYS.KB_ENTRIES_MAX;
+    err.meta = { limit: q.limit, used: q.used };
+    throw err;
+  }
+}
+
+async function invalidateKbEntitlements(orgId) {
+  const id = orgId?._id ?? orgId;
+  if (id) await entitlementsService.invalidateEntitlements(id);
+}
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -137,6 +169,21 @@ const upload = multer({
     }
   }
 });
+
+/**
+ * Lightweight existence check — used by the inbox setup guide.
+ * GET /api/knowledge-base/exists
+ * Returns { exists: boolean } without running any aggregation.
+ */
+exports.knowledgeBaseExists = async (req, res) => {
+  try {
+    const orgId = req.user.organization._id || req.user.organization;
+    const count = await KnowledgeBase.countDocuments({ organization: orgId }).limit(1).lean();
+    res.json({ success: true, exists: count > 0 });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to check knowledge base' });
+  }
+};
 
 /**
  * Get knowledge base entries (paginated; same envelope as GET /api/users)
@@ -238,8 +285,11 @@ exports.getKnowledgeBaseById = async (req, res) => {
  */
 exports.createManualKnowledgeBase = async (req, res) => {
   try {
+    const orgId = req.user.organization._id || req.user.organization;
+    await assertKbEntryCapAvailable(orgId);
+
     const {
-      title, content, category, tags, priority, metadata,
+      title, content, type, category, tags, priority, metadata,
       trainingContext, trainingWeight, isTrainingData, isActive,
       templateFields
     } = req.body;
@@ -247,6 +297,7 @@ exports.createManualKnowledgeBase = async (req, res) => {
     const knowledgeBase = new KnowledgeBase({
       title,
       content,
+      type: type || 'general',
       category,
       tags: tags || [],
       priority: priority || 1,
@@ -258,10 +309,11 @@ exports.createManualKnowledgeBase = async (req, res) => {
       source: 'manual',
       metadata: metadata || {},
       organization: req.user.organization,
-      createdBy: req.user.id
+      createdBy: req.user._id
     });
 
     await knowledgeBase.save();
+    await invalidateKbEntitlements(orgId);
 
     res.status(201).json({
       success: true,
@@ -269,6 +321,15 @@ exports.createManualKnowledgeBase = async (req, res) => {
       message: 'Knowledge base entry created successfully'
     });
   } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
     console.error('Create manual knowledge base error:', error);
     res.status(500).json({
       success: false,
@@ -283,6 +344,10 @@ exports.createManualKnowledgeBase = async (req, res) => {
  */
 exports.createPDFKnowledgeBase = async (req, res) => {
   try {
+    const orgId = req.user.organization._id || req.user.organization;
+    await entitlementsService.assert(orgId.toString(), FEATURE_KEYS.KB_UPLOAD_PDF);
+    await assertKbEntryCapAvailable(orgId);
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -311,10 +376,11 @@ exports.createPDFKnowledgeBase = async (req, res) => {
         uploadedAt: new Date()
       },
       organization: req.user.organization,
-      createdBy: req.user.id
+      createdBy: req.user._id
     });
 
     await knowledgeBase.save();
+    await invalidateKbEntitlements(orgId);
 
     res.status(201).json({
       success: true,
@@ -322,6 +388,15 @@ exports.createPDFKnowledgeBase = async (req, res) => {
       message: 'Knowledge base created from PDF successfully'
     });
   } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
     console.error('Create PDF knowledge base error:', error);
     res.status(500).json({
       success: false,
@@ -340,6 +415,10 @@ exports.createURLKnowledgeBase = async (req, res) => {
   let kbCreditsDeducted = 0;
   const kbOrgId = req.user.organization._id || req.user.organization;
   try {
+    // Plan gate: org must be allowed to use URL ingestion AND have entry capacity.
+    await entitlementsService.assert(kbOrgId, FEATURE_KEYS.KB_UPLOAD_URL);
+    await assertKbEntryCapAvailable(kbOrgId);
+
     const { url, title, category, tags, priority, focus = 'overview', targetWordCount, targetTagCount } = req.body;
 
     if (!url) {
@@ -385,7 +464,7 @@ exports.createURLKnowledgeBase = async (req, res) => {
 
     // Step 2: Generate AI summary (ContentSummarizerService - Single Responsibility)
     console.log(`🤖 [KB] Generating AI summary...`);
-    const summaryData = await runWithAiContext(
+    const { result: summaryData, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId: kbOrgId,
         userId: req.user._id,
@@ -427,10 +506,11 @@ exports.createURLKnowledgeBase = async (req, res) => {
         ...scrapedData.metadata
       },
       organization: req.user.organization,
-      createdBy: req.user.id
+      createdBy: req.user._id
     });
 
     await knowledgeBase.save();
+    await invalidateKbEntitlements(kbOrgId);
 
     // Step 5: Deduct actual AI credits used
     const actualWordCount = summaryData.summary.trim().split(/\s+/).length;
@@ -439,10 +519,18 @@ exports.createURLKnowledgeBase = async (req, res) => {
       summaryData.tags.length
     );
 
-    await aiCreditService.deductCredits(kbOrgId, actualCost, {
-      operation: 'knowledge_base_from_url', userId: req.user._id,
-      url: url, wordCount: actualWordCount, tagCount: summaryData.tags.length
-    });
+    await aiCreditService.deductCredits(
+      kbOrgId,
+      actualCost,
+      {
+        operation: 'knowledge_base_from_url',
+        userId: req.user._id,
+        url: url,
+        wordCount: actualWordCount,
+        tagCount: summaryData.tags.length
+      },
+      { aiApiUsageId }
+    );
     kbCreditsDeducted = actualCost;
 
     res.status(201).json({
@@ -458,11 +546,20 @@ exports.createURLKnowledgeBase = async (req, res) => {
         },
         creditsUsed: actualCost
       },
-      message: 'Knowledge base created from URL with AI summary successfully'
+      message: 'Knowledge base created from URL with Reppy summary successfully'
     });
   } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+        featureKey: error.featureKey,
+        meta: error.meta
+      });
+    }
     console.error('Create URL knowledge base error:', error);
-    
+
     if (kbCreditsDeducted > 0) {
       await aiCreditService.rollbackCredits(kbOrgId, kbCreditsDeducted, { operation: 'knowledge_base_from_url', userId: req.user?._id, reason: error.message });
     }
@@ -488,13 +585,251 @@ exports.createURLKnowledgeBase = async (req, res) => {
 };
 
 /**
+ * Discover internal URLs on a website (no AI, no KB writes).
+ * POST /api/knowledge-base/url/discover
+ *
+ * Returns a list the client shows with checkboxes; user picks pages, then
+ * POST /url/crawl with selectedUrls.
+ */
+exports.discoverWebsiteUrls = async (req, res) => {
+  const kbOrgId = req.user.organization._id || req.user.organization;
+  try {
+    await entitlementsService.assert(kbOrgId, FEATURE_KEYS.KB_UPLOAD_URL);
+
+    const { url, maxPages } = req.body;
+    if (!url) {
+      return res.status(400).json({ success: false, error: 'URL is required' });
+    }
+
+    try {
+      webScraperService._validateURL(url);
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || 'Invalid URL' });
+    }
+
+    const requestedPages = parseInt(maxPages, 10) || KB_CRAWL_MAX_PAGES;
+    const cappedPages = Math.min(Math.max(1, requestedPages), KB_CRAWL_MAX_PAGES);
+
+    const result = await webScraperService.discoverInternalUrls(url, {
+      maxPages: cappedPages
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        startUrl: result.startUrl,
+        urls: result.urls,
+        totalFound: result.totalFound,
+        maxPages: cappedPages
+      },
+      message: `Found ${result.totalFound} internal page(s). Select which ones to import.`
+    });
+  } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false, code: error.code, error: error.message,
+        featureKey: error.featureKey, meta: error.meta
+      });
+    }
+    console.error('Discover website URLs error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to discover website pages. Please try again.'
+    });
+  }
+};
+
+/**
+ * Create knowledge base from an ENTIRE website (crawl internal pages).
+ * POST /api/knowledge-base/url/crawl
+ *
+ * Long-running: enqueues a background Bull job and returns a crawlJobId the
+ * client polls via GET /url/crawl/:jobId. One KB entry is created per page so
+ * the AI reply engine's $text search can surface the most relevant page.
+ */
+exports.createCrawlKnowledgeBase = async (req, res) => {
+  const kbOrgId = req.user.organization._id || req.user.organization;
+  try {
+    // Same plan gate as single-URL ingestion + must have entry capacity.
+    await entitlementsService.assert(kbOrgId, FEATURE_KEYS.KB_UPLOAD_URL);
+    await assertKbEntryCapAvailable(kbOrgId);
+
+    const {
+      url, titlePrefix, category, tags, priority,
+      focus = 'overview', targetWordCount, targetTagCount,
+      selectedUrls: rawSelectedUrls
+    } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ success: false, error: 'URL is required' });
+    }
+
+    try {
+      webScraperService._validateURL(url);
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || 'Invalid URL' });
+    }
+
+    // Accept any valid http/https URL from the user's selection. These URLs
+    // already passed the same-site filter during the /url/discover step, so
+    // re-filtering here against the start URL is redundant and can erroneously
+    // reject all URLs in edge cases (e.g. normalisation differences). We still
+    // validate that each entry is a parseable http/https URL for safety.
+    if (!Array.isArray(rawSelectedUrls) || rawSelectedUrls.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Select at least one page to import. Use "Discover pages" first, then choose which pages to import.'
+      });
+    }
+
+    const selectedUrls = rawSelectedUrls
+      .filter((u) => {
+        if (typeof u !== 'string' || !u.trim()) return false;
+        try {
+          const parsed = new URL(u.trim());
+          return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch (_) {
+          return false;
+        }
+      })
+      .map((u) => u.trim());
+
+    if (!selectedUrls.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'None of the selected URLs are valid. Please use "Discover pages" again and select valid pages to import.'
+      });
+    }
+
+    const q = await entitlementsService.quota(kbOrgId, FEATURE_KEYS.KB_ENTRIES_MAX);
+    let importCount = selectedUrls.length;
+    if (!q.isUnlimited) {
+      importCount = Math.min(importCount, Math.max(0, q.limit - q.used));
+    }
+    if (importCount < 1) {
+      return res.status(402).json({
+        success: false, code: 'QUOTA_EXCEEDED',
+        error: "You've reached your knowledge base entries limit. Upgrade to add more."
+      });
+    }
+
+    const urlsToImport = selectedUrls.slice(0, importCount);
+
+    const crawlJob = await KbCrawlJob.create({
+      organization: kbOrgId,
+      createdBy: req.user._id,
+      startUrl: url,
+      maxPages: urlsToImport.length,
+      selectedUrls: urlsToImport,
+      status: 'queued',
+      options: {
+        titlePrefix: titlePrefix || undefined,
+        category: category || 'website',
+        tags: Array.isArray(tags) ? tags : [],
+        priority: priority || 1,
+        focus,
+        targetWordCount: targetWordCount ? parseInt(targetWordCount, 10) : undefined,
+        targetTagCount: targetTagCount ? parseInt(targetTagCount, 10) : undefined
+      }
+    });
+
+    const crawlJobId = String(crawlJob._id);
+    let enqueued = false;
+    try {
+      await kbCrawlQueue.add(
+        { crawlJobId },
+        { ...queueConfig, attempts: 1 }
+      );
+      enqueued = true;
+    } catch (enqueueErr) {
+      console.error('[KB Crawl] Failed to enqueue Bull job — falling back to inline processing', enqueueErr.message);
+    }
+
+    // Always kick off processing on the API process for small imports (≤3 pages).
+    // Atomic claim in processKbCrawl prevents double-work if the worker is also healthy.
+    // This keeps the UI from getting stuck at "Starting crawl…" when orm-worker is down.
+    const INLINE_CRAWL_PAGE_LIMIT = 3;
+    if (!enqueued || urlsToImport.length <= INLINE_CRAWL_PAGE_LIMIT) {
+      const processKbCrawl = require('../jobs/processKbCrawl');
+      setImmediate(() => {
+        processKbCrawl({ data: { crawlJobId }, id: `inline-${crawlJobId}` })
+          .catch((err) => {
+            console.error('[KB Crawl] Inline processing failed', { crawlJobId, error: err.message });
+          });
+      });
+    }
+
+    return res.status(202).json({
+      success: true,
+      data: {
+        crawlJobId,
+        status: crawlJob.status,
+        maxPages: urlsToImport.length,
+        selectedCount: urlsToImport.length
+      },
+      message: `Import started for ${urlsToImport.length} selected page(s).`
+    });
+  } catch (error) {
+    if (error?.name === 'EntitlementError') {
+      return res.status(error.statusCode || 402).json({
+        success: false, code: error.code, error: error.message,
+        featureKey: error.featureKey, meta: error.meta
+      });
+    }
+    console.error('Create crawl knowledge base error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to start website crawl. Please try again.' });
+  }
+};
+
+/**
+ * Poll the status of a website crawl.
+ * GET /api/knowledge-base/url/crawl/:jobId
+ */
+exports.getCrawlStatus = async (req, res) => {
+  try {
+    const kbOrgId = req.user.organization._id || req.user.organization;
+    const job = await KbCrawlJob.findOne({ _id: req.params.jobId, organization: kbOrgId })
+      .select('status startUrl maxPages pagesFound pagesProcessed entriesCreated currentUrl creditsUsed errors error startedAt finishedAt createdAt')
+      .lean();
+
+    if (!job) {
+      return res.status(404).json({ success: false, error: 'Crawl job not found' });
+    }
+
+    const isDone = ['completed', 'failed', 'partial'].includes(job.status);
+    return res.json({
+      success: true,
+      data: {
+        crawlJobId: String(job._id),
+        status: job.status,
+        done: isDone,
+        startUrl: job.startUrl,
+        maxPages: job.maxPages,
+        pagesFound: job.pagesFound,
+        pagesProcessed: job.pagesProcessed,
+        entriesCreated: job.entriesCreated,
+        currentUrl: job.currentUrl,
+        creditsUsed: job.creditsUsed,
+        errors: job.errors || [],
+        error: job.error || '',
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt
+      }
+    });
+  } catch (error) {
+    console.error('Get crawl status error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch crawl status' });
+  }
+};
+
+/**
  * Update knowledge base entry
  * PUT /api/knowledge-base/:id
  */
 exports.updateKnowledgeBase = async (req, res) => {
   try {
     const {
-      title, content, category, tags, priority, metadata, isActive,
+      title, content, type, category, tags, priority, metadata, isActive,
       trainingContext, trainingWeight, isTrainingData, templateFields
     } = req.body;
 
@@ -512,6 +847,7 @@ exports.updateKnowledgeBase = async (req, res) => {
 
     if (title !== undefined)           knowledgeBase.title = title;
     if (content !== undefined)         knowledgeBase.content = content;
+    if (type !== undefined)            knowledgeBase.type = type;
     if (category !== undefined)        knowledgeBase.category = category;
     if (tags !== undefined)            knowledgeBase.tags = tags;
     if (priority !== undefined)        knowledgeBase.priority = priority;
@@ -522,7 +858,7 @@ exports.updateKnowledgeBase = async (req, res) => {
     if (isTrainingData !== undefined)   knowledgeBase.isTrainingData = Boolean(isTrainingData);
     if (Array.isArray(templateFields))  knowledgeBase.templateFields = templateFields;
 
-    knowledgeBase.updatedBy = req.user.id;
+    knowledgeBase.updatedBy = req.user._id;
 
     await knowledgeBase.save();
 
@@ -568,6 +904,7 @@ exports.deleteKnowledgeBase = async (req, res) => {
     }
 
     await knowledgeBase.deleteOne();
+    await invalidateKbEntitlements(req.user.organization);
 
     res.json({
       success: true,

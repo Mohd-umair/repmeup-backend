@@ -35,6 +35,14 @@ const aiApiUsageSchema = new mongoose.Schema(
     completionTokens: { type: Number, default: 0 },
     totalTokens: { type: Number, default: 0 },
     estimatedUsd: { type: Number, default: 0 },
+    /** Chat session messages sent to OpenAI (system/user/assistant roles). Omitted for image/video. */
+    promptMessages: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    /** Primary assistant text from the completion (chat only). */
+    completionText: { type: String, default: '' },
+    /** Product AI credits deducted for this call (linked in `deductCredits` when inside same AI context). */
+    applicationCreditsUsed: { type: Number, default: undefined },
+    /** Mirrors AICreditUsage.operation when credits were linked. */
+    creditOperation: { type: String, default: '' },
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {}

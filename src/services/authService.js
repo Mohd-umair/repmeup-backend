@@ -8,14 +8,51 @@ const emailService = require('./emailService');
 
 class AuthService {
   /**
+   * Normalize Google profile names and derive a default org name (always creates a sensible org on signup).
+   * @param {object} googleProfile - from googleAuthService.getUserProfile / verifyIdToken
+   * @returns {{ email: string, providerId: string, firstName: string, lastName: string, picture?: string, organizationName: string }}
+   */
+  _normalizeGoogleSignupProfile(googleProfile) {
+    const email = (googleProfile.email || '').toLowerCase().trim();
+    const providerId = googleProfile.id;
+    const picture = googleProfile.picture;
+    const fullName = (googleProfile.fullName || '').trim();
+
+    let firstName = (googleProfile.firstName || '').trim();
+    let lastName = (googleProfile.lastName || '').trim();
+
+    if (!firstName && fullName) {
+      const parts = fullName.split(/\s+/).filter(Boolean);
+      firstName = parts[0] || '';
+      lastName = lastName || parts.slice(1).join(' ');
+    }
+
+    const localPart = email.split('@')[0] || 'user';
+    if (!firstName) {
+      firstName = localPart.replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) || 'User';
+    }
+    if (!lastName) {
+      lastName = 'Team';
+    }
+
+    const display = [firstName, lastName].filter((s) => s && String(s).trim()).join(' ').trim();
+    const organizationName = display
+      ? `${display}'s Organization`
+      : `${localPart}'s Organization`;
+
+    return { email, providerId, firstName, lastName, picture, organizationName };
+  }
+
+  /**
    * Register new user with organization
    */
   async register(userData) {
     try {
       const { email, password, firstName, lastName, organizationName } = userData;
+      const normalizedEmail = (email || '').toLowerCase().trim();
 
       // Check if user already exists
-      const existingUser = await User.findOne({ email });
+      const existingUser = await User.findOne({ email: normalizedEmail });
       if (existingUser) {
         throw new Error('User with this email already exists');
       }
@@ -31,14 +68,26 @@ class AuthService {
         }
       });
 
-      // Create user
+      const rawVerifyToken = crypto.randomBytes(32).toString('hex');
+      const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
+      const verifyExpiryMs =
+        parseInt(process.env.EMAIL_VERIFICATION_EXPIRY_MS || '', 10) || 48 * 60 * 60 * 1000;
+
+      // Create user (password hashed by pre-save hook)
       const user = await User.create({
-        email,
+        email: normalizedEmail,
         password,
         firstName,
         lastName,
         role: 'admin', // First user is always admin
-        organization: organization._id
+        organization: organization._id,
+        isEmailVerified: false,
+        emailVerificationToken: hashedVerifyToken,
+        emailVerificationExpires: new Date(Date.now() + verifyExpiryMs),
+        emailVerificationLastSent: new Date(),
+        metadata: {
+          signupSource: 'email_password'
+        }
       });
 
       // Update organization owner
@@ -46,15 +95,11 @@ class AuthService {
       organization.usage.currentUsers = 1;
       await organization.save();
 
-      // Generate tokens
-      const token = generateToken(user._id);
-      const refreshToken = generateRefreshToken(user._id);
-
+      // No JWT until email is verified — client shows "check your inbox"
       return {
         user,
         organization,
-        token,
-        refreshToken
+        verificationTokenPlain: rawVerifyToken
       };
     } catch (error) {
       throw error;
@@ -62,11 +107,84 @@ class AuthService {
   }
 
   /**
+   * Confirm email using the raw token from the signup link (hashed compare).
+   */
+  async verifyEmail(rawToken) {
+    if (!rawToken || typeof rawToken !== 'string') {
+      throw new Error('Verification token is required');
+    }
+
+    const hashed = crypto.createHash('sha256').update(rawToken.trim()).digest('hex');
+    const user = await User.findOne({
+      emailVerificationToken: hashed,
+      emailVerificationExpires: { $gt: Date.now() }
+    }).populate('organization');
+
+    if (!user) {
+      throw new Error('This verification link is invalid or has expired. Request a new one from the sign-in page.');
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save({ validateBeforeSave: false });
+
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    const userObj = user.toJSON();
+    const effectiveGroup = await this._resolveEffectiveGroup(user);
+    if (!userObj.group && effectiveGroup) {
+      userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+    }
+    userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
+
+    return {
+      user: userObj,
+      token,
+      refreshToken
+    };
+  }
+
+  /**
+   * Resend signup verification email. Generic success when no account / already verified.
+   */
+  async resendVerificationEmail(email) {
+    const normalizedEmail = (email || '').toLowerCase().trim();
+    if (!normalizedEmail) return;
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user || user.deletedAt || !user.isActive) return;
+
+    // OAuth-only users have no password and are already treated as verified at signup
+    if (!user.password) return;
+    if (user.isEmailVerified) return;
+
+    const minGapMs = 60 * 1000;
+    if (user.emailVerificationLastSent && Date.now() - new Date(user.emailVerificationLastSent).getTime() < minGapMs) {
+      throw new Error('Please wait a minute before requesting another verification email.');
+    }
+
+    const rawVerifyToken = crypto.randomBytes(32).toString('hex');
+    const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
+    const verifyExpiryMs =
+      parseInt(process.env.EMAIL_VERIFICATION_EXPIRY_MS || '', 10) || 48 * 60 * 60 * 1000;
+
+    user.emailVerificationToken = hashedVerifyToken;
+    user.emailVerificationExpires = new Date(Date.now() + verifyExpiryMs);
+    user.emailVerificationLastSent = new Date();
+    await user.save({ validateBeforeSave: false });
+
+    await emailService.sendEmailVerificationEmail(user, rawVerifyToken);
+  }
+
+  /**
    * Login user
    */
   async login(email, password) {
     try {
-      const user = await User.findOne({ email })
+      const normalizedEmail = (email || '').toLowerCase().trim();
+      const user = await User.findOne({ email: normalizedEmail })
         .select('+password')
         .populate('organization')
         .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
@@ -86,6 +204,24 @@ class AuthService {
       const isPasswordValid = await user.comparePassword(password);
       if (!isPasswordValid) {
         throw new Error('Invalid credentials');
+      }
+
+      // Email/password signups must verify before login. Legacy accounts have no pending token.
+      const pendingEmailVerification =
+        user.isEmailVerified === false && user.emailVerificationToken;
+      if (pendingEmailVerification) {
+        throw new Error(
+          'Please verify your email before signing in. Check your inbox for the verification link, or use “Resend verification” on the sign-in page.'
+        );
+      }
+
+      // Block sign-in to a demo workspace whose trial has expired (locked).
+      // Data is retained; purchasing unlocks the same workspace.
+      if (await this._isWorkspaceLocked(user.organization)) {
+        const err = new Error('Your demo trial has ended. Purchase a plan to continue — all your data is safe.');
+        err.code = 'UPGRADE_REQUIRED';
+        err.statusCode = 403;
+        throw err;
       }
 
       user.lastLogin = new Date();
@@ -109,6 +245,84 @@ class AuthService {
     } catch (error) {
       throw error;
     }
+  }
+
+  /**
+   * Is the given organization a demo workspace whose trial has expired (locked)?
+   * Cheap check: prefers the denormalized `organization.demo.lockedAt`, falling
+   * back to the authoritative Subscription.demoStatus only when needed.
+   * @param {object|string} organization Populated org doc (preferred) or org id.
+   */
+  async _isWorkspaceLocked(organization) {
+    if (!organization) return false;
+    // Fast path: denormalized flag on the (already-populated) org document.
+    if (organization.demo) {
+      if (organization.demo.lockedAt) return true;
+      if (organization.demo.isDemo !== true) return false; // not a demo → never locked
+    }
+    // Authoritative fallback (e.g. org passed as id, or denormalized flag absent).
+    const orgId = organization._id || organization;
+    const Subscription = require('../models/Subscription');
+    const sub = await Subscription.findOne({ organization: orgId })
+      .select('isDemo demoStatus')
+      .lean();
+    return !!(sub && sub.isDemo && sub.demoStatus === 'locked');
+  }
+
+  /**
+   * Magic-link login for demo prospects. Consumes a one-time token (hashed on the
+   * user as `demoMagicToken`) and issues a normal JWT session — no password needed.
+   * @param {string} rawToken The plaintext token from the magic link.
+   */
+  async demoLogin(rawToken) {
+    if (!rawToken || typeof rawToken !== 'string') {
+      const err = new Error('Invalid or missing demo login token');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const hashed = crypto.createHash('sha256').update(rawToken.trim()).digest('hex');
+    const user = await User.findOne({
+      demoMagicToken: hashed,
+      demoMagicTokenExpires: { $gt: new Date() }
+    })
+      .select('+demoMagicToken +demoMagicTokenExpires')
+      .populate('organization')
+      .populate({ path: 'group', populate: { path: 'permissions', select: 'code name category actions' } });
+
+    if (!user) {
+      const err = new Error('This demo link is invalid or has expired.');
+      err.statusCode = 401;
+      throw err;
+    }
+    if (user.deletedAt || !user.isActive) {
+      const err = new Error('This demo account is no longer available.');
+      err.statusCode = 401;
+      throw err;
+    }
+
+    // Locked trial → cannot enter via magic link either; must purchase.
+    if (await this._isWorkspaceLocked(user.organization)) {
+      const err = new Error('Your demo trial has ended. Purchase a plan to continue — all your data is safe.');
+      err.code = 'UPGRADE_REQUIRED';
+      err.statusCode = 403;
+      throw err;
+    }
+
+    user.lastLogin = new Date();
+    await user.save();
+
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    const userObj = user.toJSON();
+    const effectiveGroup = await this._resolveEffectiveGroup(user);
+    if (!userObj.group && effectiveGroup) {
+      userObj.group = { _id: effectiveGroup._id, name: effectiveGroup.name, slug: effectiveGroup.slug };
+    }
+    userObj.resolvedPermissions = this._extractPermissionCodes(user, effectiveGroup);
+
+    return { user: userObj, token, refreshToken };
   }
 
   /**
@@ -148,6 +362,14 @@ class AuthService {
         }
       });
 
+      if (updates.preferences) {
+        const existing = await User.findById(userId).select('preferences').lean();
+        updates.preferences = {
+          ...(existing?.preferences || {}),
+          ...updates.preferences
+        };
+      }
+
       const user = await User.findByIdAndUpdate(
         userId,
         updates,
@@ -177,8 +399,11 @@ class AuthService {
         throw new Error('Current password is incorrect');
       }
 
-      // Update password
+      // Update password — clear super-admin recoverable copy when user changes it themselves
       user.password = newPassword;
+      user.adminRecoverablePassword = undefined;
+      user.adminPasswordSetAt = undefined;
+      user.adminPasswordSetBy = undefined;
       await user.save();
 
       return { message: 'Password updated successfully' };
@@ -190,9 +415,23 @@ class AuthService {
   /**
    * Create team member
    */
-  async createTeamMember(organizationId, creatorId, userData) {
+  async createTeamMember(organizationId, creatorId, userData, creatorRole = 'agent') {
     try {
       const { email, firstName, lastName, role } = userData;
+
+      // SECURITY: never trust the requested role blindly — that let a tenant
+      // admin/manager mint a `super_admin` (full platform takeover). Only an
+      // `admin` may create tenant roles up to `admin`; a `manager` is capped at
+      // `agent`/`viewer`. Platform roles (`super_admin`) are never grantable here.
+      const ROLE_GRANTS = {
+        admin: ['admin', 'manager', 'agent', 'viewer'],
+        manager: ['agent', 'viewer']
+      };
+      const grantable = ROLE_GRANTS[creatorRole] || [];
+      const requestedRole = role || 'agent';
+      if (!grantable.includes(requestedRole)) {
+        throw new Error(`You are not permitted to assign the role '${requestedRole}'`);
+      }
 
       // Check if user already exists
       const existingUser = await User.findOne({ email });
@@ -206,8 +445,8 @@ class AuthService {
         throw new Error('User limit reached for your plan');
       }
 
-      // Generate temporary password
-      const tempPassword = Math.random().toString(36).slice(-8);
+      // Generate a cryptographically strong temporary password
+      const tempPassword = crypto.randomBytes(12).toString('base64url');
 
       // Create user
       const user = await User.create({
@@ -215,7 +454,7 @@ class AuthService {
         password: tempPassword,
         firstName,
         lastName,
-        role: role || 'agent',
+        role: requestedRole,
         organization: organizationId
       });
 
@@ -238,7 +477,14 @@ class AuthService {
    */
   async googleAuth(googleProfile) {
     try {
-      const { email, id: providerId, firstName, lastName, picture } = googleProfile;
+      const { email, providerId, firstName, lastName, picture, organizationName } =
+        this._normalizeGoogleSignupProfile(googleProfile);
+
+      if (!email || !providerId) {
+        throw new Error('Google did not return a valid email or account id.');
+      }
+
+      let isNewUser = false;
 
       // Check if user exists
       let user = await User.findOne({ email }).populate('organization');
@@ -258,6 +504,23 @@ class AuthService {
           );
         }
 
+        // Orphaned user (no org doc) — create org and attach (e.g. legacy / partial signup)
+        if (!user.organization || !user.organization._id) {
+          const organization = await Organization.create({
+            name: organizationName,
+            owner: null,
+            subscription: {
+              plan: 'free',
+              status: 'trial',
+              startDate: new Date()
+            }
+          });
+          user.organization = organization._id;
+          organization.owner = user._id;
+          organization.usage.currentUsers = 1;
+          await organization.save();
+        }
+
         // User exists - update OAuth info and login
         user.oauth = {
           provider: 'google',
@@ -265,16 +528,23 @@ class AuthService {
           profile: googleProfile
         };
         user.lastLogin = new Date();
-        
+
+        if ((!user.firstName || !String(user.firstName).trim()) && firstName) {
+          user.firstName = firstName;
+        }
+        if ((!user.lastName || !String(user.lastName).trim()) && lastName) {
+          user.lastName = lastName;
+        }
+
         if (!user.avatar && picture) {
           user.avatar = picture;
         }
-        
+
         await user.save();
+        user = await User.findById(user._id).populate('organization');
       } else {
-        // Create new user and organization
-        const organizationName = `${firstName}'s Organization`;
-        
+        isNewUser = true;
+        // Create new user and organization (same pattern as email register)
         const organization = await Organization.create({
           name: organizationName,
           owner: null,
@@ -293,6 +563,7 @@ class AuthService {
           organization: organization._id,
           avatar: picture,
           isEmailVerified: true, // Google emails are verified
+          lastLogin: new Date(),
           oauth: {
             provider: 'google',
             providerId,
@@ -326,7 +597,7 @@ class AuthService {
         user: user.toJSON(),
         token,
         refreshToken,
-        isNewUser: !user.lastLogin || user.createdAt.getTime() === user.updatedAt.getTime()
+        isNewUser
       };
     } catch (error) {
       console.error('Google auth error:', error);

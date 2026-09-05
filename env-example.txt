@@ -17,11 +17,39 @@ MONGODB_URI=mongodb://localhost:27017/orm_development
 # Redis
 REDIS_URL=redis://localhost:6379
 
+# Worker concurrency (core worker.js — webhooks, AI, auto-reply, email, voice)
+# WEBHOOK_CONCURRENCY=10
+# AI_CONCURRENCY=10
+# AUTOREPLY_CONCURRENCY=5
+# ENABLE_CAMPAIGN_IN_CORE_WORKER=true   # local dev: campaigns in core worker; production: false + run campaignWorker.js
+
+# WhatsApp campaign broadcast (campaignWorker.js / campaign-send queue)
+# CAMPAIGN_BATCH_SIZE=100
+# CAMPAIGN_BATCH_CONCURRENCY=20
+# CAMPAIGN_SENDS_PER_SECOND=30
+# CAMPAIGN_MAX_INFLIGHT_PER_WABA=5
+# CAMPAIGN_MAX_SEND_ATTEMPTS=3
+# CAMPAIGN_INBOX_CONCURRENCY=10
+# CAMPAIGN_WABA_PAUSE_MS=120000
+# CAMPAIGN_WABA_429_THRESHOLD=10
+# CAMPAIGN_SKIP_STATUS_SOCKET=true
+# INTERACTION_MAX_INLINE_REPLIES=500
+
 # Rate limiting (optional; defaults: 1000 req/15 min per IP, or 10000 in development)
 # RATE_LIMIT_MAX_REQUESTS=1000
 # RATE_LIMIT_WINDOW_MS=900000
 # To allow more requests: RATE_LIMIT_MAX_REQUESTS=5000
 # To disable rate limiting entirely (e.g. all traffic behind one IP): RATE_LIMIT_DISABLED=true
+
+# Strict brute-force limiter for /auth login, OTP, and password-reset endpoints
+# (defaults: 10 attempts / 15 min per IP)
+# AUTH_RATE_LIMIT_MAX=10
+# AUTH_RATE_LIMIT_WINDOW_MS=900000
+
+# Bull Board queue dashboard (/admin/queues) — REQUIRED to enable it.
+# If either is unset the dashboard is disabled (returns 404) rather than served openly.
+BULL_BOARD_USER=change-me
+BULL_BOARD_PASSWORD=change-me-to-a-long-random-string
 
 # JWT
 JWT_SECRET=your-super-secret-jwt-key-change-in-production-minimum-32-characters
@@ -41,10 +69,45 @@ FACEBOOK_APP_SECRET=your_meta_app_secret  # Same as META_APP_SECRET, used for da
 META_REDIRECT_URI=http://localhost:3000/api/platforms/meta/callback
 META_WEBHOOK_VERIFY_TOKEN=your_webhook_verify_token
 
+# WhatsApp Embedded Signup (“Connect WhatsApp” in the app)
+# Public OAuth redirect Meta calls after the user finishes onboarding (must match Meta App > Facebook Login > Valid OAuth Redirect URIs)
+# Example: https://api.yourdomain.com/api/platforms/whatsapp/callback
+WHATSAPP_CALLBACK_URL=
+# Configuration ID from Meta App Dashboard → WhatsApp → Embedded Signup (same as config_id in:
+# https://business.facebook.com/messaging/whatsapp/onboard/?app_id=…&config_id=…)
+META_WHATSAPP_CONFIG_ID=
+# Optional: versioned Login dialog, e.g. v23.0 → https://www.facebook.com/v23.0/dialog/oauth
+# META_WHATSAPP_OAUTH_DIALOG_VERSION=v23.0
+
 # WhatsApp Business API
 WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
 WHATSAPP_BUSINESS_ACCOUNT_ID=your_business_account_id
 WHATSAPP_ACCESS_TOKEN=your_whatsapp_access_token
+
+# ── Interakt tech-partner (BSP) ──────────────────────────────────────────────
+# Set these to onboard new WhatsApp numbers through Interakt instead of Meta direct.
+# Existing Meta-direct connections keep working either way: the transport is chosen
+# per connection from platformData.provider, so leaving these blank changes nothing.
+#
+# INTERAKT_ISV_TOKEN   the single partner access token Interakt issues you. Used as
+#                      `Authorization: <token>` on api.interakt.ai and as
+#                      `x-access-token` on the amped-express Graph proxy.
+# INTERAKT_SOLUTION_ID the Partner Solution ID passed to Embedded Signup as
+#                      extras.setup.solutionID. Presence of this value is what makes
+#                      the frontend use the FB JS SDK flow.
+INTERAKT_ISV_TOKEN=
+INTERAKT_SOLUTION_ID=
+INTERAKT_API_BASE=https://amped-express.interakt.ai/api
+INTERAKT_PARTNER_API_BASE=https://api.interakt.ai/v1
+INTERAKT_DATA_LOCALIZATION_REGION=IN
+# Optional. Only needed if Interakt's console probes the partner webhook with a
+# Meta-style hub.challenge handshake. Falls back to WHATSAPP_WEBHOOK_VERIFY_TOKEN.
+# The POST webhook itself is authenticated by the isv_name_token Interakt echoes back.
+INTERAKT_WEBHOOK_VERIFY_TOKEN=
+
+# New support ticket alerts (POST /api/tickets) — email only
+# Default recipient: umair9317@gmail.com (override with ADMIN_SUPPORT_TICKET_EMAIL)
+# ADMIN_SUPPORT_TICKET_EMAIL=umair9317@gmail.com
 
 # Google/YouTube
 GOOGLE_CLIENT_ID=your_google_client_id
@@ -81,7 +144,7 @@ LINKEDIN_WEBHOOK_SECRET=your_webhook_signing_secret_here
 # OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # OPENAI_MODEL=gpt-4
 # Newer models (use exact API ids, lowercase — e.g. not "GPT-5.3"):
-# OPENAI_MODEL=gpt-5.3-chat-latest
+# OPENAI_MODEL=gpt-5.4
 # OPENAI_MODEL=gpt-5.2
 # OPENAI_MODEL=gpt-4o
 # Image generation model (OpenAI Image API):
@@ -119,3 +182,6 @@ ALLOWED_FILE_TYPES=image/jpeg,image/png,image/gif,image/webp
 
 # Logging
 LOG_LEVEL=debug
+
+# Demo booking alert recipient (defaults to info@repmeup.in)
+DEMO_BOOKING_EMAIL=info@repmeup.in

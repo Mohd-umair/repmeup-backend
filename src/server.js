@@ -2,9 +2,10 @@ require('dotenv').config();
 const app = require('./app');
 const { getCorsOriginOption } = require('./config/corsOrigins');
 const connectDB = require('./config/database');
-const { connectRedis } = require('./config/redis');
+const { connectRedis, getRedisClient } = require('./config/redis');
 const http = require('http');
 const socketIO = require('socket.io');
+const { createAdapter } = require('@socket.io/redis-adapter');
 const logger = require('./config/logger');
 
 process.on('uncaughtException', (err) => {
@@ -18,6 +19,10 @@ process.on('uncaughtException', (err) => {
 
 // Create HTTP server
 const server = http.createServer(app);
+
+// Attach the Voice IVR WebSocket gateway at /voice/stream (Twilio Media Streams)
+const voiceGatewayService = require('./services/voiceGatewayService');
+voiceGatewayService.attach(server);
 
 // Initialize Socket.IO
 const io = socketIO(server, {
@@ -68,61 +73,54 @@ async function startServer() {
     // Connect to Redis
     await connectRedis();
     logger.info('Redis connected successfully');
-    
+
+    // Socket.IO Redis adapter — REQUIRED for pm2 cluster mode and for worker
+    // processes to reach browser clients. Without it, an emit on one API
+    // instance never reaches clients connected to another instance, and
+    // @socket.io/redis-emitter events from worker.js/campaignWorker.js go
+    // nowhere. Attached before server.listen() so no client ever connects
+    // to an adapter-less instance. Subscriber mode needs dedicated
+    // connections, hence the two duplicates.
+    const pubClient = getRedisClient().duplicate();
+    const subClient = getRedisClient().duplicate();
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+    io.adapter(createAdapter(pubClient, subClient));
+    logger.info('Socket.IO Redis adapter attached (cross-instance + worker emits enabled)');
+
     // Upgrade rate limiting to Redis-backed after connection
     if (app.upgradeRateLimiting) {
       app.upgradeRateLimiting();
     }
 
-    // Initialize queue processors (unless DISABLE_WORKERS is set)
-    if (process.env.DISABLE_WORKERS !== 'true') {
-      const { webhookQueue, aiQueue, autoReplyQueue, syncQueue } = require('./config/queue');
-      const processWebhook = require('./jobs/processWebhook');
-      const processAI = require('./jobs/processAI');
-      const processAutoReply = require('./jobs/processAutoReply');
+    // Queue processors are intentionally NOT started here.
+    // Run worker.js as a separate PM2 process to handle all queue jobs.
+    // This prevents double-processing when both server.js and worker.js are running.
+    logger.info('Queue processors not started in server process — run worker.js separately.');
 
-      // Queue concurrency from environment or defaults
-      const WEBHOOK_CONCURRENCY = parseInt(process.env.WEBHOOK_CONCURRENCY) || 10;
-      const AI_CONCURRENCY = parseInt(process.env.AI_CONCURRENCY) || 10;
-      const AUTOREPLY_CONCURRENCY = parseInt(process.env.AUTOREPLY_CONCURRENCY) || 5;
-
-      logger.info('Queue concurrency configuration', {
-        webhook: WEBHOOK_CONCURRENCY,
-        ai: AI_CONCURRENCY,
-        autoReply: AUTOREPLY_CONCURRENCY
-      });
-
-      // Start webhook queue processor
-      webhookQueue.process(WEBHOOK_CONCURRENCY, async (job) => {
-        const jobLogger = logger.createChild({ module: 'webhook-queue', jobId: job.id });
-        jobLogger.info('Processing webhook job');
-        return await processWebhook(job);
-      });
-      logger.info('Webhook queue processor started');
-
-      // Start AI queue processor
-      aiQueue.process(AI_CONCURRENCY, async (job) => {
-        const jobLogger = logger.createChild({ module: 'ai-queue', jobId: job.id });
-        jobLogger.info('Processing AI job');
-        return await processAI(job);
-      });
-      logger.info('AI queue processor started');
-
-      // Start auto-reply queue processor
-      autoReplyQueue.process(AUTOREPLY_CONCURRENCY, async (job) => {
-        const jobLogger = logger.createChild({ module: 'autoreply-queue', jobId: job.id });
-        jobLogger.info('Processing auto-reply job');
-        return await processAutoReply(job);
-      });
-      logger.info('Auto-reply queue processor started');
-    } else {
-      logger.warn('Queue processors disabled (DISABLE_WORKERS=true). Workers should run separately.');
+    // Seed global flow blueprints (idempotent upsert — safe to run on every boot)
+    try {
+      const { seedGlobalBlueprints } = require('./scripts/seedCheckoutBlueprint');
+      await seedGlobalBlueprints();
+      logger.info('Flow blueprints seeded');
+    } catch (seedErr) {
+      logger.warn('Blueprint seeding failed (non-fatal):', seedErr.message);
     }
 
-    // Initialize auto-reply scheduler
+    // Ensure contacts/campaigns permission codes exist and are linked to system groups
+    try {
+      const gpService = require('./services/groupPermissionService');
+      const perms = await gpService.seedDefaultPermissions();
+      const groups = await gpService.seedDefaultGroups();
+      logger.info('Permissions seeded', { perms, groups });
+    } catch (permErr) {
+      logger.warn('Permission seeding failed (non-fatal):', permErr.message);
+    }
+
+    // Initialize auto-reply scheduler (non-blocking — runs in background)
     const autoReplyScheduler = require('./services/autoReplyScheduler');
-    await autoReplyScheduler.initializeScheduledJobs();
-    logger.info('Auto-reply scheduler initialized');
+    autoReplyScheduler.initializeScheduledJobs()
+      .catch(err => logger.error('Auto-reply scheduler init failed:', { error: err.message }));
+    logger.info('Auto-reply scheduler initialization started (background)');
 
     // Start listening
     server.listen(PORT, () => {

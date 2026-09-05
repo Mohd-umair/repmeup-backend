@@ -1,7 +1,10 @@
 const mongoose = require('mongoose');
 const Subscription = require('../models/Subscription');
-const Plan = require('../models/Plan');
 const AICreditUsage = require('../models/AICreditUsage');
+const AiApiUsage = require('../models/AiApiUsage');
+const entitlementsService = require('./entitlementsService');
+const { ensureAiCreditPeriodCurrent } = require('./creditPeriodService');
+const { getAiRequestContext, clearLastAiApiUsageId } = require('./aiRequestContext');
 
 /**
  * AI Credit Service - Single Responsibility Principle
@@ -9,60 +12,41 @@ const AICreditUsage = require('../models/AICreditUsage');
  */
 class AICreditService {
   /**
-   * Check if organization has enough AI credits for an operation
+   * Check if organization has enough AI credits for an operation.
+   * Triggers a lazy UTC-month rollover (carry-forward) before checking.
    * @param {String} organizationId
    * @param {Number} estimatedCost - Estimated credits needed
    * @returns {Promise<Object>} { allowed: Boolean, current?, limit?, remaining?, needed? }
    */
   async checkCredits(organizationId, estimatedCost = 1) {
     try {
-      const subscription = await Subscription.findOne({ organization: organizationId });
+      const period = await ensureAiCreditPeriodCurrent(organizationId);
 
-      if (!subscription) {
-        // No subscription yet - create free plan or deny
-        const freePlan = await Plan.getByPlanId('free');
-        if (!freePlan) {
-          return {
-            allowed: false,
-            error: 'No subscription found. Please contact support.',
-            code: 'NO_SUBSCRIPTION'
-          };
-        }
-
+      if (period.isUnlimited) {
         return {
           allowed: true,
-          current: 0,
-          limit: freePlan.limits.maxAICreditsPerMonth,
-          remaining: freePlan.limits.maxAICreditsPerMonth,
-          isUnlimited: freePlan.limits.maxAICreditsPerMonth === -1
-        };
-      }
-
-      const currentUsage = subscription.usage.aiCreditsThisMonth || 0;
-      const limit = subscription.limits.maxAICreditsPerMonth || 0;
-      const isUnlimited = limit === -1;
-
-      if (isUnlimited) {
-        return {
-          allowed: true,
-          current: currentUsage,
+          current: period.used,
           limit: -1,
           remaining: Infinity,
           isUnlimited: true
         };
       }
 
-      const remaining = Math.max(0, limit - currentUsage);
-      const allowed = currentUsage + estimatedCost <= limit;
+      const { effectiveLimit, carriedCredits, planLimit } = period;
+      const currentUsage = period.used;
+      const remaining = Math.max(0, effectiveLimit - currentUsage);
+      const allowed = currentUsage + estimatedCost <= effectiveLimit;
 
       if (!allowed) {
         return {
           allowed: false,
           current: currentUsage,
-          limit: limit,
-          remaining: remaining,
+          limit: effectiveLimit,
+          planLimit,
+          carriedCredits,
+          remaining,
           needed: estimatedCost,
-          exceededBy: (currentUsage + estimatedCost) - limit,
+          exceededBy: (currentUsage + estimatedCost) - effectiveLimit,
           code: 'AI_CREDITS_EXCEEDED',
           error: `Insufficient AI credits. You need ${estimatedCost} credits but have ${remaining} remaining this month.`
         };
@@ -71,8 +55,10 @@ class AICreditService {
       return {
         allowed: true,
         current: currentUsage,
-        limit: limit,
-        remaining: remaining,
+        limit: effectiveLimit,
+        planLimit,
+        carriedCredits,
+        remaining,
         needed: estimatedCost
       };
     } catch (error) {
@@ -82,14 +68,16 @@ class AICreditService {
   }
 
   /**
-   * Deduct AI credits after successful operation
-   * @param {String} organizationId
-   * @param {Number} actualCost - Actual credits used
-   * @param {Object} metadata - Optional metadata (operation type, details, userId)
-   * @returns {Promise<Object>} Updated usage
+   * Deduct AI credits after successful operation.
+   * Triggers a lazy rollover before incrementing so the period is always current.
+   * @param {object} [linkOptions] Optional `aiApiUsageId` to attach product credits to `AiApiUsage` when deduct runs outside ALS.
    */
-  async deductCredits(organizationId, actualCost = 1, metadata = {}) {
+  async deductCredits(organizationId, actualCost = 1, metadata = {}, linkOptions = {}) {
     try {
+      // Ensure the period is current (lazy rollover) before incrementing usage,
+      // so we never count debits against a stale period.
+      await ensureAiCreditPeriodCurrent(organizationId);
+
       const result = await Subscription.findOneAndUpdate(
         { organization: organizationId },
         { 
@@ -104,6 +92,27 @@ class AICreditService {
         return { success: false };
       }
 
+      const explicitId =
+        linkOptions.aiApiUsageId && mongoose.Types.ObjectId.isValid(String(linkOptions.aiApiUsageId))
+          ? String(linkOptions.aiApiUsageId)
+          : null;
+      const store = getAiRequestContext();
+      const fromContext =
+        !explicitId &&
+        store &&
+        store.lastAiApiUsageId &&
+        mongoose.Types.ObjectId.isValid(String(store.lastAiApiUsageId))
+          ? String(store.lastAiApiUsageId)
+          : null;
+      const linkedUsageId = explicitId || fromContext;
+
+      const creditMeta = {
+        ...metadata,
+        userId: undefined,
+        operation: undefined,
+        ...(linkedUsageId ? { aiApiUsageId: linkedUsageId } : {})
+      };
+
       // Log usage event for history tracking
       try {
         await AICreditUsage.create({
@@ -111,15 +120,25 @@ class AICreditService {
           user: metadata.userId || organizationId, // Fallback to org ID if user not provided
           operation: metadata.operation || 'unknown',
           creditsUsed: actualCost,
-          metadata: {
-            ...metadata,
-            userId: undefined, // Remove userId from metadata to avoid duplication
-            operation: undefined // Remove operation from metadata to avoid duplication
-          }
+          metadata: creditMeta
         });
       } catch (logError) {
         console.error('Error logging AI credit usage:', logError);
         // Don't fail the deduction if logging fails
+      }
+
+      if (linkedUsageId) {
+        try {
+          await AiApiUsage.findByIdAndUpdate(linkedUsageId, {
+            $set: {
+              applicationCreditsUsed: actualCost,
+              creditOperation: metadata.operation || 'unknown'
+            }
+          });
+        } catch (linkErr) {
+          console.error('Error linking application credits to AiApiUsage:', linkErr.message);
+        }
+        clearLastAiApiUsageId();
       }
 
       console.log(`💰 [AI Credits] Deducted ${actualCost} credits for org ${organizationId}. New total: ${result.usage.aiCreditsThisMonth}/${result.limits.maxAICreditsPerMonth}`);
@@ -214,6 +233,7 @@ class AICreditService {
           .skip(skip)
           .limit(limit)
           .select('-__v')
+          .populate('user', 'firstName lastName email')
           .lean(),
         AICreditUsage.countDocuments(query)
       ]);
@@ -319,38 +339,45 @@ class AICreditService {
   }
 
   /**
-   * Get AI credit usage for organization
+   * Get AI credit usage for organization.
+   * Triggers a lazy rollover and resolves the limit from entitlements (not the
+   * stale snapshot on the Subscription document) to keep the header chip and
+   * billing page consistent with checkCredits enforcement.
    * @param {String} organizationId
-   * @returns {Promise<Object>} Usage stats
+   * @returns {Promise<Object>} Usage stats including carry-forward breakdown
    */
   async getUsage(organizationId) {
     try {
-      const subscription = await Subscription.findOne({ organization: organizationId });
+      const period = await ensureAiCreditPeriodCurrent(organizationId);
 
-      if (!subscription) {
+      if (period.isUnlimited) {
         return {
-          current: 0,
-          limit: 0,
-          remaining: 0,
+          current: period.used,
+          limit: -1,
+          carriedCredits: 0,
+          effectiveLimit: -1,
+          remaining: Infinity,
           percentage: 0,
-          isUnlimited: false
+          isUnlimited: true,
+          isNearLimit: false,
+          isAtLimit: false
         };
       }
 
-      const current = subscription.usage.aiCreditsThisMonth || 0;
-      const limit = subscription.limits.maxAICreditsPerMonth || 0;
-      const isUnlimited = limit === -1;
-      const remaining = isUnlimited ? Infinity : Math.max(0, limit - current);
-      const percentage = isUnlimited ? 0 : (current / limit) * 100;
+      const { planLimit, carriedCredits, used, effectiveLimit, remaining } = period;
+      const percentage = effectiveLimit > 0 ? (used / effectiveLimit) * 100 : 0;
 
       return {
-        current,
-        limit,
+        current: used,
+        limit: effectiveLimit,
+        planLimit,
+        carriedCredits,
+        effectiveLimit,
         remaining,
         percentage: Math.round(percentage),
-        isUnlimited,
-        isNearLimit: percentage >= 90 && !isUnlimited,
-        isAtLimit: current >= limit && !isUnlimited
+        isUnlimited: false,
+        isNearLimit: percentage >= 90,
+        isAtLimit: used >= effectiveLimit
       };
     } catch (error) {
       console.error('Get AI credit usage error:', error);

@@ -8,9 +8,25 @@ const Plan = require('../models/Plan');
 const UserActivityLog = require('../models/UserActivityLog');
 const PlatformConnection = require('../models/PlatformConnection');
 const Subscription = require('../models/Subscription');
+const {
+  encryptAdminPassword,
+  decryptAdminPassword
+} = require('../utils/adminPasswordCipher');
+const {
+  generateImpersonationToken,
+  generateRefreshToken
+} = require('../middlewares/auth');
+const crypto = require('crypto');
 
-const PLAN_ADMIN_SELECT =
-  'planId name description tier price billingCycle limits features badge badgeColor highlightColor isActive isPublic displayOrder trialDays stripePriceId stripeProductId createdAt updatedAt';
+// Everything the admin Plans form needs to hydrate. Razorpay ids and paise amounts are
+// read-only in the UI but must be returned, or the form shows them blank.
+const PLAN_ADMIN_SELECT = [
+  'planId name description tier price billingCycle limits features entitlements',
+  'badge badgeColor highlightColor isActive isPublic displayOrder trialDays',
+  'stripePriceId stripeProductId createdAt updatedAt',
+  'razorpayPlanId priceInr razorpayPlanIdAnnual priceAnnual priceAnnualInr annualOfferLabel',
+  'tagline cardStyle inheritsFromPlanId headlineMetricKeys cardBullets entitlementNotes limitedOffer'
+].join(' ');
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
@@ -133,7 +149,7 @@ class SuperAdminService {
           'planId planName tier status billingCycle ' +
           'currentPeriodStart currentPeriodEnd razorpayNextBillingAt ' +
           'cancelAtPeriodEnd cancelledAt cancellationReason ' +
-          'pendingDowngradePlanId planHistory razorpaySubscriptionId'
+          'planHistory razorpaySubscriptionId'
         )
         .lean()
     ]);
@@ -152,7 +168,6 @@ class SuperAdminService {
           cancelAtPeriodEnd: subscription.cancelAtPeriodEnd ?? false,
           cancelledAt: subscription.cancelledAt ?? null,
           cancellationReason: subscription.cancellationReason ?? null,
-          pendingDowngradePlanId: subscription.pendingDowngradePlanId ?? null,
           planHistory: (subscription.planHistory || []).slice(-10).map(h => ({
             planId: h.planId,
             planName: h.planName,
@@ -169,7 +184,7 @@ class SuperAdminService {
    * Create a user under an organization (super-admin provisioning).
    * Allowed roles: admin, manager, agent, viewer. Enforces plan user limits (Subscription or Organization).
    */
-  async createUserForOrganization(organizationId, body) {
+  async createUserForOrganization(organizationId, body, actorUserId) {
     const Subscription = require('../models/Subscription');
     const oid = String(organizationId);
     if (!mongoose.Types.ObjectId.isValid(oid)) {
@@ -233,7 +248,10 @@ class SuperAdminService {
       lastName: String(lastName).trim(),
       role: userRole,
       organization: oid,
-      isActive: true
+      isActive: true,
+      adminRecoverablePassword: encryptAdminPassword(String(password)),
+      adminPasswordSetAt: new Date(),
+      adminPasswordSetBy: actorUserId || undefined
     });
 
     await Organization.findByIdAndUpdate(oid, {
@@ -247,7 +265,8 @@ class SuperAdminService {
 
     return User.findById(user._id)
       .select('-password -emailVerificationToken -passwordResetToken')
-      .lean();
+      .lean()
+      .then((doc) => ({ ...doc, provisionalPassword: String(password) }));
   }
 
   async listUsers(query) {
@@ -576,7 +595,8 @@ class SuperAdminService {
       connList,
       userCreditHistory,
       orgAgents,
-      insights
+      insights,
+      passwordRow
     ] = await Promise.all([
       orgIdStr
         ? aiCreditService.getUsage(orgIdStr)
@@ -626,7 +646,10 @@ class SuperAdminService {
             items: [],
             pagination: { page: 1, limit: agentsLimit, total: 0, pages: 0 }
           }),
-      this.buildUserInsights(userId, orgId)
+      this.buildUserInsights(userId, orgId),
+      User.findById(userId)
+        .select('+adminRecoverablePassword adminPasswordSetAt oauth.provider oauth.providerId')
+        .lean()
     ]);
 
     if (orgId) {
@@ -667,6 +690,10 @@ class SuperAdminService {
         insights
       };
     }
+
+    _meta.passwordInfo = passwordRow
+      ? this.buildPasswordRevealInfo(passwordRow)
+      : this.buildPasswordRevealInfo(u);
 
     return {
       ...rest,
@@ -768,6 +795,178 @@ class SuperAdminService {
     target.isActive = false;
     await target.save();
     return target.toJSON();
+  }
+
+  /**
+   * Resolve the tenant user to impersonate when super-admin clicks "Login as organization".
+   */
+  async resolveOrganizationLoginUser(orgId) {
+    if (!mongoose.Types.ObjectId.isValid(orgId)) {
+      const err = new Error('Invalid organization id');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const baseFilter = {
+      organization: orgId,
+      isActive: true,
+      deletedAt: null,
+      role: { $ne: 'super_admin' }
+    };
+
+    let user = await User.findOne({ ...baseFilter, role: 'admin' })
+      .sort({ createdAt: 1 })
+      .select('_id email firstName lastName role isActive deletedAt oauth');
+
+    if (!user) {
+      user = await User.findOne({ ...baseFilter, role: { $in: ['manager', 'viewer'] } })
+        .sort({ createdAt: 1 })
+        .select('_id email firstName lastName role isActive deletedAt oauth');
+    }
+
+    if (!user) {
+      user = await User.findOne({ ...baseFilter, role: 'agent' })
+        .sort({ createdAt: 1 })
+        .select('_id email firstName lastName role isActive deletedAt oauth');
+    }
+
+    if (!user) {
+      const err = new Error('No active user found for this organization');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    return user;
+  }
+
+  assertImpersonationTarget(target) {
+    if (!target) {
+      const err = new Error('User not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    if (target.deletedAt) {
+      const err = new Error('Cannot impersonate a removed user');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (!target.isActive) {
+      const err = new Error('Cannot impersonate an inactive user');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (target.role === 'super_admin') {
+      const err = new Error('Cannot impersonate a super admin account');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+
+  buildPasswordRevealInfo(userDoc) {
+    const oauthProvider = userDoc.oauth?.provider || null;
+    const hasOAuth = Boolean(oauthProvider);
+    const decrypted = userDoc.adminRecoverablePassword
+      ? decryptAdminPassword(userDoc.adminRecoverablePassword)
+      : null;
+
+    return {
+      authMethod: hasOAuth && !decrypted ? 'oauth' : 'local',
+      oauthProvider,
+      passwordAvailable: Boolean(decrypted),
+      password: decrypted,
+      passwordSetAt: userDoc.adminPasswordSetAt || null,
+      message: decrypted
+        ? null
+        : hasOAuth
+          ? 'This user signs in with OAuth. Reset password to set a local login password.'
+          : 'Password is hashed. Use Reset & reveal to generate a new password.'
+    };
+  }
+
+  async getUserPasswordReveal(userId) {
+    const user = await User.findById(userId)
+      .select('+adminRecoverablePassword adminPasswordSetAt oauth.provider oauth.providerId')
+      .lean();
+
+    if (!user) {
+      const err = new Error('User not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    return this.buildPasswordRevealInfo(user);
+  }
+
+  async resetUserPasswordReveal(actorUserId, targetUserId, body = {}) {
+    const target = await User.findById(targetUserId).select('+password oauth.provider');
+    if (!target) {
+      const err = new Error('User not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    let plain = body?.password != null ? String(body.password).trim() : '';
+    if (plain && plain.length < 6) {
+      const err = new Error('Password must be at least 6 characters');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (!plain) {
+      plain = crypto.randomBytes(9).toString('base64url').slice(0, 12);
+    }
+
+    target.password = plain;
+    target.adminRecoverablePassword = encryptAdminPassword(plain);
+    target.adminPasswordSetAt = new Date();
+    target.adminPasswordSetBy = actorUserId;
+    await target.save();
+
+    return {
+      userId: String(target._id),
+      email: target.email,
+      password: plain,
+      passwordSetAt: target.adminPasswordSetAt
+    };
+  }
+
+  async buildImpersonationSession(actorUserId, targetUserId) {
+    const target = await User.findById(targetUserId)
+      .select('_id email firstName lastName role isActive deletedAt organization oauth.provider')
+      .populate('organization', 'name slug')
+      .lean();
+
+    this.assertImpersonationTarget(target);
+
+    const token = generateImpersonationToken(target._id, actorUserId);
+    const refreshToken = generateRefreshToken(target._id);
+
+    return {
+      token,
+      refreshToken,
+      user: {
+        _id: target._id,
+        email: target.email,
+        firstName: target.firstName,
+        lastName: target.lastName,
+        role: target.role,
+        organization: target.organization
+      },
+      impersonatedBy: String(actorUserId)
+    };
+  }
+
+  async impersonateUser(actorUserId, targetUserId) {
+    if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
+      const err = new Error('Invalid user id');
+      err.statusCode = 400;
+      throw err;
+    }
+    return this.buildImpersonationSession(actorUserId, targetUserId);
+  }
+
+  async impersonateOrganization(actorUserId, organizationId) {
+    const target = await this.resolveOrganizationLoginUser(organizationId);
+    return this.buildImpersonationSession(actorUserId, target._id);
   }
 }
 

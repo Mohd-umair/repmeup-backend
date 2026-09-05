@@ -40,7 +40,6 @@ const groupSchema = new mongoose.Schema({
   timestamps: true
 });
 
-groupSchema.index({ slug: 1 });
 groupSchema.index({ isActive: 1 });
 
 groupSchema.pre('validate', function (next) {

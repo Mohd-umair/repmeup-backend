@@ -1,4 +1,5 @@
 const Organization = require('../models/Organization');
+const { normalizeAutoReplyDelaySettings } = require('../utils/replyDelayHelper');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
@@ -122,7 +123,8 @@ exports.updateOrganization = async (req, res, next) => {
       'industry',
       'size',
       'logo',
-      'whiteLabel'
+      'whiteLabel',
+      'orgCode'
     ];
 
     allowedFields.forEach(field => {
@@ -130,6 +132,11 @@ exports.updateOrganization = async (req, res, next) => {
         organization[field] = req.body[field];
       }
     });
+
+    // Sanitize orgCode: strip non-alphanumeric, uppercase, max 6 chars
+    if (organization.orgCode) {
+      organization.orgCode = organization.orgCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6);
+    }
 
     // Handle autoReplySettings separately (merge nested object)
     if (req.body.autoReplySettings !== undefined) {
@@ -139,9 +146,27 @@ exports.updateOrganization = async (req, res, next) => {
       }
       Object.keys(req.body.autoReplySettings).forEach(key => {
         if (req.body.autoReplySettings[key] !== undefined) {
-          organization.autoReplySettings[key] = req.body.autoReplySettings[key];
+          // Deep-merge nested sub-objects (e.g. fallbackSettings) so partial updates
+          // don't wipe sibling fields that were not included in the request
+          if (
+            key === 'fallbackSettings' &&
+            typeof req.body.autoReplySettings[key] === 'object' &&
+            req.body.autoReplySettings[key] !== null &&
+            !Array.isArray(req.body.autoReplySettings[key])
+          ) {
+            organization.autoReplySettings[key] = {
+              ...(organization.autoReplySettings[key]?.toObject
+                ? organization.autoReplySettings[key].toObject()
+                : organization.autoReplySettings[key] || {}),
+              ...req.body.autoReplySettings[key]
+            };
+            organization.markModified('autoReplySettings.fallbackSettings');
+          } else {
+            organization.autoReplySettings[key] = req.body.autoReplySettings[key];
+          }
         }
       });
+      normalizeAutoReplyDelaySettings(organization.autoReplySettings);
     }
 
     // Handle inboxSettings (merge nested object)
@@ -166,6 +191,22 @@ exports.updateOrganization = async (req, res, next) => {
           organization.escalationSettings[key] = req.body.escalationSettings[key];
         }
       });
+    }
+
+    // Handle per-channel automation mode (workflow_only | ai_only | hybrid)
+    if (req.body.automationModeByChannel !== undefined) {
+      const VALID_MODES = ['workflow_only', 'ai_only', 'hybrid'];
+      const CHANNELS = ['whatsapp', 'instagram', 'facebook'];
+      if (!organization.automationModeByChannel) {
+        organization.automationModeByChannel = {};
+      }
+      CHANNELS.forEach(ch => {
+        const val = req.body.automationModeByChannel[ch];
+        if (val !== undefined && VALID_MODES.includes(val)) {
+          organization.automationModeByChannel[ch] = val;
+        }
+      });
+      organization.markModified('automationModeByChannel');
     }
 
     await organization.save();
@@ -341,6 +382,108 @@ exports.deleteLogo = async (req, res, next) => {
     res.status(200).json({ success: true, message: 'Logo removed successfully' });
   } catch (error) {
     console.error('Delete logo error:', error);
+    next(error);
+  }
+};
+
+// ─── Quiet-hours helpers (reused from processAutoReply) ──────────────────────
+
+function _parseHHMM(str) {
+  const [h, m] = String(str || '00:00').split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+function _isQuietHoursActive(quietHours) {
+  if (!quietHours?.enabled) return false;
+  try {
+    const tz = quietHours.timezone || 'UTC';
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(new Date());
+    const h = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+    const m = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+    const now = h * 60 + m;
+    const start = _parseHHMM(quietHours.start);
+    const end   = _parseHHMM(quietHours.end);
+    return start >= end
+      ? (now >= start || now < end)   // overnight (e.g. 22:00–08:00)
+      : (now >= start && now < end);
+  } catch (_) { return false; }
+}
+
+/**
+ * GET /api/organizations/:id/automation-status
+ * Returns live automation state: auto-reply on/off, quiet hours, profile completeness.
+ */
+exports.getAutomationStatus = async (req, res, next) => {
+  try {
+    const orgId = req.params.id;
+
+    if (req.user.organization._id.toString() !== orgId.toString() &&
+        req.user.organization.toString() !== orgId.toString()) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    const PlatformConnection = require('../models/PlatformConnection');
+    const KnowledgeBase      = require('../models/KnowledgeBase');
+    const BrandConfig        = require('../models/BrandConfig');
+
+    const [org, platformCount, kbCount, brandConfig] = await Promise.all([
+      Organization.findById(orgId)
+        .select('autoReplySettings automationModeByChannel')
+        .lean(),
+      PlatformConnection.countDocuments({ organization: orgId, isActive: true, status: 'connected' }),
+      KnowledgeBase.countDocuments({ organization: orgId }),
+      BrandConfig.findOne({ organization: orgId }).select('toneOfVoice').lean()
+    ]);
+
+    if (!org) {
+      return res.status(404).json({ success: false, error: 'Organization not found' });
+    }
+
+    const ar = org.autoReplySettings || {};
+    const qh = ar.quietHours || {};
+
+    // Primary mode — prefer instagram channel; fall back to first configured channel
+    const modeMap = org.automationModeByChannel || {};
+    const primaryMode =
+      modeMap.instagram || modeMap.facebook || modeMap.whatsapp || modeMap.youtube || 'ai_only';
+
+    // Profile completeness (4 checkpoints)
+    const completenessItems = [
+      { key: 'platform',     label: 'Platform connected',    done: platformCount > 0, link: '/app/connections' },
+      { key: 'knowledgeBase',label: 'Knowledge base',        done: kbCount > 0,       link: '/app/knowledge-base' },
+      { key: 'autoReply',    label: 'Auto-reply configured', done: !!ar.enabled,      link: '/app/automation/ai-replies' },
+      { key: 'brandVoice',   label: 'Brand voice set',       done: !!(brandConfig?.toneOfVoice && brandConfig.toneOfVoice !== 'balanced'), link: '/app/brand-config' }
+    ];
+    const score = Math.round(
+      (completenessItems.filter(i => i.done).length / completenessItems.length) * 100
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        autoReply: {
+          enabled:  !!ar.enabled,
+          mode:     primaryMode,
+          platforms: Array.isArray(ar.enabledPlatforms) ? ar.enabledPlatforms : [],
+          quietHours: {
+            enabled:     !!qh.enabled,
+            isActiveNow: _isQuietHoursActive(qh),
+            start:       qh.start     || '22:00',
+            end:         qh.end       || '08:00',
+            timezone:    qh.timezone  || 'UTC'
+          },
+          fallback: {
+            enabled: !!(ar.fallbackSettings?.enabled),
+            message: ar.fallbackSettings?.message || ''
+          }
+        },
+        profileCompleteness: { score, items: completenessItems }
+      }
+    });
+  } catch (error) {
+    console.error('Get automation status error:', error);
     next(error);
   }
 };

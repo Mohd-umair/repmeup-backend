@@ -2,9 +2,11 @@ const Interaction = require('../models/Interaction');
 const PlatformConnection = require('../models/PlatformConnection');
 const googleService = require('../integrations/google/googleService');
 const youtubeService = require('../integrations/google/youtubeService');
-const { processWebhook } = require('../jobs/processWebhook');
 const logger = require('../config/logger');
+const { ingestInstagramWebhook } = require('../services/webhook/instagramWebhookIngress');
 const logEvents = require('../utils/logEvents');
+const { generateChatRef } = require('../utils/chatRefHelper');
+const { upsertWhatsAppThread } = require('../services/webhook/whatsappWebhookService');
 
 /**
  * @desc    Handle Google Business Profile webhook
@@ -72,13 +74,13 @@ exports.handleGoogleWebhook = async (req, res, next) => {
           }
         });
 
-        console.log('Google webhook queued for processing');
+        logger.info('Google webhook queued for processing');
       } catch (error) {
-        console.error('Error processing Google webhook:', error);
+        logger.error('Error processing Google webhook', { error: error.message, stack: error.stack });
       }
     }
   } catch (error) {
-    console.error('Google webhook handler error:', error);
+    logger.error('Google webhook handler error', { error: error.message, stack: error.stack });
     // Don't send error response if we already sent 200
   }
 };
@@ -106,7 +108,7 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
     const messageData = JSON.parse(Buffer.from(message.data, 'base64').toString());
     const { videoId, commentId, eventType } = messageData;
 
-    console.log('YouTube webhook received:', { videoId, commentId, eventType });
+    logger.info('YouTube webhook received', { videoId, commentId, eventType });
 
     // Find platform connection by channel
     const connection = await PlatformConnection.findOne({
@@ -115,7 +117,7 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
     });
 
     if (!connection) {
-      console.log('No active YouTube connection found');
+      logger.info('No active YouTube connection found');
       return res.status(200).json({ success: true, message: 'No connection found' });
     }
 
@@ -141,13 +143,13 @@ exports.handleYouTubeWebhook = async (req, res, next) => {
           }
         });
 
-        console.log('YouTube webhook queued for processing');
+        logger.info('YouTube webhook queued for processing');
       } catch (error) {
-        console.error('Error processing YouTube webhook:', error);
+        logger.error('Error processing YouTube webhook', { error: error.message, stack: error.stack });
       }
     }
   } catch (error) {
-    console.error('YouTube webhook handler error:', error);
+    logger.error('YouTube webhook handler error', { error: error.message, stack: error.stack });
     // Don't send error response if we already sent 200
   }
 };
@@ -224,7 +226,7 @@ exports.verifyFacebookWebhook = (req, res) => {
   const expectedToken = process.env.META_WEBHOOK_VERIFY_TOKEN;
   const tokenMatches = !!expectedToken && token === expectedToken;
 
-  console.log('Facebook webhook verification request:', {
+  logger.info('Facebook webhook verification request', {
     mode,
     hasToken: !!token,
     tokenLength: token?.length,
@@ -233,7 +235,7 @@ exports.verifyFacebookWebhook = (req, res) => {
   });
 
   if (mode === 'subscribe' && tokenMatches && challenge) {
-    console.log('Facebook webhook verified successfully');
+    logger.info('Facebook webhook verified successfully');
     res.status(200).send(challenge);
   } else {
     const reason = !mode || mode !== 'subscribe' ? 'mode not subscribe'
@@ -241,7 +243,7 @@ exports.verifyFacebookWebhook = (req, res) => {
       : !tokenMatches ? 'verify token does not match META_WEBHOOK_VERIFY_TOKEN'
       : !challenge ? 'missing hub.challenge'
       : 'unknown';
-    console.error('Facebook webhook verification failed:', reason);
+    logger.error('Facebook webhook verification failed', { reason });
     res.sendStatus(403);
   }
 };
@@ -252,19 +254,26 @@ exports.verifyFacebookWebhook = (req, res) => {
  */
 exports.handleFacebookWebhook = async (req, res) => {
   // Log every POST immediately (even empty body) so we know if Meta is calling
-  console.log('[Facebook Webhook] POST hit – Meta is calling this URL');
+  logger.info('[Facebook Webhook] POST hit – Meta is calling this URL');
 
   try {
+    const obj = req.body?.object;
+
+    // Meta often sends Instagram messaging (object: "instagram") to the same callback URL as Page webhooks.
+    if (obj === 'instagram') {
+      logger.info('[Facebook Webhook] Routing object=instagram to Instagram handler');
+      return exports.handleInstagramWebhook(req, res);
+    }
+
     // If we get a body but no entry/object, log raw keys to debug Meta's payload format
     const hasBody = !!req.body;
     const bodyKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
-    const obj = req.body?.object;
     const entryCount = req.body?.entry?.length ?? 0;
     const firstEntry = req.body?.entry?.[0];
     const pageId = firstEntry?.id;
     const hasMessaging = !!(firstEntry?.messaging && firstEntry.messaging.length > 0);
 
-    console.log('[Facebook Webhook] POST received', {
+    logger.info('[Facebook Webhook] POST received', {
       hasBody,
       object: obj,
       entryCount,
@@ -275,7 +284,7 @@ exports.handleFacebookWebhook = async (req, res) => {
 
     // When Meta sends something but entry is empty, show what we got so we can fix parsing
     if (hasBody && (entryCount === 0 || !obj)) {
-      console.log('[Facebook Webhook] Payload keys:', bodyKeys.join(', '), '| body.entry type:', Array.isArray(req.body?.entry) ? 'array' : typeof req.body?.entry);
+      logger.info('[Facebook Webhook] Payload keys', { keys: bodyKeys.join(', '), entryType: Array.isArray(req.body?.entry) ? 'array' : typeof req.body?.entry });
     }
 
     const { webhookQueue } = require('../config/queue');
@@ -285,18 +294,18 @@ exports.handleFacebookWebhook = async (req, res) => {
 
     // Only process Page webhooks (messages, feed, etc.). Ignore others (e.g. object: 'permissions')
     if (obj !== 'page') {
-      if (obj) console.log('[Facebook Webhook] Ignoring non-page object:', obj);
+      if (obj) logger.info('[Facebook Webhook] Ignoring non-page object', { obj });
       return;
     }
 
     if (!firstEntry) {
-      console.log('[Facebook Webhook] No entry in payload – nothing to process');
+      logger.info('[Facebook Webhook] No entry in payload – nothing to process');
       return;
     }
 
     // For debugging: if this is a messaging event but we'll skip, log why
     if (hasMessaging) {
-      console.log('[Facebook Webhook] Messenger DM event: pageId=%s, sender=%s', pageId, firstEntry.messaging?.[0]?.sender?.id);
+      logger.info('[Facebook Webhook] Messenger DM event: pageId=%s, sender=%s', { pageId, id: firstEntry.messaging?.[0]?.sender?.id });
     }
 
     // Determine organization from page ID (must match a connected Page in the app)
@@ -308,7 +317,7 @@ exports.handleFacebookWebhook = async (req, res) => {
     });
 
     if (!connection) {
-      console.log('[Facebook Webhook] No active Facebook connection found for pageId:', pageId, '- Ensure this Page is connected in the app (Settings → Connect Facebook → Page Manager) and that the Page you messaged is the same one.');
+      logger.info('[Facebook Webhook] No active Facebook connection found for pageId — ensure this Page is connected in the app (Settings → Connect Facebook → Page Manager) and that the Page you messaged is the same one', { pageId });
       return;
     }
 
@@ -325,9 +334,9 @@ exports.handleFacebookWebhook = async (req, res) => {
       }
     });
 
-    console.log('[Facebook Webhook] Queued for processing, pageId=%s', pageId);
+    logger.info('[Facebook Webhook] Queued for processing, pageId=%s', { pageId });
   } catch (error) {
-    console.error('Facebook webhook handler error:', error);
+    logger.error('Facebook webhook handler error', { error: error.message, stack: error.stack });
     // Don't send error response as we already sent 200
   }
 };
@@ -341,13 +350,16 @@ exports.verifyInstagramWebhook = (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('Instagram webhook verification request:', { mode, token });
+  logger.info('Instagram webhook verification request', { mode, token });
 
-  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
-    console.log('Instagram webhook verified successfully');
+  const expectedToken =
+    process.env.INSTAGRAM_LOGIN_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
+
+  if (mode === 'subscribe' && token === expectedToken) {
+    logger.info('Instagram webhook verified successfully');
     res.status(200).send(challenge);
   } else {
-    console.error('Instagram webhook verification failed');
+    logger.error('Instagram webhook verification failed');
     res.sendStatus(403);
   }
 };
@@ -359,85 +371,63 @@ exports.verifyInstagramWebhook = (req, res) => {
  */
 exports.handleInstagramWebhook = async (req, res) => {
   try {
-    // Acknowledge receipt immediately so Meta doesn't retry
     res.sendStatus(200);
 
-    console.log('📩 [Instagram Webhook] Received POST:', JSON.stringify(req.body, null, 2));
-
-    const entry = req.body.entry?.[0];
-    if (!entry) {
-      console.log('No entry in Instagram webhook payload');
-      return;
-    }
-
-    // Process DMs (messaging/standby), comments, or mentions
-    const hasMessaging = entry.messaging && entry.messaging.length > 0;
-    const hasStandby = entry.standby && entry.standby.length > 0;
-    const hasChanges = entry.changes && entry.changes.length > 0;
-    const hasCommentChange = hasChanges && entry.changes.some(c => c.field === 'comments');
-    const hasMentionChange = hasChanges && entry.changes.some(c => c.field === 'mentions');
-    if (!hasMessaging && !hasStandby && !hasCommentChange && !hasMentionChange) {
-      return;
-    }
-
-    const instagramId = entry.id;
-    const isMetaTestEvent = String(instagramId) === '0';
-    const PlatformConnection = require('../models/PlatformConnection');
-    const connection = await PlatformConnection.findOne({
-      platform: 'instagram',
-      platformUserId: { $in: [instagramId, String(instagramId)].filter(Boolean) },
-      isActive: true
+    logger.info('[Instagram Webhook] Received POST', {
+      object: req.body?.object,
+      entryId: req.body?.entry?.[0]?.id
     });
 
-    if (!connection) {
-      if (isMetaTestEvent && hasMentionChange) {
-        console.log('[Instagram Webhook] Received Meta test mention event (entry.id=0). This confirms callback URL works.');
-      } else {
-        console.log(`[Instagram Webhook] No active Instagram connection for account ${instagramId}. Connect this Instagram in Settings → Page Manager to receive DMs/comments/mentions here.`);
-      }
-      return;
-    }
-
-    // If DM arrived in standby, take thread control immediately so we can reply later.
-    // "Take control of conversations" must be ON in the Page's app settings for this to work.
-    if (hasStandby && !hasMessaging) {
-      const axios = require('axios');
-      const pageId = connection.platformPageId || connection.platformData?.pageId;
-      const accessToken = connection.accessToken;
-      if (pageId && accessToken) {
-        for (const event of entry.standby) {
-          const senderId = event.sender?.id;
-          if (!senderId) continue;
-          try {
-            await axios.post(`https://graph.facebook.com/v19.0/${pageId}/take_thread_control`, null, {
-              params: { recipient_id: senderId, access_token: accessToken }
-            });
-            console.log(`[Instagram Webhook] ✅ Took thread control for standby sender ${senderId}`);
-          } catch (ttcErr) {
-            console.warn(`[Instagram Webhook] ⚠️ take_thread_control failed for ${senderId}:`, ttcErr.response?.data?.error?.message || ttcErr.message);
-          }
-        }
-      }
-    }
-
-    const organizationId = connection.organization.toString();
-
-    // Save DM to DB immediately so inbox polling shows it without Sync
-    const processWebhook = require('../jobs/processWebhook');
-    try {
-      const result = await processWebhook({
-        data: { platform: 'instagram', payload: req.body, organizationId },
-        id: 'instagram-' + Date.now()
-      });
-      if (result && result.interactionId) {
-        console.log('Instagram webhook processed and DM saved to database');
-      }
-    } catch (processErr) {
-      console.error('Instagram webhook processing error:', processErr.message);
-    }
+    await ingestInstagramWebhook(req.body, '[Instagram Webhook]');
   } catch (error) {
-    console.error('Instagram webhook handler error:', error);
-    // Don't send error response as we already sent 200
+    logger.error('Instagram webhook handler error', { error: error.message, stack: error.stack });
+  }
+};
+
+// =============================================================================
+// Instagram Login (Repmeup-IG app) — separate webhook endpoint
+// =============================================================================
+
+/**
+ * Verify Instagram Login webhook (Repmeup-IG app)
+ * GET /api/webhooks/instagram-login
+ */
+exports.verifyInstagramLoginWebhook = (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  logger.info('[IG-Login Webhook] Verification request', { mode, token });
+
+  const verifyToken = process.env.INSTAGRAM_LOGIN_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
+  if (mode === 'subscribe' && token === verifyToken) {
+    logger.info('[IG-Login Webhook] Verified successfully');
+    res.status(200).send(challenge);
+  } else {
+    logger.error('[IG-Login Webhook] Verification failed');
+    res.sendStatus(403);
+  }
+};
+
+/**
+ * Handle Instagram Login webhook events (Repmeup-IG app)
+ * POST /api/webhooks/instagram-login
+ *
+ * Only looks up connections created via Instagram Login (IGAA token prefix).
+ * Self-heals the app-scoped → real IG Business Account ID on first webhook.
+ */
+exports.handleInstagramLoginWebhook = async (req, res) => {
+  try {
+    res.sendStatus(200);
+
+    logger.info('[IG-Login Webhook] Received POST', {
+      object: req.body?.object,
+      entryId: req.body?.entry?.[0]?.id
+    });
+
+    await ingestInstagramWebhook(req.body, '[IG-Login Webhook]');
+  } catch (error) {
+    logger.error('[IG-Login Webhook] Handler error', { error: error.message, stack: error.stack });
   }
 };
 
@@ -458,7 +448,7 @@ exports.verifyLinkedInWebhook = (req, res) => {
     const challengeCode = req.query['challengeCode'];
     const applicationId = req.query['applicationId']; // For parent-child apps
 
-    console.log('💼 [LinkedIn Webhook] Verification request:', { 
+    logger.info('💼 [LinkedIn Webhook] Verification request', { 
       challengeCode: challengeCode ? 'present' : 'missing',
       applicationId: applicationId || 'none',
       clientSecretSet: !!process.env.LINKEDIN_CLIENT_SECRET
@@ -466,7 +456,7 @@ exports.verifyLinkedInWebhook = (req, res) => {
 
     // Check if client secret is configured
     if (!process.env.LINKEDIN_CLIENT_SECRET) {
-      console.error('❌ [LinkedIn Webhook] LINKEDIN_CLIENT_SECRET not set in environment');
+      logger.error('❌ [LinkedIn Webhook] LINKEDIN_CLIENT_SECRET not set in environment');
       return res.status(500).json({
         error: 'LinkedIn client secret not configured',
         message: 'Please set LINKEDIN_CLIENT_SECRET in your .env file'
@@ -475,7 +465,7 @@ exports.verifyLinkedInWebhook = (req, res) => {
 
     // Check if challenge code is provided
     if (!challengeCode) {
-      console.error('❌ [LinkedIn Webhook] No challengeCode provided');
+      logger.error('❌ [LinkedIn Webhook] No challengeCode provided');
       return res.status(400).json({
         error: 'Missing challenge code',
         message: 'LinkedIn must provide challengeCode query parameter'
@@ -490,7 +480,7 @@ exports.verifyLinkedInWebhook = (req, res) => {
       .update(challengeCode)
       .digest('hex');
 
-    console.log('✅ [LinkedIn Webhook] Challenge response computed');
+    logger.info('✅ [LinkedIn Webhook] Challenge response computed');
 
     // Return JSON response with both challengeCode and challengeResponse
     // Must respond within 3 seconds with 200 OK and content-type: application/json
@@ -502,12 +492,12 @@ exports.verifyLinkedInWebhook = (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.status(200).json(response);
 
-    console.log('✅ [LinkedIn Webhook] Verification response sent', {
+    logger.info('✅ [LinkedIn Webhook] Verification response sent', {
       challengeCode: challengeCode.substring(0, 8) + '...',
       responseLength: JSON.stringify(response).length
     });
   } catch (error) {
-    console.error('❌ [LinkedIn Webhook] Verification error:', error);
+    logger.error('❌ [LinkedIn Webhook] Verification error', { error: error.message, stack: error.stack });
     res.status(500).json({
       error: 'Internal server error',
       message: error.message
@@ -530,7 +520,7 @@ exports.handleLinkedInWebhook = async (req, res) => {
     const { webhookQueue } = require('../config/queue');
     const crypto = require('crypto');
     
-    console.log('💼 [LinkedIn Webhook] Received:', JSON.stringify(req.body, null, 2));
+    logger.info('💼 [LinkedIn Webhook] Received', { body: req.body });
 
     // Verify webhook signature for security
     // LinkedIn uses X-LI-Signature header with format: hmacsha256=<hash>
@@ -539,7 +529,7 @@ exports.handleLinkedInWebhook = async (req, res) => {
     
     if (signatureHeader) {
       if (!process.env.LINKEDIN_CLIENT_SECRET) {
-        console.error('❌ [LinkedIn Webhook] LINKEDIN_CLIENT_SECRET not set for signature verification');
+        logger.error('❌ [LinkedIn Webhook] LINKEDIN_CLIENT_SECRET not set for signature verification');
         return res.sendStatus(500);
       }
 
@@ -554,16 +544,16 @@ exports.handleLinkedInWebhook = async (req, res) => {
         .digest('hex');
       
       if (signature !== expectedSignature) {
-        console.error('❌ [LinkedIn Webhook] Invalid signature', {
+        logger.error('❌ [LinkedIn Webhook] Invalid signature', {
           received: signature.substring(0, 10) + '...',
           expected: expectedSignature.substring(0, 10) + '...'
         });
         return res.sendStatus(403);
       }
       
-      console.log('✅ [LinkedIn Webhook] Signature verified');
+      logger.info('✅ [LinkedIn Webhook] Signature verified');
     } else {
-      console.warn('⚠️  [LinkedIn Webhook] No X-LI-Signature header present');
+      logger.warn('⚠️  [LinkedIn Webhook] No X-LI-Signature header present');
     }
 
     // Acknowledge receipt immediately
@@ -573,7 +563,7 @@ exports.handleLinkedInWebhook = async (req, res) => {
     const { eventType, organizationUrn, data } = req.body;
     
     if (!eventType || !data) {
-      console.log('⚠️  [LinkedIn Webhook] Invalid payload structure');
+      logger.info('⚠️  [LinkedIn Webhook] Invalid payload structure');
       return;
     }
 
@@ -581,7 +571,7 @@ exports.handleLinkedInWebhook = async (req, res) => {
     const orgId = organizationUrn?.split(':').pop();
     
     if (!orgId) {
-      console.log('⚠️  [LinkedIn Webhook] No organization ID in payload');
+      logger.info('⚠️  [LinkedIn Webhook] No organization ID in payload');
       return;
     }
 
@@ -597,11 +587,11 @@ exports.handleLinkedInWebhook = async (req, res) => {
     });
 
     if (!connection) {
-      console.log(`⚠️  [LinkedIn Webhook] No active connection found for org: ${orgId}`);
+      logger.info(`⚠️  [LinkedIn Webhook] No active connection found for org: ${orgId}`);
       return;
     }
 
-    console.log(`✅ [LinkedIn Webhook] Found connection for org: ${connection.platformName}`);
+    logger.info(`✅ [LinkedIn Webhook] Found connection for org: ${connection.platformName}`);
 
     // Queue webhook for processing based on event type
     await webhookQueue.add({
@@ -618,9 +608,9 @@ exports.handleLinkedInWebhook = async (req, res) => {
       }
     });
 
-    console.log(`✅ [LinkedIn Webhook] Queued ${eventType} for processing`);
+    logger.info(`✅ [LinkedIn Webhook] Queued ${eventType} for processing`);
   } catch (error) {
-    console.error('❌ [LinkedIn Webhook] Handler error:', error);
+    logger.error('❌ [LinkedIn Webhook] Handler error', { error: error.message, stack: error.stack });
     // Don't send error response as we already sent 200
   }
 };
@@ -636,209 +626,568 @@ exports.verifyWhatsAppWebhook = (req, res) => {
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
 
-    console.log('💬 [WhatsApp Webhook] Verification request:', { 
+    logger.info('💬 [WhatsApp Webhook] Verification request', { 
       mode, 
       tokenProvided: !!token,
       challengeProvided: !!challenge 
     });
 
     // Verify the token and mode
-    if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
-      console.log('✅ [WhatsApp Webhook] Verification successful');
+    // Accept either the WhatsApp-specific token or the generic Meta verify token
+    const expectedToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
+    if (mode === 'subscribe' && token === expectedToken) {
+      logger.info('✅ [WhatsApp Webhook] Verification successful');
       res.status(200).send(challenge);
     } else {
-      console.error('❌ [WhatsApp Webhook] Verification failed');
+      logger.error('❌ [WhatsApp Webhook] Verification failed — token mismatch');
       res.sendStatus(403);
     }
   } catch (error) {
-    console.error('❌ [WhatsApp Webhook] Verification error:', error);
+    logger.error('❌ [WhatsApp Webhook] Verification error', { error: error.message, stack: error.stack });
     res.sendStatus(500);
   }
 };
 
 /**
- * @desc    Handle WhatsApp webhook
+ * @desc    Handle WhatsApp webhook.
+ *
+ * Responsibilities that stay in the controller:
+ *   1. Meta signature verification (x-hub-signature-256)
+ *   2. Immediate 200 ACK so Meta does not retry while we process
+ *   3. Top-level object-type guard
+ *
+ * Everything else — connection lookup, message persistence, sentiment,
+ * socket emit, AI/auto-reply queuing, delivery-status updates — is handled
+ * by whatsappWebhookService.processWhatsAppWebhook().
+ *
  * @route   POST /api/webhooks/whatsapp
  * @access  Public (called by Meta)
  */
-exports.handleWhatsAppWebhook = async (req, res) => {
-  try {
-    const { webhookQueue } = require('../config/queue');
-    const whatsappService = require('../integrations/whatsapp/whatsappService');
-    const PlatformConnection = require('../models/PlatformConnection');
-    const Interaction = require('../models/Interaction');
+/**
+ * @desc    Verify the Interakt partner webhook (some consoles probe with a GET).
+ * @route   GET /api/webhooks/interakt
+ * @access  Public
+ */
+exports.verifyInteraktWebhook = async (req, res) => {
+  // Meta-style handshake, in case Interakt's console uses one.
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  const expected =
+    process.env.INTERAKT_WEBHOOK_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
 
-    console.log('💬 [WhatsApp Webhook] Received event');
-    console.log('📦 [WhatsApp Webhook] Request body:', JSON.stringify(req.body, null, 2));
-    console.log('📋 [WhatsApp Webhook] Headers:', {
-      'x-hub-signature-256': req.headers['x-hub-signature-256'] ? 'present' : 'missing',
-      'content-type': req.headers['content-type']
+  if (mode === 'subscribe' && challenge && expected && token === expected) {
+    logger.info('[Interakt Webhook] Verification succeeded');
+    return res.status(200).send(challenge);
+  }
+  // Plain reachability probe.
+  if (!mode && !challenge) return res.status(200).send('OK');
+
+  logger.warn('[Interakt Webhook] Verification failed', { mode, hasChallenge: Boolean(challenge) });
+  return res.sendStatus(403);
+};
+
+/**
+ * @desc    Interakt partner (tech-partner) webhook — onboarding lifecycle events.
+ *
+ * This is the partner-level callback shared between us and Interakt. It is NOT the
+ * per-number message webhook (that is /api/webhooks/whatsapp, which carries Meta-format
+ * messages and delivery statuses). Interakt posts here when a WABA/phone number
+ * finishes onboarding against our solution:
+ *
+ *   { "event": "WABA_ONBOARDED",
+ *     "isv_name_token": "<our ISV token>",
+ *     "waba_id": "...",
+ *     "phone_number_id": "..." }
+ *
+ * Authentication is the echoed `isv_name_token` — Interakt sends our own partner token
+ * back to us, so a constant-time compare against INTERAKT_ISV_TOKEN proves the sender.
+ *
+ * Only WABA_ONBOARDED is documented today; anything else is acknowledged and logged in
+ * full rather than dropped, so we can see what Interakt actually sends on failure.
+ *
+ * @route   POST /api/webhooks/interakt
+ * @access  Public (authenticated by the echoed ISV token in the body)
+ */
+exports.handleInteraktWebhook = async (req, res) => {
+  const body = req.body || {};
+  const { event, isv_name_token: isvToken, waba_id: wabaId, phone_number_id: phoneNumberId } = body;
+
+  const expected = process.env.INTERAKT_ISV_TOKEN;
+  if (!expected) {
+    logger.error('[Interakt Webhook] INTERAKT_ISV_TOKEN not configured — cannot authenticate');
+    return res.sendStatus(503);
+  }
+
+  const crypto = require('crypto');
+  const a = Buffer.from(String(isvToken || ''));
+  const b = Buffer.from(String(expected));
+  const authed = a.length === b.length && crypto.timingSafeEqual(a, b);
+  if (!authed) {
+    logger.warn('[Interakt Webhook] Rejected: isv_name_token mismatch', { event, wabaId });
+    return res.sendStatus(403);
+  }
+
+  // ACK before doing any work — Interakt should never wait on our DB.
+  res.sendStatus(200);
+
+  logger.info('[Interakt Webhook] Event received', { event, wabaId, phoneNumberId });
+
+  // Onboarding failure. Observed shape (note the doubly-nested error):
+  //   { event: 'WABA_ONBOARDING_FAILED', waba_id, phone_number_id,
+  //     error: { error: { message, type, code, fbtrace_id } } }
+  if (event === 'WABA_ONBOARDING_FAILED') {
+    const metaError = body.error?.error || body.error || {};
+    const reason = metaError.message || 'Interakt could not complete onboarding for this WABA.';
+    logger.error('[Interakt Webhook] Onboarding failed', {
+      wabaId, phoneNumberId, code: metaError.code, reason
     });
 
-    // Verify webhook signature (Meta signature verification)
-    const signature = req.headers['x-hub-signature-256'];
-    if (signature && process.env.META_APP_SECRET) {
-      const crypto = require('crypto');
-      const expectedSignature = 'sha256=' + crypto
-        .createHmac('sha256', process.env.META_APP_SECRET)
-        .update(JSON.stringify(req.body))
-        .digest('hex');
+    const interaktLog = require('../services/interaktLogService');
+    await interaktLog.logInbound({
+      event, success: false, reason, wabaId, phoneNumberId,
+      errorCode: metaError.code, payload: body
+    });
 
-      if (signature !== expectedSignature) {
-        console.error('❌ [WhatsApp Webhook] Invalid signature');
-        console.error('   Expected:', expectedSignature);
-        console.error('   Received:', signature);
+    try {
+      const PlatformConnection = require('../models/PlatformConnection');
+      const or = [];
+      if (phoneNumberId) {
+        or.push({ 'platformData.phoneNumberId': String(phoneNumberId) });
+        or.push({ platformUserId: String(phoneNumberId) });
+      }
+      if (wabaId) {
+        or.push({ 'platformData.wabaId': String(wabaId) });
+        or.push({ 'platformData.businessAccountId': String(wabaId) });
+      }
+      // Only the Interakt-transported rows — a pre-existing Meta-direct connection on
+      // the same WABA is still perfectly healthy and must not be marked failed.
+      const connections = await PlatformConnection.find({
+        platform: 'whatsapp',
+        'platformData.provider': 'interakt',
+        $or: or
+      });
+
+      for (const connection of connections) {
+        if (!connection.platformData) connection.platformData = {};
+        connection.platformData.interaktLastError = String(reason).slice(0, 500);
+        connection.markModified('platformData');
+        connection.status = 'error';
+        await connection.save();
+      }
+      logger.info('[Interakt Webhook] Marked connections failed', { count: connections.length, wabaId });
+    } catch (err) {
+      logger.error('[Interakt Webhook] Could not apply onboarding failure', { error: err.message, wabaId });
+    }
+    return;
+  }
+
+  if (event !== 'WABA_ONBOARDED') {
+    // Still-unseen event type. Log the payload (minus the token) rather than guessing
+    // at semantics, so it can be implemented once a real one has been observed.
+    const { isv_name_token, ...safe } = body;
+    logger.warn('[Interakt Webhook] Unhandled event type — logging payload for follow-up', { payload: safe });
+    // Recorded as failed so it surfaces in the super-admin panel rather than only
+    // existing in pm2 logs — that is how WABA_ONBOARDING_FAILED was discovered.
+    const interaktLogUnknown = require('../services/interaktLogService');
+    await interaktLogUnknown.logInbound({
+      event, success: false, reason: `Unhandled Interakt event: ${event}`,
+      wabaId, phoneNumberId, payload: body
+    });
+    return;
+  }
+
+  if (!phoneNumberId && !wabaId) {
+    logger.warn('[Interakt Webhook] WABA_ONBOARDED without waba_id or phone_number_id — ignoring');
+    return;
+  }
+
+  try {
+    const PlatformConnection = require('../models/PlatformConnection');
+    const or = [];
+    if (phoneNumberId) {
+      or.push({ 'platformData.phoneNumberId': String(phoneNumberId) });
+      or.push({ platformUserId: String(phoneNumberId) });
+    }
+    if (wabaId) {
+      or.push({ 'platformData.wabaId': String(wabaId) });
+      or.push({ 'platformData.businessAccountId': String(wabaId) });
+    }
+
+    const connection = await PlatformConnection.findOne({ platform: 'whatsapp', $or: or });
+    if (!connection) {
+      // Interakt can confirm before our signup handler has finished writing. Not an
+      // error — the signup path sets the same fields itself.
+      logger.warn('[Interakt Webhook] No matching connection yet', { wabaId, phoneNumberId });
+      return;
+    }
+
+    if (!connection.platformData) connection.platformData = {};
+    connection.platformData.provider = 'interakt';
+    if (wabaId) {
+      connection.platformData.wabaId = String(wabaId);
+      connection.platformData.businessAccountId = String(wabaId);
+    }
+    if (phoneNumberId) connection.platformData.phoneNumberId = String(phoneNumberId);
+    connection.platformData.interaktRegisteredAt = new Date();
+    connection.platformData.interaktLastError = null;
+    connection.markModified('platformData');
+    connection.status = 'connected';
+    connection.isActive = true;
+    await connection.save();
+
+    logger.info('[Interakt Webhook] Connection marked onboarded', {
+      connectionId: connection._id.toString(),
+      organization: connection.organization?.toString()
+    });
+
+    const interaktLogOk = require('../services/interaktLogService');
+    await interaktLogOk.logInbound({
+      event, success: true, wabaId, phoneNumberId,
+      organization: connection.organization || null,
+      platformConnection: connection._id,
+      payload: body
+    });
+  } catch (err) {
+    logger.error('[Interakt Webhook] Failed to apply WABA_ONBOARDED', { error: err.message, wabaId, phoneNumberId });
+  }
+};
+
+exports.handleWhatsAppWebhook = async (req, res) => {
+  logger.info('[WhatsApp Webhook] Received event');
+
+  // Signature verification.
+  //
+  // Meta signs with OUR app secret, so the HMAC below is authoritative for
+  // Meta-direct numbers. Interakt-proxied deliveries are signed by Interakt's app
+  // (or unsigned), so that HMAC can never match — a mismatch there means "different
+  // sender", not "forged". We therefore verify whenever a signature is present and
+  // it validates, and only hard-reject when it is present AND provably wrong AND we
+  // are not expecting Interakt traffic.
+  const signature = req.headers['x-hub-signature-256'];
+  const appSecret = process.env.META_APP_SECRET || process.env.FACEBOOK_APP_SECRET;
+
+  if (signature && appSecret) {
+    const crypto = require('crypto');
+    const raw =
+      req.rawBody && Buffer.isBuffer(req.rawBody)
+        ? req.rawBody
+        : Buffer.from(JSON.stringify(req.body ?? {}));
+    if (!req.rawBody) {
+      logger.warn(
+        '[WhatsApp Webhook] req.rawBody missing — signature may fail. Ensure POST /api/webhooks/whatsapp uses express.json verify (see app.js).'
+      );
+    }
+    const expected =
+      'sha256=' + crypto.createHmac('sha256', appSecret).update(raw).digest('hex');
+
+    // Constant-time compare, and never log `expected` — that hands out a valid
+    // signature for this exact body to anyone who can read the logs.
+    const expectedBuf = Buffer.from(expected);
+    const receivedBuf = Buffer.from(String(signature));
+    const valid =
+      expectedBuf.length === receivedBuf.length &&
+      crypto.timingSafeEqual(expectedBuf, receivedBuf);
+
+    if (!valid) {
+      const interaktEnabled = Boolean(process.env.INTERAKT_ISV_TOKEN);
+      if (!interaktEnabled) {
+        logger.error('[WhatsApp Webhook] Invalid signature — rejecting', {
+          received: String(signature).slice(0, 16) + '…'
+        });
         return res.sendStatus(403);
       }
-      console.log('✅ [WhatsApp Webhook] Signature verified');
-    } else {
-      console.log('⚠️  [WhatsApp Webhook] Signature verification skipped (no signature or META_APP_SECRET)');
+      // Interakt is configured: accept, but make it visible rather than silent.
+      logger.warn(
+        '[WhatsApp Webhook] Signature did not match our app secret; accepting as Interakt-proxied delivery',
+        { received: String(signature).slice(0, 16) + '…' }
+      );
     }
+  } else {
+    logger.warn(
+      '[WhatsApp Webhook] Signature verification skipped (no signature header, or META_APP_SECRET / FACEBOOK_APP_SECRET unset)'
+    );
+  }
 
-    // Acknowledge receipt immediately
-    res.sendStatus(200);
+  // ACK immediately so Meta does not retry while we do async work.
+  res.sendStatus(200);
 
-    // Check if it's a WhatsApp Business Account event
-    if (req.body.object !== 'whatsapp_business_account') {
-      console.log('⏭️  [WhatsApp Webhook] Not a WhatsApp business account event');
-      console.log('   Object type:', req.body.object);
-      console.log('   Expected: whatsapp_business_account');
+  if (req.body?.object !== 'whatsapp_business_account') {
+    logger.info('[WhatsApp Webhook] Ignoring non-whatsapp_business_account event', {
+      objectType: req.body?.object
+    });
+    return;
+  }
+
+  try {
+    const { webhookQueue } = require('../config/queue');
+    const hasStatuses = req.body?.entry?.some((e) =>
+      e.changes?.some((c) => c.value?.statuses?.length > 0)
+    );
+    const messageCount = req.body?.entry?.reduce(
+      (n, e) => n + (e.changes?.reduce((c, ch) => c + (ch.value?.messages?.length ?? 0), 0) ?? 0), 0
+    );
+
+    // Deterministic jobId so retried/duplicate deliveries (Meta retries the exact
+    // same webhook body when our 200 OK doesn't arrive in time, and some BSPs like
+    // Interakt also redeliver) are deduped by Bull itself at enqueue time — Bull
+    // will not create a second job for a jobId that already exists in Redis.
+    // Hash the exact bytes we received (falls back to serialized body if rawBody
+    // capture is ever unavailable) so retries of the same payload map to the same id.
+    const crypto = require('crypto');
+    const rawForId =
+      req.rawBody && Buffer.isBuffer(req.rawBody)
+        ? req.rawBody
+        : Buffer.from(JSON.stringify(req.body ?? {}));
+    const jobId = `wa_webhook_${crypto.createHash('sha256').update(rawForId).digest('hex')}`;
+
+    const job = await webhookQueue.add(
+      {
+        platform: 'whatsapp_webhook',
+        payload: req.body
+      },
+      {
+        jobId,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+        priority: hasStatuses ? 2 : 1
+      }
+    );
+    logger.info('[WhatsApp Webhook] Enqueued', {
+      jobId: job.id,
+      messages: messageCount,
+      statuses: hasStatuses
+    });
+  } catch (error) {
+    logger.error('[WhatsApp Webhook] Failed to enqueue', { error: error.message, stack: error.stack });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Product Payment Webhook
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @desc    Handle payment confirmation from any payment provider (legacy commerce flow).
+ *          Matches the order by orderToken, queues a confirmation DM, and atomically marks paid.
+ *
+ *          Hardening (Phase 0):
+ *            - raw body HMAC-SHA256 via exact bytes (req.rawBody captured in app.js)
+ *            - timing-safe comparison via timingSafeEqual
+ *            - PRODUCT_PAYMENT_SECRET mandatory in production
+ *            - atomic findOneAndUpdate with status guard (dedup)
+ *            - bridges to canonical CommerceOrder when orderToken matches
+ *            - confirmation DM is queued, not sent inline
+ *
+ * @route   POST /api/webhooks/product-payment
+ * @access  Public (verified by HMAC)
+ */
+exports.handleProductPaymentWebhook = async (req, res) => {
+  // ACK immediately so the payment provider does not retry while we process
+  res.sendStatus(200);
+
+  try {
+    const crypto = require('crypto');
+    const secret = process.env.PRODUCT_PAYMENT_SECRET;
+
+    // Require webhook secret in production
+    if (!secret && process.env.NODE_ENV === 'production') {
+      logger.error('[ProductPayment] PRODUCT_PAYMENT_SECRET not configured in production — webhook rejected');
       return;
     }
 
-    // Check if there are entries
-    if (!req.body.entry || req.body.entry.length === 0) {
-      console.log('⏭️  [WhatsApp Webhook] No entries in webhook');
-      console.log('   Entry count:', req.body.entry ? req.body.entry.length : 0);
+    if (secret) {
+      const sig = req.headers['x-repmeup-sig'] || req.headers['x-webhook-sig'] || '';
+      // Always use exact raw bytes captured in app.js express.json verify callback
+      const rawBody = Buffer.isBuffer(req.rawBody)
+        ? req.rawBody
+        : Buffer.from(req.rawBody || JSON.stringify(req.body || '{}'));
+      const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+      const sigBuf = Buffer.from(sig);
+      const expBuf = Buffer.from(expected);
+      const signaturesMatch =
+        sigBuf.length === expBuf.length &&
+        crypto.timingSafeEqual(sigBuf, expBuf);
+      if (!signaturesMatch) {
+        logger.warn('[ProductPayment] Invalid signature — request rejected');
+        return;
+      }
+    }
+
+    const { order_token: orderToken, payment_ref: paymentRef, amount: rawAmount, currency } = req.body || {};
+    if (!orderToken) {
+      logger.warn('[ProductPayment] Missing order_token in payload');
       return;
     }
 
-    console.log(`📥 [WhatsApp Webhook] Processing ${req.body.entry.length} entry/entries`);
+    const ProductOrder = require('../models/ProductOrder');
+    const CommerceOrder = require('../models/CommerceOrder');
 
-    // Process each entry
-    for (const entry of req.body.entry) {
-      if (!entry.changes || entry.changes.length === 0) {
+    // Atomic status transition — guards against duplicate webhook delivery
+    const claimed = await ProductOrder.findOneAndUpdate(
+      { orderToken, status: { $ne: 'paid' } },
+      {
+        $set: {
+          status: 'paid',
+          paymentRef: paymentRef || null,
+          paidAt: new Date()
+        }
+      },
+      { new: true }
+    ).populate('product');
+
+    if (!claimed) {
+      logger.info('[ProductPayment] Order already paid or not found — skipping duplicate', { orderToken });
+      return;
+    }
+
+    logger.info('[ProductPayment] ProductOrder marked paid', { orderToken, paymentRef });
+
+    // Bridge to canonical CommerceOrder if one references the same orderToken
+    const bridgeUpdate = {
+      $set: {
+        status: 'paid',
+        paymentRef: paymentRef || null,
+        paymentMethod: 'external',
+        paidAt: new Date()
+      },
+      $push: {
+        statusHistory: {
+          status: 'paid',
+          at: new Date(),
+          note: `Payment confirmed via product-payment webhook (ref: ${paymentRef || 'unknown'})`
+        }
+      }
+    };
+    const bridged = await CommerceOrder.findOneAndUpdate(
+      { orderToken, status: { $nin: ['paid', 'delivered', 'cancelled', 'refunded'] } },
+      bridgeUpdate,
+      { new: true }
+    );
+    if (bridged) {
+      logger.info('[ProductPayment] Bridged payment status to CommerceOrder', {
+        orderToken,
+        commerceOrderId: String(bridged._id)
+      });
+    }
+
+    // Queue confirmation DM — async, does not block ACK
+    const { paymentWebhookQueue } = require('../config/queue');
+    await paymentWebhookQueue.add(
+      'product-payment-dm',
+      {
+        type: 'product_payment_confirmation',
+        productOrderId: String(claimed._id),
+        commerceOrderId: bridged ? String(bridged._id) : null,
+        organizationId: String(claimed.organization),
+        instagramUserId: claimed.instagramUserId,
+        productName: claimed.product?.name || null
+      },
+      { attempts: 3, backoff: { type: 'exponential', delay: 3000 }, removeOnComplete: 50, removeOnFail: 100 }
+    );
+  } catch (err) {
+    logger.error('[ProductPayment] Webhook handler error', { error: err.message });
+  }
+};
+
+// ── Gmail Pub/Sub Webhook ─────────────────────────────────────────────────────
+
+/**
+ * POST /api/webhooks/gmail
+ *
+ * Receives push notifications from Google Pub/Sub when new Gmail messages arrive.
+ * Payload shape (base64-encoded JSON in message.data):
+ *   { emailAddress: string, historyId: string }
+ *
+ * Google requires a 2xx response within 10 seconds; processing is queued
+ * so we ACK immediately and do the DB work asynchronously.
+ */
+exports.handleGmailWebhook = async (req, res) => {
+  // Always ACK immediately to prevent Pub/Sub from retrying
+  res.status(200).json({ received: true });
+
+  try {
+    const message = req.body?.message;
+    if (!message?.data) {
+      logger.warn('[GmailWebhook] push received with no message.data');
+      return;
+    }
+
+    // Decode base64-encoded JSON payload
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(message.data, 'base64').toString('utf-8'));
+    } catch {
+      logger.warn('[GmailWebhook] could not decode message.data');
+      return;
+    }
+
+    const { emailAddress, historyId } = payload;
+    if (!emailAddress) {
+      logger.warn('[GmailWebhook] push missing emailAddress');
+      return;
+    }
+
+    logger.debug('[GmailWebhook] push received', { emailAddress, historyId });
+
+    // Queue the processing job — same pattern as WhatsApp
+    const { emailWebhookQueue, queueConfig } = require('../config/queue');
+    await emailWebhookQueue.add(
+      { provider: 'gmail', emailAddress, historyId },
+      queueConfig
+    );
+  } catch (err) {
+    logger.error('[GmailWebhook] error queuing job', { error: err.message });
+  }
+};
+
+// ── Outlook / Microsoft Graph Webhook ────────────────────────────────────────
+
+/**
+ * POST /api/webhooks/outlook
+ *
+ * Handles both the Graph subscription validation challenge (GET-like POST with
+ * validationToken query param) and the actual change notification payload.
+ *
+ * Security: validates the clientState secret on every notification.
+ */
+exports.handleOutlookWebhook = async (req, res) => {
+  // Graph subscription validation: respond with the validationToken as plain text
+  const validationToken = req.query.validationToken;
+  if (validationToken) {
+    return res.status(200).contentType('text/plain').send(validationToken);
+  }
+
+  // ACK immediately
+  res.status(202).json({ received: true });
+
+  try {
+    const notifications = req.body?.value;
+    if (!Array.isArray(notifications) || notifications.length === 0) return;
+
+    const expectedClientState = process.env.OUTLOOK_WEBHOOK_CLIENT_STATE;
+
+    for (const notification of notifications) {
+      // Validate clientState to prevent spoofing
+      if (expectedClientState && notification.clientState !== expectedClientState) {
+        logger.warn('[OutlookWebhook] clientState mismatch — ignoring notification');
         continue;
       }
 
-      for (const change of entry.changes) {
-        const value = change.value;
-        
-        // Check if it's a message event
-        if (change.field === 'messages' && value.messages && value.messages.length > 0) {
-          const message = value.messages[0];
-          const phoneNumberId = value.metadata.phone_number_id;
+      const { subscriptionId, resource, resourceData } = notification;
+      const messageId = resourceData?.id || resource?.split('/').pop();
+      if (!messageId) continue;
 
-          console.log(`💬 [WhatsApp Webhook] New message from ${message.from}`);
+      logger.debug('[OutlookWebhook] notification received', { subscriptionId, messageId });
 
-          // Find platform connection by phone number ID
-          console.log(`🔍 [WhatsApp Webhook] Looking for connection with phoneNumberId: ${phoneNumberId}`);
-          
-          const connection = await PlatformConnection.findOne({
-            platform: 'whatsapp',
-            'platformData.phoneNumberId': phoneNumberId,
-            isActive: true
-          }).populate('organization');
-
-          if (!connection) {
-            console.log(`⚠️  [WhatsApp Webhook] No active connection found for phone: ${phoneNumberId}`);
-            console.log(`   Checking all WhatsApp connections...`);
-            
-            // Debug: List all WhatsApp connections
-            const allConnections = await PlatformConnection.find({ platform: 'whatsapp' });
-            console.log(`   Found ${allConnections.length} WhatsApp connection(s) in database:`);
-            allConnections.forEach((conn, idx) => {
-              console.log(`   [${idx + 1}] ID: ${conn._id}, PhoneNumberId: ${conn.platformData?.phoneNumberId}, Active: ${conn.isActive}`);
-            });
-            
-            continue;
-          }
-
-          console.log(`✅ [WhatsApp Webhook] Found connection for: ${connection.platformData.verifiedName}`);
-
-          // Process the message
-          const messageData = await whatsappService.processWebhookMessage(req.body);
-
-          if (messageData.success && !messageData.skipped) {
-            // Transform to interaction
-            const interaction = await whatsappService.transformToInteraction(
-              messageData.messageData,
-              connection,
-              connection.organization
-            );
-
-            // Save interaction
-            const savedInteraction = await Interaction.create(interaction);
-            console.log(`✅ [WhatsApp] Interaction saved: ${savedInteraction._id}`);
-
-            // AUTOMATIC SENTIMENT ANALYSIS: Analyze immediately for real-time filtering
-            if (savedInteraction.content && !savedInteraction.sentiment) {
-              try {
-                const aiService = require('../services/aiService');
-                const sentimentResult = aiService.fallbackSentimentAnalysis(savedInteraction.content);
-                savedInteraction.sentiment = sentimentResult.sentiment;
-                savedInteraction.sentimentScore = sentimentResult.sentimentScore;
-                savedInteraction.sentimentConfidence = sentimentResult.sentimentConfidence;
-                await savedInteraction.save();
-                console.log(`🎭 [WhatsApp] Sentiment analyzed: ${sentimentResult.sentiment} for ${savedInteraction._id}`);
-              } catch (sentError) {
-                console.error(`⚠️ [WhatsApp] Sentiment analysis failed:`, sentError.message);
-              }
-            }
-
-            // Mark message as read (optional)
-            try {
-              await whatsappService.markAsRead(message.id);
-            } catch (readError) {
-              console.error('❌ [WhatsApp] Failed to mark as read:', readError.message);
-            }
-
-            // Full AI pipeline + auto-reply queue (respects triggerMode, platforms, types, delay)
-            try {
-              const { aiQueue } = require('../config/queue');
-              const autoReplyScheduler = require('../services/autoReplyScheduler');
-              await aiQueue.add(
-                { interactionId: savedInteraction._id },
-                {
-                  attempts: 3,
-                  backoff: 2000,
-                  jobId: `ai-${savedInteraction._id}`
-                }
-              );
-              const queued = await autoReplyScheduler.queueImmediateAutoReply(
-                savedInteraction._id.toString(),
-                connection.organization._id.toString()
-              );
-              if (queued) {
-                console.log(`✅ [WhatsApp] AI + auto-reply queued: ${savedInteraction._id}`);
-              }
-            } catch (queueError) {
-              console.error('❌ [WhatsApp] Failed to queue AI/auto-reply:', queueError.message);
-            }
-          }
-        } 
-        // Handle message status updates (optional)
-        else if (change.field === 'messages' && value.statuses && value.statuses.length > 0) {
-          const status = value.statuses[0];
-          console.log(`📊 [WhatsApp Webhook] Message status update: ${status.status} for ${status.id}`);
-          
-          // Update interaction status in database
-          await Interaction.updateOne(
-            { platformId: status.id, platform: 'whatsapp' },
-            { 
-              $set: { 
-                'metadata.deliveryStatus': status.status,
-                'metadata.statusTimestamp': new Date(parseInt(status.timestamp) * 1000)
-              } 
-            }
-          );
-        }
-      }
+      const { emailWebhookQueue, queueConfig } = require('../config/queue');
+      await emailWebhookQueue.add(
+        { provider: 'outlook', subscriptionId, messageId },
+        queueConfig
+      );
     }
-
-  } catch (error) {
-    console.error('❌ [WhatsApp Webhook] Handler error:', error);
-    // Don't send error response as we already sent 200
+  } catch (err) {
+    logger.error('[OutlookWebhook] error queuing job', { error: err.message });
   }
 };
 

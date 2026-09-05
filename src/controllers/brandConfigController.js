@@ -1,7 +1,10 @@
 const BrandConfig = require('../models/BrandConfig');
 const auditLogController = require('./auditLogController');
 const aiService = require('../services/aiService');
-const { runWithAiContext } = require('../services/aiRequestContext');
+const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
+const aiCreditService = require('../services/aiCreditService');
+const brandProfileService = require('../services/brandProfileService');
+const PlatformPost = require('../models/PlatformPost');
 
 /**
  * @desc    Get brand config for current user's organization
@@ -52,7 +55,17 @@ exports.getPreview = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Organization not found' });
     }
 
-    const result = await runWithAiContext(
+    // Credit gate — 1 credit per preview generation
+    const creditCheck = await aiCreditService.checkCredits(organizationId, 1);
+    if (!creditCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        code: 'AI_CREDITS_EXCEEDED',
+        message: creditCheck.error || 'Insufficient AI credits'
+      });
+    }
+
+    const { result, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
         organizationId,
         userId: req.user._id,
@@ -67,6 +80,18 @@ exports.getPreview = async (req, res) => {
           organizationId
         )
     );
+
+    // Deduct 1 credit and link to the vendor API usage record
+    try {
+      await aiCreditService.deductCredits(
+        organizationId,
+        1,
+        { operation: 'brand_config_preview', userId: req.user._id },
+        { aiApiUsageId }
+      );
+    } catch (creditErr) {
+      console.warn('Brand preview credit deduction failed (non-fatal):', creditErr.message);
+    }
 
     const sample = result?.posts?.all ?? result?.platformPosts?.instagram ?? '';
     const previewText = typeof sample === 'string' ? sample : (sample?.content || sample?.text || '');
@@ -160,5 +185,98 @@ exports.retrainVoice = async (req, res) => {
       success: false,
       error: error.message || 'Failed to update voice trained timestamp'
     });
+  }
+};
+
+/**
+ * @desc    Analyze recent posts and build brand profile
+ * @route   POST /api/brand-config/analyze
+ * @access  Private (admin/manager)
+ */
+exports.analyzeBrandProfile = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, error: 'Organization not found' });
+    }
+
+    const postCount = await PlatformPost.countDocuments({ organization: organizationId });
+    if (postCount < 3) {
+      return res.status(400).json({
+        success: false,
+        error: `Need at least 3 synced posts to analyze (you have ${postCount}). Sync your platforms first.`
+      });
+    }
+
+    const result = await brandProfileService.analyzeOrgContent(organizationId);
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+
+    const config = await BrandConfig.findOne({ organization: organizationId });
+    res.status(200).json({ success: true, data: config });
+  } catch (error) {
+    console.error('Analyze brand profile error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Brand profile analysis failed'
+    });
+  }
+};
+
+/**
+ * @desc    Save manual overrides for auto-analyzed brand profile values
+ * @route   PUT /api/brand-config/profile-overrides
+ * @access  Private (admin/manager)
+ */
+exports.updateProfileOverrides = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, error: 'Organization not found' });
+    }
+
+    const config = await BrandConfig.findOneAndUpdate(
+      { organization: organizationId },
+      { $set: { brandProfileOverrides: req.body.overrides || null } },
+      { new: true, upsert: true }
+    );
+
+    res.status(200).json({ success: true, data: config });
+  } catch (error) {
+    console.error('Update profile overrides error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update overrides'
+    });
+  }
+};
+
+/**
+ * @desc    Clear / reset the AI-analyzed brand profile (keeps manual settings)
+ * @route   DELETE /api/brand-config/brand-profile
+ * @access  Private (admin/manager)
+ */
+exports.clearBrandProfile = async (req, res) => {
+  try {
+    const organizationId = req.user.organization?._id || req.user.organization;
+    if (!organizationId) {
+      return res.status(400).json({ success: false, error: 'Organization not found' });
+    }
+
+    const config = await BrandConfig.findOneAndUpdate(
+      { organization: organizationId },
+      { $set: { brandProfile: {}, brandProfileOverrides: null } },
+      { new: true }
+    );
+
+    if (!config) {
+      return res.status(404).json({ success: false, error: 'Brand config not found' });
+    }
+
+    res.status(200).json({ success: true, data: config, message: 'Brand profile cleared' });
+  } catch (error) {
+    console.error('Clear brand profile error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to clear profile' });
   }
 };

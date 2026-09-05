@@ -46,9 +46,17 @@ class MetaAuthService {
    * Generate state parameter for OAuth (security)
    */
   generateState(userId, organizationId, platform = 'facebook') {
+    // Fail fast here so a bad caller doesn't produce a state that only
+    // breaks AFTER the user authorizes on Meta and bounces back.
+    // JSON.stringify silently drops undefined values.
+    if (!userId || !organizationId) {
+      throw new Error(
+        `Cannot generate Meta OAuth state: userId=${userId}, organizationId=${organizationId}`
+      );
+    }
     const stateData = {
-      userId,
-      organizationId,
+      userId: String(userId),
+      organizationId: String(organizationId),
       platform,
       timestamp: Date.now(),
       nonce: crypto.randomBytes(16).toString('hex')
@@ -452,6 +460,7 @@ class MetaAuthService {
     if (!accessToken) return null;
     const appCreds = [
       [process.env.META_APP_ID, process.env.META_APP_SECRET],
+      [process.env.INSTAGRAM_LOGIN_APP_ID, process.env.INSTAGRAM_LOGIN_APP_SECRET],
       [process.env.INSTAGRAM_APP_ID, process.env.INSTAGRAM_APP_SECRET],
       [process.env.FACEBOOK_APP_ID, process.env.FACEBOOK_APP_SECRET]
     ].filter(([id, secret]) => id && secret);
@@ -515,6 +524,7 @@ class MetaAuthService {
           type: 'user_token',
           purpose: 'page_management'
         };
+        if (!existingConnection.connectedAt) existingConnection.connectedAt = new Date();
         await existingConnection.save();
         console.log(`✅ [Meta] Updated Facebook user-level connection for: ${userInfo.name}`);
         return existingConnection;
@@ -538,7 +548,8 @@ class MetaAuthService {
         metadata: {
           type: 'user_token', // Mark this as a user-level token
           purpose: 'page_management'
-        }
+        },
+        connectedAt: new Date()
       });
 
       console.log(`✅ [Meta] Created Facebook user-level connection for: ${userInfo.name}`);
@@ -575,6 +586,7 @@ class MetaAuthService {
           if (!existingConnection.metadata) existingConnection.metadata = {};
           existingConnection.metadata.profilePicture = pagePictureUrl;
         }
+        if (!existingConnection.connectedAt) existingConnection.connectedAt = new Date();
         await existingConnection.save();
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
         return existingConnection;
@@ -613,7 +625,8 @@ class MetaAuthService {
           instagramAccountId: pageData.instagram_business_account?.id || null,
           instagramUsername: pageData.instagram_business_account?.username || null,
           profilePicture: pagePictureUrl
-        }
+        },
+        connectedAt: new Date()
       });
 
       // Increment usage counter (SOLID: Dependency Inversion - depend on service, not direct model manipulation)
@@ -742,6 +755,7 @@ class MetaAuthService {
           existingConnection.metadata.profilePicture = instagramAccount.profile_picture_url;
         }
         existingConnection.scopes = ['instagram_basic', 'instagram_manage_comments', 'instagram_manage_insights', 'instagram_content_publish', 'pages_show_list'];
+        if (!existingConnection.connectedAt) existingConnection.connectedAt = new Date();
         await existingConnection.save();
         console.log(`✅ [MetaAuth] Updated existing Instagram connection for: ${instagramAccount.username}`);
         await this.subscribePageToWebhook(pageData.id, pageAccessToken);
@@ -790,7 +804,8 @@ class MetaAuthService {
           facebookPageId: pageData.id,
           facebookPageName: pageData.name,
           profilePicture: instagramAccount.profile_picture_url
-        }
+        },
+        connectedAt: new Date()
       });
 
       // Increment usage counter (SOLID: Dependency Inversion)
@@ -812,6 +827,74 @@ class MetaAuthService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Get redirect URI for the Instagram Direct connect flow.
+   * Reads INSTAGRAM_DIRECT_CALLBACK_URL, falls back to INSTAGRAM_CALLBACK_URL.
+   */
+  getInstagramDirectRedirectURI() {
+    const redirectUri =
+      process.env.INSTAGRAM_DIRECT_CALLBACK_URL ||
+      process.env.INSTAGRAM_CALLBACK_URL ||
+      process.env.META_CALLBACK_URL;
+
+    if (!redirectUri) {
+      throw new Error(
+        'Instagram direct callback URL not configured. Please set INSTAGRAM_DIRECT_CALLBACK_URL in your environment variables.'
+      );
+    }
+    return redirectUri;
+  }
+
+  /**
+   * Auto-discover and save all Instagram Professional accounts accessible via a Facebook user token.
+   * Iterates /me/accounts, finds pages with an instagram_business_account, and saves each as a
+   * PlatformConnection with platform = 'instagram'.  Also saves the linked Facebook Page connection.
+   *
+   * @param {string} userId - ORM user id
+   * @param {string} organizationId - ORM organisation id
+   * @param {string} accessToken - Long-lived Facebook user access token
+   * @param {object} userInfo - { id, name, email } from /me
+   * @returns {{ savedCount: number, igAccounts: Array<{ username, pageId }>, errors: string[] }}
+   */
+  async autoSaveInstagramConnections(userId, organizationId, accessToken, userInfo) {
+    const pages = await this.getUserPages(accessToken);
+    const pagesWithIg = pages.filter(p => p.instagram_business_account);
+
+    const igAccounts = [];
+    const errors = [];
+
+    for (const page of pagesWithIg) {
+      const pageAccessToken = page.access_token;
+      try {
+        // Save the Facebook Page connection so inbox / publish work correctly
+        await this.saveFacebookConnection(userId, organizationId, page, pageAccessToken);
+      } catch (err) {
+        if (err.code !== 'CROSS_ORG_CONFLICT') {
+          console.warn(`[InstagramDirect] Could not save Facebook page ${page.name}: ${err.message}`);
+        }
+      }
+
+      try {
+        await this.saveInstagramConnection(userId, organizationId, page, pageAccessToken);
+        igAccounts.push({
+          username: page.instagram_business_account.username,
+          pageId: page.id,
+          pageName: page.name
+        });
+      } catch (err) {
+        if (err.code === 'CROSS_ORG_CONFLICT') {
+          errors.push(`Instagram account @${page.instagram_business_account.username} is already connected to another workspace.`);
+        } else {
+          console.error(`[InstagramDirect] Failed to save IG account for page ${page.name}:`, err.message);
+          errors.push(`Could not connect @${page.instagram_business_account.username || page.name}: ${err.message}`);
+        }
+      }
+    }
+
+    console.log(`[InstagramDirect] Saved ${igAccounts.length}/${pagesWithIg.length} Instagram account(s) for org ${organizationId}`);
+    return { savedCount: igAccounts.length, igAccounts, errors };
   }
 
   /**

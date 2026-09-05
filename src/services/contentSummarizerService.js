@@ -122,9 +122,15 @@ FORMAT:
 - Make it easy to read and understand
 - For longer summaries (2000+ words), organize into sections if appropriate`;
 
+    // Truncate very large inputs to prevent excessive prompt token usage
+    const MAX_SUMMARY_INPUT = 12000;
+    const inputContent = content.length > MAX_SUMMARY_INPUT
+      ? content.substring(0, MAX_SUMMARY_INPUT) + '\n…[content truncated for length]'
+      : content;
+
     const userPrompt = `Create a ${targetWordCount || 500}-word summary of the following content${title ? ` from "${title}"` : ''}${url ? ` (Source: ${url})` : ''}:
 
-${content}
+${inputContent}
 
 Remember: Your summary MUST be approximately ${targetWordCount || 500} words. This is a strict requirement.`;
 

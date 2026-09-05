@@ -5,7 +5,11 @@ const logger = require('../config/logger');
 const instagramService = require('../integrations/meta/instagramService');
 const { emitToOrg } = require('../utils/socketEmitter');
 const cacheService = require('../services/cacheService');
-const { isThreadStyleDm } = require('../utils/interactionThreadDm');
+const { isThreadStyleDm, resetAutoReplyCountersForNewInbound } = require('../utils/interactionThreadDm');
+const { generateChatRef } = require('../utils/chatRefHelper');
+const { resolveContact, normalizeAuthorForPlatform } = require('../services/contactService');
+const instagramWebhookService = require('../services/webhook/instagramWebhookService');
+const whatsappWebhookService = require('../services/webhook/whatsappWebhookService');
 
 /**
  * Process webhook events from social media platforms
@@ -27,15 +31,19 @@ module.exports = async function processWebhook(job) {
 
     switch (platform) {
       case 'instagram':
-        interaction = await handleInstagramWebhook(payload, organizationId);
+        interaction = await instagramWebhookService.handleInstagramMessage(payload, organizationId);
         break;
-      
+
       case 'facebook':
         interaction = await handleFacebookWebhook(payload, organizationId);
         break;
-      
+
       case 'whatsapp':
-        interaction = await handleWhatsAppWebhook(payload, organizationId);
+        interaction = await whatsappWebhookService.handleWhatsAppMessage(payload, organizationId);
+        break;
+
+      case 'whatsapp_webhook':
+        await whatsappWebhookService.processWhatsAppWebhook(payload);
         break;
       
       case 'google':
@@ -49,6 +57,22 @@ module.exports = async function processWebhook(job) {
       case 'linkedin':
         interaction = await handleLinkedInWebhook(payload, organizationId);
         break;
+
+      case 'shopify': {
+        // Shopify webhook — delegate to shopifySyncService topic dispatcher
+        const shopifySyncService = require('../services/shopifySyncService');
+        const PlatformConnectionModel = require('../models/PlatformConnection');
+        const { topic, payload: shopifyPayload, connectionId } = job.data;
+        const conn = connectionId
+          ? await PlatformConnectionModel.findById(connectionId).lean()
+          : await PlatformConnectionModel.findOne({ organization: organizationId, platform: 'shopify', isActive: true }).lean();
+        if (conn) {
+          await shopifySyncService.handleWebhookTopic(conn, topic, shopifyPayload || payload);
+        } else {
+          jobLogger.warn('[processWebhook] No Shopify connection found for org', { organizationId });
+        }
+        break;
+      }
       
       default:
         jobLogger.warn('Unknown platform', { platform });
@@ -62,11 +86,158 @@ module.exports = async function processWebhook(job) {
         contentPreview: interaction.content?.substring(0, 100)
       });
 
-      // Invalidate inbox list cache so next GET /api/inbox returns this interaction (fixes DMs not showing until refresh/sync)
+      // ─── Contact Identity Resolution (fire-and-forget) ──────────────────
+      // Resolve (or create) the unified Contact for this customer.
+      // Runs in background — never blocks message delivery or AI queuing.
+      if (interaction.author?.platformId) {
+        (async () => {
+          try {
+            const contactPayload = normalizeAuthorForPlatform(
+              interaction.platform,
+              interaction.author,
+              {} // rawData kept minimal to avoid storing large webhook payloads
+            );
+            const contact = await resolveContact(contactPayload, organizationId);
+            if (contact) {
+              await Interaction.findByIdAndUpdate(interaction._id, { contact: contact._id });
+              // Keep in-memory reference so downstream in this job can access it
+              interaction.contact = contact._id;
+            }
+          } catch (contactErr) {
+            jobLogger.warn('Contact resolution failed (non-fatal)', { error: contactErr.message });
+          }
+        })();
+      }
+
+      // Invalidate inbox + analytics cache (dashboard counts / charts use Redis analytics:* keys)
       if (organizationId) {
-        cacheService.delPattern(`interactions:${organizationId}*`).catch(err => {
-          jobLogger.warn('Failed to invalidate inbox cache', { err: err?.message });
+        cacheService.invalidateInteractionCaches(organizationId).catch(err => {
+          jobLogger.warn('Failed to invalidate interaction caches', { err: err?.message });
         });
+      }
+
+      // Unified Flow Builder routing (workflow-first; AI is the fallback)
+      let flowHandledComment = false;
+      let flowHandledStory = false;
+      let flowHandled = false;
+      if (organizationId) {
+        try {
+          const flowTriggerRouter = require('../services/flow/flowTriggerRouter');
+          const postbackPayload = interaction.metadata?.postback || interaction.metadata?.buttonPayload;
+          let eventType = `${interaction.platform}.${interaction.type}`;
+          if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+            eventType = 'instagram.comment';
+          } else if (
+            interaction.platform === 'instagram' &&
+            interaction.type === 'dm' &&
+            interaction.metadata?.isStoryEngagement
+          ) {
+            eventType =
+              interaction.metadata.storyTriggerType === 'story_mention'
+                ? 'instagram.story_mention'
+                : 'instagram.story_reply';
+          } else if (interaction.platform === 'instagram' && interaction.type === 'dm' && postbackPayload) {
+            // A DM carrying a button payload is a postback click, not free text.
+            eventType = 'instagram.postback';
+          } else if (interaction.platform === 'instagram' && interaction.type === 'dm') {
+            eventType = 'instagram.dm';
+          } else if (interaction.platform === 'facebook' && interaction.type === 'dm') {
+            eventType = 'facebook.dm';
+          } else if (interaction.platform === 'whatsapp') {
+            eventType = 'whatsapp.message';
+          }
+
+          const flowResult = await flowTriggerRouter.route({
+            organizationId,
+            platform: interaction.platform,
+            eventType,
+            interaction,
+            payload: {
+              content: interaction.content,
+              text: interaction.content,
+              postback: interaction.metadata?.postback || interaction.metadata?.buttonPayload
+            }
+          });
+
+          if (flowResult.handled) {
+            flowHandled = true;
+            if (interaction.platform === 'instagram' && interaction.type === 'comment') {
+              flowHandledComment = true;
+            }
+            if (
+              interaction.platform === 'instagram' &&
+              interaction.type === 'dm' &&
+              interaction.metadata?.isStoryEngagement
+            ) {
+              flowHandledStory = true;
+            }
+            jobLogger.info('Automation flow handled event', {
+              eventType,
+              enrollments: flowResult.enrollments.length
+            });
+          }
+        } catch (flowErr) {
+          jobLogger.warn('Automation flow routing error (non-fatal)', { error: flowErr.message });
+        }
+      }
+
+      // Commerce postback gate — SALES:* / PICK:* button taps are fully handled by
+      // salesConversationService.handlePostback inside instagramWebhookService before this
+      // point. Never queue AI for them: the button label text (e.g. "Product Details") would
+      // hit productSearchService's regex and return unrelated catalog items, producing a wrong
+      // second message. This gate mirrors the commentDmSent / storyToDmSent pattern.
+      const salesPostbackHandled = !!(
+        interaction.platform === 'instagram' &&
+        interaction.metadata?.buttonPayload &&
+        /^(SALES:|PICK:)/.test(String(interaction.metadata.buttonPayload))
+      );
+      if (salesPostbackHandled) {
+        jobLogger.info('Sales commerce postback already handled — skipping AI', {
+          interactionId: interaction._id.toString(),
+          buttonPayload: String(interaction.metadata.buttonPayload).slice(0, 40)
+        });
+      }
+
+      // Comment-to-DM selling flow only (follow-invite moved to processAI.js so sentiment is available)
+      // Awaited (not fire-and-forget) so we know whether it answered the comment: when it
+      // did, we must suppress the AI auto-reply engine below, otherwise the commenter also
+      // receives the "agent will contact you" fallback as a second response.
+      let commentDmSent = false;
+      if (
+        !flowHandledComment &&
+        interaction.platform === 'instagram' &&
+        interaction.type === 'comment'
+      ) {
+        const commentToDmService = require('../services/commentToDmService');
+        try {
+          const result = await commentToDmService.processCommentForProduct(interaction, organizationId);
+          commentDmSent = !!result?.sent;
+          if (commentDmSent) {
+            jobLogger.info('Comment-to-DM automation sent', { interactionId: interaction._id.toString() });
+          }
+        } catch (err) {
+          jobLogger.warn('comment automation chain error', { err: err?.message });
+        }
+      }
+
+      // Story-to-DM: story reply / @mention → product DM (before AI queue)
+      let storyToDmSent = false;
+      if (
+        !flowHandledStory &&
+        interaction.platform === 'instagram' &&
+        interaction.type === 'dm' &&
+        interaction.metadata?.isStoryEngagement
+      ) {
+        try {
+          const storyToDmService = require('../services/storyToDmService');
+          const result = await storyToDmService.processStoryEngagement(interaction, organizationId);
+          storyToDmSent = !!result?.sent;
+          if (storyToDmSent) {
+            jobLogger.info('Story-to-DM automation sent', { interactionId: interaction._id.toString() });
+          }
+        } catch (err) {
+          jobLogger.warn('story-to-dm automation error', { err: err?.message });
+        }
       }
 
       // Per-comment / per-message interactions: skip if we already answered that item.
@@ -75,8 +246,35 @@ module.exports = async function processWebhook(job) {
       const isAlreadyReplied = interaction.status === 'replied' || interaction.status === 'resolved';
       const threadDm = isThreadStyleDm(interaction);
 
-      if (!threadDm && (hasReplies || isAlreadyReplied)) {
-        console.log(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+      // Workflow-first gate: AI runs only as a fallback per the channel automation mode.
+      let runAiFallback = true;
+      if (organizationId) {
+        try {
+          const Organization = require('../models/Organization');
+          const replyEngineService = require('../services/replyEngineService');
+          const orgDoc = await Organization.findById(organizationId)
+            .select('automationModeByChannel automationFlowMode')
+            .lean();
+          ({ runAiFallback } = replyEngineService.decide({
+            organization: orgDoc,
+            platform: interaction.platform,
+            flowHandled
+          }));
+        } catch (modeErr) {
+          jobLogger.warn('Reply-engine mode resolve failed (defaulting to AI fallback on)', { error: modeErr.message });
+        }
+      }
+
+      if (!runAiFallback) {
+        logger.info(`⏭️  [Webhook] Skipping AI — channel mode/flow ownership (flowHandled: ${flowHandled}): ${interaction._id}`);
+      } else if (!threadDm && (hasReplies || isAlreadyReplied)) {
+        logger.info(`⏭️  [Webhook] Skipping AI and auto-reply queue - interaction already replied to (status: ${interaction.status}, replies: ${interaction.replies?.length || 0})`);
+      } else if (salesPostbackHandled) {
+        logger.info(`⏭️  [Webhook] Skipping AI — Sales commerce postback already handled: ${interaction._id}`);
+      } else if (storyToDmSent) {
+        logger.info(`⏭️  [Webhook] Skipping AI — Story-to-DM handled this message: ${interaction._id}`);
+      } else if (commentDmSent) {
+        logger.info(`⏭️  [Webhook] Skipping AI — Comment-to-DM handled this comment: ${interaction._id}`);
       } else {
         // Thread DMs reuse one interaction id per conversation — jobId must include message id or each new message would be deduped by Bull
         const mid = interaction.metadata?.lastMid;
@@ -96,7 +294,7 @@ module.exports = async function processWebhook(job) {
           }
         );
 
-        console.log(`📝 [Webhook] Queued for AI processing: ${interaction._id}${threadDm && mid ? ` (mid ${mid})` : ''}`);
+        logger.info(`📝 [Webhook] Queued for AI processing: ${interaction._id}${threadDm && mid ? ` (mid ${mid})` : ''}`);
 
         // Queue auto-reply if webhook mode is enabled
         const autoReplyScheduler = require('../services/autoReplyScheduler');
@@ -106,9 +304,9 @@ module.exports = async function processWebhook(job) {
         );
 
         if (queued) {
-          console.log(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
+          logger.info(`🤖 [Webhook] Auto-reply queued for interaction: ${interaction._id}`);
         } else {
-          console.log(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
+          logger.info(`⚠️  [Webhook] Auto-reply NOT queued (check trigger mode settings)`);
         }
       }
     } else {
@@ -122,16 +320,14 @@ module.exports = async function processWebhook(job) {
     };
 
   } catch (error) {
-    console.error('Webhook processing error:', error);
+    logger.error('Webhook processing error', { error: error.message, stack: error.stack });
     throw error;
   }
 };
 
 /**
- * Fetch Instagram commenter/DM author profile (username, name, avatar) for inbox display.
- * Uses Instagram User Profile API; webhook only sends sender.id, not username/name.
- * For DMs, pass accessToken of the Instagram connection that *received* the message (required by Meta).
- * Returns { username, name, avatarUrl } or partial; missing fields left undefined.
+ * @deprecated Logic has been moved to src/services/webhook/instagramWebhookService.js
+ * This file-local copy is no longer called and will be removed in a future cleanup.
  */
 async function fetchInstagramAuthorProfile(organizationId, igUserId, accessTokenFromConnection = null) {
   if (!igUserId) return {};
@@ -146,7 +342,7 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId, accessToken
       }).select('accessToken');
       token = connection?.accessToken;
     } catch (e) {
-      console.warn('[processWebhook] fetchInstagramAuthorProfile: connection lookup failed', e.message);
+      logger.warn('[processWebhook] fetchInstagramAuthorProfile: connection lookup failed', { error: e.message });
       return {};
     }
   }
@@ -161,7 +357,7 @@ async function fetchInstagramAuthorProfile(organizationId, igUserId, accessToken
       avatarUrl
     };
   } catch (e) {
-    console.warn('[processWebhook] fetchInstagramAuthorProfile failed for igUserId=', igUserId, e.message);
+    logger.warn('[processWebhook] fetchInstagramAuthorProfile failed for igUserId=', { igUserId, error: e.message });
     return {};
   }
 }
@@ -188,43 +384,66 @@ async function fetchInstagramAuthorAvatar(organizationId, igUserId) {
   }
 }
 
+/** @deprecated Prefer instagramWebhookService — kept in sync for legacy callers */
+function isInstagramUserSharedMediaEchoAttachment(att) {
+  if (!att) return false;
+  const t = String(att.type || '').toLowerCase();
+  return (
+    t === 'share' ||
+    t === 'ig_post' ||
+    t === 'ig_reel' ||
+    t === 'reel' ||
+    t === 'story' ||
+    t === 'ig_story' ||
+    !!(att.payload && att.payload.ig_post_media_id)
+  );
+}
+
 /**
- * Meta sometimes delivers a user-shared post in DM with is_echo:true, sender=IG business id, recipient=user id.
- * We still want an inbox thread for the user who shared the post.
+ * Meta sometimes delivers user-shared IG post/reel/story in DM with is_echo:true, sender=IG business id.
+ * @deprecated Prefer instagramWebhookService
  */
 function isInstagramSharePostEcho(event, message, igAccountId) {
   if (!message?.is_echo || !igAccountId) return false;
   if (String(event.sender?.id) !== String(igAccountId) || !event.recipient?.id) return false;
   const atts = message.attachments || [];
-  return atts.some(
-    (a) =>
-      a.type === 'share' ||
-      a.type === 'ig_post' ||
-      !!(a.payload && a.payload.ig_post_media_id)
-  );
+  return atts.some(isInstagramUserSharedMediaEchoAttachment);
 }
 
-/** Pick best attachment for shared IG post / media in DMs. */
+/** @deprecated Prefer instagramWebhookService */
 function buildInstagramDmAttachmentFields(message) {
   const atts = message.attachments || [];
+  const lower = (t) => String(t || '').toLowerCase();
   const primary =
-    atts.find((a) => a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id)) ||
-    atts.find((a) => a.type === 'share') ||
+    atts.find((a) => a && (a.type === 'ig_post' || (a.payload && a.payload.ig_post_media_id))) ||
+    atts.find((a) => a && ['ig_reel', 'reel'].includes(lower(a.type))) ||
+    atts.find((a) => a && ['story', 'ig_story'].includes(lower(a.type))) ||
+    atts.find((a) => a && a.type === 'share') ||
     atts[0];
   const p = primary?.payload || {};
+  const igPostMediaId =
+    p.ig_post_media_id || p.reel_media_id || p.media_id || null;
   return {
     attachmentType: primary?.type || 'file',
-    attachmentUrl: p.url || null,
-    igPostMediaId: p.ig_post_media_id || null,
+    attachmentUrl: p.url || p.attachment_url || null,
+    igPostMediaId,
     shareTitle: typeof p.title === 'string' ? p.title : null
   };
 }
 
+/** @deprecated Prefer instagramWebhookService */
+function buildInstagramDmPlaceholderText(attachmentType, igPostMediaId) {
+  const t = String(attachmentType || '').toLowerCase();
+  if (igPostMediaId) return '[Shared Instagram post]';
+  if (t === 'ig_reel' || t === 'reel') return '[Shared Instagram reel]';
+  if (t === 'story' || t === 'ig_story') return '[Shared Instagram story]';
+  if (attachmentType) return `[${attachmentType}]`;
+  return '';
+}
+
 /**
- * Handle Instagram webhook
- * Supports two payload formats:
- * 1. Graph API (comments): entry[].changes[] with field "comments" or "messages"
- * 2. Instagram Messaging (DMs): entry[].messaging[] - used by Meta for DM webhooks
+ * @deprecated Logic has been moved to src/services/webhook/instagramWebhookService.js
+ * This file-local copy is no longer called and will be removed in a future cleanup.
  */
 async function handleInstagramWebhook(payload, organizationId) {
   try {
@@ -239,13 +458,29 @@ async function handleInstagramWebhook(payload, organizationId) {
     let platformConnectionId = null;
     let dmReceiverConnection = null;
     if (igAccountId) {
-      const conn = await PlatformConnection.findOne({
+      // Primary: match by platformUserId
+      let conn = await PlatformConnection.findOne({
         organization: organizationId,
         platform: 'instagram',
         platformUserId: { $in: [String(igAccountId), igAccountId].filter(Boolean) },
         status: { $in: ['connected', 'available'] },
         isActive: true
-      }).select('_id accessToken').lean();
+      }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
+
+      // Fallback: search by platformPageId or businessAccountId
+      if (!conn) {
+        conn = await PlatformConnection.findOne({
+          organization: organizationId,
+          platform: 'instagram',
+          $or: [
+            { platformPageId: { $in: [String(igAccountId), igAccountId].filter(Boolean) } },
+            { 'platformData.businessAccountId': String(igAccountId) }
+          ],
+          status: { $in: ['connected', 'available'] },
+          isActive: true
+        }).select('_id accessToken platformUserId platformPageId platformData metadata platformUsername').lean();
+      }
+
       if (conn) {
         platformConnectionId = conn._id;
         dmReceiverConnection = conn;
@@ -261,9 +496,12 @@ async function handleInstagramWebhook(payload, organizationId) {
     const allMessageEvents = [...messaging, ...standby];
 
     if (allMessageEvents.length === 0) {
-      logger.info('[processWebhook] Instagram: no messaging or standby events', {
+      const hasComments = !!(entry.changes?.some(c => c.field === 'comments'));
+      const hasMentions = !!(entry.changes?.some(c => c.field === 'mentions'));
+      logger.info('[processWebhook] Instagram: no DM/standby events — checking changes', {
         entryId: entry.id,
-        hasChanges: !!(entry.changes && entry.changes.length)
+        hasComments,
+        hasMentions
       });
     }
 
@@ -298,7 +536,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       const text =
         message.text ||
         shareTitle ||
-        (igPostMediaId ? '[Shared Instagram post]' : attachmentType ? `[${attachmentType}]` : '');
+        buildInstagramDmPlaceholderText(attachmentType, igPostMediaId);
       if (!mid || !partnerId) {
         logger.warn('[processWebhook] Instagram: message missing mid or partnerId', {
           mid: !!mid,
@@ -338,7 +576,7 @@ async function handleInstagramWebhook(payload, organizationId) {
 
       // One thread per conversation (IG account + customer), not per message
       const threadPlatformId = `dm_${String(igAccountId)}_${String(partnerId)}`;
-      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author').lean();
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid author chatRef').lean();
       if (existing && existing.metadata?.lastMid === mid) {
         // Meta webhook retry — do not re-queue AI / auto-reply
         logger.debug('[processWebhook] Instagram DM duplicate mid (webhook retry)', { threadPlatformId, mid });
@@ -356,6 +594,12 @@ async function handleInstagramWebhook(payload, organizationId) {
       if (profile.avatarUrl) mergedAuthor.avatarUrl = profile.avatarUrl;
       else if (existingAuthor.avatarUrl) mergedAuthor.avatarUrl = existingAuthor.avatarUrl;
 
+      // Generate chatRef for new interactions or backfill existing ones that don't have it
+      let _igDmChatRef = null;
+      if (!existing || !existing.chatRef) {
+        _igDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+      }
+
       const updateFields = {
         organization: organizationId,
         platform: 'instagram',
@@ -372,11 +616,21 @@ async function handleInstagramWebhook(payload, organizationId) {
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
+      // Backfill chatRef into $set for existing interactions that don't have it
+      if (existing && !existing.chatRef && _igDmChatRef?.chatRef) {
+        updateFields.chatNumber = _igDmChatRef.chatNumber;
+        updateFields.chatRef = _igDmChatRef.chatRef;
+      }
+
       // Step 1: Upsert the thread (create or update non-message fields)
-      // Do not put status/isRead in $setOnInsert — they are already in $set (MongoDB conflicts same path in both operators)
+      // For NEW interactions: chatRef goes into $setOnInsert (avoids $set/$setOnInsert field conflict)
+      // For EXISTING without chatRef: already added to updateFields ($set) above
+      const setOnInsertFields = (!existing && _igDmChatRef?.chatRef)
+        ? { chatNumber: _igDmChatRef.chatNumber, chatRef: _igDmChatRef.chatRef, source: 'webhook' }
+        : { source: 'webhook' };
       await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
-        { $set: updateFields },
+        { $set: updateFields, $setOnInsert: setOnInsertFields },
         { upsert: true }
       );
 
@@ -386,7 +640,7 @@ async function handleInstagramWebhook(payload, organizationId) {
       if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
       if (attachmentType) incomingMsg.attachmentType = attachmentType;
       if (igPostMediaId) incomingMsg.igPostMediaId = igPostMediaId;
-      await Interaction.updateOne(
+      const _igDmPush = await Interaction.updateOne(
         { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
         {
           $push: {
@@ -397,6 +651,11 @@ async function handleInstagramWebhook(payload, organizationId) {
           }
         }
       );
+
+      // New inbound DM (not a webhook retry) → reset auto-reply hard-stop counters.
+      if (_igDmPush.modifiedCount > 0) {
+        await resetAutoReplyCountersForNewInbound(Interaction, { platformId: threadPlatformId });
+      }
 
       const interaction = await Interaction.findOne({ platformId: threadPlatformId });
 
@@ -415,8 +674,15 @@ async function handleInstagramWebhook(payload, organizationId) {
     for (const change of changes) {
       if (change.field === 'comments') {
         const comment = change.value;
-        // Skip our own replies: when the connected IG account replies, from.id equals the account id.
+        // Skip own comments: when the connected IG account owner posts a comment,
+        // from.id equals the account's global IG ID (= entry.id = igAccountId).
+        // Business owner comments must not appear as inbox interactions.
         if (comment.from && String(comment.from.id) === String(igAccountId)) {
+          logger.info('[processWebhook] Instagram: skipping own comment from connected account', {
+            commentId: comment.id,
+            fromId: comment.from.id,
+            igAccountId
+          });
           return null;
         }
 
@@ -440,6 +706,13 @@ async function handleInstagramWebhook(payload, organizationId) {
           if (Number.isFinite(ms)) platformCreatedAt = new Date(ms);
         }
 
+        // Resolve the proper shortcode permalink (e.g. /p/DWfGl70lIGM/) via Graph API
+        const mediaId = comment.media?.id;
+        let postUrl = null;
+        if (mediaId && dmReceiverConnection?.accessToken) {
+          postUrl = await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mediaId, instagramService._connectionType(dmReceiverConnection));
+        }
+
         const updatePayload = {
           organization: organizationId,
           platform: 'instagram',
@@ -448,20 +721,24 @@ async function handleInstagramWebhook(payload, organizationId) {
           content: comment.text,
           author,
           metadata: {
-            postId: comment.media?.id,
-            postUrl: `https://www.instagram.com/p/${comment.media?.id}`
+            postId: mediaId,
+            postUrl
           },
           platformCreatedAt
         };
+        // Link to the platform connection so the inbox reply path can resolve
+        // the correct access token and account, same as DMs do at line 428.
+        if (platformConnectionId) updatePayload.platformConnection = platformConnectionId;
         if (isReply && parentCommentId) {
           updatePayload.parentId = parentCommentId; // So this reply shows in the parent thread, not as new conversation
         }
 
+        const _igCommentChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.id },
           {
             $set: updatePayload,
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _igCommentChatRef.chatNumber, chatRef: _igCommentChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -519,6 +796,7 @@ async function handleInstagramWebhook(payload, organizationId) {
           if (Number.isFinite(ms)) mentionCreatedAt = new Date(ms);
         }
 
+        const _igMentionChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: String(mentionId) },
           {
@@ -530,16 +808,18 @@ async function handleInstagramWebhook(payload, organizationId) {
               content: mentionText,
               author,
               platformCreatedAt: mentionCreatedAt,
-              metadata: {
+                metadata: {
                 mentionId: mention.id || null,
                 mediaId: mention.media_id || null,
                 commentId: mention.comment_id || null,
                 postId: mention.media_id || null,
-                postUrl: mention.media_id ? `https://www.instagram.com/p/${mention.media_id}` : null,
+                postUrl: mention.media_id && dmReceiverConnection?.accessToken
+                  ? await instagramService.fetchMediaPermalink(dmReceiverConnection.accessToken, mention.media_id, instagramService._connectionType(dmReceiverConnection))
+                  : null,
                 rawMention: mention
               }
             },
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _igMentionChatRef.chatNumber, chatRef: _igMentionChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -572,6 +852,7 @@ async function handleInstagramWebhook(payload, organizationId) {
           if (Number.isFinite(ms)) msgPlatformCreatedAt = new Date(ms);
         }
 
+        const _igLegacyDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
@@ -585,7 +866,7 @@ async function handleInstagramWebhook(payload, organizationId) {
               threadId: message.conversation_id,
               platformCreatedAt: msgPlatformCreatedAt
             },
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _igLegacyDmChatRef.chatNumber, chatRef: _igLegacyDmChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -601,7 +882,7 @@ async function handleInstagramWebhook(payload, organizationId) {
     });
     return null;
   } catch (error) {
-    console.error('Instagram webhook handler error:', error);
+    logger.error('Instagram webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -676,7 +957,7 @@ async function handleFacebookWebhook(payload, organizationId) {
       if (profile.avatarUrl) author.avatarUrl = profile.avatarUrl;
 
       const threadPlatformId = `dm_${String(pageId)}_${String(senderId)}`;
-      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid').lean();
+      const existing = await Interaction.findOne({ platformId: threadPlatformId }).select('_id metadata.lastMid chatRef').lean();
       if (existing && existing.metadata?.lastMid === mid) {
         logger.debug('[processWebhook] Facebook DM duplicate mid (webhook retry)', { threadPlatformId, mid });
         return null;
@@ -685,6 +966,12 @@ async function handleFacebookWebhook(payload, organizationId) {
       const incomingMsg = { mid, text, timestamp: event.timestamp };
       if (attachmentUrl) incomingMsg.attachmentUrl = attachmentUrl;
       if (attachmentType) incomingMsg.attachmentType = attachmentType;
+
+      // Generate chatRef for new interactions or backfill existing ones that don't have it
+      let _fbDmChatRef = null;
+      if (!existing || !existing.chatRef) {
+        _fbDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+      }
 
       const updateFields = {
         organization: organizationId,
@@ -702,19 +989,40 @@ async function handleFacebookWebhook(payload, organizationId) {
       };
       if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
+      // Backfill chatRef into $set for existing interactions that don't have it
+      if (existing && !existing.chatRef && _fbDmChatRef?.chatRef) {
+        updateFields.chatNumber = _fbDmChatRef.chatNumber;
+        updateFields.chatRef = _fbDmChatRef.chatRef;
+      }
+
+      const updateOps = {
+        $set: updateFields,
+        $push: {
+          'metadata.incomingMessages': {
+            $each: [incomingMsg],
+            $slice: -100
+          }
+        }
+      };
+      // For NEW interactions: chatRef + source via $setOnInsert
+      if (!existing) {
+        updateOps.$setOnInsert = {
+          source: 'webhook',
+          ...(_fbDmChatRef?.chatRef ? { chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef } : {})
+        };
+      }
+
       const interaction = await Interaction.findOneAndUpdate(
         { platformId: threadPlatformId },
-        {
-          $set: updateFields,
-          $push: {
-            'metadata.incomingMessages': {
-              $each: [incomingMsg],
-              $slice: -100
-            }
-          }
-        },
+        updateOps,
         { upsert: true, new: true }
       );
+
+      // New inbound DM → reset the auto-reply hard-stop counters so a long-lived
+      // conversation isn't permanently locked out of auto-reply once it crosses
+      // maxAutoReplies. (Bot loops never reach here — no inbound between replies.)
+      await resetAutoReplyCountersForNewInbound(Interaction, { platformId: threadPlatformId });
+
       return interaction;
     }
 
@@ -758,11 +1066,12 @@ async function handleFacebookWebhook(payload, organizationId) {
         };
         if (platformConnectionId) updateFields.platformConnection = platformConnectionId;
 
+        const _fbCommentChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: comment.comment_id },
           {
             $set: updateFields,
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _fbCommentChatRef.chatNumber, chatRef: _fbCommentChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -788,6 +1097,7 @@ async function handleFacebookWebhook(payload, organizationId) {
         };
         if (senderProfile.avatarUrl) author.avatarUrl = senderProfile.avatarUrl;
 
+        const _fbDmChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
         const interaction = await Interaction.findOneAndUpdate(
           { platformId: message.id },
           {
@@ -801,7 +1111,7 @@ async function handleFacebookWebhook(payload, organizationId) {
               threadId: message.thread_id,
               platformCreatedAt: parseMetaTimestamp(message.created_time)
             },
-            $setOnInsert: { status: 'unread', isRead: false }
+            $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _fbDmChatRef.chatNumber, chatRef: _fbDmChatRef.chatRef }
           },
           { upsert: true, new: true }
         );
@@ -812,7 +1122,7 @@ async function handleFacebookWebhook(payload, organizationId) {
 
     return null;
   } catch (error) {
-    console.error('Facebook webhook handler error:', error);
+    logger.error('Facebook webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -861,15 +1171,15 @@ async function fetchFacebookSenderProfile(organizationId, pageId, psid, accessTo
   } catch (err) {
     // Suppress the warning for 403 (privacy / no permission) — expected for many users.
     if (err.response?.status !== 403) {
-      console.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', psid,
-        err.response?.data?.error?.message || err.message);
+      logger.warn('[processWebhook] fetchFacebookSenderProfile failed for psid=', { psid, error: err.response?.data?.error?.message || err.message });
     }
     return {};
   }
 }
 
 /**
- * Handle WhatsApp webhook
+ * @deprecated Logic has been moved to src/services/webhook/whatsappWebhookService.js
+ * This file-local copy is no longer called and will be removed in a future cleanup.
  */
 async function handleWhatsAppWebhook(payload, organizationId) {
   try {
@@ -879,36 +1189,96 @@ async function handleWhatsAppWebhook(payload, organizationId) {
     const changes = entry.changes || [];
 
     for (const change of changes) {
-      if (change.value.messages) {
-        const message = change.value.messages[0];
+      const value = change.value || {};
+      if (!value.messages || value.messages.length === 0) continue;
 
-        const interaction = await Interaction.findOneAndUpdate(
-          { platformId: message.id },
-          {
-            $set: {
-              organization: organizationId,
-              platform: 'whatsapp',
-              type: 'dm',
-              platformId: message.id,
-              content: message.text?.body || message.body,
-              author: {
-                platformId: message.from,
-                name: change.value.contacts?.[0]?.profile?.name || message.from
-              },
-              platformCreatedAt: new Date(parseInt(message.timestamp) * 1000)
-            },
-            $setOnInsert: { status: 'unread', isRead: false }
-          },
-          { upsert: true, new: true }
-        );
+      const message = value.messages[0];
+      const phoneNumberId = value.metadata?.phone_number_id;
+      const senderId = String(message.from);
+      const mid = message.id;
 
-        return interaction;
+      // One Interaction per (connected phone number, customer)
+      const threadPlatformId = `dm_${String(phoneNumberId)}_${senderId}`;
+
+      const existing = await Interaction
+        .findOne({ platformId: threadPlatformId })
+        .select('_id metadata.lastMid author chatRef')
+        .lean();
+
+      // Idempotency: skip if we've already recorded this exact message id
+      if (existing && existing.metadata?.lastMid === mid) {
+        return null;
       }
+
+      const prevAuthor = existing?.author || {};
+      const mergedAuthor = {
+        platformId: senderId,
+        name: value.contacts?.[0]?.profile?.name || prevAuthor.name || senderId,
+        username: value.contacts?.[0]?.wa_id || prevAuthor.username || senderId
+      };
+
+      let chatRefData = null;
+      if (!existing || !existing.chatRef) {
+        chatRefData = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+      }
+
+      const textContent = message.text?.body || message.body || '';
+
+      const set = {
+        organization: organizationId,
+        platform: 'whatsapp',
+        type: 'dm',
+        platformId: threadPlatformId,
+        threadId: senderId,
+        content: textContent,
+        author: mergedAuthor,
+        platformCreatedAt: new Date(parseInt(message.timestamp) * 1000),
+        status: 'unread',
+        isRead: false,
+        'metadata.lastMid': mid,
+        'metadata.phoneNumberId': String(phoneNumberId)
+      };
+
+      const setOnInsert = { source: 'webhook' };
+      if (existing && !existing.chatRef && chatRefData?.chatRef) {
+        set.chatNumber = chatRefData.chatNumber;
+        set.chatRef = chatRefData.chatRef;
+      } else if (!existing && chatRefData?.chatRef) {
+        setOnInsert.chatNumber = chatRefData.chatNumber;
+        setOnInsert.chatRef = chatRefData.chatRef;
+      }
+
+      await Interaction.findOneAndUpdate(
+        { platformId: threadPlatformId },
+        { $set: set, $setOnInsert: setOnInsert },
+        { upsert: true }
+      );
+
+      // Append this message to the thread's message list; guard against duplicate mids
+      const _liDmPush = await Interaction.updateOne(
+        { platformId: threadPlatformId, 'metadata.incomingMessages.mid': { $ne: mid } },
+        {
+          $push: {
+            'metadata.incomingMessages': {
+              $each: [{ mid, text: textContent, timestamp: Date.now(), type: message.type }],
+              $slice: -100
+            }
+          }
+        }
+      );
+
+      // New inbound DM (not a webhook retry) → reset auto-reply hard-stop counters.
+      if (_liDmPush.modifiedCount > 0) {
+        await resetAutoReplyCountersForNewInbound(Interaction, { platformId: threadPlatformId });
+      }
+
+      const interaction = await Interaction.findOne({ platformId: threadPlatformId });
+      return interaction;
     }
 
     return null;
   } catch (error) {
-    console.error('WhatsApp webhook handler error:', error);
+    logger.error('WhatsApp webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -935,7 +1305,7 @@ async function handleGoogleWebhook(payload, organizationId) {
 
     return null;
   } catch (error) {
-    console.error('Google webhook handler error:', error);
+    logger.error('Google webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -962,7 +1332,7 @@ async function handleYouTubeWebhook(payload, organizationId) {
 
     return null;
   } catch (error) {
-    console.error('YouTube webhook handler error:', error);
+    logger.error('YouTube webhook handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -978,12 +1348,12 @@ async function handleYouTubeWebhook(payload, organizationId) {
  */
 async function handleLinkedInWebhook(payload, organizationId) {
   try {
-    console.log('💼 [LinkedIn Webhook] Processing payload:', JSON.stringify(payload, null, 2));
+    logger.info('💼 [LinkedIn Webhook] Processing payload', { payload });
     
     const { eventType, data } = payload;
 
     if (!eventType || !data) {
-      console.log('⚠️  [LinkedIn Webhook] Missing eventType or data');
+      logger.info('⚠️  [LinkedIn Webhook] Missing eventType or data');
       return null;
     }
 
@@ -994,20 +1364,20 @@ async function handleLinkedInWebhook(payload, organizationId) {
         return await handleLinkedInComment(data, organizationId);
       
       case 'SHARE_CREATED':
-        console.log('💼 [LinkedIn Webhook] New share created (informational only)');
+        logger.info('💼 [LinkedIn Webhook] New share created (informational only)');
         return null; // We don't create interactions for our own posts
       
       case 'SHARE_LIKE_CREATED':
-        console.log('💼 [LinkedIn Webhook] Post liked (informational only)');
+        logger.info('💼 [LinkedIn Webhook] Post liked (informational only)');
         return null; // We might want to track likes in the future
       
       default:
-        console.log(`⚠️  [LinkedIn Webhook] Unknown event type: ${eventType}`);
+        logger.info(`⚠️  [LinkedIn Webhook] Unknown event type: ${eventType}`);
         return null;
     }
 
   } catch (error) {
-    console.error('❌ [LinkedIn Webhook] Handler error:', error);
+    logger.error('❌ [LinkedIn Webhook] Handler error', { error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -1034,11 +1404,11 @@ async function handleLinkedInComment(data, organizationId) {
     const authorId = authorUrn?.split(':').pop();
 
     if (!commentId || !commentText) {
-      console.log('⚠️  [LinkedIn Webhook] Missing required comment data');
+      logger.info('⚠️  [LinkedIn Webhook] Missing required comment data');
       return null;
     }
 
-    console.log(`💼 [LinkedIn Webhook] Processing comment: ${commentId}`);
+    logger.info(`💼 [LinkedIn Webhook] Processing comment: ${commentId}`);
 
     // Find the platform connection
     const connection = await PlatformConnection.findOne({
@@ -1048,11 +1418,12 @@ async function handleLinkedInComment(data, organizationId) {
     });
 
     if (!connection) {
-      console.log('⚠️  [LinkedIn Webhook] No active LinkedIn connection found');
+      logger.info('⚠️  [LinkedIn Webhook] No active LinkedIn connection found');
       return null;
     }
 
     // Create or update the interaction
+    const _liChatRef = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
     const interaction = await Interaction.findOneAndUpdate(
       { platformId: commentId },
       {
@@ -1079,16 +1450,16 @@ async function handleLinkedInComment(data, organizationId) {
           threadId: parentCommentUrn || shareUrn,
           platformCreatedAt: createdAt ? new Date(createdAt) : new Date()
         },
-        $setOnInsert: { status: 'unread', isRead: false }
+        $setOnInsert: { status: 'unread', isRead: false, source: 'webhook', chatNumber: _liChatRef.chatNumber, chatRef: _liChatRef.chatRef }
       },
       { upsert: true, new: true }
     );
 
-    console.log(`✅ [LinkedIn Webhook] Interaction created/updated: ${interaction._id}`);
+    logger.info(`✅ [LinkedIn Webhook] Interaction created/updated: ${interaction._id}`);
 
     return interaction;
   } catch (error) {
-    console.error('❌ [LinkedIn Comment] Processing error:', error);
+    logger.error('❌ [LinkedIn Comment] Processing error', { error: error.message, stack: error.stack });
     throw error;
   }
 }

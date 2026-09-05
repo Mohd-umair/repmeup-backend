@@ -1,0 +1,1326 @@
+/**
+ * WhatsApp Webhook Service
+ *
+ * Single authoritative location for WhatsApp inbound message persistence and
+ * post-persistence side-effects (sentiment / socket emit / AI queue / mark-as-read).
+ *
+ * Implements the dm_<phoneNumberId>_<senderId> threading pattern so all messages
+ * from the same customer collapse into one conversation.
+ *
+ * Architecture:
+ *   webhookController.handleWhatsAppWebhook (signature verify + ACK)
+ *           │
+ *           ▼
+ *   processWhatsAppWebhook(payload)   ← top-level orchestrator
+ *           │
+ *           ├─ for each message change → processIncomingMessage(change, connection, payload)
+ *           └─ for each status change  → processStatusUpdate(status)
+ *
+ *   processIncomingMessage() calls:
+ *           upsertWhatsAppThread() → DB kernel (also used by BullMQ worker)
+ *
+ * Exports:
+ *   processWhatsAppWebhook(payload)          → Promise<void>   — top-level dispatcher
+ *   processIncomingMessage(change, conn)     → Promise<void>   — per-message pipeline
+ *   processStatusUpdate(status)              → Promise<void>   — delivery status
+ *   upsertWhatsAppThread(params)             → Promise<{ interaction, mid, skipped }>
+ *   handleWhatsAppMessage(payload, orgId)    → Promise<Interaction|null>  (queue / legacy)
+ */
+
+const Interaction = require('../../models/Interaction');
+const PlatformConnection = require('../../models/PlatformConnection');
+const { generateChatRef } = require('../../utils/chatRefHelper');
+const { resetAutoReplyCountersForNewInbound } = require('../../utils/interactionThreadDm');
+const { emitToOrg } = require('../../utils/socketEmitter');
+const cacheService = require('../cacheService');
+const { resolveContact, normalizeAuthorForPlatform } = require('../contactService');
+const logger = require('../../config/logger');
+const campaignConfig = require('../../config/campaignConfig');
+const campaignMetrics = require('../campaignMetricsService');
+const { buildCorrelationCtx } = require('../../utils/correlationContext');
+
+/**
+ * Handle a WhatsApp native-cart order message (type === 'order').
+ *
+ * Idempotent: if an order with the same whatsappMessageId already exists for this org,
+ * we return the existing order without creating a duplicate. Meta can resend the same
+ * webhook on network retries so we always guard here.
+ *
+ * After creating a new order we:
+ *   1. Send a deterministic text acknowledgement to the customer (no LLM required).
+ *   2. Set WhatsAppAiState to pendingAction=awaiting_shipping_address so the next
+ *      inbound message can be captured as the delivery address.
+ *
+ * Non-fatal — a failure here must never block normal message processing.
+ */
+async function _handleOrderMessage({ message, connection, organizationId, savedInteraction }) {
+  try {
+    const CommerceOrder = require('../../models/CommerceOrder');
+    const Product = require('../../models/Product');
+    const WhatsAppAiState = require('../../models/WhatsAppAiState');
+    const { assignOrderDisplayRef } = require('../../utils/opsRefHelper');
+
+    const order = message.order || {};
+    const catalog_id = order.catalog_id;
+    const product_items = order.product_items || [];
+    const messageId = message.id;
+
+    if (!product_items.length) {
+      logger.warn('[WhatsApp] Order message has no product_items', { messageId });
+      return null;
+    }
+
+    // ── Idempotency: same Meta message id → same order, do not duplicate ──────
+    if (messageId) {
+      const existing = await CommerceOrder.findOne({
+        organization: organizationId,
+        whatsappMessageId: messageId
+      }).lean();
+      if (existing) {
+        logger.info('[WhatsApp] Order already exists for this webhook message — skipping duplicate create', {
+          orderId: existing._id.toString(),
+          displayRef: existing.displayRef,
+          messageId
+        });
+        return existing;
+      }
+    }
+
+    // Meta sends `product_retailer_id` on order webhooks; tolerate `retailer_id` too.
+    const ridOf = (i) => i.product_retailer_id || i.retailer_id;
+
+    // Resolve products from our DB by retailer id (catalog retailer_id = our sku or _id string)
+    const retailerIds = product_items.map(ridOf).filter(Boolean);
+    const dbProducts = await Product.find({
+      organization: organizationId,
+      $or: [
+        { sku: { $in: retailerIds } },
+        { _id: { $in: retailerIds.filter((id) => /^[a-f\d]{24}$/i.test(id)) } }
+      ]
+    }).lean();
+
+    const productByRetailerId = {};
+    dbProducts.forEach((p) => {
+      if (p.sku) productByRetailerId[p.sku] = p;
+      productByRetailerId[p._id.toString()] = p;
+    });
+
+    // lineItem.product is schema-required, so only matched products become line items.
+    // Unmatched retailer ids are still counted in the total and recorded in notes so the
+    // order is never silently dropped.
+    const lineItems = [];
+    const unmatched = [];
+    let totalAmount = 0;
+    let currency = null;
+
+    for (const item of product_items) {
+      const rid = ridOf(item);
+      const qty = Number(item.quantity) || 1;
+      // Meta order webhooks send item_price in MAJOR currency units (e.g. 150 = ₹150), not cents.
+      const metaPrice = item.item_price != null && item.item_price !== ''
+        ? Number(item.item_price) : undefined;
+      const dbProduct = rid ? productByRetailerId[rid] : undefined;
+      const unitPrice = (metaPrice != null && !Number.isNaN(metaPrice)) ? metaPrice : dbProduct?.price;
+
+      if (unitPrice != null) totalAmount += unitPrice * qty;
+      if (!currency) currency = item.currency || dbProduct?.currency || null;
+
+      if (dbProduct) {
+        lineItems.push({
+          product: dbProduct._id,
+          retailerId: rid,
+          name: dbProduct.name || rid,
+          qty,
+          unitPrice,
+          currency: item.currency || dbProduct.currency || 'INR'
+        });
+      } else if (rid) {
+        unmatched.push(`${rid} ×${qty}`);
+      }
+    }
+
+    currency = currency || 'INR';
+    const buyerPhone = String(message.from || savedInteraction?.author?.platformId || '');
+    const buyerName = (savedInteraction?.author?.name && savedInteraction.author.name !== buyerPhone)
+      ? savedInteraction.author.name : undefined;
+
+    const commerceOrder = await CommerceOrder.create(
+      await assignOrderDisplayRef(organizationId, {
+        organization: organizationId,
+        channel: 'whatsapp',
+        status: 'pending',
+        lineItems,
+        totalAmount: +totalAmount.toFixed(2),
+        currency,
+        whatsappMessageId: messageId,
+        metaOrderId: catalog_id ? `${catalog_id}_${messageId}` : undefined,
+        buyerPhone,
+        buyerName,
+        notes: unmatched.length ? `Unmatched catalog items: ${unmatched.join(', ')}` : undefined,
+        sourceInteraction: savedInteraction?._id,
+        statusHistory: [{ status: 'pending', at: new Date(), note: 'Order placed via WhatsApp cart' }]
+      })
+    );
+
+    logger.info('[WhatsApp] CommerceOrder created from native cart', {
+      orderId: commerceOrder._id.toString(),
+      displayRef: commerceOrder.displayRef,
+      matchedItems: lineItems.length,
+      unmatched: unmatched.length,
+      total: totalAmount,
+      organizationId
+    });
+
+    // Notify inbox agent via socket
+    emitToOrg(organizationId, 'commerce_order_created', {
+      order: commerceOrder.toObject(),
+      interactionId: savedInteraction?._id?.toString()
+    });
+
+    // ── Deterministic ACK — independent of flows/LLM configuration ───────────
+    // The customer always gets exactly ONE acknowledgement message regardless of
+    // whether the auto-reply AI is enabled. We record it in Interaction.replies
+    // so the thread history is complete.
+    try {
+      const whatsappService = require('../../integrations/whatsapp/whatsappService');
+      const itemList = lineItems
+        .map((li) => `• ${li.qty}× ${li.name}`)
+        .join('\n');
+      const unmatchedNote = unmatched.length
+        ? `\n\nNote: ${unmatched.length} item(s) couldn't be matched — our team will confirm.`
+        : '';
+      const totalStr = totalAmount > 0
+        ? `\nTotal: ${currency} ${totalAmount.toFixed(2)}`
+        : '';
+      const ackText =
+        `✅ Thank you! We've received your order ${commerceOrder.displayRef}.\n\n` +
+        `${itemList}${totalStr}${unmatchedNote}\n\n` +
+        `Please reply with your full delivery address (house/flat, area, city, pincode) so we can process your order right away! 🚚`;
+
+      const ackResult = await whatsappService.sendTextMessage(connection, buyerPhone, ackText);
+      if (ackResult?.success && savedInteraction?._id) {
+        // Record in thread so inbox agents see the acknowledgement
+        await Interaction.updateOne(
+          { _id: savedInteraction._id },
+          {
+            $push: {
+              replies: {
+                content: ackText,
+                sentAt: new Date(),
+                wasAutoGenerated: true,
+                source: 'order_ack',
+                platformResponseId: ackResult.messageId || null,
+                deliveryStatus: 'sent'
+              }
+            }
+          }
+        );
+      }
+      logger.info('[WhatsApp] Order ACK sent to customer', {
+        orderId: commerceOrder._id.toString(),
+        displayRef: commerceOrder.displayRef,
+        ackSuccess: !!ackResult?.success
+      });
+    } catch (ackErr) {
+      logger.warn('[WhatsApp] Order ACK send failed (non-fatal)', { error: ackErr.message });
+    }
+
+    // ── Set AI state: awaiting delivery address ────────────────────────────────
+    const phoneNumberId = connection.platformData?.phoneNumberId || connection.platformUserId;
+    if (phoneNumberId && buyerPhone) {
+      try {
+        await WhatsAppAiState.setPendingAction(
+          { organization: organizationId, phoneNumberId, senderId: buyerPhone },
+          {
+            activeDomain: 'commerce',
+            pendingAction: 'awaiting_shipping_address',
+            entityId: commerceOrder._id
+          },
+          24 * 60 * 60 * 1000 // 24h to collect address
+        );
+      } catch (stateErr) {
+        logger.debug('[WhatsApp] Failed to set AI state for address collection (non-fatal)', { error: stateErr.message });
+      }
+    }
+
+    return commerceOrder;
+  } catch (err) {
+    logger.error('[WhatsApp] _handleOrderMessage failed (non-fatal)', { error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Find or create a unified Contact for an inbound WhatsApp sender and link it
+ * on the Interaction thread. Non-fatal — never blocks message delivery.
+ */
+async function _resolveAndLinkContact({ interaction, author, organizationId, rawContact = {} }) {
+  if (!interaction?._id || !author?.platformId) return null;
+
+  try {
+    const contactPayload = normalizeAuthorForPlatform('whatsapp', author, rawContact);
+    const contact = await resolveContact(contactPayload, organizationId);
+    if (contact) {
+      await Interaction.findByIdAndUpdate(interaction._id, { contact: contact._id });
+      if (typeof interaction.set === 'function') {
+        interaction.set('contact', contact._id);
+      } else {
+        interaction.contact = contact._id;
+      }
+    }
+    return contact;
+  } catch (err) {
+    logger.warn('[WhatsApp] Contact resolution failed (non-fatal)', { error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Upsert a WhatsApp conversation thread and append one inbound message.
+ *
+ * This is the shared DB kernel. Callers (controller + job) supply the already-parsed
+ * values; both paths may enrich them differently (e.g. the controller enriches with
+ * mediaId / location from whatsappService.processWebhookMessage), but the upsert
+ * pattern itself is identical.
+ *
+ * @param {object} params
+ * @param {string}  params.phoneNumberId  - The connected phone number ID (business)
+ * @param {string}  params.senderId       - Customer WhatsApp number
+ * @param {string}  params.mid            - Message id (wamid) for deduplication
+ * @param {string}  params.textContent    - Resolved text body of the message
+ * @param {string}  params.messageType    - 'text' | 'image' | 'video' | etc.
+ * @param {object}  params.mergedAuthor   - { platformId, name, username }
+ * @param {Date}    params.platformCreatedAt
+ * @param {string}  params.organizationId
+ * @param {string}  [params.connectionId] - PlatformConnection._id (optional; stored for reply routing)
+ * @param {object}  [params.extraSet]     - Additional $set fields (e.g. mediaId, location)
+ * @param {object}  [params.msgExtra]     - Additional fields to push into incomingMessages entry
+ *
+ * @returns {Promise<{ interaction: Interaction|null, mid: string, skipped: boolean }>}
+ */
+// A gap longer than this between inbound messages starts a new AI session.
+// Stale context (address discussions, product choices) from the old session
+// will not be injected into the new session's transcript or AI state.
+const SESSION_GAP_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+async function upsertWhatsAppThread({
+  phoneNumberId,
+  senderId,
+  mid,
+  textContent,
+  messageType,
+  mergedAuthor,
+  platformCreatedAt,
+  organizationId,
+  connectionId,
+  extraSet = {},
+  msgExtra = {}
+}) {
+  const threadPlatformId = `dm_${String(phoneNumberId)}_${String(senderId)}`;
+
+  let waBusinessAvatarUrl = null;
+  if (connectionId) {
+    const conn = await PlatformConnection.findById(connectionId)
+      .select('platformProfilePicture metadata.profilePicture platformData.businessProfile')
+      .lean();
+    waBusinessAvatarUrl =
+      conn?.platformProfilePicture ||
+      conn?.metadata?.profilePicture ||
+      conn?.platformData?.businessProfile?.profile_picture_url ||
+      null;
+  }
+
+  // platformId is unique PER ORG, not globally. All queries must scope by organizationId
+  // so two tenants sharing the same WhatsApp Business number cannot collide.
+  const existing = await Interaction
+    .findOne({ platformId: threadPlatformId, organization: organizationId })
+    .select('_id metadata.lastMid metadata.lastInboundAt metadata.sessionStartedAt author chatRef')
+    .lean();
+
+  // Idempotency: Meta/Interakt can retry the same webhook — skip if mid is already recorded.
+  // This is done as a single atomic conditional update (compare-and-swap on lastMid) instead of
+  // read-then-compare, so two near-simultaneous deliveries of the exact same retried mid cannot
+  // both observe a stale lastMid and both fall through. Only one can win the CAS below; the loser
+  // returns skipped:true immediately without doing any further work (session detection, flows, AI).
+  if (existing) {
+    const claim = await Interaction.updateOne(
+      { _id: existing._id, 'metadata.lastMid': { $ne: mid } },
+      { $set: { 'metadata.lastMid': mid } }
+    );
+    if (claim.modifiedCount === 0) {
+      logger.debug('[whatsappWebhookService] Duplicate mid (webhook retry) — skipped', { threadPlatformId, mid });
+      return { interaction: null, mid, skipped: true };
+    }
+  }
+
+  // ── Session boundary detection ─────────────────────────────────────────────
+  // When the customer returns after a gap > SESSION_GAP_MS, treat it as a new
+  // AI session: clear the WhatsAppAiState so stale pending actions (e.g. address
+  // collection from a week-old order) don't resurface.
+  const now = Date.now();
+  const lastInboundAt = existing?.metadata?.lastInboundAt
+    ? new Date(existing.metadata.lastInboundAt).getTime()
+    : null;
+  const isNewSession = !lastInboundAt || (now - lastInboundAt) > SESSION_GAP_MS;
+  const sessionStartedAt = isNewSession
+    ? new Date()
+    : (existing?.metadata?.sessionStartedAt ? new Date(existing.metadata.sessionStartedAt) : new Date());
+
+  if (isNewSession && existing) {
+    logger.info('[WhatsApp] New session detected — clearing AI state for thread', {
+      threadPlatformId,
+      gapMs: lastInboundAt ? now - lastInboundAt : null
+    });
+    try {
+      const WhatsAppAiState = require('../../models/WhatsAppAiState');
+      await WhatsAppAiState.resetSession({ organization: organizationId, phoneNumberId: String(phoneNumberId), senderId: String(senderId) });
+    } catch (stateErr) {
+      logger.debug('[WhatsApp] WhatsAppAiState reset failed (non-fatal)', { error: stateErr.message });
+    }
+  }
+
+  let chatRefData = null;
+  if (!existing || !existing.chatRef) {
+    chatRefData = await generateChatRef(organizationId).catch(() => ({ chatNumber: null, chatRef: null }));
+  }
+
+  const set = {
+    organization: organizationId,
+    platform: 'whatsapp',
+    type: 'dm',
+    platformId: threadPlatformId,
+    threadId: String(senderId),
+    content: textContent,
+    author: mergedAuthor,
+    platformCreatedAt,
+    status: 'unread',
+    isRead: false,
+    'metadata.lastMid': mid,
+    'metadata.phoneNumberId': String(phoneNumberId),
+    'metadata.lastInboundAt': new Date(),
+    'metadata.sessionStartedAt': sessionStartedAt,
+    ...(waBusinessAvatarUrl ? { 'metadata.whatsappBusinessAvatarUrl': waBusinessAvatarUrl } : {}),
+    ...extraSet
+  };
+
+  if (connectionId) set.platformConnection = connectionId;
+
+  const setOnInsert = { source: 'webhook' };
+
+  // chatRef: backfill into $set for existing threads without one; $setOnInsert for new ones
+  if (existing && !existing.chatRef && chatRefData?.chatRef) {
+    set.chatNumber = chatRefData.chatNumber;
+    set.chatRef = chatRefData.chatRef;
+  } else if (!existing && chatRefData?.chatRef) {
+    setOnInsert.chatNumber = chatRefData.chatNumber;
+    setOnInsert.chatRef = chatRefData.chatRef;
+  }
+
+  // Step 1: Upsert the thread document (compound unique on { organization, platformId })
+  await Interaction.findOneAndUpdate(
+    { platformId: threadPlatformId, organization: organizationId },
+    { $set: set, $setOnInsert: setOnInsert },
+    { upsert: true }
+  );
+
+  // Step 2: Append message to list, guarding against duplicate mids from webhook retries
+  const incomingMsg = {
+    mid,
+    text: textContent,
+    timestamp: platformCreatedAt,
+    type: messageType,
+    ...msgExtra
+  };
+
+  const pushResult = await Interaction.updateOne(
+    {
+      platformId: threadPlatformId,
+      organization: organizationId,
+      'metadata.incomingMessages.mid': { $ne: mid }
+    },
+    {
+      $push: {
+        'metadata.incomingMessages': {
+          $each: [incomingMsg],
+          $slice: -100
+        }
+      }
+    }
+  );
+
+  // A genuinely new inbound message (not a webhook retry) means the customer is
+  // actively re-engaging. Reset the per-thread auto-reply hard-stop counters so a
+  // long-lived conversation isn't permanently locked out of auto-reply once it has
+  // crossed maxAutoReplies. The cap still protects against AI-to-AI loops, because
+  // those have no inbound message between replies to trigger this reset.
+  if (pushResult.modifiedCount > 0) {
+    await resetAutoReplyCountersForNewInbound(Interaction, {
+      platformId: threadPlatformId,
+      organization: organizationId
+    });
+  }
+
+  const interaction = await Interaction.findOne({
+    platformId: threadPlatformId,
+    organization: organizationId
+  });
+
+  // `pushResult.modifiedCount === 0` means the atomic $push guard above found this exact mid
+  // already present (a concurrent duplicate that raced past the CAS check earlier, or a case
+  // where the early check didn't apply because this was a brand-new thread). Treat it the same
+  // as an early-detected duplicate: callers must NOT run flows/AI for a message they already
+  // processed, or the customer gets the same reply multiple times.
+  const skipped = pushResult.modifiedCount === 0;
+  if (skipped) {
+    logger.debug('[whatsappWebhookService] Duplicate mid (concurrent race, caught by $push guard) — skipped', {
+      threadPlatformId,
+      mid
+    });
+  }
+  return { interaction, mid, skipped, isNewSession };
+}
+
+/**
+ * Handle a raw WhatsApp webhook payload (queue / legacy path).
+ *
+ * Parses the Meta payload format and calls upsertWhatsAppThread for DB persistence.
+ * Extra work (sentiment, socket, AI queue, markAsRead) is done by the outer processWebhook
+ * job or the webhookController — not here.
+ *
+ * @param {object} payload       - Raw Meta webhook POST body
+ * @param {string} organizationId
+ * @returns {Promise<Interaction|null>}
+ */
+async function handleWhatsAppMessage(payload, organizationId) {
+  try {
+    const entry = payload.entry?.[0];
+    if (!entry) return null;
+
+    for (const change of entry.changes || []) {
+      const value = change.value || {};
+      if (!value.messages || value.messages.length === 0) continue;
+
+      const message = value.messages[0];
+      const phoneNumberId = value.metadata?.phone_number_id;
+      const senderId = String(message.from);
+      const mid = message.id;
+      const textContent = message.text?.body || message.body || '';
+
+      const mergedAuthor = {
+        platformId: senderId,
+        name: value.contacts?.[0]?.profile?.name || senderId,
+        username: value.contacts?.[0]?.wa_id || senderId
+      };
+
+      const platformCreatedAt = new Date(parseInt(message.timestamp) * 1000);
+
+      const { interaction, skipped } = await upsertWhatsAppThread({
+        phoneNumberId,
+        senderId,
+        mid,
+        textContent,
+        messageType: message.type || 'text',
+        mergedAuthor,
+        platformCreatedAt,
+        organizationId
+      });
+
+      if (skipped) return null;
+
+      await _resolveAndLinkContact({
+        interaction,
+        author: mergedAuthor,
+        organizationId,
+        rawContact: value.contacts?.[0] || {}
+      });
+
+      return interaction;
+    }
+
+    return null;
+  } catch (error) {
+    logger.error('[whatsappWebhookService] handleWhatsAppMessage error', { error: error.message });
+    throw error;
+  }
+}
+
+// ─── Orchestrators (controller entrypoint) ──────────────────────────────────
+
+/**
+ * Top-level processor for a WhatsApp webhook payload.
+ *
+ * Assumes the caller (controller) has already:
+ *   1. verified the x-hub-signature-256 signature,
+ *   2. sent the 200 ACK to Meta,
+ *   3. confirmed req.body.object === 'whatsapp_business_account'.
+ *
+ * Iterates every entry/change, dispatches to processIncomingMessage or
+ * processStatusUpdate. Errors for a single change are logged but do not
+ * prevent sibling changes from being processed.
+ *
+ * @param {object} payload  The raw req.body
+ * @returns {Promise<void>}
+ */
+/**
+ * Handle Meta's `account_update` webhook for partner-solution onboarding.
+ *
+ * Payload (Meta -> our app, object: whatsapp_business_account):
+ *   changes[].field = "account_update"
+ *   changes[].value = { event: "PARTNER_ADDED",
+ *                       waba_info: { waba_id, owner_business_id, solution_id,
+ *                                    solution_partner_business_ids: [...] } }
+ *
+ * Note there is NO phone_number_id here — Meta identifies the customer by WABA.
+ * We record the onboarding against the matching connection; the phone number id
+ * arrives separately via Interakt's WABA_ONBOARDED callback or from the signup
+ * response itself.
+ *
+ * @see Interakt "How to Onboard as a Tech Provider" — Listening for Onboarded Customers
+ */
+async function processAccountUpdate(change, entry) {
+  const value = change.value || {};
+  const event = value.event;
+  const info = value.waba_info || {};
+  const wabaId = info.waba_id;
+
+  logger.info('[WhatsApp Webhook] account_update received', {
+    event,
+    wabaId,
+    solutionId: info.solution_id,
+    ownerBusinessId: info.owner_business_id,
+    entryId: entry?.id
+  });
+
+  if (event !== 'PARTNER_ADDED') {
+    // Other account_update events exist (e.g. bans, verification changes). Log and
+    // move on rather than guessing at semantics we have not seen.
+    logger.info('[WhatsApp Webhook] account_update event not handled', { event, wabaId });
+    return;
+  }
+  if (!wabaId) {
+    logger.warn('[WhatsApp Webhook] PARTNER_ADDED without waba_id — ignoring');
+    return;
+  }
+
+  const PlatformConnection = require('../../models/PlatformConnection');
+  const connections = await PlatformConnection.find({
+    platform: 'whatsapp',
+    $or: [
+      { 'platformData.wabaId': String(wabaId) },
+      { 'platformData.businessAccountId': String(wabaId) }
+    ]
+  });
+
+  if (!connections.length) {
+    // Normal race: Meta can fire before our signup handler has written the row.
+    // The signup path stamps the same fields itself, so nothing is lost.
+    logger.warn('[WhatsApp Webhook] PARTNER_ADDED but no connection for this WABA yet', { wabaId });
+    return;
+  }
+
+  for (const connection of connections) {
+    if (!connection.platformData) connection.platformData = {};
+    connection.platformData.provider = 'interakt';
+    connection.platformData.wabaId = String(wabaId);
+    connection.platformData.businessAccountId = String(wabaId);
+    if (info.solution_id) connection.platformData.interaktSolutionId = String(info.solution_id);
+    if (info.owner_business_id) connection.platformData.businessId = String(info.owner_business_id);
+    connection.platformData.interaktRegisteredAt = new Date();
+    connection.platformData.interaktLastError = null;
+    connection.markModified('platformData');
+    connection.status = 'connected';
+    connection.isActive = true;
+    await connection.save();
+
+    logger.info('[WhatsApp Webhook] PARTNER_ADDED applied', {
+      connectionId: connection._id.toString(),
+      organization: connection.organization?.toString(),
+      wabaId
+    });
+  }
+}
+
+async function processWhatsAppWebhook(payload) {
+  if (!payload?.entry || payload.entry.length === 0) {
+    logger.info('[WhatsApp Webhook] No entries to process');
+    return;
+  }
+
+  logger.info(`[WhatsApp Webhook] Processing ${payload.entry.length} entry/entries`);
+
+  for (const entry of payload.entry) {
+    if (!entry.changes || entry.changes.length === 0) continue;
+
+    for (const change of entry.changes) {
+      // Partner-solution onboarding. Meta fires this on the `account_updates` field
+      // when a customer finishes Embedded Signup configured with our solution id —
+      // it is delivered to BOTH us and Interakt, and is the PRIMARY onboarding
+      // signal (Interakt's tp-signup API is only the 5-7 minute fallback).
+      // Without this branch the event was silently dropped by the field filter below.
+      if (change.field === 'account_update' || change.field === 'account_updates') {
+        try {
+          await processAccountUpdate(change, entry);
+        } catch (auErr) {
+          logger.error('[WhatsApp Webhook] processAccountUpdate failed', { error: auErr.message });
+        }
+        continue;
+      }
+
+      if (change.field !== 'messages') {
+        logger.debug('[WhatsApp Webhook] Skipping change (handler only processes field=messages)', {
+          field: change.field
+        });
+        continue;
+      }
+
+      const value = change.value || {};
+
+      // Incoming message path
+      if (value.messages && value.messages.length > 0) {
+        const phoneNumberId = value.metadata?.phone_number_id;
+        if (!phoneNumberId) {
+          logger.warn('[WhatsApp Webhook] Message change missing phone_number_id', { value });
+        } else {
+          const connection = await _lookupWhatsAppConnection(phoneNumberId);
+          if (connection) {
+            try {
+              await processIncomingMessage(change, connection, payload);
+            } catch (msgErr) {
+              logger.error('[WhatsApp Webhook] processIncomingMessage failed', {
+                error: msgErr.message,
+                stack: msgErr.stack
+              });
+            }
+          }
+        }
+      }
+
+      // Delivery-status path — always evaluated so statuses are never skipped
+      // even when messages and statuses arrive in the same change object
+      if (value.statuses && value.statuses.length > 0) {
+        for (const status of value.statuses) {
+          try {
+            await processStatusUpdate(status, value.metadata?.phone_number_id);
+          } catch (statusErr) {
+            logger.error('[WhatsApp Webhook] processStatusUpdate failed', {
+              error: statusErr.message
+            });
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Find the active WhatsApp platform connection for a given phone_number_id.
+ * Logs a diagnostic snapshot of all WhatsApp connections when no match is found.
+ *
+ * Exported internally only for test visibility; stable API is processWhatsAppWebhook.
+ */
+async function _lookupWhatsAppConnection(phoneNumberId) {
+  if (phoneNumberId == null || phoneNumberId === '') {
+    logger.warn('[WhatsApp Webhook] lookup called with empty phone_number_id');
+    return null;
+  }
+
+  const pid = String(phoneNumberId).trim();
+
+  const connection = await PlatformConnection.findOne({
+    platform: 'whatsapp',
+    isActive: true,
+    $or: [{ 'platformData.phoneNumberId': pid }, { platformUserId: pid }]
+  }).populate('organization');
+
+  if (connection) {
+    logger.info('[WhatsApp Webhook] Matched connection', {
+      phoneNumberId: pid,
+      verifiedName: connection.platformData?.verifiedName
+    });
+    return connection;
+  }
+
+  logger.warn('[WhatsApp Webhook] No active connection found for phone_number_id', {
+    phoneNumberId: pid,
+    hint: 'DB should set platformData.phoneNumberId or platformUserId (same as Meta phone number id) from Embedded Signup.'
+  });
+
+  // Diagnostic snapshot — helps when multiple tenants share the same business number
+  // and someone's toggled isActive off. Kept at debug so it doesn't spam production.
+  try {
+    const all = await PlatformConnection.find({ platform: 'whatsapp' })
+      .select('_id isActive platformData.phoneNumberId')
+      .lean();
+    logger.debug('[WhatsApp Webhook] WhatsApp connections in DB', {
+      total: all.length,
+      sample: all.slice(0, 5).map((c) => ({
+        id: String(c._id),
+        phoneNumberId: c.platformData?.phoneNumberId,
+        isActive: c.isActive
+      }))
+    });
+  } catch (e) {
+    logger.debug('[WhatsApp Webhook] Diagnostic snapshot failed', { error: e.message });
+  }
+
+  return null;
+}
+
+/**
+ * Full per-message pipeline (post-ACK):
+ *   1. Parse via whatsappService.processWebhookMessage (media/location enrichment)
+ *   2. Merge author from previous thread doc
+ *   3. Upsert thread + push message (via upsertWhatsAppThread)
+ *   4. Atomic sentiment $set (avoids VersionError with racing AI worker)
+ *   5. markAsRead (best effort)
+ *   6. Socket emit to org (best effort)
+ *   7. Enqueue AI job + immediate auto-reply (best effort)
+ *
+ * Every side-effect is try/catch'd so one failure doesn't poison the rest.
+ *
+ * @param {object} change      webhook change node ({ field, value })
+ * @param {object} connection  populated PlatformConnection (with organization)
+ * @param {object} rawPayload  the full req.body (needed by whatsappService.processWebhookMessage)
+ */
+async function processIncomingMessage(change, connection, rawPayload) {
+  const whatsappService = require('../../integrations/whatsapp/whatsappService');
+  const aiService = require('../aiService');
+  const autoReplyScheduler = require('../autoReplyScheduler');
+  const { aiQueue } = require('../../config/queue');
+
+  const value = change.value;
+  const phoneNumberId = value.metadata.phone_number_id;
+  const organizationId = connection.organization._id.toString();
+
+  const parsed = await whatsappService.processWebhookMessage(rawPayload);
+  if (!parsed?.success || parsed.skipped) return;
+
+  const md = parsed.messageData;
+  const senderId = String(md.from);
+  const mid = md.platformId;
+
+  // Merge author with whatever was previously stored so names don't downgrade
+  // to the raw phone number once we've learned a real name.
+  const prevAuthor = (
+    await Interaction.findOne({
+      platformId: `dm_${String(phoneNumberId)}_${senderId}`,
+      organization: connection.organization._id
+    })
+      .select('author')
+      .lean()
+  )?.author || {};
+  const mergedAuthor = {
+    platformId: senderId,
+    name: md.contact?.name || prevAuthor.name || senderId,
+    username: md.contact?.wa_id || prevAuthor.username || senderId,
+    avatarUrl: prevAuthor.avatarUrl || prevAuthor.profilePicture || undefined
+  };
+
+  const extraSet = { contentType: md.mediaType || 'text' };
+  if (md.mediaId) {
+    extraSet['metadata.mediaId'] = md.mediaId;
+    extraSet['metadata.mediaType'] = md.mediaType;
+    extraSet['metadata.hasMedia'] = true;
+  }
+  if (md.location) {
+    extraSet['metadata.location'] = md.location;
+  }
+  // Persist the tapped button/list id so flows can branch on it and so address
+  // capture can distinguish a button tap from a typed address. Cleared (null) on a
+  // normal text message so a stale id from an earlier tap can't be misread.
+  extraSet['metadata.buttonPayload'] = md.buttonPayload || null;
+
+  const msgExtra = {};
+  if (md.mediaId) {
+    msgExtra.mediaId = md.mediaId;
+    const rawType = md.mediaType || 'file';
+    msgExtra.attachmentType =
+      rawType === 'document' ? 'file' : rawType === 'sticker' ? 'image' : rawType;
+    if (rawType === 'document') {
+      msgExtra.attachmentDisplayName =
+        (typeof md.content === 'string' && md.content.trim() && md.content !== '[Document]')
+          ? md.content.trim()
+          : undefined;
+    }
+  }
+  if (md.isUnsupported) {
+    msgExtra.isUnsupported = true;
+  }
+
+  const { interaction: savedInteraction, skipped, isNewSession } = await upsertWhatsAppThread({
+    phoneNumberId,
+    senderId,
+    mid,
+    textContent: md.content,
+    messageType: md.type || 'text',
+    mergedAuthor,
+    platformCreatedAt: md.timestamp,
+    organizationId,
+    connectionId: connection._id,
+    extraSet,
+    msgExtra
+  });
+
+  if (skipped) {
+    logger.info('[WhatsApp] Duplicate webhook (same mid) — skipped', { mid });
+    return;
+  }
+  if (!savedInteraction) {
+    logger.error('[WhatsApp] Thread upsert succeeded but document not found after fetch');
+    return;
+  }
+
+  const correlationCtx = buildCorrelationCtx({
+    organizationId,
+    senderId,
+    phoneNumberId,
+    mid,
+    platform: 'whatsapp',
+    interactionId: savedInteraction._id?.toString(),
+    sessionReset: isNewSession || undefined
+  });
+
+  logger.info('[WhatsApp] Thread updated', {
+    ...correlationCtx,
+    isNewSession
+  });
+
+  // Handle WhatsApp Flow response (nfm_reply — structured form submission)
+  if (md.type === 'interactive' && md.flowResponse) {
+    const reviewCollectionService = require('../reviewCollectionService');
+    const flowToken = md.flowToken;
+    if (flowToken) {
+      reviewCollectionService.processFlowResponse(organizationId, flowToken, md.flowResponse)
+        .catch(err => logger.warn('[WhatsApp] Flow response processing failed (non-fatal)', { error: err.message }));
+    }
+  }
+
+  // Resolve unified Contact (phone → contacts list) — same as other webhook platforms.
+  await _resolveAndLinkContact({
+    interaction: savedInteraction,
+    author: mergedAuthor,
+    organizationId,
+    rawContact: md.contact || value.contacts?.[0] || {}
+  });
+
+  // NOTE: the autonomous commerce agent, appointment agent, and WA keyword
+  // automation used to run HERE unconditionally — which made them fire even in
+  // workflow_only mode and stack up alongside flows (e.g. an order message
+  // appearing mid-appointment-flow on every reply). They now run inside the single
+  // AI gate below, so the channel automation mode is the only "who replies" rule.
+
+  // Handle native WhatsApp cart order (type === 'order')
+  // The order handler sends a deterministic ACK and sets AI state; no other AI agent should reply.
+  let isNativeOrder = false;
+  if (md.type === 'order' || md.rawMessage?.type === 'order') {
+    isNativeOrder = true;
+    const rawMsg = md.rawMessage || (value?.messages?.[0]) || {};
+    await _handleOrderMessage({
+      message: rawMsg,
+      connection,
+      organizationId,
+      savedInteraction
+    });
+  }
+
+  // Track campaign recipient reply (most recent send to this number)
+  try {
+    const campaignService = require('../campaignService');
+    await campaignService.markRecipientReplied({
+      orgId: organizationId,
+      phone: senderId
+    });
+  } catch (replyTrackErr) {
+    logger.debug('[WhatsApp] Campaign reply tracking skipped', { error: replyTrackErr.message });
+  }
+
+  // ── Sentiment (atomic $set — avoids VersionError with AI worker races) ──
+  if (savedInteraction.content) {
+    try {
+      const sentimentResult = aiService.fallbackSentimentAnalysis(savedInteraction.content);
+      await Interaction.updateOne(
+        { _id: savedInteraction._id },
+        {
+          $set: {
+            sentiment: sentimentResult.sentiment,
+            sentimentScore: sentimentResult.sentimentScore,
+            sentimentConfidence: sentimentResult.sentimentConfidence
+          }
+        }
+      );
+      logger.info('[WhatsApp] Sentiment analyzed', {
+        sentiment: sentimentResult.sentiment,
+        interactionId: String(savedInteraction._id)
+      });
+    } catch (sentError) {
+      logger.error('[WhatsApp] Sentiment analysis failed', { error: sentError.message });
+    }
+  }
+
+  // ── Mark as read ────────────────────────────────────────────────────────
+  try {
+    await whatsappService.markAsRead(connection, mid);
+  } catch (readError) {
+    logger.error('[WhatsApp] Failed to mark as read', { error: readError.message });
+  }
+
+  // ── Socket emit ─────────────────────────────────────────────────────────
+  try {
+    emitToOrg(organizationId, 'new_interaction', {
+      interaction: savedInteraction.toObject()
+    });
+  } catch (socketErr) {
+    logger.error('[WhatsApp] Socket emit failed', { error: socketErr.message });
+  }
+
+  cacheService.invalidateInteractionCaches(organizationId).catch((err) => {
+    logger.warn('[WhatsApp] Failed to invalidate interaction caches', { error: err.message });
+  });
+
+  // ── Workflow-first routing → AI fallback (per-channel automation mode) ──────
+  // Flows are the core engine; AI runs only as a fallback when no flow took the
+  // conversation (and only when the channel mode allows it).
+  const replyEngineService = require('../replyEngineService');
+  const organization = connection.organization;
+
+  let flowHandled = false;
+  const { runFlows, runAiFallback } = replyEngineService.decide({
+    organization,
+    platform: 'whatsapp',
+    flowHandled: false
+  });
+
+  if (runFlows) {
+    try {
+      const flowTriggerRouter = require('../flow/flowTriggerRouter');
+      const isOrder = md.type === 'order' || md.rawMessage?.type === 'order';
+      const eventType = isOrder ? 'whatsapp.order' : 'whatsapp.message';
+      const flowResult = await flowTriggerRouter.route({
+        organizationId,
+        platform: 'whatsapp',
+        eventType,
+        interaction: savedInteraction,
+        payload: {
+          content: savedInteraction.content,
+          text: savedInteraction.content,
+          // A native WhatsApp cart order webhook is a freshly "created" order.
+          orderEvent: isOrder ? 'created' : undefined,
+          postback: savedInteraction.metadata?.postback || savedInteraction.metadata?.buttonPayload,
+          // This exact inbound message's wamid — used by flowTriggerRouter as an atomic
+          // idempotency key so a webhook retry can never spin up a second FlowEnrollment
+          // for the same message (see FlowEnrollment.triggerMid).
+          mid
+        }
+      });
+      flowHandled = !!flowResult.handled;
+      if (flowHandled) {
+        logger.info('[WhatsApp] Automation flow handled message', {
+          interactionId: String(savedInteraction._id),
+          enrollments: flowResult.enrollments.length
+        });
+      }
+    } catch (flowErr) {
+      logger.warn('[WhatsApp] Flow routing error (non-fatal)', { error: flowErr.message });
+    }
+  }
+
+  // ── AI layer (single gate) ─────────────────────────────────────────────────
+  // Every AI/commerce automation runs ONLY here, so the channel mode decides who
+  // replies: workflow_only → none of this runs (flows own it); hybrid → only when
+  // no flow took the conversation; ai_only → runs. Within the gate, the FIRST
+  // automation that answers suppresses the rest (no duplicate / conflicting replies).
+  //
+  // Native cart orders bypass the entire AI gate — the order handler already sent
+  // the deterministic ACK and set the AI state for address collection.
+  if (runAiFallback && !flowHandled && !isNativeOrder) {
+    let aiHandled = false;
+    const agentArgs = { organizationId, senderId, text: md.content || '', connection, interaction: savedInteraction };
+
+    // 1) Appointment booking agent.
+    try {
+      const { tryAutonomousBooking } = require('../ai/appointmentAgentService');
+      aiHandled = !!(await tryAutonomousBooking(agentArgs));
+    } catch (apptErr) {
+      logger.debug('[WhatsApp] Appointment agent check failed (non-fatal)', { error: apptErr.message });
+    }
+
+    // 2) Commerce agent — only when appointment agent did not handle.
+    if (!aiHandled) {
+      try {
+        const { tryAutonomousCommerceAction } = require('../ai/commerceAgentService');
+        aiHandled = !!(await tryAutonomousCommerceAction(agentArgs));
+      } catch (agentErr) {
+        logger.debug('[WhatsApp] Commerce agent check failed (non-fatal)', { error: agentErr.message });
+      }
+    }
+
+    // 3) Keyword automation — only when neither commerce nor appointment handled.
+    if (!aiHandled) {
+      try {
+        aiHandled = await _checkWaKeywordAutomation({ textContent: md.content, connection, organizationId, senderId });
+      } catch (kwErr) {
+        logger.debug('[WhatsApp] Keyword automation check failed (non-fatal)', { error: kwErr.message });
+      }
+    }
+
+    // 4) Generic AI auto-reply — only if no agent already answered.
+    if (!aiHandled) {
+      try {
+        await aiQueue.add(
+          { interactionId: savedInteraction._id },
+          { attempts: 3, backoff: 2000, jobId: `ai-${savedInteraction._id}-${mid}` }
+        );
+        const queued = await autoReplyScheduler.queueImmediateAutoReply(
+          savedInteraction._id.toString(),
+          organizationId,
+          { expectedLastMid: mid }
+        );
+        if (queued) {
+          logger.info('[WhatsApp] AI fallback + auto-reply queued', { interactionId: String(savedInteraction._id) });
+        }
+      } catch (queueError) {
+        logger.error('[WhatsApp] Failed to queue AI/auto-reply', { error: queueError.message });
+      }
+    }
+  } else {
+    logger.info('[WhatsApp] AI skipped', {
+      interactionId: String(savedInteraction._id),
+      reason: isNativeOrder ? 'native_order_handled' : 'workflow_owns_channel',
+      runAiFallback,
+      flowHandled,
+      isNativeOrder
+    });
+  }
+}
+
+/**
+ * Persist WhatsApp delivery-status update (sent / delivered / read / failed).
+ *
+ * Because Meta's status events don't carry organizationId, we match by the
+ * platform-level `platformId` (wamid). Even though `platformId` is now
+ * scoped by org for deduplication, it remains globally unique within WhatsApp
+ * because wamids are generated by Meta — so a single-key match is safe here.
+ *
+ * @param {object} status  { id, status, timestamp }
+ */
+
+/** After a delivery webhook, push the updated thread to open inbox clients. */
+async function _emitInteractionUpdatedForReplyWamid(wamid) {
+  try {
+    const stub = await Interaction.findOne({
+      platform: 'whatsapp',
+      'replies.platformResponseId': wamid
+    })
+      .select('_id organization')
+      .lean();
+    if (!stub?._id) return;
+
+    const fresh = await Interaction.findById(stub._id).lean();
+    if (!fresh?.organization) return;
+
+    const orgId =
+      typeof fresh.organization.toString === 'function'
+        ? fresh.organization.toString()
+        : String(fresh.organization);
+    emitToOrg(orgId, 'interaction_updated', { interaction: fresh });
+  } catch (err) {
+    logger.warn('[WhatsApp] Failed to emit interaction_updated after status change', {
+      wamid,
+      error: err.message
+    });
+  }
+}
+
+/**
+ * @param {object} status  one entry from webhook `value.statuses[]`
+ * @param {string} [phoneNumberId]  `value.metadata.phone_number_id`, used to resolve the
+ *   owning organization for pass-through cost tracking. Optional so existing callers
+ *   (and tests) keep working; cost is simply not recorded without it.
+ */
+async function processStatusUpdate(status, phoneNumberId) {
+  if (!status?.id) return;
+  logger.info('[WhatsApp] Status update', { id: status.id, status: status.status });
+
+  const campaignService = require('../campaignService');
+  const errorDetail =
+    status.errors?.[0]?.title ||
+    status.errors?.[0]?.message ||
+    status.errors?.[0]?.error_data?.details ||
+    null;
+
+  await campaignService.applyRecipientDeliveryStatus(
+    status.id,
+    status.status,
+    status.timestamp,
+    errorDetail
+  );
+
+  // Pass-through WhatsApp cost. Meta bills per 24h conversation, and the `pricing` +
+  // `conversation` objects on this status are the only place that data appears.
+  // Wrapped so cost tracking can never break delivery-status processing.
+  if (phoneNumberId && status.conversation?.id) {
+    try {
+      const connection = await _lookupWhatsAppConnection(phoneNumberId);
+      if (connection?.organization) {
+        const whatsappCostService = require('../whatsappCostService');
+        await whatsappCostService.recordConversationCharge(connection.organization, status);
+      }
+    } catch (costErr) {
+      logger.warn('[WhatsApp] conversation cost tracking failed (non-fatal)', {
+        error: costErr.message
+      });
+    }
+  }
+
+  const statusAt = new Date(parseInt(status.timestamp, 10) * 1000);
+  const DELIVERY_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, failed: -1 };
+
+  if (status.status === 'failed') {
+    // Mark agent/manual inbox sends as failed so the UI shows "Not sent".
+    await Interaction.updateOne(
+      { platform: 'whatsapp', 'replies.platformResponseId': status.id },
+      {
+        $set: {
+          'replies.$.deliveryStatus': 'failed',
+          'replies.$.deliveryStatusAt': statusAt,
+          'replies.$.status': 'failed'
+        }
+      }
+    );
+
+    // Drop failed campaign deliveries from inbox — only successfully sent messages belong there.
+    await Interaction.updateOne(
+      {
+        platform: 'whatsapp',
+        'replies.platformResponseId': status.id,
+        'replies.whatsappTemplatePreview.campaignId': { $exists: true, $ne: null }
+      },
+      { $pull: { replies: { platformResponseId: status.id } } }
+    );
+
+    if (!(await shouldSkipStatusSocketEmit())) {
+      await _emitInteractionUpdatedForReplyWamid(status.id);
+    }
+    return;
+  }
+
+  // Only advance delivery lifecycle (sent → delivered → read); never downgrade.
+  const stub = await Interaction.findOne({
+    platform: 'whatsapp',
+    'replies.platformResponseId': status.id
+  })
+    .select('replies')
+    .lean();
+
+  if (stub?.replies?.length) {
+    const reply = stub.replies.find((r) => r.platformResponseId === status.id);
+    const current = reply?.deliveryStatus || 'pending';
+    const currentRank = DELIVERY_RANK[current] ?? 0;
+    const newRank = DELIVERY_RANK[status.status] ?? 0;
+    if (newRank <= currentRank) return;
+  }
+
+  // Update delivery on outbound reply in thread (match by wamid on replies[])
+  await Interaction.updateOne(
+    { platform: 'whatsapp', 'replies.platformResponseId': status.id },
+    {
+      $set: {
+        'replies.$.deliveryStatus': status.status,
+        'replies.$.deliveryStatusAt': statusAt
+      }
+    }
+  );
+
+  if (!(await shouldSkipStatusSocketEmit())) {
+    await _emitInteractionUpdatedForReplyWamid(status.id);
+  }
+}
+
+async function shouldSkipStatusSocketEmit() {
+  if (!campaignConfig.skipStatusSocketWhenBlasting) return false;
+  return campaignMetrics.isHighVolumeBlast();
+}
+
+/**
+ * Check whether the inbound message matches the org's WA keyword automation list.
+ * If yes, send a product_list reply automatically.
+ * Non-fatal — never blocks message persistence.
+ *
+ * @returns {Promise<boolean>} true if a message was sent (caller should suppress further AI replies)
+ */
+async function _checkWaKeywordAutomation({ textContent, connection, organizationId, senderId }) {
+  if (!textContent) return false;
+
+  const Organization = require('../../models/Organization');
+  const org = await Organization.findById(organizationId)
+    .select('waKeywordAutomation')
+    .lean();
+
+  const kwa = org?.waKeywordAutomation;
+  if (!kwa?.enabled || !kwa.keywords?.length) return false;
+
+  const lower = textContent.toLowerCase().trim();
+  const matched = kwa.keywords.some((kw) => lower.includes(String(kw).toLowerCase().trim()));
+  if (!matched) return false;
+
+  // Load active products for this org
+  const Product = require('../../models/Product');
+  const products = await Product.find({ organization: organizationId, isActive: true })
+    .select('name sku _id')
+    .sort({ createdAt: -1 })
+    .limit(kwa.maxProducts || 10)
+    .lean();
+
+  if (!products.length) return false;
+
+  const catalogId = connection.platformData?.catalogId || connection.metadata?.catalogId;
+  if (!catalogId) return false;
+
+  const entitlementsService = require('../entitlementsService');
+  const { FEATURE_KEYS } = require('../../config/featureCatalog');
+  const allowed = await entitlementsService.can(organizationId.toString(), FEATURE_KEYS.COMMERCE_WA_CATALOG_ENABLED);
+  if (!allowed) return false;
+
+  const whatsappCatalogService = require('../../integrations/whatsapp/whatsappCatalogService');
+
+  // Build sections array — single section with all products
+  const sections = [{
+    title: kwa.headerText || 'Our Products',
+    product_items: products.map((p) => ({ product_retailer_id: p.sku || p._id.toString() }))
+  }];
+
+  try {
+    await whatsappCatalogService.sendProductListMessage(
+      connection,
+      senderId,
+      catalogId,
+      sections,
+      kwa.headerText || 'Our Products',
+      kwa.bodyText || 'Here are our available products!'
+    );
+
+    logger.info('[WhatsApp] Keyword automation product_list sent', {
+      organizationId,
+      senderId,
+      keyword: lower.substring(0, 30)
+    });
+    return true; // handled — suppress generic AI reply
+  } catch (sendErr) {
+    logger.warn('[WhatsApp] Keyword automation send failed', { error: sendErr.message });
+    return false;
+  }
+}
+
+module.exports = {
+  // Orchestrators (controller calls these)
+  processWhatsAppWebhook,
+  processIncomingMessage,
+  processStatusUpdate,
+  // DB kernel (used by both HTTP and BullMQ paths)
+  upsertWhatsAppThread,
+  // Queue / legacy path
+  handleWhatsAppMessage,
+  // Exported for tests
+  _handleOrderMessage,
+  _checkWaKeywordAutomation
+};

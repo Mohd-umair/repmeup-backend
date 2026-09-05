@@ -59,10 +59,10 @@ npm run pm2:delete   # Remove all processes
 
 | File | Server Size | RAM | Processes | Use Case |
 |------|-------------|-----|-----------|----------|
-| `ecosystem.config.small.js` | 1GB | 1GB | 1 API | Testing, Low traffic |
-| `ecosystem.config.medium.js` | 2GB | 2GB | 2 API + 1 Worker | **RECOMMENDED** |
+| `ecosystem.small.config.js` | 1GB | 1GB | 1 API | Testing, Low traffic |
+| `ecosystem.medium.config.js` | 2GB | 2GB | 2 API + 1 Worker | **RECOMMENDED** |
 | `ecosystem.config.js` | 2GB | 2GB | 2 API + 1 Worker | Default (same as medium) |
-| `ecosystem.config.large.js` | 4GB+ | 4GB+ | 4 API + 2 Workers | High traffic |
+| `ecosystem.large.config.js` | 4GB+ | 4GB+ | 4 API + 2 Workers | High traffic |
 
 ---
 

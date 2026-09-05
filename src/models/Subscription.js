@@ -52,7 +52,7 @@ const subscriptionSchema = new mongoose.Schema({
     }
   },
   
-  // Usage tracking
+  // Usage tracking (legacy; new code reads usageBuckets via entitlementsService)
   usage: {
     connectedAccounts: {
       type: Number,
@@ -77,9 +77,73 @@ const subscriptionSchema = new mongoose.Schema({
     lastResetAt: {
       type: Date,
       default: Date.now
+    },
+    // Credits banked from the previous period (carry-forward).
+    // Added to the plan's monthly allowance so unused credits accumulate
+    // indefinitely. 0 for unlimited plans and demo workspaces.
+    carriedCredits: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    // UTC calendar-month anchor used by creditPeriodService to detect rollover
+    // without a cron job. Mirrors the lazy-reset pattern used by bucketService.
+    creditPeriodStart: {
+      type: Date,
+      default: Date.now
     }
   },
-  
+
+  /**
+   * Generic per-feature usage buckets keyed by Feature.key.
+   *
+   * Each entry tracks consumption against a `limit` feature. The bucketService
+   * is responsible for resetting `used` to 0 when the period rolls over.
+   *
+   *   usageBuckets: {
+   *     'credits.autoReply.monthly': { used: 23,  periodStart: 2026-05-01 },
+   *     'inbox.uniqueContacts.monthly': { used: 117, periodStart: 2026-05-01 }
+   *   }
+   *
+   * NOTE: legacy `usage.aiCreditsThisMonth` etc. are kept in sync during the
+   * migration window so older controllers still report correct numbers.
+   */
+  usageBuckets: {
+    type: Map,
+    of: new mongoose.Schema(
+      {
+        used: { type: Number, default: 0 },
+        periodStart: { type: Date, default: () => new Date() }
+      },
+      { _id: false }
+    ),
+    default: undefined
+  },
+
+  /**
+   * Extra entitlement this org has PURCHASED on top of its plan, keyed by feature key.
+   *
+   *   { 'contacts.max':                     { limitDelta: 3000 },
+   *     'users.max':                        { limitDelta: 2 },
+   *     'credits.aiConversations.monthly':  { limitDelta: 500, periodMonthKey: '2026-08' },
+   *     'flowBuilder.enabled':              { enabled: true } }
+   *
+   * This is a DERIVED CACHE, never hand-edited: addOnService.recomputeOverrides()
+   * rebuilds it from the AddOnGrant ledger plus active SubscriptionAddOn rows. That
+   * makes fulfilment idempotent, repairable (recompute everything), and immune to
+   * double-granting on a replayed webhook.
+   *
+   * Overrides only ever ADD capability — see entitlementsService.applyOverrides.
+   *
+   * Mixed rather than Map because feature keys contain dots, which Mongoose Map keys
+   * cannot (the same reason Plan.entitlements is Mixed).
+   */
+  entitlementOverrides: {
+    type: mongoose.Schema.Types.Mixed,
+    default: () => ({})
+  },
+
+
   // Billing status
   status: {
     type: String,
@@ -136,12 +200,6 @@ const subscriptionSchema = new mongoose.Schema({
     },
     reason: String
   }],
-  
-  // Downgrade scheduled at period end (set planId here; applied by subscription.completed webhook)
-  pendingDowngradePlanId: {
-    type: String,
-    default: null
-  },
 
   // Cancellation
   cancelledAt: Date,
@@ -153,7 +211,31 @@ const subscriptionSchema = new mongoose.Schema({
   cancelAtPeriodEnd: {
     type: Boolean,
     default: false
-  }
+  },
+
+  // ── Demo / Trial workspace ────────────────────────────────────────────────
+  // When isDemo=true the subscription is running on a full-featured trial that
+  // can be converted to a paid plan IN PLACE (no migration). `trialEndsAt`
+  // above governs expiry. `demoStatus` is the demo lifecycle state:
+  //   trialing  → active trial, full features
+  //   locked    → trial expired; data retained, access gated until purchase
+  //   converted → prospect purchased; now a normal paid subscription
+  isDemo: { type: Boolean, default: false, index: true },
+  demoStatus: {
+    type: String,
+    enum: ['trialing', 'locked', 'converted'],
+    default: undefined
+  },
+  lockedAt: { type: Date },
+  convertedAt: { type: Date },
+
+  /**
+   * Per-demo monthly AI-credit cap. Overrides the plan's (unlimited) credit
+   * limit for THIS demo only, so each demo can be capped individually.
+   * null / undefined = no demo cap (falls back to the plan limit, i.e. unlimited
+   * on the demo plan). Only meaningful when isDemo === true.
+   */
+  demoCreditsCap: { type: Number, default: null }
 }, {
   timestamps: true
 });
@@ -179,11 +261,24 @@ subscriptionSchema.methods.hasFeature = function(featureName) {
   return this.features.includes(featureName);
 };
 
-// Method to reset monthly usage
+// Method to reset monthly usage (legacy keys + new bucket map kept in sync).
+// NOTE: does NOT touch usage.carriedCredits — that is managed exclusively by
+// creditPeriodService.ensureAiCreditPeriodCurrent so the carry-forward bank
+// is never accidentally zeroed by manual admin resets.
 subscriptionSchema.methods.resetMonthlyUsage = function() {
   this.usage.postsThisMonth = 0;
   this.usage.autoRepliesThisMonth = 0;
+  this.usage.aiCreditsThisMonth = 0;
   this.usage.lastResetAt = new Date();
+
+  if (this.usageBuckets && typeof this.usageBuckets.forEach === 'function') {
+    const now = new Date();
+    this.usageBuckets.forEach((bucket, key) => {
+      this.usageBuckets.set(key, { used: 0, periodStart: now });
+    });
+    this.markModified('usageBuckets');
+  }
+
   return this.save();
 };
 

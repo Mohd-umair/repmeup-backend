@@ -4,7 +4,102 @@ const Plan = require('../models/Plan');
 const User = require('../models/User');
 const ScheduledPost = require('../models/ScheduledPost');
 const AICreditUsage = require('../models/AICreditUsage');
+const entitlementsService = require('../services/entitlementsService');
+const bucketService = require('../services/bucketService');
+const { FEATURE_KEYS } = require('../config/featureCatalog');
+const { ensureAiCreditPeriodCurrent, utcMonthStart } = require('../services/creditPeriodService');
+const { buildPublicPlanCard } = require('../services/planPresentationService');
 const { cancelRazorpaySubscription } = require('./razorpayController');
+
+/**
+ * Build the demo/trial status block for the limits payload.
+ * Returns null for normal (non-demo) workspaces so the frontend can simply check
+ * `data.trial` truthiness to decide whether to show trial UI.
+ */
+/**
+ * The pricing-sheet meters (AI conversations, Active Contacts), display-ready.
+ *
+ * Both resolve through the entitlements engine rather than the legacy `usage.*`
+ * counters, so they pick up live counts and purchased top-ups automatically.
+ * `baseLimit`/`purchasedDelta` let the UI print "10,000 + 3,000 purchased".
+ */
+async function buildSheetMeters(orgId) {
+  const format = (n) => (n === -1 ? 'Unlimited' : Number(n || 0).toLocaleString('en-IN'));
+
+  const build = async (featureKey, label) => {
+    try {
+      const q = await entitlementsService.quota(orgId, featureKey);
+      const resolved = (await entitlementsService.getEntitlements(orgId)).keys?.[featureKey] || {};
+      return {
+        featureKey,
+        label,
+        used: q.used,
+        limit: q.limit,
+        baseLimit: resolved.baseLimit ?? q.limit,
+        purchasedDelta: resolved.purchasedDelta ?? 0,
+        remaining: q.isUnlimited ? null : q.remaining,
+        isUnlimited: q.isUnlimited,
+        isExhausted: q.isExhausted,
+        percentUsed: q.isUnlimited || !q.limit ? 0 : Math.min(100, Math.round((q.used / q.limit) * 100)),
+        display: `${format(q.used)} / ${format(q.limit)}`,
+        resetPeriod: q.resetPeriod
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const [aiConversations, activeContacts] = await Promise.all([
+    build(FEATURE_KEYS.CREDITS_AI_CONVERSATIONS, 'AI conversations this month'),
+    build(FEATURE_KEYS.CONTACTS_MAX, 'Active Contacts')
+  ]);
+
+  // Contacts dropped because the org was at its ceiling — drives the "top up" nudge.
+  let contactsNotSaved = 0;
+  try {
+    const overflow = await bucketService.getBucket(orgId, 'contacts.overflow.monthly');
+    contactsNotSaved = overflow?.used || 0;
+  } catch { /* counter is best-effort */ }
+
+  return { aiConversations, activeContacts, contactsNotSaved };
+}
+
+/**
+ * @desc    WhatsApp pass-through message spend for this org
+ * @route   GET /api/subscription/whatsapp-spend
+ *
+ * These are Meta's conversation charges billed straight through — identical on every
+ * plan, which is why they sit beside the plan meters rather than inside them.
+ */
+exports.getWhatsAppSpend = async (req, res, next) => {
+  try {
+    const whatsappCostService = require('../services/whatsappCostService');
+    const { from, to } = req.query;
+    const summary = await whatsappCostService.getSpendSummary(
+      req.user.organization._id,
+      { from, to }
+    );
+    res.status(200).json({ success: true, data: summary });
+  } catch (error) {
+    next(error);
+  }
+};
+
+function buildTrialStatus(subscription) {
+  if (!subscription || !subscription.isDemo) return null;
+  const now = Date.now();
+  const endsAt = subscription.trialEndsAt ? new Date(subscription.trialEndsAt).getTime() : null;
+  const msLeft = endsAt != null ? endsAt - now : null;
+  const daysRemaining = msLeft != null ? Math.max(0, Math.ceil(msLeft / (24 * 60 * 60 * 1000))) : null;
+  return {
+    isDemo: true,
+    demoStatus: subscription.demoStatus || 'trialing',   // trialing | locked | converted
+    locked: subscription.demoStatus === 'locked',
+    trialEndsAt: subscription.trialEndsAt ?? null,
+    daysRemaining,
+    expired: msLeft != null ? msLeft <= 0 : false
+  };
+}
 
 /**
  * @desc    Get subscription limits and usage for organization
@@ -44,10 +139,13 @@ exports.getLimits = async (req, res, next) => {
       });
     }
 
-    // Compute all real-time usage values from actual data
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
+    // Trigger carry-forward rollover before aggregating usage so the
+    // period anchor is current and `carriedCredits` reflects the banked amount.
+    const orgId = req.user.organization._id;
+    const creditPeriod = await ensureAiCreditPeriodCurrent(orgId);
+
+    // Use the UTC month start consistent with creditPeriodService.
+    const startOfMonth = utcMonthStart();
 
     const [
       connectedAccountsCount,
@@ -88,46 +186,96 @@ exports.getLimits = async (req, res, next) => {
 
     const aiCreditsThisMonth = aiCreditsAgg[0]?.total ?? 0;
 
+    // Update display-accuracy usage counts atomically without touching the credit
+    // period fields (carriedCredits, creditPeriodStart) managed by creditPeriodService.
+    await Subscription.findOneAndUpdate(
+      { organization: orgId },
+      {
+        $set: {
+          'usage.connectedAccounts': connectedAccountsCount,
+          'usage.activeUsers': activeUserCount,
+          'usage.postsThisMonth': postsThisMonthCount,
+          'usage.autoRepliesThisMonth': autoRepliesThisMonthCount,
+          'usage.aiCreditsThisMonth': aiCreditsThisMonth
+        }
+      }
+    );
+
+    // Patch in-memory values so the response below is correct without a second query.
     subscription.usage.connectedAccounts = connectedAccountsCount;
     subscription.usage.activeUsers = activeUserCount;
     subscription.usage.postsThisMonth = postsThisMonthCount;
     subscription.usage.autoRepliesThisMonth = autoRepliesThisMonthCount;
     subscription.usage.aiCreditsThisMonth = aiCreditsThisMonth;
-    await subscription.save();
 
-    // Calculate remaining quota
-    const canConnectMore = subscription.limits.maxAccounts === -1 || 
-                          subscription.usage.connectedAccounts < subscription.limits.maxAccounts;
+    const ent = await entitlementsService.getEntitlements(orgId);
+    const resolvedLimits = { ...ent.limits };
 
-    const remaining = subscription.limits.maxAccounts === -1 ? 
-                     Infinity : 
-                     Math.max(0, subscription.limits.maxAccounts - subscription.usage.connectedAccounts);
+    // Per-demo AI-credit cap overrides the (unlimited) plan limit for display +
+    // enforcement parity with aiCreditService.checkCredits.
+    if (subscription.isDemo && subscription.demoCreditsCap != null && subscription.demoCreditsCap >= 0) {
+      resolvedLimits.maxAICreditsPerMonth = subscription.demoCreditsCap;
+    }
 
-    // Get next tier info from database
-    const currentTier = subscription.tier;
-    const nextTier = await Plan.getNextTierPlan(currentTier);
+    const canConnectMore =
+      resolvedLimits.maxAccounts === -1 ||
+      subscription.usage.connectedAccounts < resolvedLimits.maxAccounts;
+
+    const remaining =
+      resolvedLimits.maxAccounts === -1
+        ? Infinity
+        : Math.max(0, resolvedLimits.maxAccounts - subscription.usage.connectedAccounts);
+
+    const currentTier = ent.tier ?? subscription.tier;
+    const nextTierPlan = await Plan.getNextTierPlan(currentTier);
+    const nextTier = nextTierPlan
+      ? {
+          ...buildPublicPlanCard(nextTierPlan),
+          planId: nextTierPlan.planId,
+          name: nextTierPlan.name,
+          tier: nextTierPlan.tier,
+          price: nextTierPlan.price,
+          maxAccounts: buildPublicPlanCard(nextTierPlan).limits.maxAccounts
+        }
+      : null;
 
     res.status(200).json({
       success: true,
       data: {
-        plan: subscription.planName,
-        planId: subscription.planId,
-        tier: subscription.tier,
+        plan: ent.planName || subscription.planName,
+        planId: ent.planId || subscription.planId,
+        tier: ent.tier ?? subscription.tier,
         status: subscription.status,
         limits: {
-          ...subscription.limits,
-          maxAICreditsPerMonth: subscription.limits.maxAICreditsPerMonth || 500
+          ...resolvedLimits,
+          // Keep -1 (unlimited) and an explicit demo cap (incl. 0) intact;
+          // only fall back to 500 when the value is truly absent.
+          maxAICreditsPerMonth:
+            resolvedLimits.maxAICreditsPerMonth == null
+              ? 500
+              : resolvedLimits.maxAICreditsPerMonth
         },
-        usage: subscription.usage,
+        usage: {
+          ...subscription.usage,
+          // Authoritative carry-forward state from creditPeriodService.
+          carriedCredits: creditPeriod.carriedCredits,
+          creditPeriodStart: subscription.usage.creditPeriodStart
+        },
+        // Breakdown used by billing / header / ai-credits pages.
+        creditSummary: {
+          planLimit: creditPeriod.planLimit,
+          carriedCredits: creditPeriod.carriedCredits,
+          effectiveLimit: creditPeriod.effectiveLimit,
+          remaining: creditPeriod.remaining,
+          isUnlimited: creditPeriod.isUnlimited
+        },
         canConnectMore,
         remaining,
-        nextTier: nextTier ? {
-          name: nextTier.name,
-          tier: nextTier.tier,
-          maxAccounts: nextTier.limits.maxAccounts,
-          price: nextTier.price,
-          planId: nextTier.planId
-        } : null,
+        nextTier,
+        // The 2026 pricing-sheet meters, display-ready. Separate from `usage` because
+        // these resolve through the entitlements engine (live counts, purchased
+        // top-ups) rather than the legacy counter fields.
+        meters: await buildSheetMeters(orgId),
         billing: {
           currentPeriodStart: subscription.currentPeriodStart ?? null,
           currentPeriodEnd: subscription.currentPeriodEnd ?? null,
@@ -135,14 +283,16 @@ exports.getLimits = async (req, res, next) => {
           cancelAtPeriodEnd: subscription.cancelAtPeriodEnd ?? false,
           cancelledAt: subscription.cancelledAt ?? null,
           cancellationReason: subscription.cancellationReason ?? null,
-          pendingDowngradePlanId: subscription.pendingDowngradePlanId ?? null,
           planHistory: (subscription.planHistory || []).slice(-5).map(h => ({
             planId: h.planId,
             planName: h.planName,
             changedAt: h.changedAt,
             reason: h.reason || null
           }))
-        }
+        },
+        // Demo/trial status — drives the prospect trial banner + lock screen.
+        // Null for normal (non-demo) workspaces.
+        trial: buildTrialStatus(subscription)
       }
     });
   } catch (error) {
@@ -266,28 +416,33 @@ exports.getSubscription = async (req, res, next) => {
  * @desc    Get all available plans (from database)
  * @route   GET /api/subscription/plans
  * @access  Public
+ *
+ * @deprecated Duplicates `GET /api/plans` (planController.getPlans). Kept for
+ * one release for backward-compat with older clients; new callers should hit
+ * `/api/plans`. The response shape and data are identical. This handler will
+ * be removed in the next major version — see the dynamic plan + feature
+ * engine plan, "cleanup" task.
  */
 exports.getPlans = async (req, res, next) => {
   try {
+    res.set('Deprecation', 'true');
+    res.set('Link', '</api/plans>; rel="successor-version"');
+
     const plans = await Plan.getPublicPlans();
-    
-    // Transform to match frontend expectation (object with planId as keys)
     const plansObject = {};
-    plans.forEach(plan => {
+    plans.forEach((plan) => {
+      const card = buildPublicPlanCard(plan);
       plansObject[plan.planId] = {
-        name: plan.name,
-        tier: plan.tier,
-        price: plan.price,
-        limits: plan.limits,
-        features: plan.features,
-        badge: plan.badge,
-        badgeColor: plan.badgeColor
+        ...card,
+        legacyFeatures: plan.features || []
       };
     });
-    
+
     res.status(200).json({
       success: true,
-      data: plansObject
+      data: plansObject,
+      deprecated: true,
+      successor: '/api/plans'
     });
   } catch (error) {
     console.error('Get plans error:', error);
@@ -325,11 +480,10 @@ exports.upgradePlan = async (req, res, next) => {
       });
     }
 
-    // Check if downgrade
     if (newPlan.tier < subscription.tier) {
       return res.status(400).json({
         success: false,
-        error: 'Cannot downgrade plan. Please contact support.'
+        error: 'Changing to a lower-tier plan is not supported. Contact support if you need help.'
       });
     }
 
@@ -348,8 +502,11 @@ exports.upgradePlan = async (req, res, next) => {
     subscription.tier = newPlan.tier;
     subscription.limits = newPlan.limits;
     subscription.features = newPlan.features;
-    
+
     await subscription.save();
+
+    // Entitlements have changed — drop the cache so the next request re-resolves.
+    await entitlementsService.invalidateEntitlements(subscription.organization);
 
     res.status(200).json({
       success: true,

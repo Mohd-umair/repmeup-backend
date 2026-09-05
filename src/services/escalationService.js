@@ -119,6 +119,14 @@ class EscalationService {
       reasons.push(`Urgency detected: ${urgencyKeywords.keywords.join(', ')}`);
     }
 
+    // Soft Rule 7: Conversation loop detection (30 points)
+    // Fires when a customer keeps returning to the same thread after AI replies without resolution
+    const sameTopicReplies = interaction.escalationMetadata?.sameTopicReplies || 0;
+    if (sameTopicReplies >= 2) {
+      escalationScore += 30;
+      reasons.push(`Conversation loop detected — customer returned ${sameTopicReplies} time(s) without resolution`);
+    }
+
     // ESCALATION THRESHOLD: Score >= 50
     const shouldEscalate = escalationScore >= 50;
 
@@ -252,6 +260,41 @@ class EscalationService {
   }
 
   /**
+   * Layer 1 — Intent-based hard routing.
+   * Returns { shouldRoute: true, reason } when the interaction's intentBucket is in the org's
+   * alwaysHumanBuckets list. These conversations skip AI generation entirely and go straight
+   * to a human agent (account-specific lookups, billing disputes, legal, etc.)
+   *
+   * @param {Object} interaction - Interaction document (intentBucket must be populated or ObjectId)
+   * @param {Object} organization - Organization document with escalationSettings
+   * @returns {{ shouldRoute: boolean, reason?: string }}
+   */
+  checkIntentRouting(interaction, organization) {
+    const alwaysHumanBuckets = organization.escalationSettings?.alwaysHumanBuckets || [];
+
+    if (!interaction.intentBucket || alwaysHumanBuckets.length === 0) {
+      return { shouldRoute: false };
+    }
+
+    const bucketId = interaction.intentBucket._id
+      ? interaction.intentBucket._id.toString()
+      : interaction.intentBucket.toString();
+
+    const isAlwaysHuman = alwaysHumanBuckets.some(
+      (id) => id.toString() === bucketId
+    );
+
+    if (isAlwaysHuman) {
+      return {
+        shouldRoute: true,
+        reason: 'Intent bucket configured for direct human routing (account/billing/legal queries)'
+      };
+    }
+
+    return { shouldRoute: false };
+  }
+
+  /**
    * Escalate interaction to human agent
    * @param {Object} interaction - Interaction to escalate
    * @param {Object} organization - Organization
@@ -273,13 +316,21 @@ class EscalationService {
         const agent = await this.assignToAgent(interaction, organization);
         if (agent) {
           console.log(`👤 [Escalation] Auto-assigned to agent: ${agent.firstName} ${agent.lastName}`);
-          
-          // Send notification if enabled
-          if (organization.escalationSettings?.notifyAgents) {
+
+          // Send notification if enabled — check both the top-level field and the
+          // nested `notifications.notifyAgents` field saved by the Automation Hub UI.
+          const notify =
+            organization.escalationSettings?.notifyAgents ||
+            organization.escalationSettings?.notifications?.notifyAgents;
+          if (notify) {
             await this.notifyAgent(agent, interaction, organization);
           }
         }
       }
+
+      // Always refresh the inbox so the escalation/assignment shows live — even when
+      // the conversation was already assigned (auto-assign skipped) or autoAssign is off.
+      await this._emitInteractionUpdated(interaction._id);
 
       return interaction;
     } catch (error) {
@@ -288,39 +339,70 @@ class EscalationService {
     }
   }
 
+  /** Emit a real-time inbox update for an interaction (escalation/assignment banner). */
+  async _emitInteractionUpdated(interactionId) {
+    try {
+      const { emitToOrg } = require('../utils/socketEmitter');
+      const fresh = await Interaction.findById(interactionId).lean();
+      if (fresh) {
+        emitToOrg(String(fresh.organization), 'interaction_updated', { interaction: fresh });
+      }
+    } catch (err) {
+      console.warn('[Escalation] interaction_updated emit failed (non-fatal):', err.message);
+    }
+  }
+
   /**
    * Assign interaction to agent using configured method
    */
-  async assignToAgent(interaction, organization) {
-    const settings = organization.escalationSettings;
+  /**
+   * Assign interaction to agent.
+   * @param {Object} interaction
+   * @param {Object} organization
+   * @param {Object} [opts]
+   * @param {boolean} [opts.forceFallback=false] - When true, bypasses the 'manual' assignment
+   *   restriction and always picks an available agent. Use for AI fallback paths where the
+   *   fallbackSettings.assignToAgent flag is explicitly set to true.
+   */
+  async assignToAgent(interaction, organization, { forceFallback = false } = {}) {
+    const settings = organization.escalationSettings || {};
     const method = settings.assignmentMethod || 'round_robin';
 
     try {
+      const existing = await Interaction.findById(interaction._id).select('assignedTo').lean();
+      if (existing?.assignedTo) {
+        console.log(
+          `⏭️ [Escalation] Skipping auto-assign — interaction ${interaction._id} already assigned to ${existing.assignedTo}`
+        );
+        return null;
+      }
+
+      // 'manual' means no automatic assignment — UNLESS the caller explicitly forces it
+      // (e.g. fallback path where the admin has turned on assignToAgent).
+      if (method === 'manual' && !forceFallback) {
+        return null;
+      }
+
       let agent = null;
 
       switch (method) {
-        case 'round_robin':
-          agent = await this.assignRoundRobin(organization);
-          break;
-        
         case 'least_busy':
           agent = await this.assignLeastBusy(organization);
           break;
-        
         case 'skill_based':
           agent = await this.assignSkillBased(interaction, organization);
           break;
-        
-        case 'manual':
-          // Don't auto-assign, wait for manual assignment
-          return null;
-        
+        case 'round_robin':
         default:
           agent = await this.assignRoundRobin(organization);
       }
 
       if (agent) {
         await interaction.assignTo(agent._id, null, 'escalation');
+
+        // Emit real-time update so the inbox assignment banner appears immediately.
+        await this._emitInteractionUpdated(interaction._id);
+
         return agent;
       }
 
@@ -339,6 +421,9 @@ class EscalationService {
 
     if (pool.length === 0) return null;
 
+    if (!organization.escalationSettings) {
+      organization.escalationSettings = {};
+    }
     const lastIndex = organization.escalationSettings.lastAssignedAgentIndex ?? -1;
     const nextIndex = (lastIndex + 1) % pool.length;
     organization.escalationSettings.lastAssignedAgentIndex = nextIndex;

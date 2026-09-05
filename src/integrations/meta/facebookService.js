@@ -3,6 +3,7 @@ const PlatformConnection = require('../../models/PlatformConnection');
 const Interaction = require('../../models/Interaction');
 const fs = require('fs');
 const path = require('path');
+const { generateChatRef } = require('../../utils/chatRefHelper');
 
 /**
  * Facebook Service
@@ -12,6 +13,12 @@ class FacebookService {
   constructor() {
     this.apiVersion = 'v18.0';
     this.baseURL = `https://graph.facebook.com/${this.apiVersion}`;
+  }
+
+  /** Locale for Meta Graph (affects localized error strings). META_GRAPH_LOCALE overrides (e.g. en_US). */
+  _metaGraphParams(params = {}) {
+    const locale = process.env.META_GRAPH_LOCALE || 'en_US';
+    return { locale, ...params };
   }
 
   /**
@@ -106,7 +113,7 @@ class FacebookService {
       return axios.post(
         `${this.baseURL}/${pageId}/messages`,
         body,
-        { params: { access_token: accessToken }, timeout: 15000 }
+        { params: this._metaGraphParams({ access_token: accessToken }), timeout: 15000 }
       );
     };
 
@@ -168,7 +175,7 @@ class FacebookService {
           }));
           form.append('filedata', fs.createReadStream(localFilePath));
           return axios.post(apiUrl, form, {
-            params: { access_token: accessToken },
+            params: this._metaGraphParams({ access_token: accessToken }),
             headers: form.getHeaders(),
             timeout: 30000,
             maxContentLength: 100 * 1024 * 1024
@@ -187,7 +194,7 @@ class FacebookService {
         };
         if (!useTag) delete body.tag;
         return axios.post(apiUrl, body, {
-          params: { access_token: accessToken }, timeout: 15000
+          params: this._metaGraphParams({ access_token: accessToken }), timeout: 15000
         });
       };
 
@@ -393,14 +400,26 @@ class FacebookService {
 
       // Bulk upsert interactions
       if (interactions.length > 0) {
+        const fbOrgId = platformConnection.organization;
+        const fbExistingIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const fbChatRefMap = {};
+        for (const interaction of interactions) {
+          if (!fbExistingIds.has(interaction.platformId)) {
+            fbChatRefMap[interaction.platformId] = await generateChatRef(fbOrgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = fbChatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }
@@ -479,14 +498,26 @@ class FacebookService {
 
       // Bulk upsert
       if (interactions.length > 0) {
+        const fbRevOrgId = platformConnection.organization;
+        const fbRevExistingIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const fbRevChatRefMap = {};
+        for (const interaction of interactions) {
+          if (!fbRevExistingIds.has(interaction.platformId)) {
+            fbRevChatRefMap[interaction.platformId] = await generateChatRef(fbRevOrgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = fbRevChatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }

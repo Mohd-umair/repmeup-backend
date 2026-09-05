@@ -81,19 +81,135 @@ exports.validateContactInquiry = (req, res, next) => {
   next();
 };
 
+exports.validateAutomationFlow = (req, res, next) => {
+  const nodeSchema = Joi.object({
+    id: Joi.string().trim().required(),
+    type: Joi.string().trim().required(),
+    label: Joi.string().trim().max(200).allow('', null),
+    position: Joi.object({
+      x: Joi.number().default(0),
+      y: Joi.number().default(0)
+    }).optional(),
+    config: Joi.object().unknown(true).default({}),
+    supportedChannels: Joi.array().items(Joi.string()).default([])
+  });
+
+  const edgeSchema = Joi.object({
+    id: Joi.string().trim().required(),
+    source: Joi.string().trim().required(),
+    target: Joi.string().trim().required(),
+    label: Joi.string().trim().max(100).allow('', null),
+    condition: Joi.alternatives().try(Joi.object().unknown(true), Joi.valid(null)).optional()
+  });
+
+  const schema = Joi.object({
+    name: Joi.string().trim().min(1).max(200).required(),
+    description: Joi.string().trim().max(2000).allow('', null),
+    channels: Joi.array().items(Joi.string().valid('whatsapp', 'instagram', 'facebook')).min(1).default(['whatsapp']),
+    entryNodeId: Joi.string().trim().allow('', null),
+    nodes: Joi.array().items(nodeSchema).default([]),
+    edges: Joi.array().items(edgeSchema).default([]),
+    settings: Joi.object({
+      quietHoursStart: Joi.string().allow('', null),
+      quietHoursEnd: Joi.string().allow('', null),
+      frequencyCap: Joi.number().min(0).optional(),
+      frequencyCapWindowDays: Joi.number().min(1).optional(),
+      timezone: Joi.string().allow('', null)
+    }).optional(),
+    isBlueprint: Joi.boolean().optional(),
+    strictValidate: Joi.boolean().optional()
+  });
+
+  const { error, value } = schema.validate(req.body, { abortEarly: true, stripUnknown: true });
+  if (error) {
+    return res.status(400).json({ success: false, error: error.details[0].message });
+  }
+  req.body = value;
+  next();
+};
+
+const DEMO_TIME_SLOTS = [
+  '09:30 AM', '10:00 AM', '10:30 AM', '11:00 AM', '11:30 AM', '12:00 PM',
+  '02:00 PM', '02:30 PM', '03:00 PM', '03:30 PM', '04:00 PM', '04:30 PM',
+  '05:00 PM', '05:30 PM'
+];
+
+exports.validateDemoBooking = (req, res, next) => {
+  const schema = Joi.object({
+    name: Joi.string().trim().min(2).max(200).required(),
+    email: Joi.string().email().required(),
+    phone: Joi.string().trim().min(8).max(40).required(),
+    company: Joi.string().trim().min(1).max(200).required(),
+    demoDate: Joi.string()
+      .pattern(/^\d{4}-\d{2}-\d{2}$/)
+      .required()
+      .custom((value, helpers) => {
+        const d = new Date(`${value}T00:00:00`);
+        if (Number.isNaN(d.getTime())) return helpers.error('any.invalid');
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (d < today) return helpers.message('Demo date must be today or in the future');
+        const max = new Date(today);
+        max.setDate(max.getDate() + 60);
+        if (d > max) return helpers.message('Demo date must be within the next 60 days');
+        const day = d.getDay();
+        if (day === 0 || day === 6) return helpers.message('Demo date must be a weekday');
+        return value;
+      }),
+    demoTime: Joi.string().valid(...DEMO_TIME_SLOTS).required(),
+    timezone: Joi.string().trim().max(64).default('Asia/Kolkata'),
+    teamSize: Joi.string().trim().max(40).allow('', null),
+    notes: Joi.string().trim().max(5000).allow('', null)
+  });
+
+  const { error, value } = schema.validate(req.body, { abortEarly: true, stripUnknown: true });
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      error: error.details[0].message
+    });
+  }
+
+  req.body = value;
+  next();
+};
+
 // Validate interaction reply
 exports.validateReply = (req, res, next) => {
+  const whatsappTemplateSchema = Joi.object({
+    name: Joi.string().trim().min(1).max(512).required(),
+    languageCode: Joi.string().trim().max(35).allow('', null).optional(),
+    components: Joi.array().items(Joi.object().unknown(true)).max(30).optional()
+  }).unknown(true);
+
   const schema = Joi.object({
     content: Joi.string().allow('').max(10000).optional(),
     useTemplate: Joi.boolean().optional(),
     templateId: objectId().optional(),
     templateVariables: Joi.object().optional(),
     attachmentUrl: Joi.string().uri({ scheme: ['http', 'https', 'data'] }).optional(),
-    attachmentType: Joi.string().valid('image', 'video', 'file', 'audio').optional()
-  });
+    attachmentType: Joi.string().valid('image', 'video', 'file', 'audio').optional(),
+    /** Inbox → WhatsApp Cloud API template send (sanitized in controller) */
+    whatsappTemplate: whatsappTemplateSchema.optional(),
+    /** Rich inbox preview rendered in Angular (validated + merged server-side when sending a template).
+     *  Also sent as `whatsappTemplate.inboxUiPreview` so older validators that only whitelist `whatsappTemplate` still receive it.
+     */
+    whatsappTemplatePreview: Joi.object({
+      templateName: Joi.string().trim().max(512).optional(),
+      languageCode: Joi.string().trim().max(35).allow('', null).optional(),
+      category: Joi.string().trim().max(32).allow('', null).optional(),
+      headerImageUrl: Joi.string().uri({ scheme: ['http', 'https'] }).max(2048).allow('', null).optional(),
+      headerText: Joi.string().allow('').max(4096).optional(),
+      bodyText: Joi.string().allow('').max(4096).optional(),
+      footerText: Joi.string().allow('').max(1024).optional(),
+      buttons: Joi.array().items(Joi.object().unknown(true)).max(25).optional()
+    })
+      .unknown(true)
+      .optional()
+  }).unknown(true);
 
   const { error } = schema.validate(req.body);
-  
+
   if (error) {
     return res.status(400).json({
       success: false,
@@ -103,10 +219,16 @@ exports.validateReply = (req, res, next) => {
 
   const hasContent = typeof req.body.content === 'string' && req.body.content.trim().length > 0;
   const hasAttachment = req.body.attachmentUrl && req.body.attachmentType;
-  if (!hasContent && !hasAttachment) {
+  const waTmpl = req.body.whatsappTemplate;
+  const hasWhatsappTemplate =
+    waTmpl &&
+    typeof waTmpl === 'object' &&
+    typeof waTmpl.name === 'string' &&
+    waTmpl.name.trim().length > 0;
+  if (!hasContent && !hasAttachment && !hasWhatsappTemplate) {
     return res.status(400).json({
       success: false,
-      error: 'Either content or attachment (attachmentUrl + attachmentType) is required'
+      error: 'Either message content, an attachment (attachmentUrl + attachmentType), or whatsappTemplate is required'
     });
   }
 
@@ -205,7 +327,14 @@ exports.validateKnowledgeBaseManual = (req, res, next) => {
     content: Joi.string().required().max(100000),
     tags: Joi.array().items(Joi.string().max(100)).max(50).optional(),
     priority: Joi.number().min(1).max(10).optional(),
-    metadata: Joi.object().optional()
+    metadata: Joi.object().optional(),
+    trainingContext: Joi.string().max(2000).allow('').optional(),
+    trainingWeight: Joi.number().min(1).max(10).optional(),
+    isTrainingData: Joi.boolean().optional(),
+    isActive: Joi.boolean().optional(),
+    templateFields: Joi.array().items(
+      Joi.object({ key: Joi.string().allow('').max(500), value: Joi.string().allow('').max(50000) })
+    ).max(100).optional()
   }).options({ stripUnknown: true });
 
   const { error } = schema.validate(req.body);
@@ -222,11 +351,18 @@ exports.validateKnowledgeBaseUpdate = (req, res, next) => {
   const schema = Joi.object({
     title: Joi.string().max(500).optional(),
     content: Joi.string().max(100000).optional(),
+    type: Joi.string().valid('faq', 'product_info', 'policy', 'brand_voice', 'procedure', 'general').optional(),
     category: Joi.string().max(200).optional(),
     tags: Joi.array().items(Joi.string().max(100)).max(50).optional(),
     priority: Joi.number().min(1).max(10).optional(),
     metadata: Joi.object().optional(),
-    isActive: Joi.boolean().optional()
+    isActive: Joi.boolean().optional(),
+    trainingContext: Joi.string().max(2000).allow('').optional(),
+    trainingWeight: Joi.number().min(1).max(10).optional(),
+    isTrainingData: Joi.boolean().optional(),
+    templateFields: Joi.array().items(
+      Joi.object({ key: Joi.string().allow('').max(500), value: Joi.string().allow('').max(50000) })
+    ).max(100).optional()
   }).options({ stripUnknown: true }).min(1);
 
   const { error } = schema.validate(req.body);

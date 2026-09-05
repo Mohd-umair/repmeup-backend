@@ -12,6 +12,8 @@ function menuIdStr(id) {
  * Build grouped menus: top-level only, with nested `children` from parentId (already permission-filtered).
  */
 function buildGroupedMenuTree(accessibleMenus) {
+  const idSet = new Set(accessibleMenus.map((m) => menuIdStr(m._id)));
+
   const byParent = new Map();
   accessibleMenus.forEach((m) => {
     if (!m.parentId) return;
@@ -21,7 +23,13 @@ function buildGroupedMenuTree(accessibleMenus) {
   });
   byParent.forEach((arr) => arr.sort((a, b) => (a.order || 0) - (b.order || 0)));
 
-  const topLevel = accessibleMenus.filter((m) => !m.parentId);
+  // Items whose parentId points to a missing/inactive parent are orphaned — promote to top-level
+  // so they still appear in the sidebar (e.g. Catalog with a deleted parent).
+  const topLevel = accessibleMenus.filter((m) => {
+    if (!m.parentId) return true;
+    return !idSet.has(menuIdStr(m.parentId));
+  });
+  topLevel.sort((a, b) => (a.order || 0) - (b.order || 0));
 
   const enriched = topLevel.map((parent) => {
     const kids = byParent.get(menuIdStr(parent._id)) || [];
@@ -29,10 +37,13 @@ function buildGroupedMenuTree(accessibleMenus) {
     return { ...parent, children: kids };
   });
 
-  const groupedMenus = { main: [], management: [], settings: [] };
+  const groupedMenus = { main: [], management: [], settings: [], automation: [], campaigns: [] };
   enriched.forEach((menu) => {
     if (groupedMenus[menu.group]) {
       groupedMenus[menu.group].push(menu);
+    } else {
+      // Unknown group: fall back to main so it's still visible
+      groupedMenus.main.push(menu);
     }
   });
   return groupedMenus;
@@ -308,7 +319,7 @@ exports.seedMenus = async (req, res, next) => {
     const defaultMenus = [
       {
         label: 'Home',
-        icon: '🏠',
+        icon: 'fas fa-home',
         route: '/',
         order: 1,
         group: 'main',
@@ -316,7 +327,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Dashboard',
-        icon: '📊',
+        icon: 'fas fa-chart-pie',
         route: '/app/dashboard',
         order: 2,
         group: 'main',
@@ -324,7 +335,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Inbox',
-        icon: '📥',
+        icon: 'fas fa-inbox',
         route: '/app/inbox',
         order: 3,
         group: 'main',
@@ -335,8 +346,17 @@ exports.seedMenus = async (req, res, next) => {
         }
       },
       {
+        label: 'Bucket Board',
+        icon: 'fas fa-columns',
+        route: '/app/inbox/buckets',
+        order: 4,
+        group: 'main',
+        requiredRoles: ['admin', 'manager', 'agent'],
+        requiredPermissions: ['inbox.read']
+      },
+      {
         label: 'Knowledge Base',
-        icon: '🧠',
+        icon: 'fas fa-brain',
         route: '/app/knowledge-base',
         order: 6,
         group: 'main',
@@ -345,7 +365,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Analytics',
-        icon: '📈',
+        icon: 'fas fa-chart-line',
         route: '/app/analytics',
         order: 7,
         group: 'main',
@@ -354,7 +374,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Agents',
-        icon: '👥',
+        icon: 'fas fa-users',
         route: '/app/agents',
         order: 8,
         group: 'management',
@@ -362,8 +382,16 @@ exports.seedMenus = async (req, res, next) => {
         requiresFeature: 'agents'
       },
       {
+        label: 'Appointments',
+        icon: 'fas fa-calendar-check',
+        route: '/app/appointments',
+        order: 7,
+        group: 'management',
+        requiredRoles: ['admin', 'manager']
+      },
+      {
         label: 'Settings',
-        icon: '⚙️',
+        icon: 'fas fa-cog',
         route: '/app/settings',
         order: 9,
         group: 'settings',
@@ -375,7 +403,7 @@ exports.seedMenus = async (req, res, next) => {
 
     const publishParent = await Menu.create({
       label: 'Publish',
-      icon: '✈️',
+      icon: 'fas fa-paper-plane',
       route: '/app/publish',
       order: 4,
       group: 'main',
@@ -386,7 +414,7 @@ exports.seedMenus = async (req, res, next) => {
     const publishChildren = await Menu.insertMany([
       {
         label: 'Create',
-        icon: '✏️',
+        icon: 'fas fa-pen',
         route: '/app/publish',
         order: 1,
         group: 'main',
@@ -396,7 +424,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Calendar',
-        icon: '📅',
+        icon: 'fas fa-calendar-alt',
         route: '/app/publish/calendar',
         order: 2,
         group: 'main',
@@ -406,7 +434,7 @@ exports.seedMenus = async (req, res, next) => {
       },
       {
         label: 'Published',
-        icon: '📋',
+        icon: 'fas fa-folder-open',
         route: '/app/content',
         queryParams: { view: 'published' },
         order: 3,
@@ -486,7 +514,7 @@ exports.migratePublishSubmenus = async (req, res, next) => {
     const publishChildren = await Menu.insertMany([
       {
         label: 'Create',
-        icon: '✏️',
+        icon: 'fas fa-pen',
         route: '/app/publish',
         order: 1,
         group: 'main',
@@ -496,7 +524,7 @@ exports.migratePublishSubmenus = async (req, res, next) => {
       },
       {
         label: 'Calendar',
-        icon: '📅',
+        icon: 'fas fa-calendar-alt',
         route: '/app/publish/calendar',
         order: 2,
         group: 'main',
@@ -506,7 +534,7 @@ exports.migratePublishSubmenus = async (req, res, next) => {
       },
       {
         label: 'Published',
-        icon: '📋',
+        icon: 'fas fa-folder-open',
         route: '/app/content',
         queryParams: { view: 'published' },
         order: 3,
@@ -549,7 +577,7 @@ exports.migrateContentMenuLibrary = async (req, res, next) => {
 
     const relabeled = await Menu.updateMany(
       { route: '/app/content', label: 'Published' },
-      { $set: { label: 'Content', icon: '📚' } }
+      { $set: { label: 'Content', icon: 'fas fa-folder-open' } }
     );
 
     res.status(200).json({

@@ -9,7 +9,7 @@ const platformConnectionSchema = new mongoose.Schema({
   
   platform: {
     type: String,
-    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin'],
+    enum: ['instagram', 'facebook', 'youtube', 'google', 'whatsapp', 'linkedin', 'email', 'shopify'],
     required: true
   },
   
@@ -50,12 +50,75 @@ const platformConnectionSchema = new mongoose.Schema({
     phoneNumber: String,
     displayPhoneNumber: String,
     businessAccountId: String,
-    
+    catalogId: String,        // Meta Commerce Catalog ID linked to this WABA phone number
+
+    // WABA identity written by the embedded-signup flow.
+    //
+    // These MUST stay declared. Mongoose runs in strict mode, so an undeclared
+    // path is silently dropped on save — which is exactly what used to happen to
+    // `wabaId`. Because whatsappService falls back
+    // `wabaId || businessAccountId || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID`,
+    // every embedded-signup tenant silently resolved to the shared env WABA.
+    wabaId: String,
+    wabaName: String,
+    businessId: String,
+    verifiedName: String,
+    qualityRating: String,
+    codeVerificationStatus: String,
+
+    /**
+     * Which transport carries this connection's API calls.
+     *   'meta'    — direct Meta Graph (graph.facebook.com)
+     *   'interakt'— Interakt tech-partner proxy (amped-express.interakt.ai)
+     * Absent means 'meta', which is correct for every pre-Interakt connection,
+     * so no migration is required.
+     */
+    provider: {
+      type: String,
+      enum: ['meta', 'interakt'],
+      default: 'meta'
+    },
+    interaktSolutionId: String,
+    interaktRegisteredAt: Date,
+    interaktWebhookConfiguredAt: Date,
+    interaktLastError: String,
+
+    /** Campaign governance — Meta tier / quality / pause state */
+    wabaMessagingTier: String,
+    wabaQualityRating: String,
+    campaignPausedUntil: Date,
+    campaignPauseReason: String,
+
     // For LinkedIn
     organizationId: String,
     organizationName: String,
     organizationUrn: String,
-    personUrn: String
+    personUrn: String,
+
+    // For Shopify (Custom App)
+    shopDomain: String,    // e.g. my-store.myshopify.com
+    shopName: String,
+    shopId: String,
+    apiVersion: { type: String, default: '2024-10' },
+
+    // For Email (Gmail / Outlook / IMAP)
+    emailProvider: {
+      type: String,
+      enum: ['gmail', 'outlook', 'imap'],
+      default: null
+    },
+    emailAddress: String,           // The connected inbox address
+    watchHistoryId: String,         // Gmail: historyId for delta sync via Pub/Sub
+    watchExpiry: Date,              // Gmail: watch() expires every 7 days — renewal required
+    msSubscriptionId: String,       // Outlook: Microsoft Graph subscription ID
+    msSubscriptionExpiry: Date,     // Outlook: Graph subscriptions expire every 3 days
+    imapHost: String,
+    imapPort: Number,
+    imapSecure: { type: Boolean, default: true },
+    smtpHost: String,
+    smtpPort: Number,
+    smtpSecure: { type: Boolean, default: true },
+    lastPolledUid: Number           // IMAP: last seen UID for delta polling
   },
   
   // Metadata for connection relationships
@@ -83,7 +146,40 @@ const platformConnectionSchema = new mongoose.Schema({
     },
     profilePicture: String,
     followerCount: Number,
-    isVerified: Boolean
+    isVerified: Boolean,
+    // Instagram-specific: whether the account allows DM access via API
+    instagramDmEnabled: {
+      type: Boolean,
+      default: null  // null = not yet determined
+    },
+    instagramDmDisabledReason: String,
+    // Identifies the OAuth / connection flow used to create this record.
+    //  - instagram_login           : Instagram API with Instagram Login (IGAA tokens)
+    //  - facebook_login            : Instagram via Facebook Login / Page Manager (EAA tokens)
+    //  - whatsapp_embedded_signup  : WhatsApp via Meta Embedded Signup OAuth (per-tenant)
+    //  - whatsapp_direct_env       : WhatsApp using shared env-level credentials (dev/single-tenant)
+    //  - whatsapp_interakt_signup  : WhatsApp via Embedded Signup with the Interakt solution ID,
+    //                                registered with Interakt as tech partner (platformData.provider='interakt')
+    connectionType: {
+      type: String,
+      enum: [
+        'instagram_login',
+        'facebook_login',
+        'whatsapp_embedded_signup',
+        'whatsapp_direct_env',
+        'whatsapp_interakt_signup',
+        null
+      ],
+      default: null
+    },
+    // Instagram Login flow: the app-scoped Instagram User ID (ISUID) returned by
+    // graph.instagram.com/me. Webhooks use the global IG Business Account ID as
+    // entry.id — storing the ISUID here lets the webhook handler self-heal the
+    // platformUserId on the first delivery.
+    igLoginScopedId: {
+      type: String,
+      default: null
+    }
   },
   
   // Connection status
@@ -165,7 +261,9 @@ const platformConnectionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
-  }
+  },
+  /** True for the display-only demo connection seeded into a trial workspace. */
+  seeded: { type: Boolean, default: false }
 }, {
   timestamps: true
 });

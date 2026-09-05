@@ -1,5 +1,73 @@
 const Plan = require('../models/Plan');
 const planAdminService = require('../services/planAdminService');
+const entitlementsService = require('../services/entitlementsService');
+const {
+  buildPublicPlanCard,
+  buildComparisonMatrix,
+  buildWhatsAppRatesPanel,
+  AC_NAC_LEGEND
+} = require('../services/planPresentationService');
+const { buildAddOnPriceIndex } = require('../config/addOnCatalog');
+const { syncPlanBillingOptions, RazorpayPlanSyncError } = require('../services/razorpayPlanService');
+const Subscription = require('../models/Subscription');
+const { CATALOG_BY_KEY } = require('../config/featureCatalog');
+const { emitToOrg } = require('../utils/socketEmitter');
+
+/**
+ * Sanitize an `entitlements` map sent by the admin UI:
+ *   - Drops keys not in the catalog (admins can't invent feature keys at runtime).
+ *   - Coerces numeric `limit` strings to numbers.
+ *   - Coerces boolean strings to true/false.
+ *   - Returns a plain object for Plan.entitlements (Mixed — keys may contain ".").
+ */
+function sanitizeEntitlementsPayload(rawIn) {
+  if (!rawIn || typeof rawIn !== 'object') return undefined;
+  const cleaned = {};
+  for (const [key, value] of Object.entries(rawIn)) {
+    const catalogEntry = CATALOG_BY_KEY[key];
+    if (!catalogEntry || !value || typeof value !== 'object') continue;
+    const next = {};
+    if (catalogEntry.kind === 'boolean') {
+      if (value.enabled !== undefined) next.enabled = value.enabled === true || value.enabled === 'true';
+    } else if (catalogEntry.kind === 'limit') {
+      const v = value.limit ?? value.value;
+      if (v !== undefined && v !== null && v !== '') {
+        const n = Number(v);
+        if (Number.isFinite(n)) next.limit = n;
+      }
+    } else if (catalogEntry.kind === 'enum') {
+      // Only rungs that exist on the ladder — an unknown value would break levelAtLeast().
+      if (Array.isArray(catalogEntry.enumOptions) && catalogEntry.enumOptions.includes(value.value)) {
+        next.value = value.value;
+      }
+    } else if (catalogEntry.kind === 'list') {
+      if (Array.isArray(value.value)) {
+        const allowed = catalogEntry.enumOptions;
+        next.value = Array.isArray(allowed)
+          ? value.value.filter((m) => allowed.includes(m))
+          : value.value.map((m) => String(m));
+      }
+    } else if (value.value !== undefined) {
+      next.value = value.value;
+    }
+    if (Object.keys(next).length) cleaned[key] = next;
+  }
+  return cleaned;
+}
+
+function applyRazorpaySyncToPlan(plan, syncResult) {
+  // Accepts either a single-leg result (legacy) or the { monthly, annual } pair.
+  const monthly = syncResult.monthly || syncResult;
+  const annual = syncResult.annual;
+
+  plan.razorpayPlanId = monthly.razorpayPlanId || undefined;
+  plan.priceInr = monthly.priceInr != null && monthly.priceInr > 0 ? monthly.priceInr : undefined;
+
+  if (annual) {
+    plan.razorpayPlanIdAnnual = annual.razorpayPlanId || undefined;
+    plan.priceAnnualInr = annual.priceInr != null && annual.priceInr > 0 ? annual.priceInr : undefined;
+  }
+}
 
 /**
  * Plan Management Controller
@@ -18,14 +86,11 @@ exports.getPlans = async (req, res, next) => {
     // Transform to match frontend expectation (object with planId as keys)
     const plansObject = {};
     plans.forEach(plan => {
+      const card = buildPublicPlanCard(plan);
       plansObject[plan.planId] = {
-        name: plan.name,
-        tier: plan.tier,
-        price: plan.price,
-        limits: plan.limits,
-        features: plan.features,
-        badge: plan.badge,
-        badgeColor: plan.badgeColor
+        ...card,
+        // Legacy `features` string array — deprecated; prefer `features: { key, label }[]`
+        legacyFeatures: plan.features || []
       };
     });
 
@@ -35,6 +100,53 @@ exports.getPlans = async (req, res, next) => {
     });
   } catch (error) {
     console.error('Get plans error:', error);
+    next(error);
+  }
+};
+
+/**
+ * @desc    Everything the public pricing page renders, fully display-ready.
+ * @route   GET /api/plans/pricing-page
+ * @access  Public
+ *
+ * Returns the plan cards, the AC/NAC legend, the full comparison matrix and the
+ * WhatsApp pass-through rates in one call. All formatting, percentages and
+ * included/excluded flags are resolved here — the page renders strings.
+ */
+exports.getPricingPage = async (req, res, next) => {
+  try {
+    const plans = await Plan.getPublicPlans();
+
+    // "Everything in Starter" needs the referenced plan's display name.
+    const planNamesById = plans.reduce((acc, p) => {
+      acc[p.planId] = p.name;
+      return acc;
+    }, {});
+
+    const addOnPrices = buildAddOnPriceIndex();
+
+    const cards = plans.map((plan) => buildPublicPlanCard(plan, {
+      planNamesById,
+      addOnPrices: addOnPrices[plan.planId]
+    }));
+
+    // The custom-priced tier is a CTA panel, not a card or a table column.
+    const enterprise = cards.find((c) => c.isCustomPrice) || null;
+    const tieredPlans = plans.filter((p) => p.price !== 'custom');
+    const comparison = buildComparisonMatrix(tieredPlans, { addOnPrices });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        plans: cards.filter((c) => !c.isCustomPrice),
+        enterprise,
+        comparison,
+        legend: AC_NAC_LEGEND,
+        whatsappRates: buildWhatsAppRatesPanel()
+      }
+    });
+  } catch (error) {
+    console.error('Get pricing page error:', error);
     next(error);
   }
 };
@@ -119,6 +231,7 @@ exports.createPlan = async (req, res, next) => {
       billingCycle,
       limits,
       features,
+      entitlements,
       badge,
       badgeColor,
       highlightColor,
@@ -127,7 +240,16 @@ exports.createPlan = async (req, res, next) => {
       displayOrder,
       stripePriceId,
       stripeProductId,
-      trialDays
+      trialDays,
+      priceAnnual,
+      annualOfferLabel,
+      tagline,
+      cardStyle,
+      inheritsFromPlanId,
+      headlineMetricKeys,
+      cardBullets,
+      entitlementNotes,
+      limitedOffer
     } = req.body;
 
     // Check if plan with same planId already exists
@@ -139,7 +261,7 @@ exports.createPlan = async (req, res, next) => {
       });
     }
 
-    const plan = await Plan.create({
+    const draftPlan = {
       planId,
       name,
       description,
@@ -148,6 +270,7 @@ exports.createPlan = async (req, res, next) => {
       billingCycle,
       limits,
       features,
+      entitlements: sanitizeEntitlementsPayload(entitlements),
       badge,
       badgeColor,
       highlightColor,
@@ -157,13 +280,42 @@ exports.createPlan = async (req, res, next) => {
       stripePriceId,
       stripeProductId,
       trialDays,
+      priceAnnual,
+      annualOfferLabel,
+      tagline,
+      cardStyle,
+      inheritsFromPlanId,
+      headlineMetricKeys,
+      cardBullets,
+      entitlementNotes,
+      limitedOffer
+    };
+
+    let razorpaySync;
+    try {
+      razorpaySync = await syncPlanBillingOptions(draftPlan);
+    } catch (err) {
+      if (err instanceof RazorpayPlanSyncError) {
+        return res.status(err.statusCode).json({ success: false, error: err.message });
+      }
+      throw err;
+    }
+
+    const plan = await Plan.create({
+      ...draftPlan,
+      razorpayPlanId: razorpaySync.monthly.razorpayPlanId || undefined,
+      priceInr: razorpaySync.monthly.priceInr || undefined,
+      razorpayPlanIdAnnual: razorpaySync.annual.razorpayPlanId || undefined,
+      priceAnnualInr: razorpaySync.annual.priceInr || undefined,
       createdBy: req.user._id
     });
 
     res.status(201).json({
       success: true,
       data: plan,
-      message: 'Plan created successfully'
+      message: razorpaySync.monthly.created
+        ? 'Plan created and linked to Razorpay successfully'
+        : 'Plan created successfully'
     });
   } catch (error) {
     console.error('Create plan error:', error);
@@ -195,12 +347,19 @@ exports.updatePlan = async (req, res, next) => {
       });
     }
 
-    // Update fields
+    const previousPlan = plan.toObject();
+
+    // Update fields (razorpayPlanId/priceInr are server-managed via Razorpay sync)
     const allowedFields = [
       'name', 'description', 'tier', 'price', 'billingCycle',
       'limits', 'features', 'badge', 'badgeColor', 'highlightColor',
       'isActive', 'isPublic', 'displayOrder', 'stripePriceId',
-      'stripeProductId', 'trialDays'
+      'stripeProductId', 'trialDays',
+      // Annual leg (priceAnnualInr / razorpayPlanIdAnnual stay server-managed)
+      'priceAnnual', 'annualOfferLabel',
+      // Pricing-sheet presentation
+      'tagline', 'cardStyle', 'inheritsFromPlanId', 'headlineMetricKeys',
+      'cardBullets', 'entitlementNotes', 'limitedOffer'
     ];
 
     allowedFields.forEach(field => {
@@ -209,16 +368,56 @@ exports.updatePlan = async (req, res, next) => {
       }
     });
 
+    if (req.body.entitlements !== undefined) {
+      const cleaned = sanitizeEntitlementsPayload(req.body.entitlements) || {};
+      plan.entitlements = cleaned;
+      plan.markModified('entitlements');
+    }
+
+    // Mixed path — Mongoose can't detect in-place mutation
+    if (req.body.entitlementNotes !== undefined) {
+      plan.markModified('entitlementNotes');
+    }
+
+    let razorpaySync;
+    try {
+      razorpaySync = await syncPlanBillingOptions(plan, previousPlan);
+    } catch (err) {
+      if (err instanceof RazorpayPlanSyncError) {
+        return res.status(err.statusCode).json({ success: false, error: err.message });
+      }
+      throw err;
+    }
+
+    applyRazorpaySyncToPlan(plan, razorpaySync);
     plan.updatedBy = req.user._id;
     await plan.save();
 
     // Keep org subscriptions aligned with template (limits/features/name/tier).
     const syncedSubscriptionCount = await planAdminService.syncSubscriptionsFromPlan(plan);
 
+    // Drop entitlement caches for every org on this plan AND tell their
+    // active socket sessions to refetch — keeps the FE store in lock-step
+    // with admin edits without requiring a page reload.
+    try {
+      const subs = await Subscription.find({ planId: plan.planId }).select('organization').lean();
+      await Promise.all(
+        subs.map(async (s) => {
+          const orgId = String(s.organization);
+          await entitlementsService.invalidateEntitlements(orgId);
+          emitToOrg(orgId, 'entitlements:invalidated', { reason: 'plan-update', planId: plan.planId });
+        })
+      );
+    } catch (e) {
+      console.warn('[updatePlan] cache invalidation failed (non-fatal):', e.message);
+    }
+
     res.status(200).json({
       success: true,
       data: plan,
-      message: 'Plan updated successfully',
+      message: (razorpaySync.monthly.created || razorpaySync.annual.created)
+        ? 'Plan updated and new Razorpay plan linked (price or billing changed)'
+        : 'Plan updated successfully',
       syncedSubscriptionCount
     });
   } catch (error) {

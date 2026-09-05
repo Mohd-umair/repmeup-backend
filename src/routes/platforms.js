@@ -1,11 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const platformController = require('../controllers/platformController');
+const shopifyController = require('../controllers/shopifyController');
 const { protect, authorize } = require('../middlewares/auth');
-const { checkConnectionLimit, attachConnectionLimits } = require('../middleware/platformLimitMiddleware');
+const { checkConnectionLimit, attachConnectionLimits } = require('../middlewares/platformLimitMiddleware');
+const { requireChannel } = require('../middlewares/requireFeature');
 
 // Google OAuth callback (public - called by Google)
 router.get('/google/callback', platformController.handleGoogleCallback);
+
+// WhatsApp Embedded Signup callback (public — Meta redirects here after OAuth)
+router.get('/whatsapp/callback', platformController.handleWhatsAppCallback);
 
 // Meta webhook verification (public - called by Meta for callback URL validation)
 // Must be before router.use(protect)
@@ -49,12 +54,32 @@ router.post('/meta/callback', (req, res, next) => {
 router.use(protect);
 
 // Google OAuth flow - check limit before starting OAuth
-router.get('/google/connect', checkConnectionLimit, platformController.initiateGoogleConnection);
+/**
+ * `channels.allowed` gates WHICH platforms a plan may connect; `checkConnectionLimit`
+ * (already here) gates HOW MANY. Both apply, and both only on connect — disconnect and
+ * the connections list stay open so an org can always manage what it already has.
+ */
+router.get('/google/connect', checkConnectionLimit, requireChannel('google'), platformController.initiateGoogleConnection);
 
 // WhatsApp Business API
-router.post('/whatsapp/connect', platformController.connectWhatsApp);
+// GET  /whatsapp/connect        → returns Embedded Signup OAuth authUrl (production)
+// POST /whatsapp/connect        → direct env-credentials connect (dev / current setup)
+// POST /whatsapp/connect-direct → alias for the above
+router.get('/whatsapp/connect', checkConnectionLimit, requireChannel('whatsapp'), platformController.initiateWhatsAppConnection);
+router.post('/whatsapp/connect', checkConnectionLimit, requireChannel('whatsapp'), platformController.connectWhatsApp);
+router.post('/whatsapp/connect-direct', checkConnectionLimit, requireChannel('whatsapp'), platformController.connectWhatsApp);
+// POST /whatsapp/embedded-signup → completes FB-JS-SDK Embedded Signup started with the
+// Interakt solution ID. Body: { code, wabaId, phoneNumberId } straight from the SDK.
+router.post('/whatsapp/embedded-signup', checkConnectionLimit, requireChannel('whatsapp'), platformController.completeWhatsAppEmbeddedSignup);
 router.delete('/whatsapp/disconnect', platformController.disconnectWhatsApp);
 router.get('/whatsapp/status', platformController.getWhatsAppStatus);
+// Manually register a Pending phone number for Cloud API (moves status → Active)
+router.post('/whatsapp/register-phone', platformController.registerWhatsAppPhone);
+
+// ── Shopify (Custom App token flow) ─────────────────────────────────────────
+router.post('/shopify/connect', checkConnectionLimit, requireChannel('shopify'), shopifyController.connectShopify);
+router.post('/shopify/:id/sync', shopifyController.syncShopify);
+router.delete('/shopify/:id', shopifyController.disconnectShopify);
 
 // Platform management
 router.get('/', attachConnectionLimits, platformController.getPlatformConnections);
@@ -64,8 +89,6 @@ router.get('/:id', platformController.getPlatformConnection);
 router.delete('/:id', platformController.disconnectPlatform);
 router.post('/:id/sync', platformController.syncPlatform);
 router.post('/:id/refresh-locations', platformController.refreshGoogleLocations);
-
-router.post('/whatsapp/connect', checkConnectionLimit, platformController.connectWhatsApp);
 
 module.exports = router;
 

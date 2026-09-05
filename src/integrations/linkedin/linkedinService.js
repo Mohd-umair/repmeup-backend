@@ -1,5 +1,6 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
+const { generateChatRef } = require('../../utils/chatRefHelper');
 
 // Currently active Marketing API version (YYYYMM). Update when LinkedIn sunsets older versions.
 const LINKEDIN_API_VERSION = '202510';
@@ -269,6 +270,11 @@ class LinkedInService {
       for (const interactionData of allInteractions) {
         try {
           const { status, isRead, sentiment, ...platformFields } = interactionData;
+          const existing = await Interaction.findOne({
+            platformId: interactionData.platformId,
+            organization: connection.organization
+          }).select('_id').lean();
+          const liRef = existing ? { chatNumber: null, chatRef: null } : await generateChatRef(connection.organization).catch(() => ({ chatNumber: null, chatRef: null }));
           await Interaction.findOneAndUpdate(
             {
               platformId: interactionData.platformId,
@@ -276,7 +282,7 @@ class LinkedInService {
             },
             {
               $set: platformFields,
-              $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+              $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: liRef.chatNumber, chatRef: liRef.chatRef }
             },
             {
               upsert: true,

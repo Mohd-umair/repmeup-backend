@@ -219,6 +219,17 @@ exports.disconnectAccount = async (req, res, next) => {
     connection.isActive = false;
     await connection.save();
 
+    // Revoke Meta webhook subscription for Instagram Login connections
+    if (
+      connection.platform === 'instagram' &&
+      (connection.metadata?.connectionType === 'instagram_login' ||
+        (typeof connection.accessToken === 'string' && connection.accessToken.startsWith('IGAA')))
+    ) {
+      const igLoginAuth = require('../integrations/meta/instagramLoginAuth');
+      const isuid = connection.metadata?.igLoginScopedId || connection.platformUserId;
+      igLoginAuth.unsubscribeFromWebhook(isuid, connection.accessToken).catch(() => {});
+    }
+
     // Update subscription usage
     if (connection.usesAccountSlot !== false) {
       await Subscription.updateOne(

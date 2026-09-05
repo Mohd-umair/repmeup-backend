@@ -1,6 +1,7 @@
 const axios = require('axios');
 const Interaction = require('../../models/Interaction');
 const PlatformConnection = require('../../models/PlatformConnection');
+const { generateChatRef } = require('../../utils/chatRefHelper');
 
 class YouTubeService {
   constructor() {
@@ -100,11 +101,44 @@ class YouTubeService {
   }
 
   /**
-   * Fetch comments for a video
+   * Fetch basic video info (title + thumbnail) for a single videoId.
+   * Used when the caller doesn't already have this data (e.g. real-time webhooks).
    */
-  async fetchVideoComments(platformConnection, videoId) {
+  async _getVideoInfo(accessToken, videoId) {
+    try {
+      const response = await axios.get(`${this.apiUrl}/videos`, {
+        params: { part: 'snippet', id: videoId },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      const item = response.data.items?.[0];
+      if (!item) return null;
+      return {
+        title: item.snippet.title || null,
+        thumbnailUrl:
+          item.snippet.thumbnails?.medium?.url ||
+          item.snippet.thumbnails?.default?.url ||
+          null
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Fetch comments for a video
+   * @param {Object} platformConnection
+   * @param {string} videoId
+   * @param {{ title: string|null, thumbnailUrl: string|null }|null} videoMeta
+   *   If omitted (e.g. webhook path), the method fetches video info via the API.
+   */
+  async fetchVideoComments(platformConnection, videoId, videoMeta = null) {
     try {
       const { accessToken } = platformConnection;
+
+      // Resolve video title/thumbnail if not supplied by the caller
+      if (!videoMeta) {
+        videoMeta = await this._getVideoInfo(accessToken, videoId);
+      }
 
       const response = await axios.get(`${this.apiUrl}/commentThreads`, {
         params: {
@@ -177,6 +211,8 @@ class YouTubeService {
             // Metadata
             metadata: {
               videoId: videoId,
+              videoTitle: videoMeta?.title || null,
+              videoThumbnailUrl: videoMeta?.thumbnailUrl || null,
               likeCount: topLevelComment.likeCount || 0,
               canReply: topLevelComment.canReply || false,
               isPublic: topLevelComment.isPublic || true
@@ -274,6 +310,8 @@ class YouTubeService {
                   // Metadata
                   metadata: {
                     videoId: videoId,
+                    videoTitle: videoMeta?.title || null,
+                    videoThumbnailUrl: videoMeta?.thumbnailUrl || null,
                     parentCommentId: commentId,
                     likeCount: replySnippet.likeCount || 0
                   }
@@ -294,14 +332,26 @@ class YouTubeService {
 
       // Bulk upsert interactions (insert new, update existing)
       if (interactions.length > 0) {
+        const ytOrgId = platformConnection.organization;
+        const ytExistingIds = new Set(
+          (await Interaction.find({ platformId: { $in: interactions.map(i => i.platformId) } }).select('platformId').lean())
+            .map(i => i.platformId)
+        );
+        const ytChatRefMap = {};
+        for (const interaction of interactions) {
+          if (!ytExistingIds.has(interaction.platformId)) {
+            ytChatRefMap[interaction.platformId] = await generateChatRef(ytOrgId).catch(() => ({ chatNumber: null, chatRef: null }));
+          }
+        }
         const bulkOps = interactions.map(interaction => {
           const { status, isRead, sentiment, ...platformFields } = interaction;
+          const ref = ytChatRefMap[interaction.platformId] || {};
           return {
             updateOne: {
               filter: { platformId: interaction.platformId },
               update: {
                 $set: platformFields,
-                $setOnInsert: { status: 'unread', isRead: false, sentiment: sentiment ?? null }
+                $setOnInsert: { status: 'unread', isRead: false, source: 'sync', sentiment: sentiment ?? null, chatNumber: ref.chatNumber ?? null, chatRef: ref.chatRef ?? null }
               },
               upsert: true
             }
@@ -355,7 +405,14 @@ class YouTubeService {
       for (const video of videos) {
         try {
           const videoId = video.contentDetails.videoId;
-          const result = await this.fetchVideoComments(platformConnection, videoId);
+          const videoMeta = {
+            title: video.snippet?.title || null,
+            thumbnailUrl:
+              video.snippet?.thumbnails?.medium?.url ||
+              video.snippet?.thumbnails?.default?.url ||
+              null
+          };
+          const result = await this.fetchVideoComments(platformConnection, videoId, videoMeta);
           totalCount += result.count;
           allInteractions.push(...result.interactions);
         } catch (error) {
