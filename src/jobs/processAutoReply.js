@@ -1217,7 +1217,7 @@ async function processSingleInteraction(interactionId, organization, jobData = {
         // Update contact AI insights (fire-and-forget — never blocks the reply path)
         if (interactionForReply.contact) {
           updateAIInsights(interactionForReply.contact, {
-            intent: interactionForReply.intentBucket?.toString() || interactionForReply.intent || null,
+            intent: interactionForReply.intent || null,
             sentiment: interactionForReply.sentiment || null,
             priority: interactionForReply.urgency || null
           }).catch(() => {});

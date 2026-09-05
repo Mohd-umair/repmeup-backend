@@ -147,14 +147,16 @@ function buildReportStatusQuery(reportStatus) {
 async function applyRecipientDeliveryStatus(messageId, newStatus, timestamp, errorDetail) {
   if (!messageId || !newStatus) return;
 
-  const doc = await WhatsAppCampaignRecipient.findOne({ messageId }).select('deliveryStatus').lean();
+  const doc = await WhatsAppCampaignRecipient.findOne({ messageId })
+    .select('deliveryStatus organization campaign phone contact')
+    .lean();
   if (!doc) return;
 
   const at = timestamp ? new Date(parseInt(timestamp, 10) * 1000) : new Date();
 
   if (newStatus === 'failed') {
-    await WhatsAppCampaignRecipient.updateOne(
-      { messageId },
+    const failedUpdate = await WhatsAppCampaignRecipient.updateOne(
+      { messageId, deliveryStatus: { $ne: 'failed' } },
       {
         $set: {
           deliveryStatus: 'failed',
@@ -163,6 +165,9 @@ async function applyRecipientDeliveryStatus(messageId, newStatus, timestamp, err
         }
       }
     );
+    if (failedUpdate.modifiedCount) {
+      await emitGeneralizedCampaignStatus(doc, 'failed', at, messageId);
+    }
     return;
   }
 
@@ -171,10 +176,63 @@ async function applyRecipientDeliveryStatus(messageId, newStatus, timestamp, err
   const newRank = DELIVERY_RANK[newStatus] ?? 0;
   if (newRank <= currentRank) return;
 
-  await WhatsAppCampaignRecipient.updateOne(
-    { messageId },
+  const statusUpdate = await WhatsAppCampaignRecipient.updateOne(
+    { messageId, deliveryStatus: doc.deliveryStatus },
     { $set: { deliveryStatus: newStatus, deliveryStatusAt: at } }
   );
+  if (statusUpdate.modifiedCount) {
+    await emitGeneralizedCampaignStatus(doc, newStatus, at, messageId);
+  }
+}
+
+async function emitGeneralizedCampaignStatus(recipient, status, at, messageId) {
+  try {
+    const Contact = require('../models/Contact');
+    const Campaign = require('../models/Campaign');
+    const { record } = require('./contactActivityService');
+    const parent = await Campaign.findOne({
+      organization: recipient.organization,
+      whatsAppCampaignRef: recipient.campaign
+    }).select('_id').lean();
+    if (!parent) return;
+    const contact = recipient.contact
+      ? await Contact.findOne({
+        _id: recipient.contact,
+        organization: recipient.organization,
+        isDeleted: false
+      }).select('_id').lean()
+      : await Contact.findOne({
+        organization: recipient.organization,
+        isDeleted: false,
+        $or: [
+          { primaryPhone: recipient.phone },
+          { channels: { $elemMatch: { platform: 'whatsapp', platformUserId: recipient.phone } } }
+        ]
+      }).select('_id').lean();
+    const typeMap = {
+      delivered: 'campaign_delivered',
+      read: 'campaign_read',
+      failed: 'campaign_failed'
+    };
+    const type = typeMap[status];
+    if (!contact || !type) return;
+    await record({
+      organization: recipient.organization,
+      contact: contact._id,
+      type,
+      channel: 'whatsapp',
+      relatedCampaign: parent._id,
+      payload: { messageId, at },
+      idempotencyKey: `wa-campaign-status:${messageId}:${status}`
+    });
+    await Campaign.updateOne(
+      { _id: parent._id, organization: recipient.organization },
+      { $inc: { [`stats.${status}`]: 1 } }
+    );
+  } catch {
+    // Delivery webhooks must remain retry-safe and must not fail because CRM
+    // timeline enrichment is unavailable.
+  }
 }
 
 /**
@@ -186,7 +244,7 @@ async function markRecipientReplied({ orgId, phone }) {
   const normalized = normalizePhoneLegacy(phone) || String(phone).replace(/\D/g, '');
   if (!normalized) return;
 
-  await WhatsAppCampaignRecipient.findOneAndUpdate(
+  const recipient = await WhatsAppCampaignRecipient.findOneAndUpdate(
     {
       organization: orgId,
       phone: normalized,
@@ -194,8 +252,41 @@ async function markRecipientReplied({ orgId, phone }) {
       repliedAt: { $exists: false }
     },
     { $set: { repliedAt: new Date() } },
-    { sort: { sentAt: -1 } }
+    { sort: { sentAt: -1 }, new: true }
   );
+  if (recipient) {
+    try {
+      const Contact = require('../models/Contact');
+      const Campaign = require('../models/Campaign');
+      const { record } = require('./contactActivityService');
+      const contact = await Contact.findOne({
+        organization: orgId,
+        isDeleted: false,
+        primaryPhone: normalized
+      }).select('_id').lean();
+      const parent = await Campaign.findOne({
+        organization: orgId,
+        whatsAppCampaignRef: recipient.campaign
+      }).select('_id').lean();
+      if (contact && parent) {
+        await record({
+          organization: orgId,
+          contact: contact._id,
+          type: 'campaign_replied',
+          channel: 'whatsapp',
+          relatedCampaign: parent._id,
+          payload: { phone: normalized },
+          idempotencyKey: `wa-campaign-reply:${recipient._id}`
+        });
+        await Campaign.updateOne(
+          { _id: parent._id, organization: orgId },
+          { $inc: { 'stats.replied': 1 } }
+        );
+      }
+    } catch {
+      /* never block inbound webhook */
+    }
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

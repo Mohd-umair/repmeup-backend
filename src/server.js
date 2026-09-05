@@ -106,6 +106,16 @@ async function startServer() {
       logger.warn('Blueprint seeding failed (non-fatal):', seedErr.message);
     }
 
+    // Ensure contacts/campaigns permission codes exist and are linked to system groups
+    try {
+      const gpService = require('./services/groupPermissionService');
+      const perms = await gpService.seedDefaultPermissions();
+      const groups = await gpService.seedDefaultGroups();
+      logger.info('Permissions seeded', { perms, groups });
+    } catch (permErr) {
+      logger.warn('Permission seeding failed (non-fatal):', permErr.message);
+    }
+
     // Initialize auto-reply scheduler (non-blocking — runs in background)
     const autoReplyScheduler = require('./services/autoReplyScheduler');
     autoReplyScheduler.initializeScheduledJobs()

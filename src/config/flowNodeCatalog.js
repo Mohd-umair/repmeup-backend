@@ -89,6 +89,42 @@ const FLOW_NODE_CATALOG = [
     defaultConfig: {},
     fields: []
   }),
+  node('trigger.campaign_delivered', 'trigger', 'Campaign delivered', CHANNELS, {
+    icon: 'fas fa-paper-plane',
+    description: 'Starts when a campaign message is delivered.',
+    defaultConfig: {},
+    fields: []
+  }),
+  node('trigger.campaign_read', 'trigger', 'Campaign read', ['whatsapp'], {
+    icon: 'fas fa-check-double',
+    description: 'Starts when a WhatsApp campaign message is read.',
+    defaultConfig: {},
+    fields: []
+  }),
+  node('trigger.campaign_replied', 'trigger', 'Campaign replied', CHANNELS, {
+    icon: 'fas fa-reply',
+    description: 'Starts when a contact replies to a campaign.',
+    defaultConfig: {},
+    fields: []
+  }),
+  node('trigger.campaign_no_reply', 'trigger', 'Campaign no reply', CHANNELS, {
+    icon: 'fas fa-hourglass-half',
+    description: 'Starts when a campaign recipient does not reply.',
+    defaultConfig: { waitHours: 48 },
+    fields: [{ key: 'waitHours', type: 'number', label: 'Wait hours', default: 48 }]
+  }),
+  node('trigger.payment_intent', 'trigger', 'Payment intent', CHANNELS, {
+    icon: 'fas fa-credit-card',
+    description: 'Starts when AI detects payment intent.',
+    defaultConfig: {},
+    fields: []
+  }),
+  node('trigger.churn_risk', 'trigger', 'Churn risk increased', CHANNELS, {
+    icon: 'fas fa-heart-crack',
+    description: 'Starts when customer health drops into at-risk.',
+    defaultConfig: {},
+    fields: []
+  }),
   node('trigger.order_event', 'trigger', 'Order event', ['whatsapp'], {
     icon: 'fas fa-shopping-bag',
     description: 'Commerce order lifecycle event.',

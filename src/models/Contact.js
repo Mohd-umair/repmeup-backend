@@ -56,7 +56,65 @@ const contactSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: null }
   },
 
+  company: { type: String, trim: true, default: null },
+
+  lifecycleStage: {
+    type: String,
+    enum: ['lead', 'engaged', 'qualified', 'customer', 'repeat_customer', 'vip', 'at_risk', 'churned'],
+    default: 'lead',
+    index: true
+  },
+
+  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+  team: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
+
+  customFields: { type: Map, of: mongoose.Schema.Types.Mixed, default: undefined },
+
+  intelligence: {
+    healthScore: { type: Number, default: null },
+    healthBand: { type: String, enum: ['healthy', 'needs_attention', 'at_risk', null], default: null },
+    leadScore: { type: Number, default: null },
+    churnRisk: { type: String, enum: ['low', 'medium', 'high', null], default: null },
+    engagementScore: { type: Number, default: null },
+    aiSummary: { type: String, default: null },
+    aiConfidence: { type: Number, default: null },
+    computedAt: { type: Date, default: null }
+  },
+
+  commerceMetrics: {
+    totalOrders: { type: Number, default: 0 },
+    totalSpent: { type: Number, default: 0 },
+    avgOrderValue: { type: Number, default: 0 },
+    lastOrderAt: { type: Date, default: null }
+  },
+
+  communicationPreferences: {
+    whatsapp: { type: Boolean, default: true },
+    sms: { type: Boolean, default: true },
+    email: { type: Boolean, default: true },
+    instagram: { type: Boolean, default: true },
+    facebook: { type: Boolean, default: true },
+    marketingConsent: { type: Boolean, default: true },
+    doNotContact: { type: Boolean, default: false }
+  },
+
+  source: {
+    channel: { type: String, default: null },
+    campaign: { type: mongoose.Schema.Types.ObjectId, ref: 'Campaign', default: null },
+    firstTouchAt: { type: Date, default: null }
+  },
+
+  mergedFrom: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Contact' }],
+
+  nextBestAction: {
+    action: { type: String, default: null },
+    reason: { type: String, default: null },
+    computedAt: { type: Date, default: null }
+  },
+
   lastInteractionAt: { type: Date, default: null },
+  lastActivityChannel: { type: String, default: null },
+  lastActivityType: { type: String, default: null },
   isDeleted: { type: Boolean, default: false, index: true },
 
   /**
@@ -83,5 +141,9 @@ contactSchema.index({ primaryName: 'text', notes: 'text' });
 // Live count for the `contacts.max` ("Active Contacts") entitlement. Without this,
 // every entitlements cache miss scans the whole collection for the org.
 contactSchema.index({ organization: 1, isDeleted: 1 });
+contactSchema.index({ organization: 1, isDeleted: 1, lifecycleStage: 1 });
+contactSchema.index({ organization: 1, isDeleted: 1, owner: 1 });
+contactSchema.index({ organization: 1, isDeleted: 1, lastInteractionAt: -1 });
+contactSchema.index({ organization: 1, tags: 1 });
 
 module.exports = mongoose.model('Contact', contactSchema);

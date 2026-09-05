@@ -2,11 +2,15 @@ const Contact = require('../models/Contact');
 const Interaction = require('../models/Interaction');
 const logger = require('../config/logger');
 
+function orgIdOf(req) {
+  return req.user.organization?._id || req.user.organization;
+}
+
 // ─── List contacts ─────────────────────────────────────────────────────────
 // GET /api/contacts?search=&platform=&tag=&page=1&limit=20
 exports.getContacts = async (req, res, next) => {
   try {
-    const orgId = req.user.organization._id;
+    const orgId = orgIdOf(req);
     const { search, platform, tag, page = 1, limit = 20 } = req.query;
 
     const query = { organization: orgId, isDeleted: false };
@@ -63,13 +67,13 @@ exports.getContacts = async (req, res, next) => {
 // GET /api/contacts/:id
 exports.getContact = async (req, res, next) => {
   try {
-    const orgId = req.user.organization._id;
+    const orgId = orgIdOf(req);
 
     const contact = await Contact.findOne({
       _id: req.params.id,
       organization: orgId,
       isDeleted: false
-    }).lean();
+    }).populate('owner', 'firstName lastName email').lean();
 
     if (!contact) {
       return res.status(404).json({ success: false, error: 'Contact not found' });
@@ -99,7 +103,7 @@ exports.getContact = async (req, res, next) => {
 // PUT /api/contacts/:id
 exports.updateContact = async (req, res, next) => {
   try {
-    const orgId = req.user.organization._id;
+    const orgId = orgIdOf(req);
     const { primaryName, primaryPhone, primaryEmail, notes, tags } = req.body;
 
     const contact = await Contact.findOne({ _id: req.params.id, organization: orgId, isDeleted: false });
@@ -127,7 +131,7 @@ exports.updateContact = async (req, res, next) => {
 // DELETE /api/contacts/:id
 exports.deleteContact = async (req, res, next) => {
   try {
-    const orgId = req.user.organization._id;
+    const orgId = orgIdOf(req);
 
     const contact = await Contact.findOne({ _id: req.params.id, organization: orgId, isDeleted: false });
     if (!contact) {
@@ -150,7 +154,7 @@ exports.deleteContact = async (req, res, next) => {
 // Merges target contact (found by phone or email) INTO :id (primary). Target becomes deleted.
 exports.mergeContact = async (req, res, next) => {
   try {
-    const orgId = req.user.organization._id;
+    const orgId = orgIdOf(req);
     const { phone, email } = req.body;
 
     if (!phone && !email) {

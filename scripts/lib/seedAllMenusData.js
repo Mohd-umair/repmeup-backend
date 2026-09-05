@@ -12,6 +12,11 @@ const TOP_LEVEL_MENUS = [
     description: 'View and respond to customer interactions'
   },
   {
+    label: 'Contacts', icon: 'fas fa-address-book', route: '/app/contacts', order: 4, group: 'main',
+    requiredRoles: ['admin', 'manager', 'agent'], requiredPermissions: ['inbox.read'], isActive: true,
+    description: 'Customer 360, segments, and activation'
+  },
+  {
     label: 'Bucket Board', icon: 'fas fa-columns', route: '/app/inbox/buckets', order: 4, group: 'main',
     requiredRoles: ['admin', 'manager', 'agent'], requiredPermissions: ['inbox.read'], isActive: true,
     description: 'Intent bucket kanban board for conversations'
@@ -50,7 +55,7 @@ const TOP_LEVEL_MENUS = [
 
 const AUTOMATION_MENUS = [
   { label: 'Automation Hub', icon: 'fas fa-robot', route: '/app/automation', order: 20, group: 'automation', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'Automation dashboard' },
-  { label: 'AI Auto Replies', icon: 'fas fa-comment-dots', route: '/app/automation/ai-replies', order: 21, group: 'automation', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'AI-powered auto replies' },
+  { label: 'AI replies', icon: 'fas fa-comment-dots', route: '/app/automation/ai-replies', order: 21, group: 'automation', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'Let Reppy answer on its own' },
   { label: 'Growth Automation', icon: 'fas fa-seedling', route: '/app/automation/growth', order: 22, group: 'automation', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'Comment-to-DM and growth flows' },
   { label: 'WhatsApp Flows', icon: 'fab fa-whatsapp', route: '/app/automation/whatsapp-flows', order: 23, group: 'automation', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'WhatsApp automation flows' },
   { label: 'Review Collection', icon: 'fas fa-star', route: '/app/automation/reviews', order: 24, group: 'automation', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'Request reviews after purchases' },
@@ -59,6 +64,7 @@ const AUTOMATION_MENUS = [
 ];
 
 const CAMPAIGNS_MENUS = [
+  { label: 'Activation Campaigns', icon: 'fas fa-bullhorn', route: '/app/contacts/campaigns', order: 29, group: 'campaigns', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'Filter contacts and send WhatsApp, Instagram, or Facebook campaigns' },
   { label: 'WhatsApp Campaigns', icon: 'fab fa-whatsapp', route: '/app/campaigns', order: 30, group: 'campaigns', requiredRoles: ['admin', 'manager'], requiredPermissions: ['settings.read'], description: 'Broadcast WhatsApp campaigns' },
   { label: 'Number Reports', icon: 'fas fa-chart-bar', route: '/app/reports', order: 52, group: 'campaigns', requiredRoles: ['admin', 'manager'], requiredPermissions: ['analytics.read'], description: 'Per-number analytics' }
 ];

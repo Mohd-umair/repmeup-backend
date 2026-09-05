@@ -65,6 +65,15 @@ const reviewRequestQueue = new Queue('review-request', queueOptions);
 // Kept separate from webhook-processing to allow independent concurrency tuning.
 const paymentWebhookQueue = new Queue('payment-webhook', queueOptions);
 
+const audienceMaterializeQueue = new Queue('audience-materialize', queueOptions);
+const socialCampaignSendQueue = new Queue('social-campaign-send', {
+  ...queueOptions,
+  limiter: { max: 20, duration: 1000 }
+});
+const activationCampaignLaunchQueue = new Queue('activation-campaign-launch', queueOptions);
+const contactIntelligenceQueue = new Queue('contact-intelligence', queueOptions);
+const duplicateScanQueue = new Queue('duplicate-scan', queueOptions);
+
 // ============================================================================
 // Reserved / dormant queues (declared but currently unused).
 // Kept in place so existing Bull Board dashboards and imports keep working.
@@ -107,7 +116,12 @@ const queues = [
   appointmentReminderQueue,
   publicAuditQueue,
   reviewRequestQueue,
-  paymentWebhookQueue
+  paymentWebhookQueue,
+  audienceMaterializeQueue,
+  socialCampaignSendQueue,
+  activationCampaignLaunchQueue,
+  contactIntelligenceQueue,
+  duplicateScanQueue
 ];
 
 queues.forEach(queue => {
@@ -160,6 +174,11 @@ module.exports = {
   publicAuditQueue,
   reviewRequestQueue,
   paymentWebhookQueue,
+  audienceMaterializeQueue,
+  socialCampaignSendQueue,
+  activationCampaignLaunchQueue,
+  contactIntelligenceQueue,
+  duplicateScanQueue,
   queueConfig,
   // Helper to get the queue (called from services)
   getReviewRequestQueue: () => reviewRequestQueue

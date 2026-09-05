@@ -113,6 +113,13 @@ const commerceOrderSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Contact'
   },
+  /** Exact campaign attribution, resolved once from sourceInteraction. */
+  attributedCampaign: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Campaign',
+    default: null
+  },
+  attributedAmount: { type: Number, default: 0, min: 0 },
 
   // ── Channel-specific IDs ───────────────────────────────────────────────────
   /** WhatsApp wamid of the product message sent */
@@ -186,6 +193,7 @@ const commerceOrderSchema = new mongoose.Schema({
 commerceOrderSchema.index({ organization: 1, status: 1, createdAt: -1 });
 commerceOrderSchema.index({ organization: 1, channel: 1, createdAt: -1 });
 commerceOrderSchema.index({ organization: 1, contact: 1 });
+commerceOrderSchema.index({ organization: 1, attributedCampaign: 1, createdAt: -1 });
 commerceOrderSchema.index({ organization: 1, 'lineItems.product': 1 });
 commerceOrderSchema.index({ organization: 1, displayRef: 1 }, { unique: true, sparse: true });
 commerceOrderSchema.index({ organization: 1, shopifyOrderId: 1 }, { unique: true, sparse: true });
