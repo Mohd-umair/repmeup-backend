@@ -337,10 +337,20 @@ async function upsertWhatsAppThread({
     .select('_id metadata.lastMid metadata.lastInboundAt metadata.sessionStartedAt author chatRef')
     .lean();
 
-  // Idempotency: Meta can retry the same webhook — skip if mid is already recorded
-  if (existing && existing.metadata?.lastMid === mid) {
-    logger.debug('[whatsappWebhookService] Duplicate mid (webhook retry) — skipped', { threadPlatformId, mid });
-    return { interaction: null, mid, skipped: true };
+  // Idempotency: Meta/Interakt can retry the same webhook — skip if mid is already recorded.
+  // This is done as a single atomic conditional update (compare-and-swap on lastMid) instead of
+  // read-then-compare, so two near-simultaneous deliveries of the exact same retried mid cannot
+  // both observe a stale lastMid and both fall through. Only one can win the CAS below; the loser
+  // returns skipped:true immediately without doing any further work (session detection, flows, AI).
+  if (existing) {
+    const claim = await Interaction.updateOne(
+      { _id: existing._id, 'metadata.lastMid': { $ne: mid } },
+      { $set: { 'metadata.lastMid': mid } }
+    );
+    if (claim.modifiedCount === 0) {
+      logger.debug('[whatsappWebhookService] Duplicate mid (webhook retry) — skipped', { threadPlatformId, mid });
+      return { interaction: null, mid, skipped: true };
+    }
   }
 
   // ── Session boundary detection ─────────────────────────────────────────────
@@ -454,7 +464,20 @@ async function upsertWhatsAppThread({
     platformId: threadPlatformId,
     organization: organizationId
   });
-  return { interaction, mid, skipped: false, isNewSession };
+
+  // `pushResult.modifiedCount === 0` means the atomic $push guard above found this exact mid
+  // already present (a concurrent duplicate that raced past the CAS check earlier, or a case
+  // where the early check didn't apply because this was a brand-new thread). Treat it the same
+  // as an early-detected duplicate: callers must NOT run flows/AI for a message they already
+  // processed, or the customer gets the same reply multiple times.
+  const skipped = pushResult.modifiedCount === 0;
+  if (skipped) {
+    logger.debug('[whatsappWebhookService] Duplicate mid (concurrent race, caught by $push guard) — skipped', {
+      threadPlatformId,
+      mid
+    });
+  }
+  return { interaction, mid, skipped, isNewSession };
 }
 
 /**
@@ -982,7 +1005,11 @@ async function processIncomingMessage(change, connection, rawPayload) {
           text: savedInteraction.content,
           // A native WhatsApp cart order webhook is a freshly "created" order.
           orderEvent: isOrder ? 'created' : undefined,
-          postback: savedInteraction.metadata?.postback || savedInteraction.metadata?.buttonPayload
+          postback: savedInteraction.metadata?.postback || savedInteraction.metadata?.buttonPayload,
+          // This exact inbound message's wamid — used by flowTriggerRouter as an atomic
+          // idempotency key so a webhook retry can never spin up a second FlowEnrollment
+          // for the same message (see FlowEnrollment.triggerMid).
+          mid
         }
       });
       flowHandled = !!flowResult.handled;

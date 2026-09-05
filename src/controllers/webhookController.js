@@ -927,12 +927,27 @@ exports.handleWhatsAppWebhook = async (req, res) => {
     const messageCount = req.body?.entry?.reduce(
       (n, e) => n + (e.changes?.reduce((c, ch) => c + (ch.value?.messages?.length ?? 0), 0) ?? 0), 0
     );
+
+    // Deterministic jobId so retried/duplicate deliveries (Meta retries the exact
+    // same webhook body when our 200 OK doesn't arrive in time, and some BSPs like
+    // Interakt also redeliver) are deduped by Bull itself at enqueue time — Bull
+    // will not create a second job for a jobId that already exists in Redis.
+    // Hash the exact bytes we received (falls back to serialized body if rawBody
+    // capture is ever unavailable) so retries of the same payload map to the same id.
+    const crypto = require('crypto');
+    const rawForId =
+      req.rawBody && Buffer.isBuffer(req.rawBody)
+        ? req.rawBody
+        : Buffer.from(JSON.stringify(req.body ?? {}));
+    const jobId = `wa_webhook_${crypto.createHash('sha256').update(rawForId).digest('hex')}`;
+
     const job = await webhookQueue.add(
       {
         platform: 'whatsapp_webhook',
         payload: req.body
       },
       {
+        jobId,
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
         priority: hasStatuses ? 2 : 1

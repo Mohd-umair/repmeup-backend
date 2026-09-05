@@ -60,7 +60,21 @@ const automationFlowSchema = new mongoose.Schema({
   },
   isBlueprint: { type: Boolean, default: false, index: true },
   /** True for demo/sample flows seeded into a trial workspace. */
-  seeded: { type: Boolean, default: false }
+  seeded: { type: Boolean, default: false },
+  /**
+   * Records an explicit "Activate anyway" decision when this flow's keyword trigger(s)
+   * overlap with another already-active flow on the same channel (same org). Without this,
+   * a single customer message could silently fire two flows and get 2+ replies — see
+   * flowKeywordOverlapService.js. `keywords` is the exact keyword set that was acknowledged;
+   * if the flow's keywords change afterwards, the publish endpoint resets this flag so a
+   * stale acknowledgement can't cover a brand-new conflict.
+   */
+  acknowledgedOverlap: {
+    flag: { type: Boolean, default: false },
+    keywords: { type: [String], default: [] },
+    conflictingFlowIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    at: { type: Date, default: null }
+  }
 }, { timestamps: true });
 
 automationFlowSchema.index({ organization: 1, status: 1 });

@@ -26,6 +26,7 @@ router.use(protect);
 const requireFlowBuilder = requireFeature(FEATURE_KEYS.FLOW_BUILDER_ENABLED);
 
 router.get('/node-catalog', automationFlowController.getNodeCatalog);
+router.post('/check-keyword-overlap', automationFlowController.checkKeywordOverlap);
 router.get('/', automationFlowController.listFlows);
 router.post('/', requireFlowBuilder, validateAutomationFlow, automationFlowController.createFlow);
 router.get('/:id/stats', automationFlowController.getFlowStats);

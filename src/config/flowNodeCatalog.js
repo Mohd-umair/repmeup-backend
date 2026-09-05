@@ -660,10 +660,14 @@ const FLOW_NODE_CATALOG = [
   }),
   node('wait.user_reply', 'wait', 'Wait for reply', CHANNELS, {
     icon: 'fas fa-reply',
+    // 86400s (24h) is only a sensible starting default — every flow can set its own
+    // timeout (minutes/hours/days) in the Flow Builder. Connect a "no_reply" edge from
+    // this node to control exactly what happens once this timeout elapses without a reply.
     defaultConfig: { timeoutSec: 86400 },
     fields: [{
       key: 'timeoutSec', type: 'number', label: 'Timeout (seconds)',
-      hint: 'Use a no_reply edge for timeout branch.', default: 86400
+      hint: 'How long to wait for a reply before giving up and following the "no_reply" edge. Fully adjustable per flow — not fixed.',
+      default: 86400
     }]
   }),
   node('control.end', 'control', 'End flow', CHANNELS, {

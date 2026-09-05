@@ -500,16 +500,54 @@ describe('processIncomingMessage — side-effect isolation', () => {
     });
     // prev-author lookup returns an existing doc with SAME lastMid → upsert skips
     Interaction.findOne.mockReturnValueOnce(chainable(null)); // author lookup
-    // Now simulate upsert's internal "existing.metadata.lastMid === mid" by
-    // having the pre-upsert existence-check return lastMid === 'wamid.dup'.
-    // upsertWhatsAppThread does its own findOne; re-prime for that call.
+    // Now simulate upsert's internal duplicate-mid detection. This is now a single atomic
+    // CAS (Interaction.updateOne({ _id, 'metadata.lastMid': { $ne: mid } }, ...)) instead of
+    // a plain read-then-compare — modifiedCount: 0 means "lastMid already equals this mid",
+    // i.e. a genuine webhook retry, so upsertWhatsAppThread must skip immediately.
     Interaction.findOne.mockReturnValueOnce(chainable({
       _id: 'int-existing', metadata: { lastMid: 'wamid.dup' }, author: {}, chatRef: 'chat-1'
     }));
+    Interaction.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
 
     await svc.processIncomingMessage(change, connection, payload);
 
+    // Only the CAS claim ran — no thread upsert, no push, no downstream side effects.
+    expect(Interaction.updateOne).toHaveBeenCalledTimes(1);
     expect(Interaction.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(aiQueue.add).not.toHaveBeenCalled();
+    expect(whatsappService.markAsRead).not.toHaveBeenCalled();
+  });
+
+  test('concurrent duplicate caught by the atomic $push guard (CAS passes, push modifiedCount:0) still short-circuits', async () => {
+    // This covers the harder race: two near-simultaneous deliveries of the exact same mid
+    // both pass the early CAS (e.g. thread didn't exist yet / lastMid was genuinely stale),
+    // but only ONE of them can win the atomic $push (guarded by 'metadata.incomingMessages.mid':
+    // { $ne: mid }). The loser must still be treated as skipped — it must NOT proceed to
+    // flows/AI, or the customer gets a duplicate reply.
+    whatsappService.processWebhookMessage.mockResolvedValueOnce({
+      success: true,
+      skipped: false,
+      messageData: {
+        from: '919999999999',
+        platformId: 'wamid.race',
+        content: 'hi',
+        type: 'text',
+        timestamp: new Date('2026-01-01T00:00:00Z')
+      }
+    });
+    Interaction.findOne.mockReturnValueOnce(chainable(null)); // author lookup
+    Interaction.findOne.mockReturnValueOnce(chainable({
+      _id: 'int-existing', metadata: { lastMid: 'wamid.other' }, author: {}, chatRef: 'chat-1'
+    }));
+    // 1st updateOne call = the early CAS claim on lastMid — succeeds (this mid is genuinely new).
+    Interaction.updateOne.mockResolvedValueOnce({ modifiedCount: 1 });
+    // 2nd updateOne call = the atomic $push guard — the OTHER concurrent request already
+    // pushed this exact mid first, so this one matches 0 documents.
+    Interaction.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+
+    await svc.processIncomingMessage(change, connection, payload);
+
+    expect(Interaction.updateOne).toHaveBeenCalledTimes(2);
     expect(aiQueue.add).not.toHaveBeenCalled();
     expect(whatsappService.markAsRead).not.toHaveBeenCalled();
   });

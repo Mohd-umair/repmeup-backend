@@ -8,6 +8,7 @@ const flowNodeDefaultsService = require('../services/flow/flowNodeDefaultsServic
 const entitlementsService = require('../services/entitlementsService');
 const { FEATURE_KEYS } = require('../config/featureCatalog');
 const { isTriggerType } = require('../config/flowNodeCatalog');
+const flowKeywordOverlapService = require('../services/flow/flowKeywordOverlapService');
 const logger = require('../config/logger');
 
 async function assertFlowCap(organizationId) {
@@ -37,6 +38,26 @@ function normalizeFlowBody(body) {
     isBlueprint: !!body.isBlueprint
   };
 }
+
+/**
+ * Design-time keyword-overlap check, called (debounced) by the Flow Builder UI while
+ * editing a trigger.keyword node, and by publishFlow (server-side, so this can't be
+ * bypassed) at activation time. See flowKeywordOverlapService for the matching rule.
+ */
+exports.checkKeywordOverlap = async (req, res, next) => {
+  try {
+    const { keywords, channels, flowId } = req.body || {};
+    const conflicts = await flowKeywordOverlapService.findOverlappingFlows({
+      organizationId: req.user.organization._id,
+      channels: Array.isArray(channels) && channels.length ? channels : ['whatsapp'],
+      keywords: Array.isArray(keywords) ? keywords : [],
+      excludeFlowId: flowId || null
+    });
+    return res.json({ success: true, conflicts });
+  } catch (err) {
+    next(err);
+  }
+};
 
 exports.getNodeCatalog = async (req, res, next) => {
   try {
@@ -171,9 +192,28 @@ exports.publishFlow = async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Cannot publish invalid flow', details: validation.errors });
     }
 
+    // Design-time multi-flow guard (server-side — cannot be bypassed by skipping the UI
+    // warning). Blocks activation if this flow's keyword(s) overlap an already-active flow
+    // on the same channel, unless the caller explicitly acknowledges it.
+    const overlap = await flowKeywordOverlapService.resolveOverlapForPublish(existing, req.user.organization._id, !!req.body.acknowledgeOverlap);
+    if (overlap.blocked) {
+      return res.status(409).json({
+        success: false,
+        error: 'This flow’s keyword(s) overlap with another active flow — a customer message could trigger both and get multiple replies.',
+        code: 'KEYWORD_OVERLAP',
+        conflicts: overlap.conflicts
+      });
+    }
+
     const flow = await AutomationFlow.findOneAndUpdate(
       { _id: req.params.id },
-      { $set: { status: 'active', version: (existing.version || 1) + 1 } },
+      {
+        $set: {
+          status: 'active',
+          version: (existing.version || 1) + 1,
+          ...(overlap.acknowledgedOverlapUpdate ? { acknowledgedOverlap: overlap.acknowledgedOverlapUpdate } : {})
+        }
+      },
       { new: true }
     ).lean();
     return res.json({ success: true, data: flow });

@@ -4,25 +4,59 @@ const { executeNodeHandler } = require('./flowNodeHandlers');
 
 const TIMEOUT_BRANCHES = ['no_reply', 'timeout', 'expired', 'no'];
 const REPLY_BRANCHES = ['reply', 'replied', 'yes', 'default'];
+// The Flow Builder UI's edge-label chips for a `wait.user_reply` node are
+// ['yes', 'no', 'reply', 'no_reply'] (see edgeBranchPresets in
+// flow-builder.component.ts) — authors are free to label the two branches
+// either structurally ("reply" / "no_reply") or with the literal answer
+// ("yes" / "no"). Only the structural pair is exempt from content matching.
+const STRUCTURAL_REPLY_LABELS = ['reply', 'no_reply', 'default'];
 
 function edgeBranch(edge) {
   return String(edge?.label || edge?.condition?.branch || '').trim().toLowerCase();
 }
 
-/** Choose the outgoing edge for a resumed wait node based on why it resumed. */
-function resolveWaitEdge(edges, nodeType, reason) {
+/**
+ * Choose the outgoing edge for a resumed wait node based on why it resumed.
+ *
+ * IMPORTANT: for a genuine reply (reason !== 'timeout'), this must not just grab
+ * whichever edge happens to be labelled "yes"/"reply" — it has to reflect what the
+ * contact actually said/tapped. Previously this always returned the first
+ * REPLY_BRANCHES-labelled edge for *any* reply, so a `wait.user_reply` node with two
+ * edges labelled "yes" and "no" (a very natural thing to build from the UI's own
+ * "yes"/"no" chip presets) would silently route every reply — including an explicit
+ * "No" — down the "yes" edge, because "yes" also serves as the generic
+ * "a-reply-arrived" marker. Content matching below fixes that while leaving the
+ * structural reply/no_reply scaffold (and single-edge flows) working exactly as before.
+ * @param {string} [replyText] The contact's actual reply content (only meaningful when reason === 'reply').
+ */
+function resolveWaitEdge(edges, nodeType, reason, replyText = '') {
   if (!edges?.length) return null;
-  if (nodeType === 'wait.user_reply') {
-    const wanted = reason === 'timeout' ? TIMEOUT_BRANCHES : REPLY_BRANCHES;
-    const labeled = edges.find((e) => wanted.includes(edgeBranch(e)));
+  if (nodeType !== 'wait.user_reply') return edges[0];
+
+  if (reason === 'timeout') {
+    const labeled = edges.find((e) => TIMEOUT_BRANCHES.includes(edgeBranch(e)));
     if (labeled) return labeled;
-    // Fallback by order: first edge = reply path, an edge labeled timeout = timeout path.
-    if (reason === 'timeout') {
-      return edges.find((e) => TIMEOUT_BRANCHES.includes(edgeBranch(e))) || edges[1] || edges[0];
-    }
-    return edges.find((e) => !edgeBranch(e)) || edges[0];
+    // No edge explicitly means "timeout" — take whichever edge isn't the reply path.
+    return edges.find((e) => !REPLY_BRANCHES.includes(edgeBranch(e))) || edges[edges.length - 1] || edges[0];
   }
-  return edges[0];
+
+  // reason === 'reply': prefer an edge whose label is literally what the contact
+  // said/tapped (handles "yes"/"no"-style content labels and button titles).
+  const text = String(replyText || '').trim().toLowerCase();
+  if (text) {
+    const contentMatch = edges.find((e) => {
+      const label = edgeBranch(e);
+      if (!label || STRUCTURAL_REPLY_LABELS.includes(label)) return false;
+      return label === text || text.includes(label) || label.includes(text);
+    });
+    if (contentMatch) return contentMatch;
+  }
+
+  // No content match (ambiguous reply, or the author used the generic reply/no_reply
+  // scaffold) — fall back to the structural "any reply" edge, same as before.
+  const structural = edges.find((e) => REPLY_BRANCHES.includes(edgeBranch(e)));
+  if (structural) return structural;
+  return edges.find((e) => !edgeBranch(e)) || edges[0];
 }
 
 /**
@@ -49,6 +83,14 @@ class FlowExecutorService {
 
     const nodeMap = new Map((flow.nodes || []).map((n) => [n.id, n]));
     const edgesFrom = (id) => (flow.edges || []).filter((e) => e.source === id);
+
+    // Cycle guard: `control.jump` can point anywhere in the graph, including back to an
+    // already-executed node. Without this, a jump loop could re-run a `send_text`/`send_media`
+    // node several times before maxSteps (25) is hit — resending the same message to the
+    // customer. Scoped to THIS single runEnrollment() call only: a legitimately parked
+    // wait.user_reply node breaks out of the loop (status 'waiting') and resumes later via a
+    // brand-new call with a fresh visited set, so normal wait/resume flows are unaffected.
+    const visitedNodeIds = new Set();
 
     while (currentId && steps < maxSteps && status === 'active') {
       steps += 1;
@@ -78,7 +120,11 @@ class FlowExecutorService {
 
       // Resuming a parked wait node: the wait is satisfied — branch past it instead of re-waiting.
       if (resume && node.type.startsWith('wait.')) {
-        const edge = resolveWaitEdge(edgesFrom(node.id), node.type, resume.reason);
+        // `interaction` is the fresh inbound reply when resume.reason === 'reply'
+        // (set by flowTriggerRouter.resumeOnReply), so its content is safe to use
+        // for answer-text branch matching. On a timeout resume it's the original
+        // trigger interaction, but resolveWaitEdge ignores replyText for timeouts.
+        const edge = resolveWaitEdge(edgesFrom(node.id), node.type, resume.reason, interaction?.content);
         history.push({ nodeId: node.id, event: `wait_resumed:${resume.reason || 'elapsed'}`, at: new Date() });
         resume = null;
         currentId = edge?.target || null;
@@ -86,6 +132,21 @@ class FlowExecutorService {
         continue;
       }
       resume = null;
+
+      // About to actually execute (not just pass through) this node. If we've already
+      // executed it once in this same pass, a control.jump has looped back to it — stop
+      // now, BEFORE calling the handler again, so any send/order/webhook side effect it has
+      // cannot fire a second time for this one inbound message.
+      if (visitedNodeIds.has(node.id)) {
+        status = 'failed';
+        lastError = `Flow loop detected at "${node.label || node.id}" — a control.jump revisits an already-executed node. Fix the jump target to avoid resending messages.`;
+        history.push({ nodeId: node.id, event: 'loop_detected_stopped', at: new Date() });
+        logger.warn('[FlowExecutor] loop detected — stopping before re-execution', {
+          nodeId: node.id, flowId: String(flow._id), enrollmentId: String(enrollment._id)
+        });
+        break;
+      }
+      visitedNodeIds.add(node.id);
 
       history.push({ nodeId: node.id, event: 'execute', at: new Date() });
 
