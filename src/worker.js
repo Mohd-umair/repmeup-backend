@@ -26,7 +26,8 @@ const {
   socialCampaignSendQueue,
   activationCampaignLaunchQueue,
   contactIntelligenceQueue,
-  duplicateScanQueue
+  duplicateScanQueue,
+  contentStudioInputCleanupQueue
 } = require('./config/queue');
 const processPaymentWebhook = require('./jobs/processPaymentWebhook');
 const processWebhook = require('./jobs/processWebhook');
@@ -43,6 +44,7 @@ const processFlowTick = require('./jobs/processFlowTick');
 const processKbCrawl = require('./jobs/processKbCrawl');
 const processGrowthAudit = require('./jobs/processGrowthAudit');
 const processDemoExpiry = require('./jobs/processDemoExpiry');
+const processContentStudioInputCleanup = require('./jobs/processContentStudioInputCleanup');
 const processAppointmentReminders = require('./jobs/processAppointmentReminders');
 const campaignConfig = require('./config/campaignConfig');
 const { registerCampaignWorkers } = require('./workers/registerCampaignWorkers');
@@ -164,6 +166,25 @@ async function startWorker() {
       logger.info('[Worker] appointment-reminder repeat job already exists — skipping registration');
     }
     logger.info('[Worker] demo-expiry processor started (daily)');
+
+    // Content Studio ephemeral input-image cleanup — every 30 min.
+    // Guard against duplicate repeat jobs on worker restart.
+    contentStudioInputCleanupQueue.process(1, async () => {
+      return await processContentStudioInputCleanup();
+    });
+    const csInputRepeatables = await contentStudioInputCleanupQueue.getRepeatableJobs();
+    const csInputAlreadyScheduled = csInputRepeatables.some(j => j.id && j.id.includes('content-studio-input-cleanup-repeat'));
+    if (!csInputAlreadyScheduled) {
+      await contentStudioInputCleanupQueue.add({}, {
+        repeat: { every: 30 * 60 * 1000 }, // every 30 min
+        jobId: 'content-studio-input-cleanup-repeat',
+        removeOnComplete: 5
+      });
+      logger.info('[Worker] content-studio-input-cleanup repeat job registered (every 30 min)');
+    } else {
+      logger.info('[Worker] content-studio-input-cleanup repeat job already exists — skipping registration');
+    }
+    logger.info('[Worker] content-studio-input-cleanup processor started (every 30 min)');
 
     // Email webhook processor (Gmail Pub/Sub + Outlook Graph)
     emailWebhookQueue.process(EMAIL_WEBHOOK_CONCURRENCY, async (job) => {

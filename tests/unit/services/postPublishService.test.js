@@ -45,6 +45,13 @@ jest.mock('../../../src/config/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn()
 }));
 
+// complianceService hits BrandConfig (a real Mongoose model) — mock it so these
+// unit tests never touch a DB connection. Default: no violation, so existing
+// publish-path tests are unaffected; individual tests override as needed.
+jest.mock('../../../src/services/complianceService', () => ({
+  checkContent: jest.fn().mockResolvedValue({ riskScore: 0, complianceFlags: [], hardViolation: false })
+}));
+
 jest.mock('fs', () => {
   const actual = jest.requireActual('fs');
   return {
@@ -64,6 +71,7 @@ const { validateMedia } = require('../../../src/config/platformMediaRequirements
 const instagramService = require('../../../src/integrations/meta/instagramService');
 const facebookService = require('../../../src/integrations/meta/facebookService');
 const linkedinService = require('../../../src/integrations/linkedin/linkedinService');
+const complianceService = require('../../../src/services/complianceService');
 const fs = require('fs').promises;
 
 const svc = require('../../../src/services/postPublishService');
@@ -97,6 +105,9 @@ beforeEach(() => {
   Object.values(instagramService).forEach((fn) => fn.mockReset?.());
   Object.values(facebookService).forEach((fn) => fn.mockReset?.());
   Object.values(linkedinService).forEach((fn) => fn.mockReset?.());
+
+  complianceService.checkContent.mockReset()
+    .mockResolvedValue({ riskScore: 0, complianceFlags: [], hardViolation: false });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -367,6 +378,96 @@ describe('resolveMediaForPost', () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+describe('resolveCarouselFromLibraryIds', () => {
+  const { resolveCarouselFromLibraryIds } = svc;
+  const fakeReq = () => ({ get: () => 'repmeup.in', protocol: 'https' });
+
+  test('rejects any platform other than instagram', async () => {
+    await expect(resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'facebook', fakeReq()))
+      .rejects.toMatchObject({ statusCode: 400, code: 'CAROUSEL_UNSUPPORTED_PLATFORM' });
+    await expect(resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'linkedin', fakeReq()))
+      .rejects.toMatchObject({ statusCode: 400, code: 'CAROUSEL_UNSUPPORTED_PLATFORM' });
+    expect(Media.find).not.toHaveBeenCalled();
+  });
+
+  test('is case-insensitive on platform ("Instagram" is accepted)', async () => {
+    Media.find.mockResolvedValueOnce([
+      { _id: 'm1', publicUrl: 'https://cdn.example/a.jpg', mediaType: 'image' },
+      { _id: 'm2', publicUrl: 'https://cdn.example/b.jpg', mediaType: 'image' }
+    ]);
+    await expect(resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'Instagram', fakeReq()))
+      .resolves.toBeDefined();
+  });
+
+  test('rejects fewer than 2 images', async () => {
+    await expect(resolveCarouselFromLibraryIds(['m1'], orgId, 'instagram', fakeReq()))
+      .rejects.toMatchObject({ statusCode: 400, code: 'CAROUSEL_INVALID_COUNT' });
+    expect(Media.find).not.toHaveBeenCalled();
+  });
+
+  test('rejects more than 10 images', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `m${i}`);
+    await expect(resolveCarouselFromLibraryIds(ids, orgId, 'instagram', fakeReq()))
+      .rejects.toMatchObject({ statusCode: 400, code: 'CAROUSEL_INVALID_COUNT' });
+  });
+
+  test('throws 404 MEDIA_NOT_FOUND when an id is missing or cross-org', async () => {
+    Media.find.mockResolvedValueOnce([{ _id: 'm1', publicUrl: 'u', mediaType: 'image' }]);
+    await expect(resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'instagram', fakeReq()))
+      .rejects.toMatchObject({ statusCode: 404, code: 'MEDIA_NOT_FOUND' });
+  });
+
+  test('rejects when any item is not an image (e.g. video)', async () => {
+    Media.find.mockResolvedValueOnce([
+      { _id: 'm1', publicUrl: 'https://cdn.example/a.jpg', mediaType: 'image' },
+      { _id: 'm2', publicUrl: 'https://cdn.example/b.mp4', mediaType: 'video' }
+    ]);
+    await expect(resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'instagram', fakeReq()))
+      .rejects.toMatchObject({ statusCode: 400, code: 'CAROUSEL_INVALID_MEDIA_TYPE' });
+  });
+
+  test('scopes lookup to the caller organization', async () => {
+    Media.find.mockResolvedValueOnce([
+      { _id: 'm1', publicUrl: 'a', mediaType: 'image' },
+      { _id: 'm2', publicUrl: 'b', mediaType: 'image' }
+    ]);
+    await resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'instagram', fakeReq());
+    expect(Media.find).toHaveBeenCalledWith({ _id: { $in: ['m1', 'm2'] }, organization: orgId });
+  });
+
+  test('preserves the caller-supplied order regardless of DB return order', async () => {
+    // Media.find often returns docs in a different order than $in was given
+    Media.find.mockResolvedValueOnce([
+      { _id: 'm2', publicUrl: 'https://cdn.example/b.jpg', mediaType: 'image' },
+      { _id: 'm1', publicUrl: 'https://cdn.example/a.jpg', mediaType: 'image' }
+    ]);
+    const out = await resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'instagram', fakeReq());
+    expect(out.mediaStoragePaths).toEqual(['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg']);
+    expect(out.mediaLibraryIds).toEqual(['m1', 'm2']);
+    expect(out.mediaStoragePath).toBe('https://cdn.example/a.jpg');
+  });
+
+  test('accepts a JSON-encoded array string (form-data quirk)', async () => {
+    Media.find.mockResolvedValueOnce([
+      { _id: 'm1', publicUrl: 'a', mediaType: 'image' },
+      { _id: 'm2', publicUrl: 'b', mediaType: 'image' }
+    ]);
+    const out = await resolveCarouselFromLibraryIds(JSON.stringify(['m1', 'm2']), orgId, 'instagram', fakeReq());
+    expect(out.mediaLibraryIds).toEqual(['m1', 'm2']);
+  });
+
+  test('falls back to storageService.resolvePublicUrl when publicUrl missing', async () => {
+    Media.find.mockResolvedValueOnce([
+      { _id: 'm1', publicUrl: null, filePath: '/local/a.jpg', mediaType: 'image' },
+      { _id: 'm2', publicUrl: 'https://cdn.example/b.jpg', mediaType: 'image' }
+    ]);
+    const out = await resolveCarouselFromLibraryIds(['m1', 'm2'], orgId, 'instagram', fakeReq());
+    expect(storageService.resolvePublicUrl).toHaveBeenCalled();
+    expect(out.mediaStoragePaths[0]).toMatch(/^https:\/\/cdn\.example\/a\.jpg$/);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 describe('publishExistingPost', () => {
   // Build a fake post that records state transitions via save()
   const makePost = (overrides = {}) => {
@@ -454,6 +555,48 @@ describe('publishExistingPost', () => {
       .rejects.toMatchObject({ message: 'rate limited', platformError: { code: 4, subcode: 1 } });
     expect(post.status).toBe('failed');
     expect(post.error).toBe('rate limited');
+  });
+
+  describe('compliance enforcement', () => {
+    test('hard violation blocks publish with 422 COMPLIANCE_BLOCKED, never reaches the platform SDK', async () => {
+      complianceService.checkContent.mockResolvedValueOnce({
+        riskScore: 25,
+        complianceFlags: ['Contains banned word: "guarantee"'],
+        hardViolation: true
+      });
+      const post = makePost({ status: 'pending_approval' });
+      await expect(publishExistingPost(post, connection, req))
+        .rejects.toMatchObject({ statusCode: 422, code: 'COMPLIANCE_BLOCKED' });
+      expect(instagramService.createPost).not.toHaveBeenCalled();
+      // Status is untouched (never flipped to 'publishing'/'failed') — the
+      // post stays exactly where a human left it (e.g. pending_approval) so
+      // it isn't mistaken for a platform-side failure.
+      expect(post.status).toBe('pending_approval');
+      expect(post.riskScore).toBe(25);
+      expect(post.complianceFlags).toEqual(['Contains banned word: "guarantee"']);
+      expect(post.save).toHaveBeenCalled();
+    });
+
+    test('soft flags (no hard violation) do not block — publish proceeds and flags are persisted', async () => {
+      complianceService.checkContent.mockResolvedValueOnce({
+        riskScore: 15,
+        complianceFlags: ['Legal disclaimer may be required'],
+        hardViolation: false
+      });
+      instagramService.createPost.mockResolvedValue({ postId: 'ig_1', postUrl: 'u' });
+      const post = makePost();
+      await publishExistingPost(post, connection, req);
+      expect(post.status).toBe('published');
+      expect(post.riskScore).toBe(15);
+      expect(post.complianceFlags).toEqual(['Legal disclaimer may be required']);
+    });
+
+    test('checkContent is called with the post organization and current content (not any pre-set field)', async () => {
+      const post = makePost({ organization: 'org-xyz', content: 'fresh content', riskScore: 999, complianceFlags: ['stale'] });
+      instagramService.createPost.mockResolvedValue({ postId: 'ig_1', postUrl: 'u' });
+      await publishExistingPost(post, connection, req);
+      expect(complianceService.checkContent).toHaveBeenCalledWith('org-xyz', 'fresh content');
+    });
   });
 });
 

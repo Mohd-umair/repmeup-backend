@@ -305,6 +305,145 @@ describe('reference-only endpoint routing', () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+describe('product shoot mode (options.productShoot)', () => {
+  it('sends product image first, style images next, ignoring org-wide reference pool', async () => {
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    await generateImage('sneakers post', 'org_1', {
+      productShoot: {
+        productImageUrl: 'https://cdn/product.png',
+        styleImageUrls: ['https://cdn/style1.png', 'https://cdn/style2.png'],
+        fidelityMode: 'strict',
+        shootConfig: {}
+      }
+    });
+
+    expect(axios.post.mock.calls[0][1].images).toEqual([
+      { image_url: 'https://cdn/product.png' },
+      { image_url: 'https://cdn/style1.png' },
+      { image_url: 'https://cdn/style2.png' }
+    ]);
+    // Must NOT fall back to the org's undifferentiated top-N reference pool.
+    expect(brandContextService.getReferenceOnlyContext).not.toHaveBeenCalled();
+    expect(brandContextService.getVisualStyleContext).not.toHaveBeenCalled();
+  });
+
+  it('appends the org logo after product + style images (still last)', async () => {
+    Organization.findById.mockReturnValue({
+      select: () => ({ lean: async () => ({ logo: 'https://cdn/logo.png' }) })
+    });
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    await generateImage('sneakers post', 'org_1', {
+      productShoot: { productImageUrl: 'https://cdn/product.png', styleImageUrls: [], fidelityMode: 'strict', shootConfig: {} }
+    });
+
+    expect(axios.post.mock.calls[0][1].images).toEqual([
+      { image_url: 'https://cdn/product.png' },
+      { image_url: 'https://cdn/logo.png' }
+    ]);
+  });
+
+  it('prompt distinguishes "preserve this product" from "style inspiration only"', async () => {
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    const result = await generateImage('sneakers post', 'org_1', {
+      productShoot: {
+        productImageUrl: 'https://cdn/product.png',
+        styleImageUrls: ['https://cdn/style1.png'],
+        fidelityMode: 'strict',
+        shootConfig: {}
+      }
+    });
+
+    expect(result.imagePrompt).toContain('EXACT PRODUCT');
+    expect(result.imagePrompt).toContain('STYLE INSPIRATION ONLY');
+    expect(result.imagePrompt).toContain('STRICT PRODUCT FIDELITY');
+  });
+
+  it('translates fidelityMode into the right instruction strength', async () => {
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    const strict = await generateImage('x', 'org_1', {
+      productShoot: { productImageUrl: 'https://cdn/p.png', styleImageUrls: [], fidelityMode: 'creative', shootConfig: {} }
+    });
+    expect(strict.imagePrompt).toContain('CREATIVE INTERPRETATION');
+    expect(strict.imagePrompt).not.toContain('STRICT PRODUCT FIDELITY');
+  });
+
+  it('renders shoot config (background/lighting/angle/placement) into the prompt', async () => {
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    const result = await generateImage('x', 'org_1', {
+      productShoot: {
+        productImageUrl: 'https://cdn/p.png',
+        styleImageUrls: [],
+        fidelityMode: 'strict',
+        shootConfig: { background: 'white', lighting: 'golden-hour', cameraAngle: 'close-up', placement: 'floating', includePeople: true, textSafeZone: true }
+      }
+    });
+
+    expect(result.imagePrompt).toMatch(/pure-white studio background/);
+    expect(result.imagePrompt).toMatch(/golden-hour lighting/);
+    expect(result.imagePrompt).toMatch(/close-up macro angle/);
+    expect(result.imagePrompt).toMatch(/floating\/levitating/);
+    expect(result.imagePrompt).toMatch(/Include people naturally/);
+    expect(result.imagePrompt).toMatch(/safe zone/);
+    expect(result.imagePrompt).toMatch(/360-DEGREE PRODUCT PHOTOSHOOT/);
+  });
+
+  it('orbits the camera per variantIndex so variants are not identical front shots', async () => {
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    const first = await generateImage('x', 'org_1', {
+      productShoot: { productImageUrl: 'https://cdn/p.png', styleImageUrls: [], fidelityMode: 'strict', shootConfig: {}, variantIndex: 0 }
+    });
+    const second = await generateImage('x', 'org_1', {
+      productShoot: { productImageUrl: 'https://cdn/p.png', styleImageUrls: [], fidelityMode: 'strict', shootConfig: {}, variantIndex: 1 }
+    });
+
+    expect(first.imagePrompt).toMatch(/Station 1: 0°/);
+    expect(second.imagePrompt).toMatch(/Station 2: 90°/);
+    expect(first.imagePrompt).not.toEqual(second.imagePrompt);
+  });
+
+  it('maps aspectRatio to a supported gpt-image-1 size', async () => {
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    await generateImage('x', 'org_1', {
+      productShoot: { productImageUrl: 'https://cdn/p.png', styleImageUrls: [], fidelityMode: 'strict', shootConfig: { aspectRatio: '16:9' } }
+    });
+
+    expect(axios.post.mock.calls[0][1].size).toBe('1536x1024');
+  });
+
+  it('falls back to default size for an unrecognized aspect ratio', async () => {
+    axios.post.mockResolvedValue({
+      data: { data: [{ b64_json: Buffer.from('p').toString('base64') }] }
+    });
+
+    await generateImage('x', 'org_1', {
+      productShoot: { productImageUrl: 'https://cdn/p.png', styleImageUrls: [], fidelityMode: 'strict', shootConfig: {} }
+    });
+
+    expect(axios.post.mock.calls[0][1].size).toBe('1024x1024');
+  });
+});
+
 describe('prompt layering', () => {
   it('appends the text-enforcement suffix', async () => {
     axios.post.mockResolvedValue({

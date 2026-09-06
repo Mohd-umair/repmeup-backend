@@ -59,6 +59,10 @@ jest.mock('../../../src/models/VideoJob', () => ({
   findOneAndUpdate: jest.fn()
 }));
 
+jest.mock('../../../src/services/ai/brandContextService', () => ({
+  resolveProductShootReferences: jest.fn()
+}));
+
 jest.mock('../../../src/models/EventTemplate', () => {
   const state = { findOneResult: null };
   globalThis.__postAiEventTemplateState = state;
@@ -88,6 +92,7 @@ jest.mock('fs', () => {
 const aiService = require('../../../src/services/aiService');
 const aiCreditService = require('../../../src/services/aiCreditService');
 const storageService = require('../../../src/services/storageService');
+const brandContextService = require('../../../src/services/ai/brandContextService');
 const Media = require('../../../src/models/Media');
 const VideoJob = require('../../../src/models/VideoJob');
 require('../../../src/models/EventTemplate'); // trigger the factory so state is set
@@ -147,7 +152,11 @@ beforeEach(() => {
   storageService.uploadBuffer.mockReset();
   storageService.resolvePublicUrl.mockClear();
 
-  Media.create.mockReset().mockResolvedValue({});
+  Media.create.mockReset().mockResolvedValue({ _id: 'media-doc-1' });
+  brandContextService.resolveProductShootReferences.mockReset().mockResolvedValue({
+    productImageUrl: 'https://cdn.example/product.png',
+    styleImageUrls: []
+  });
   VideoJob.create.mockReset().mockResolvedValue({});
   VideoJob.findOne.mockReset();
   VideoJob.findOneAndUpdate.mockReset().mockResolvedValue({});
@@ -236,12 +245,21 @@ describe('buildImagePrompt', () => {
 });
 
 describe('buildReferenceImagePrompt', () => {
-  test('keeps prompt minimal (no style descriptors)', () => {
+  test('keeps prompt minimal (no style descriptors) but rotates composition per variant', () => {
     const p = buildReferenceImagePrompt({ topic: 'coffee', variantIndex: 0, contentType: '' });
     expect(p).toMatch(/Social media post about: coffee/);
     expect(p).not.toMatch(/professional social media photography/);
     expect(p).toMatch(/Do NOT render any brand name/);
+    expect(p).toMatch(/Hero composition/);
+    expect(p).toMatch(/visually distinct/);
     expect(p).toMatch(/seed:\d+/);
+  });
+
+  test('variant index rotates the composition directive', () => {
+    const p0 = buildReferenceImagePrompt({ topic: 'coffee', variantIndex: 0, contentType: '' });
+    const p1 = buildReferenceImagePrompt({ topic: 'coffee', variantIndex: 1, contentType: '' });
+    expect(p0).toMatch(/Hero composition/);
+    expect(p1).toMatch(/Environmental composition/);
   });
 
   test('image-layover mode adds headline instruction', () => {
@@ -603,12 +621,14 @@ describe('generateVariantImage', () => {
       tags: ['ai-generated', 'content-studio']
     }));
     expect(out.savedToLibrary).toBe(true);
+    expect(out.mediaLibraryId).toBe('media-doc-1');
   });
 
-  test('Media.create failure is non-fatal — savedToLibrary=false', async () => {
+  test('Media.create failure is non-fatal — savedToLibrary=false, mediaLibraryId=null', async () => {
     Media.create.mockRejectedValueOnce(new Error('db'));
     const out = await generateVariantImage({ topic: 'x', organizationId: orgId, userId });
     expect(out.savedToLibrary).toBe(false);
+    expect(out.mediaLibraryId).toBeNull();
     expect(out.imageUrl).toBeDefined();
   });
 
@@ -651,6 +671,156 @@ describe('generateVariantImage', () => {
       orgId, 1,
       expect.objectContaining({ operation: 'post_variants_image' })
     );
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+describe('generateVariantImage — Product Shoot', () => {
+  const buffer = Buffer.from('fake-image-bytes');
+
+  beforeEach(() => {
+    aiService.generateImage.mockResolvedValue({
+      buffer,
+      styleSpec: null,
+      imagePrompt: 'captured-prompt'
+    });
+  });
+
+  test('rejects when both productReferenceImageId and inputImageId are given', async () => {
+    await expect(generateVariantImage({
+      topic: 'x', productReferenceImageId: 'ref1', inputImageId: 'up1',
+      organizationId: orgId, userId
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(brandContextService.resolveProductShootReferences).not.toHaveBeenCalled();
+  });
+
+  test('rejects with 503 PRODUCT_SHOOT_UNAVAILABLE when the emergency kill switch is on', async () => {
+    process.env.PRODUCT_SHOOT_KILL_SWITCH = 'true';
+    try {
+      await expect(generateVariantImage({
+        topic: 'x', productReferenceImageId: 'ref1',
+        organizationId: orgId, userId
+      })).rejects.toMatchObject({ statusCode: 503, code: 'PRODUCT_SHOOT_UNAVAILABLE' });
+      expect(brandContextService.resolveProductShootReferences).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.PRODUCT_SHOOT_KILL_SWITCH;
+    }
+  });
+
+  test('non-Product-Shoot generation is unaffected by the kill switch', async () => {
+    process.env.PRODUCT_SHOOT_KILL_SWITCH = 'true';
+    try {
+      await expect(generateVariantImage({
+        topic: 'x', generationMode: 'instant',
+        organizationId: orgId, userId
+      })).resolves.toBeDefined();
+    } finally {
+      delete process.env.PRODUCT_SHOOT_KILL_SWITCH;
+    }
+  });
+
+  test('rejects invalid shootConfig fields with 400 INVALID_SHOOT_CONFIG', async () => {
+    await expect(generateVariantImage({
+      topic: 'x', productReferenceImageId: 'ref1', shootConfig: { background: 'not-a-real-option' },
+      organizationId: orgId, userId
+    })).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_SHOOT_CONFIG' });
+  });
+
+  test('rejects more than 3 style reference ids with 400', async () => {
+    await expect(generateVariantImage({
+      topic: 'x', productReferenceImageId: 'ref1',
+      styleReferenceImageIds: ['s1', 's2', 's3', 's4'],
+      organizationId: orgId, userId
+    })).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_SHOOT_CONFIG' });
+  });
+
+  test('translates REFERENCE_NOT_FOUND from brandContextService into 404', async () => {
+    const err = new Error('Selected product reference image was not found');
+    err.code = 'REFERENCE_NOT_FOUND';
+    brandContextService.resolveProductShootReferences.mockRejectedValueOnce(err);
+    await expect(generateVariantImage({
+      topic: 'x', productReferenceImageId: 'missing',
+      organizationId: orgId, userId
+    })).rejects.toMatchObject({ statusCode: 404, code: 'REFERENCE_NOT_FOUND' });
+    expect(aiService.generateImage).not.toHaveBeenCalled();
+  });
+
+  test('resolves refs by organization/user and passes role-aware productShoot options', async () => {
+    brandContextService.resolveProductShootReferences.mockResolvedValueOnce({
+      productImageUrl: 'https://cdn.example/product.png',
+      styleImageUrls: ['https://cdn.example/style1.png']
+    });
+    await generateVariantImage({
+      topic: 'sneakers', inputImageId: 'up1', styleReferenceImageIds: ['s1'],
+      fidelityMode: 'strict', shootConfig: { background: 'white', includePeople: false },
+      organizationId: orgId, userId
+    });
+
+    expect(brandContextService.resolveProductShootReferences).toHaveBeenCalledWith(orgId, userId, {
+      productReferenceImageId: undefined,
+      inputImageId: 'up1',
+      styleReferenceImageIds: ['s1']
+    });
+
+    const [prompt, imageOrgId, imageOptions] = aiService.generateImage.mock.calls[0];
+    expect(prompt).toMatch(/Social media post about: sneakers/); // neutral base prompt, role-aware block added downstream
+    expect(imageOrgId).toBe(orgId); // org logo/context still applies even without generationMode
+    expect(imageOptions.productShoot).toEqual({
+      productImageUrl: 'https://cdn.example/product.png',
+      styleImageUrls: ['https://cdn.example/style1.png'],
+      fidelityMode: 'strict',
+      shootConfig: expect.objectContaining({ preset: 'custom', background: 'white', includePeople: false }),
+      variantIndex: 0
+    });
+  });
+
+  test('defaults fidelityMode to "strict" on invalid/missing value', async () => {
+    await generateVariantImage({
+      topic: 'x', productReferenceImageId: 'ref1', fidelityMode: 'nonsense',
+      organizationId: orgId, userId
+    });
+    const [, , imageOptions] = aiService.generateImage.mock.calls[0];
+    expect(imageOptions.productShoot.fidelityMode).toBe('strict');
+  });
+
+  test('records provenance metadata on the saved Media entry', async () => {
+    await generateVariantImage({
+      topic: 'x', productReferenceImageId: 'ref1', styleReferenceImageIds: ['s1'],
+      fidelityMode: 'balanced',
+      organizationId: orgId, userId
+    });
+    expect(Media.create).toHaveBeenCalledWith(expect.objectContaining({
+      tags: ['ai-generated', 'content-studio', 'product-shoot'],
+      metadata: expect.objectContaining({
+        source: 'product_shoot',
+        productReferenceImageId: 'ref1',
+        inputImageId: null,
+        fidelityMode: 'balanced',
+        generatedBy: userId
+      })
+    }));
+  });
+
+  test('still deducts exactly 1 credit on success (same cost as any other variant image)', async () => {
+    await generateVariantImage({
+      topic: 'x', productReferenceImageId: 'ref1',
+      organizationId: orgId, userId
+    });
+    expect(aiCreditService.deductCredits).toHaveBeenCalledWith(
+      orgId, 1,
+      expect.objectContaining({ operation: 'post_variants_image' }),
+      { aiApiUsageId: 'usage-fake-1' }
+    );
+  });
+
+  test('rolls back credit if generation fails after refs are resolved', async () => {
+    aiService.generateImage.mockRejectedValue(new Error('network fail'));
+    await expect(generateVariantImage({
+      topic: 'x', productReferenceImageId: 'ref1',
+      organizationId: orgId, userId
+    })).rejects.toThrow('network fail');
+    expect(aiCreditService.rollbackCredits).not.toHaveBeenCalled(); // nothing was deducted yet — nothing to roll back
+    expect(aiCreditService.deductCredits).not.toHaveBeenCalled();
   });
 });
 

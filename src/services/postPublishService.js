@@ -41,6 +41,7 @@ const facebookService = require('../integrations/meta/facebookService');
 const linkedinService = require('../integrations/linkedin/linkedinService');
 const { validateMedia } = require('../config/platformMediaRequirements');
 const logger = require('../config/logger');
+const complianceService = require('./complianceService');
 
 // ── Error Contract ─────────────────────────────────────────────────────────
 
@@ -347,6 +348,33 @@ async function publishToLinkedIn(connection, post) {
   return { postId: result.postId, postUrl: result.postUrl };
 }
 
+/**
+ * Recompute compliance for a post's current content and persist the result
+ * (riskScore + complianceFlags) on the in-memory document. This is the last
+ * check before content actually reaches a platform, so it always uses fresh
+ * content — never a client-supplied or stale riskScore/complianceFlags value
+ * from an earlier step (draft save, approval submission, admin edit).
+ *
+ * @throws {PostPublishError} 422 COMPLIANCE_BLOCKED on a hard violation (e.g. banned word)
+ */
+async function enforceComplianceOrThrow(post) {
+  const { riskScore, complianceFlags, hardViolation } = await complianceService.checkContent(
+    post.organization,
+    post.content
+  );
+  post.riskScore = riskScore;
+  post.complianceFlags = complianceFlags;
+  if (hardViolation) {
+    // Persist the flags even though we're blocking, so the approval queue /
+    // post detail view shows the reviewer exactly why it didn't go out.
+    await post.save();
+    throw new PostPublishError(
+      `Cannot publish: ${complianceFlags.join('; ')}. Edit the post to remove banned words first.`,
+      { statusCode: 422, code: 'COMPLIANCE_BLOCKED', extras: { complianceFlags, riskScore } }
+    );
+  }
+}
+
 // ── Scheduled Publish ─────────────────────────────────────────────────────────
 
 /**
@@ -378,6 +406,15 @@ async function executePublishForScheduledPost(postId) {
         ? (process.env.API_URL || process.env.BASE_URL || 'localhost:3000').replace(/^https?:\/\//, '')
         : null
   };
+
+  try {
+    await enforceComplianceOrThrow(post);
+  } catch (err) {
+    post.status = 'failed';
+    post.error = err.message;
+    await post.save();
+    return { success: false, error: err.message };
+  }
 
   post.status = 'publishing';
   await post.save();
@@ -460,6 +497,80 @@ async function resolvePlatformConnection(organizationId, platform) {
     });
   }
   return connection;
+}
+
+/**
+ * Resolve a Content Studio "carousel" request (2–10 existing Media library
+ * items) into ScheduledPost media fields. Deliberately separate from
+ * `resolveMediaForPost` below (which already has its own, older
+ * `mediaLibraryIds` branch used by the `/publish` multipart flow) — kept
+ * standalone rather than refactored into a single shared code path so this
+ * new, additive `saveDraft` / `schedulePost` / `sendToApproval` carousel
+ * support carries zero regression risk to the already-live single-image
+ * behavior in those three handlers.
+ *
+ * Carousel publishing is Instagram-only today (see plan discussion) —
+ * Facebook's Graph API needs a separate unpublished-photos + attached_media
+ * flow, and LinkedIn's Posts API only accepts one image via this content
+ * shape. Rather than silently truncating to one image on those platforms
+ * (confusing — the user picked N images, got 1 posted), we reject up front
+ * with an actionable message.
+ *
+ * @param {string[]|string} mediaLibraryIdsRaw  Array of Media _id strings (or JSON-encoded array)
+ * @param {string} organizationId
+ * @param {string} platform
+ * @returns {Promise<object>} { mediaStoragePaths, mediaTypes, mediaLibraryIds, mediaStoragePath, mediaType }
+ * @throws {PostPublishError} 400 for bad platform/count, 404 for missing/cross-org media
+ */
+async function resolveCarouselFromLibraryIds(mediaLibraryIdsRaw, organizationId, platform, req) {
+  const libraryIds = Array.isArray(mediaLibraryIdsRaw)
+    ? mediaLibraryIdsRaw
+    : JSON.parse(mediaLibraryIdsRaw);
+
+  const lowered = String(platform || '').toLowerCase();
+  if (lowered !== 'instagram') {
+    throw new PostPublishError(
+      'Carousel posts (multiple images) are currently supported for Instagram only. Choose a single image, or select only Instagram as the platform.',
+      { statusCode: 400, code: 'CAROUSEL_UNSUPPORTED_PLATFORM', extras: { platform: lowered } }
+    );
+  }
+  if (libraryIds.length < 2 || libraryIds.length > 10) {
+    throw new PostPublishError(
+      'A carousel needs between 2 and 10 images.',
+      { statusCode: 400, code: 'CAROUSEL_INVALID_COUNT' }
+    );
+  }
+
+  const items = await Media.find({ _id: { $in: libraryIds }, organization: organizationId });
+  if (items.length !== libraryIds.length) {
+    throw new PostPublishError(
+      'Some carousel images were not found in your library or do not belong to your organization',
+      { statusCode: 404, code: 'MEDIA_NOT_FOUND' }
+    );
+  }
+  if (items.some((m) => m.mediaType !== 'image')) {
+    throw new PostPublishError('Carousel items must all be images.', {
+      statusCode: 400,
+      code: 'CAROUSEL_INVALID_MEDIA_TYPE'
+    });
+  }
+
+  // Preserve the order the caller sent (Media.find does not guarantee input order)
+  const byId = new Map(items.map((m) => [String(m._id), m]));
+  const ordered = libraryIds.map((id) => byId.get(String(id)));
+
+  const paths = ordered.map((m) => m.publicUrl || storageService.resolvePublicUrl(m.filePath, req));
+  const types = ordered.map((m) => m.mediaType);
+
+  logger.info('[Post] Content Studio carousel resolved', { count: ordered.length, platform: lowered });
+
+  return {
+    mediaStoragePaths: paths,
+    mediaTypes: types,
+    mediaLibraryIds: ordered.map((m) => m._id),
+    mediaStoragePath: paths[0],
+    mediaType: types[0]
+  };
 }
 
 /**
@@ -658,6 +769,13 @@ async function _bestEffortCleanupFiles(files) {
  * @throws {PostPublishError} 422 for unsupported platform
  */
 async function publishExistingPost(post, connection, req) {
+  // Recompute compliance against current content right before it goes live —
+  // never trust a riskScore/complianceFlags value set earlier (draft save,
+  // approval submission, or a client-supplied value). Throws 422 on a hard
+  // violation (banned word) so the post stays in its current status instead
+  // of being marked 'publishing'.
+  await enforceComplianceOrThrow(post);
+
   post.status = 'publishing';
   await post.save();
 
@@ -754,6 +872,7 @@ module.exports = {
   // Orchestration primitives (new — used by controller handlers)
   resolvePlatformConnection,
   resolveMediaForPost,
+  resolveCarouselFromLibraryIds,
   publishExistingPost,
   incrementMediaLibraryUsage,
 

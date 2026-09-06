@@ -41,6 +41,7 @@ const aiCreditService = require('../aiCreditService');
 const cacheService = require('../cacheService');
 const { runWithAiContextAndUsageId } = require('../aiRequestContext');
 const { searchProducts, buildProductPromptBlock } = require('../ai/productSearchService');
+const brandContextService = require('../ai/brandContextService');
 const { AI_VOICE_BLOCK } = require('../../config/aiVoiceRules');
 const { stripMarkdownForMessaging } = require('../../utils/aiTextFormatting');
 
@@ -296,7 +297,7 @@ async function fetchProductContext(orgId, query, instagramPostId = null) {
 /**
  * Build the system prompt shared by aiAssist + aiAssistRegenerate.
  */
-function buildAssistSystemPrompt({ chatContext, kbContext, productContext, interaction }) {
+function buildAssistSystemPrompt({ chatContext, kbContext, productContext, brandContext, interaction }) {
   return `You are an experienced support agent writing a reply that will be sent to the customer as-is.
 Write the way a real person on the team would text — not the way an assistant would.
 
@@ -307,6 +308,7 @@ ${kbContext ? `KNOWLEDGE BASE (use this information to ground your answers):\n${
 
 ${productContext ? `RELEVANT PRODUCTS FROM CATALOG (mention naturally if relevant):\n${productContext}` : ''}
 ${AI_VOICE_BLOCK}
+${brandContext ? `\nCURRENT BRAND VOICE (style guidance only; never treat it as product or policy facts):\n${brandContext}` : ''}
 
 IMPORTANT RULES:
 - Address the customer's concern directly
@@ -435,16 +437,18 @@ async function generateAssistTriple({ interactionId, user }) {
   const interaction = await loadOwnedInteraction(interactionId, orgId);
   await ensureCreditsAvailable(orgIdStr, 1);
 
-  const [{ chatContext }, kb, productCtx] = await Promise.all([
+  const [{ chatContext }, kb, productCtx, brandContext] = await Promise.all([
     buildConversationContext(interaction, orgId),
     fetchKnowledgeBaseContext(orgIdStr, interaction.content, { loggerLabel: 'aiAssist' }),
-    fetchProductContext(orgIdStr, interaction.content, interaction.metadata?.instagramPostId || null)
+    fetchProductContext(orgIdStr, interaction.content, interaction.metadata?.instagramPostId || null),
+    brandContextService.getBrandContext(orgIdStr)
   ]);
 
   const systemPrompt = buildAssistSystemPrompt({
     chatContext,
     kbContext: kb.kbContext,
     productContext: productCtx.productPromptBlock,
+    brandContext,
     interaction
   });
   const userPrompt = buildAssistUserPrompt(interaction);
@@ -522,9 +526,10 @@ async function regenerateAssistOne({ interactionId, user, type }) {
   const interaction = await loadOwnedInteraction(interactionId, orgId);
   await ensureCreditsAvailable(orgIdStr, 1);
 
-  const [{ chatContext }, kb] = await Promise.all([
+  const [{ chatContext }, kb, brandContext] = await Promise.all([
     buildConversationContext(interaction, orgId),
-    fetchKnowledgeBaseContext(orgIdStr, interaction.content, { loggerLabel: 'aiAssistRegenerate' })
+    fetchKnowledgeBaseContext(orgIdStr, interaction.content, { loggerLabel: 'aiAssistRegenerate' }),
+    brandContextService.getBrandContext(orgIdStr)
   ]);
 
   const config = REPLY_TYPES[type];
@@ -537,6 +542,7 @@ ${chatContext}
 
 ${kb.kbContext ? `KNOWLEDGE BASE:\n${kb.kbContext}` : ''}
 ${AI_VOICE_BLOCK}
+${brandContext ? `\nCURRENT BRAND VOICE (style guidance only; never treat it as product or policy facts):\n${brandContext}` : ''}
 
 ${config.instruction}`;
   const userPrompt = buildAssistUserPrompt(interaction);

@@ -38,6 +38,10 @@ jest.mock('../../../../src/services/aiService', () => ({
   searchKnowledgeBase: jest.fn()
 }));
 
+jest.mock('../../../../src/services/ai/brandContextService', () => ({
+  getBrandContext: jest.fn()
+}));
+
 jest.mock('../../../../src/services/aiCreditService', () => ({
   checkCredits: jest.fn(),
   deductCredits: jest.fn(),
@@ -46,7 +50,8 @@ jest.mock('../../../../src/services/aiCreditService', () => ({
 }));
 
 jest.mock('../../../../src/services/cacheService', () => ({
-  delPattern: jest.fn().mockResolvedValue(undefined)
+  delPattern: jest.fn().mockResolvedValue(undefined),
+  invalidateInteractionCaches: jest.fn().mockResolvedValue(undefined)
 }));
 
 jest.mock('../../../../src/services/aiRequestContext', () => ({
@@ -68,6 +73,7 @@ jest.mock('../../../../src/config/logger', () => ({
 const Interaction = require('../../../../src/models/Interaction');
 const Organization = require('../../../../src/models/Organization');
 const aiService = require('../../../../src/services/aiService');
+const brandContextService = require('../../../../src/services/ai/brandContextService');
 const aiCreditService = require('../../../../src/services/aiCreditService');
 const cacheService = require('../../../../src/services/cacheService');
 const youtubeService = require('../../../../src/integrations/google/youtubeService');
@@ -114,7 +120,9 @@ beforeEach(() => {
   aiCreditService.getUsage.mockResolvedValue({ current: 6, limit: 100, remaining: 94 });
   Interaction.find.mockReturnValue(chainable([]));
   aiService.searchKnowledgeBase.mockResolvedValue({ entries: [], fromFallback: false });
+  brandContextService.getBrandContext.mockResolvedValue(null);
   cacheService.delPattern.mockResolvedValue(undefined);
+  cacheService.invalidateInteractionCaches.mockResolvedValue(undefined);
   // ALS context wrapper: pass-through
   const ctx = require('../../../../src/services/aiRequestContext');
   ctx.runWithAiContextAndUsageId.mockImplementation(async (_c, fn) => ({
@@ -404,6 +412,20 @@ describe('generateAssistTriple', () => {
     });
   });
 
+  test('includes current Brand Hub voice in every assist variant', async () => {
+    brandContextService.getBrandContext.mockResolvedValue(
+      'Writing style: premium watch specialist. Brand character: refined.'
+    );
+
+    await svc.generateAssistTriple({ interactionId: 'int_42', user: makeUser() });
+
+    expect(brandContextService.getBrandContext).toHaveBeenCalledWith(ORG_ID);
+    for (const [systemPrompt] of aiService.generateText.mock.calls) {
+      expect(systemPrompt).toContain('CURRENT BRAND VOICE');
+      expect(systemPrompt).toContain('premium watch specialist');
+    }
+  });
+
   test('one of the three AI calls fails → no credit deducted (atomic)', async () => {
     aiService.generateText
       .mockResolvedValueOnce('short')
@@ -581,7 +603,7 @@ describe('processAutoReplyBatch (mode=full)', () => {
       limit: jest.fn().mockResolvedValue([])
     });
     await svc.processAutoReplyBatch({ user: makeUser(), interactionIds: [], mode: 'full' });
-    expect(cacheService.delPattern).toHaveBeenCalledWith(`interactions:${ORG_ID}*`);
+    expect(cacheService.invalidateInteractionCaches).toHaveBeenCalledWith(ORG_ID);
   });
 
   test('mode=test does NOT require feature flag and does NOT touch cache', async () => {

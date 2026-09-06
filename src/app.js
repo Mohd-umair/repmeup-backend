@@ -228,6 +228,7 @@ const routeMap = [
   ['/super-admin',    './routes/super-admin'],
   ['/entitlements',   './routes/entitlements'],
   ['/brand-config',   './routes/brandConfig'],
+  ['/content-studio', './routes/contentStudioInput'],
   ['/inspirations',   './routes/inspirations'],
   ['/event-templates','./routes/eventTemplates'],
   ['/post-templates', './routes/postTemplates'],

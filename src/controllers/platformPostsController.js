@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const PlatformConnection = require('../models/PlatformConnection');
 const PlatformPost = require('../models/PlatformPost');
 const BrandConfig = require('../models/BrandConfig');
@@ -6,6 +7,7 @@ const Interaction = require('../models/Interaction');
 const facebookService = require('../integrations/meta/facebookService');
 const instagramService = require('../integrations/meta/instagramService');
 const { brandAnalysisQueue, queueConfig } = require('../config/queue');
+const brandProfileSourceService = require('../services/brandProfileSourceService');
 const { parsePagination, paginationMeta } = require('../utils/pagination');
 
 /**
@@ -343,14 +345,29 @@ exports.syncPlatformPosts = async (req, res, next) => {
     const totalShares = normalized.reduce((s, p) => s + (p.shareCount || 0), 0);
     console.log(`[PlatformPosts] Sync complete: ${upserted} posts, total likes=${totalLikes}, total shares=${totalShares}`);
 
-    // Auto-trigger brand profile analysis when 5+ posts exist and never analyzed before
+    // Analyze only active-account content, and re-run after the set of connected
+    // accounts changes. The source hash also avoids colliding with an old Bull job.
     if (upserted >= 1) {
       try {
-        const totalPosts = await PlatformPost.countDocuments({ organization: organizationId });
+        const sourceConnectionIds = await brandProfileSourceService.getActiveConnectionIds(organizationId);
+        const totalPosts = await PlatformPost.countDocuments({
+          organization: organizationId,
+          platformConnection: { $in: sourceConnectionIds }
+        });
         if (totalPosts >= 5) {
-          const config = await BrandConfig.findOne({ organization: organizationId }).select('brandProfile.analyzedAt').lean();
-          if (!config?.brandProfile?.analyzedAt) {
-            await brandAnalysisQueue.add({ organizationId: String(organizationId) }, { ...queueConfig, jobId: `brand-analysis-${organizationId}` });
+          const config = await BrandConfig.findOne({ organization: organizationId })
+            .select('brandProfile.analyzedAt brandProfile.sourceConnectionIds')
+            .lean();
+          if (!brandProfileSourceService.isProfileCurrent(config?.brandProfile, sourceConnectionIds)) {
+            const sourceHash = crypto
+              .createHash('sha1')
+              .update(sourceConnectionIds.join('|'))
+              .digest('hex')
+              .slice(0, 12);
+            await brandAnalysisQueue.add(
+              { organizationId: String(organizationId) },
+              { ...queueConfig, jobId: `brand-analysis-${organizationId}-${sourceHash}` }
+            );
             console.log(`[PlatformPosts] Queued brand analysis for org ${organizationId} (${totalPosts} posts)`);
           }
         }

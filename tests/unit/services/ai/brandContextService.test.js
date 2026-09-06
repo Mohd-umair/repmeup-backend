@@ -18,6 +18,20 @@
 
 jest.mock('axios', () => ({ get: jest.fn() }));
 
+jest.mock('../../../../src/services/brandProfileSourceService', () => {
+  const state = { activeConnectionIds: ['connection_1'] };
+  globalThis.__brandProfileSourceState = state;
+  return {
+    getActiveConnectionIds: jest.fn(async () => state.activeConnectionIds),
+    isProfileCurrent: (profile, activeIds) => {
+      if (!profile?.analyzedAt || !Array.isArray(profile.sourceConnectionIds)) return false;
+      const analyzed = profile.sourceConnectionIds.map(String).sort();
+      const active = activeIds.map(String).sort();
+      return analyzed.length === active.length && analyzed.every((id, index) => id === active[index]);
+    }
+  };
+});
+
 // Model mocks — state held inside the factory, exposed via globalThis.
 jest.mock('../../../../src/models/BrandConfig', () => {
   const state = { findOneResult: null, updateOneMock: jest.fn(() => Promise.resolve()) };
@@ -32,10 +46,10 @@ jest.mock('../../../../src/models/BrandConfig', () => {
 });
 
 jest.mock('../../../../src/models/BrandReferenceImage', () => {
-  const state = { findResult: [] };
+  const state = { findResult: [], sortCalls: [] };
   globalThis.__brandRefImgState = state;
   const chain = {
-    sort: () => chain,
+    sort: (arg) => { state.sortCalls.push(arg); return chain; },
     limit: () => chain,
     lean: async () => state.findResult
   };
@@ -60,6 +74,7 @@ const {
 
 const cfgState = globalThis.__brandConfigState;
 const refState = globalThis.__brandRefImgState;
+const sourceState = globalThis.__brandProfileSourceState;
 
 beforeEach(() => {
   axios.get.mockReset();
@@ -67,6 +82,8 @@ beforeEach(() => {
   cfgState.findOneResult = null;
   cfgState.updateOneMock.mockReset().mockResolvedValue();
   refState.findResult = [];
+  refState.sortCalls = [];
+  sourceState.activeConnectionIds = ['connection_1'];
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -110,6 +127,7 @@ describe('getBrandContext()', () => {
       toneOfVoice: 'professional',
       brandProfile: {
         analyzedAt: new Date(),
+        sourceConnectionIds: ['connection_1'],
         writingStyle: 'stiff',
         emojiUsage: 'heavy',
         recurringEmojis: ['🔥'],
@@ -154,10 +172,32 @@ describe('getBrandContext()', () => {
 
   it('omits emoji usage when set to "moderate" (default)', async () => {
     cfgState.findOneResult = {
-      brandProfile: { analyzedAt: new Date(), emojiUsage: 'moderate' }
+      brandProfile: {
+        analyzedAt: new Date(),
+        sourceConnectionIds: ['connection_1'],
+        emojiUsage: 'moderate'
+      }
     };
     const ctx = await getBrandContext('org_1');
     expect(ctx).not.toMatch(/Emoji usage/);
+  });
+
+  it('does not inject a profile analyzed from a previously connected account', async () => {
+    cfgState.findOneResult = {
+      toneOfVoice: 'professional',
+      brandProfile: {
+        analyzedAt: new Date(),
+        sourceConnectionIds: ['old_cricket_account'],
+        writingStyle: 'cricket commentary',
+        personalityDescriptors: ['sporty']
+      }
+    };
+
+    const ctx = await getBrandContext('org_1');
+
+    expect(ctx).toBe('Brand tone: professional.');
+    expect(ctx).not.toContain('cricket');
+    expect(ctx).not.toContain('sporty');
   });
 
   it('returns null on DB errors (non-blocking)', async () => {
@@ -194,6 +234,8 @@ describe('getVisualStyleContext()', () => {
   it('builds a block from brandProfile visual fields', async () => {
     cfgState.findOneResult = {
       brandProfile: {
+        analyzedAt: new Date(),
+        sourceConnectionIds: ['connection_1'],
         colorPalette: ['#111', '#eee'],
         visualComposition: 'centered hero',
         typographyStyle: 'bold sans',
@@ -213,7 +255,12 @@ describe('getVisualStyleContext()', () => {
 
   it('omits logo line when value is "none detected"', async () => {
     cfgState.findOneResult = {
-      brandProfile: { logoPlacement: 'none detected', imageMood: 'calm' }
+      brandProfile: {
+        analyzedAt: new Date(),
+        sourceConnectionIds: ['connection_1'],
+        logoPlacement: 'none detected',
+        imageMood: 'calm'
+      }
     };
     const ctx = await getVisualStyleContext('org_1');
     expect(ctx).not.toMatch(/Logo:/);
@@ -234,7 +281,13 @@ describe('getVisualStyleContext()', () => {
 
   it('does NOT override existing palette/comp/mood with reference aggregates', async () => {
     cfgState.findOneResult = {
-      brandProfile: { colorPalette: ['#fixed'], visualComposition: 'my layout', imageMood: 'my mood' }
+      brandProfile: {
+        analyzedAt: new Date(),
+        sourceConnectionIds: ['connection_1'],
+        colorPalette: ['#fixed'],
+        visualComposition: 'my layout',
+        imageMood: 'my mood'
+      }
     };
     refState.findResult = [
       { analysis: { dominantColors: ['other'], compositionType: 'xxx', mood: 'yyy' } }
@@ -246,6 +299,24 @@ describe('getVisualStyleContext()', () => {
     expect(ctx).not.toMatch(/Reference colors:/);
     expect(ctx).not.toMatch(/Reference composition:/);
     expect(ctx).not.toMatch(/Reference mood:/);
+  });
+
+  it('ignores stale analyzed visuals while preserving independent reference-image style', async () => {
+    cfgState.findOneResult = {
+      brandProfile: {
+        analyzedAt: new Date(),
+        sourceConnectionIds: ['old_cricket_account'],
+        imageMood: 'stadium energy'
+      }
+    };
+    refState.findResult = [
+      { analysis: { dominantColors: ['gold'], compositionType: 'product hero', mood: 'luxury' } }
+    ];
+
+    const ctx = await getVisualStyleContext('org_1');
+
+    expect(ctx).not.toContain('stadium energy');
+    expect(ctx).toContain('Reference mood: luxury');
   });
 });
 
@@ -272,6 +343,13 @@ describe('getReferenceOnlyContext()', () => {
     const result = await getReferenceOnlyContext('org_1');
     expect(result).toEqual({ stylePrompt: null, imageUrls: [], styleSpec: null });
     expect(openaiClient.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('sorts by { sortOrder: 1, createdAt: -1 } — must match brandReferenceImageController.list ' +
+     'so the images the user sees first in the Brand Hub grid are the ones the Vision API analyzes', async () => {
+    refState.findResult = [{ imageUrl: 'https://cdn/a.jpg' }];
+    await getReferenceOnlyContext('org_1');
+    expect(refState.sortCalls).toContainEqual({ sortOrder: 1, createdAt: -1 });
   });
 
   describe('style cache HIT', () => {

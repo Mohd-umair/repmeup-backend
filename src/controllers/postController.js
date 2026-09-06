@@ -12,6 +12,8 @@ const { PostAiGenerationError } = postAiGenerationService;
 const postPublishService = require('../services/postPublishService');
 const { PostPublishError } = postPublishService;
 const { assertScheduledForMinLead } = require('../utils/scheduleMinLead');
+const complianceService = require('../services/complianceService');
+const { runIdempotent } = require('../utils/idempotency');
 
 /**
  * Translate an EntitlementError thrown by entitlementsService into the same
@@ -267,21 +269,37 @@ exports.generateVariantImage = async (req, res) => {
     const {
       topic, variantContent, imageConfig, variantIndex, contentType,
       generationMode, logoOverlay, logoPosition, logoUrl,
-      eventTemplateId, includePeople, peopleNationality
+      eventTemplateId, includePeople, peopleNationality,
+      // Product Shoot fields — see plan "Reference-Powered Product Shoot"
+      productReferenceImageId, inputImageId, styleReferenceImageIds,
+      fidelityMode, shootConfig
     } = req.body;
     const organizationId = req.user.organization?._id || req.user.organization;
-    const out = await postAiGenerationService.generateVariantImage({
-      topic, variantContent, imageConfig, variantIndex, contentType,
-      generationMode, logoOverlay, logoPosition, logoUrl,
-      eventTemplateId, includePeople, peopleNationality,
-      organizationId,
-      userId: req.user._id,
-      req
-    });
+
+    // Idempotency: a double-click/retry on the same variant must not burn a
+    // second AI credit or produce a second image. Client sends the same key
+    // for a given variant attempt (header takes precedence over body).
+    const idempotencyKey = req.get('Idempotency-Key') || req.body.idempotencyKey || null;
+
+    const out = await runIdempotent(organizationId, 'posts.generate-variant-image', idempotencyKey, () =>
+      postAiGenerationService.generateVariantImage({
+        topic, variantContent, imageConfig, variantIndex, contentType,
+        generationMode, logoOverlay, logoPosition, logoUrl,
+        eventTemplateId, includePeople, peopleNationality,
+        productReferenceImageId, inputImageId, styleReferenceImageIds,
+        fidelityMode, shootConfig,
+        organizationId,
+        userId: req.user._id,
+        req
+      })
+    );
     res.status(200).json({
       success: true,
       imageUrl: out.imageUrl,
       savedToLibrary: out.savedToLibrary,
+      // Media library _id for this generated image — lets the frontend add it
+      // to an Instagram carousel (mediaLibraryIds[]) without re-uploading it.
+      mediaLibraryId: out.mediaLibraryId || null,
       designDna: out.designDna,
       credits: out.credits
     });
@@ -322,7 +340,7 @@ exports.getVideoJobStatus = async (req, res) => {
 exports.saveDraft = async (req, res) => {
   try {
     const {
-      platform, content, postType, mediaUrl, generatedBy,
+      platform, content, postType, mediaUrl, mediaLibraryIds, generatedBy,
       topic, audience, intent, mood, contentType, postFormat,
       visualStyle, logoOverlay, logoPosition, designDna
     } = req.body;
@@ -372,7 +390,14 @@ exports.saveDraft = async (req, res) => {
       }
     };
 
-    if (mediaUrl && typeof mediaUrl === 'string') {
+    // Carousel (Instagram-only, 2-10 images) takes priority over the
+    // single-media mediaUrl below — see resolveCarouselFromLibraryIds.
+    if (mediaLibraryIds && mediaLibraryIds.length > 0) {
+      const carouselFields = await postPublishService.resolveCarouselFromLibraryIds(
+        mediaLibraryIds, organizationId, platform, req
+      );
+      Object.assign(draftData, carouselFields);
+    } else if (mediaUrl && typeof mediaUrl === 'string') {
       if (/^https?:\/\//i.test(mediaUrl.trim())) {
         draftData.mediaStoragePath = mediaUrl.split('?')[0].trim();
         draftData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
@@ -394,6 +419,9 @@ exports.saveDraft = async (req, res) => {
 
     res.status(201).json({ success: true, draft });
   } catch (err) {
+    if (err instanceof PostPublishError) {
+      return res.status(err.statusCode).json({ success: false, code: err.code || undefined, message: err.message, ...(err.extras || {}) });
+    }
     logger.error('Save draft error', { error: err.message, stack: err.stack });
     res.status(500).json({ success: false, message: err.message || 'Failed to save draft' });
   }
@@ -433,13 +461,21 @@ exports.publishPost = async (req, res) => {
         req, organizationId, platform, postType
       );
 
+      const trimmedContent = content.trim();
+      // Always computed server-side (never client-supplied) so the approval
+      // queue / post-card UI shows accurate flags as soon as the post exists —
+      // final enforcement still happens again at the actual publish moment.
+      const { riskScore, complianceFlags } = await complianceService.checkContent(organizationId, trimmedContent);
+
       const postData = {
         organization: organizationId,
         user: userId,
         platform: platform.toLowerCase(),
         platformConnection: connection._id,
-        content: content.trim(),
+        content: trimmedContent,
         postType: postType || 'post',
+        riskScore,
+        complianceFlags,
         generatedBy: generatedBy === 'ai' ? 'ai' : 'human',
         ...(designDna ? { metadata: {
           generationPrompt: designDna.generationPrompt || null,
@@ -528,7 +564,7 @@ exports.schedulePost = async (req, res) => {
     }
 
     try {
-      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaUrl, generatedBy } = req.body;
+      const { platform, content, scheduledFor, postType, mediaLibraryId, mediaLibraryIds, mediaUrl, generatedBy } = req.body;
       const userId = req.user._id;
       const organizationId = req.user.organization?._id || req.user.organization;
 
@@ -569,21 +605,33 @@ exports.schedulePost = async (req, res) => {
       }
 
       const isAgent = req.user.role === 'agent';
+      const trimmedContent = content.trim();
+      // Always computed server-side — see sendToApproval/publishPost for why
+      // client-supplied risk values are never trusted.
+      const { riskScore, complianceFlags } = await complianceService.checkContent(organizationId, trimmedContent);
       const postData = {
         organization: organizationId,
         user: userId,
         platform: platform.toLowerCase(),
         platformConnection: connection._id,
-        content: content.trim(),
+        content: trimmedContent,
         scheduledFor: new Date(scheduledFor),
         // Agents cannot publish directly — store scheduledFor and route to approval
         status: isAgent ? 'pending_approval' : 'scheduled',
         postType: postType || 'post',
+        riskScore,
+        complianceFlags,
         generatedBy: generatedBy === 'ai' ? 'ai' : 'human'
       };
 
-      // Check if using media from library, AI-generated media URL, or uploading new media
-      if (mediaLibraryId) {
+      // Check if using a carousel (2-10 library images, Instagram-only), a
+      // single library item, an AI-generated media URL, or an uploaded file.
+      if (mediaLibraryIds && mediaLibraryIds.length > 0) {
+        const carouselFields = await postPublishService.resolveCarouselFromLibraryIds(
+          mediaLibraryIds, organizationId, platform, req
+        );
+        Object.assign(postData, carouselFields);
+      } else if (mediaLibraryId) {
         // Use media from library
         const libraryMedia = await Media.findOne({
           _id: mediaLibraryId,
@@ -685,6 +733,14 @@ exports.schedulePost = async (req, res) => {
         post: scheduledPost
       });
     } catch (error) {
+      if (error instanceof PostPublishError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          code: error.code || undefined,
+          message: error.message,
+          ...(error.extras || {})
+        });
+      }
       logger.error('Schedule post error', { error: error.message, stack: error.stack });
       res.status(500).json({ message: error.message });
     }
@@ -1052,6 +1108,11 @@ exports.updatePendingPostByAdmin = (req, res) => {
 
       if (hasContent) {
         post.content = content.trim();
+        // Content changed — recompute compliance so the flags shown before
+        // approving reflect the edited text, not the original submission.
+        const { riskScore, complianceFlags } = await complianceService.checkContent(organizationId, post.content);
+        post.riskScore = riskScore;
+        post.complianceFlags = complianceFlags;
       }
 
       if (hasLibraryMedia) {
@@ -1210,6 +1271,14 @@ exports.resubmitPost = async (req, res) => {
     if (!post.originalContent) post.originalContent = post.content;
     post.content = content.trim();
 
+    // Content changed — recompute compliance so the approval queue reviewer
+    // sees flags for what was actually resubmitted, not the rejected version.
+    {
+      const { riskScore, complianceFlags } = await complianceService.checkContent(organizationId, post.content);
+      post.riskScore = riskScore;
+      post.complianceFlags = complianceFlags;
+    }
+
     // Optional media replacement from library
     if (mediaLibraryId && String(mediaLibraryId).trim()) {
       const libraryMedia = await Media.findOne({
@@ -1276,7 +1345,10 @@ exports.resubmitPost = async (req, res) => {
  */
 exports.sendToApproval = async (req, res) => {
   try {
-    const { platform, content, postType, originalContent, riskScore, complianceFlags, generatedBy, mediaUrl } = req.body;
+    // riskScore/complianceFlags are intentionally NOT read from req.body —
+    // a client-supplied "we checked, it's fine" value can never be trusted.
+    // They are always recomputed server-side against BrandConfig below.
+    const { platform, content, postType, originalContent, generatedBy, mediaUrl, mediaLibraryIds } = req.body;
     const organizationId = req.user.organization?._id || req.user.organization;
     const userId = req.user._id;
 
@@ -1300,21 +1372,29 @@ exports.sendToApproval = async (req, res) => {
       });
     }
 
+    const trimmedContent = content.trim();
+    const { riskScore, complianceFlags } = await complianceService.checkContent(organizationId, trimmedContent);
+
     const postData = {
       organization: organizationId,
       user: userId,
       platform: platform.toLowerCase(),
       platformConnection: connection._id,
-      content: content.trim(),
+      content: trimmedContent,
       status: 'pending_approval',
       postType: postType || 'post',
-      originalContent: originalContent || content.trim(),
-      riskScore: riskScore != null ? Number(riskScore) : undefined,
-      complianceFlags: Array.isArray(complianceFlags) ? complianceFlags : [],
+      originalContent: originalContent || trimmedContent,
+      riskScore,
+      complianceFlags,
       generatedBy: generatedBy === 'ai' ? 'ai' : 'human'
     };
 
-    if (mediaUrl && typeof mediaUrl === 'string' && /^https?:\/\//i.test(mediaUrl.trim())) {
+    if (mediaLibraryIds && mediaLibraryIds.length > 0) {
+      const carouselFields = await postPublishService.resolveCarouselFromLibraryIds(
+        mediaLibraryIds, organizationId, platform, req
+      );
+      Object.assign(postData, carouselFields);
+    } else if (mediaUrl && typeof mediaUrl === 'string' && /^https?:\/\//i.test(mediaUrl.trim())) {
       postData.mediaStoragePath = mediaUrl.split('?')[0].trim();
       postData.mediaType = /\.mp4(\?|$)/i.test(mediaUrl) ? 'video' : 'image';
     } else if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.includes('/api/posts/media/')) {
@@ -1339,6 +1419,14 @@ exports.sendToApproval = async (req, res) => {
       data: post
     });
   } catch (error) {
+    if (error instanceof PostPublishError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code || undefined,
+        message: error.message,
+        ...(error.extras || {})
+      });
+    }
     logger.error('Send to approval error', { error: error.message, stack: error.stack });
     res.status(500).json({
       success: false,

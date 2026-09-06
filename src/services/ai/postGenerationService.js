@@ -149,6 +149,18 @@ async function generateSinglePostWithTemperature(systemPrompt, userPrompt, tempe
 /**
  * Generate one or per-platform post copy.
  *
+ * BRAND CONTEXT POLICY (intentional — do not "fix" without a product decision):
+ * this path (used by the Publish/Composer "Generate with AI" quick action —
+ * no mode selector shown to the user) ALWAYS applies brand voice when an
+ * organizationId is supplied. This differs from generatePostVariants()
+ * below, which is used by Content Studio's mode-driven ideation flow and
+ * only applies brand voice when the user explicitly selects "Brand Voice"
+ * mode (defaults to 'instant' = no brand context, for fast generic
+ * ideation). The two surfaces have different UX contracts: Composer implies
+ * "write this in my voice", Content Studio's default implies "give me raw
+ * ideas first, then I'll pick a mode." Keep both call sites' JSDoc in sync
+ * if this policy ever changes.
+ *
  * @param {string} prompt
  * @param {string[]} platforms        - ['instagram', 'facebook', 'linkedin', ...]
  * @param {'same'|'custom'} [mode='same']

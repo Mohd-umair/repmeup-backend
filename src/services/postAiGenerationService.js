@@ -40,6 +40,7 @@ const storageService = require('./storageService');
 const aiService = require('./aiService');
 const aiCreditService = require('./aiCreditService');
 const { runWithAiContextAndUsageId } = require('./aiRequestContext');
+const { isProductShootEnabled } = require('../utils/featureFlags');
 const logger = require('../config/logger');
 const path = require('path');
 const fs = require('fs').promises;
@@ -198,12 +199,22 @@ function buildImagePrompt({ topic, variantContent: _unusedCaption, imageConfig =
  */
 function buildReferenceImagePrompt({ topic, variantIndex = 0, contentType = '' }) {
   const safeTopic = sanitizeForImagePrompt(topic.trim()).substring(0, 120);
+  const variationDirectives = [
+    'Hero composition: subject centered, clean uncluttered background.',
+    'Environmental composition: subject in a relevant setting, rule-of-thirds framing.',
+    'Abstract close-up: tight crop on distinctive product detail.',
+    'Wide establishing shot: subject as part of a larger scene.',
+    'Dynamic diagonal: subject at a striking diagonal angle.',
+    'Flat lay overhead: bird\'s-eye arrangement of the subject.'
+  ];
+  const variationNote = variationDirectives[variantIndex % variationDirectives.length];
   return [
     `Social media post about: ${safeTopic}`,
+    variationNote,
     contentType === 'image-layover'
       ? `HEADLINE TEXT (render exactly as written, exactly these words): "${safeTopic.split(' ').slice(0, 8).join(' ')}". No other words or text anywhere else in the image.`
       : 'Do NOT render any brand name, company name, or organisation name as text inside the image — brands are represented by their logo only. Any other text visible (on signs, screens, props) must be real, common English words relevant to the topic.',
-    'High quality, platform-ready.',
+    'High quality, platform-ready. This variant MUST be visually distinct from other variants of the same topic.',
     `seed:${Date.now() % 100000 + variantIndex * 13337}`
   ].filter(Boolean).join(', ');
 }
@@ -370,7 +381,14 @@ async function persistGeneratedMedia(buffer, filename, mimeType, organizationId,
   };
 }
 
-/** Save a media library entry. Never throws — library writes are best-effort. */
+/**
+ * Save a media library entry. Never throws — library writes are best-effort.
+ * @returns {Promise<string|null>} the created Media doc's `_id`, or `null` on failure.
+ *   Callers that only care about success/failure can still do `!!id`; the id
+ *   itself is surfaced to the frontend (`mediaLibraryId`) so a variant image
+ *   can later be referenced in a carousel via `mediaLibraryIds[]` without a
+ *   second lookup.
+ */
 async function saveMediaLibraryEntry({
   filename,
   filePath,
@@ -383,10 +401,11 @@ async function saveMediaLibraryEntry({
   userId,
   organizationId,
   tags,
-  description
+  description,
+  metadata
 }) {
   try {
-    await Media.create({
+    const doc = await Media.create({
       filename,
       originalName: filename,
       filePath,
@@ -399,12 +418,13 @@ async function saveMediaLibraryEntry({
       user: userId,
       organization: organizationId,
       tags,
-      description
+      description,
+      metadata: metadata || null
     });
-    return true;
+    return String(doc._id);
   } catch (mediaErr) {
     logger.warn('[Content Studio] Failed to save to media library', { error: mediaErr.message });
-    return false;
+    return null;
   }
 }
 
@@ -658,6 +678,13 @@ async function generateVariantImage({
   eventTemplateId,
   includePeople,
   peopleNationality,
+  // Product Shoot (see plan "Reference-Powered Product Shoot") — mutually
+  // exclusive product source, plus up to 3 style-only references.
+  productReferenceImageId,
+  inputImageId,
+  styleReferenceImageIds,
+  fidelityMode,
+  shootConfig,
   organizationId,
   userId,
   req = null
@@ -666,12 +693,61 @@ async function generateVariantImage({
     throw new PostAiGenerationError('topic is required', { statusCode: 400 });
   }
 
+  const isProductShoot = !!(productReferenceImageId || inputImageId);
+  if (isProductShoot && !isProductShootEnabled()) {
+    // Emergency kill switch (plan §6) — fail loudly and specifically rather
+    // than silently reinterpreting the request as legacy reference mode,
+    // which would ignore the user's chosen primary product without telling them.
+    throw new PostAiGenerationError(
+      'Product Shoot is temporarily unavailable. Please try again shortly.',
+      { statusCode: 503, code: 'PRODUCT_SHOOT_UNAVAILABLE' }
+    );
+  }
+  if (productReferenceImageId && inputImageId) {
+    throw new PostAiGenerationError(
+      'Provide either an existing product reference or a new upload, not both',
+      { statusCode: 400 }
+    );
+  }
+
+  let productShootRefs = null;
+  let normalizedShootConfig = {};
+  let normalizedFidelityMode = 'strict';
+  if (isProductShoot) {
+    const { validateShootConfig, normalizeFidelityMode, validateStyleReferenceIds } = require('../utils/productShootValidation');
+    const { value: shootValue, errors: shootErrors } = validateShootConfig(shootConfig);
+    const { value: styleIds, errors: styleErrors } = validateStyleReferenceIds(styleReferenceImageIds);
+    const allErrors = [...shootErrors, ...styleErrors];
+    if (allErrors.length) {
+      throw new PostAiGenerationError(allErrors.join('; '), { statusCode: 400, code: 'INVALID_SHOOT_CONFIG' });
+    }
+    normalizedShootConfig = shootValue;
+    normalizedFidelityMode = normalizeFidelityMode(fidelityMode);
+
+    const brandContextService = require('./ai/brandContextService');
+    try {
+      productShootRefs = await brandContextService.resolveProductShootReferences(organizationId, userId, {
+        productReferenceImageId,
+        inputImageId,
+        styleReferenceImageIds: styleIds
+      });
+    } catch (err) {
+      if (err.code === 'REFERENCE_NOT_FOUND') {
+        throw new PostAiGenerationError(err.message, { statusCode: 404, code: 'REFERENCE_NOT_FOUND' });
+      }
+      throw err;
+    }
+  }
+
   await enforceCreditAvailability(organizationId, 1);
 
   // ── 1. Build the prompt ────────────────────────────────────────────────
   const safeVariantIndex = typeof variantIndex === 'number' ? variantIndex : 0;
   const isReferenceMode = generationMode === 'reference';
-  let imagePrompt = isReferenceMode
+  // Product Shoot reuses the neutral reference-mode prompt as its base —
+  // the role-aware "preserve product / style only" instructions are layered
+  // on top inside imageGenerationService.assembleImagePrompt, not here.
+  let imagePrompt = (isReferenceMode || isProductShoot)
     ? buildReferenceImagePrompt({
         topic,
         variantIndex: safeVariantIndex,
@@ -685,7 +761,11 @@ async function generateVariantImage({
         contentType: contentType || ''
       });
 
-  if (includePeople) {
+  if (isProductShoot) {
+    // shootConfig.includePeople already drives the people instruction inside
+    // buildProductShootPromptBlock — avoid emitting a second, possibly
+    // conflicting instruction here.
+  } else if (includePeople) {
     const nationalityPart = peopleNationality ? `${peopleNationality} ` : '';
     imagePrompt += ` Include ${nationalityPart}people naturally in the scene — diverse, authentic, candid.`;
   } else {
@@ -694,6 +774,7 @@ async function generateVariantImage({
 
   logger.info('[Content Studio] AI image prompt', {
     variantIndex: safeVariantIndex,
+    isProductShoot,
     prompt: imagePrompt.substring(0, 500)
   });
 
@@ -701,8 +782,19 @@ async function generateVariantImage({
   //   'instant'     → no brand context (generic AI generation)
   //   'brand-voice' → full visual style context (brand profile + reference images)
   //   'reference'   → reference images only (ignores brand profile visuals)
-  const imageOrgId = generationMode && generationMode !== 'instant' ? organizationId : null;
+  //   product shoot → explicit role-aware product + style images (see below)
+  const imageOrgId = (isProductShoot || (generationMode && generationMode !== 'instant')) ? organizationId : null;
   const imageOptions = generationMode === 'reference' ? { referenceOnly: true } : {};
+
+  if (isProductShoot) {
+    imageOptions.productShoot = {
+      productImageUrl: productShootRefs.productImageUrl,
+      styleImageUrls: productShootRefs.styleImageUrls,
+      fidelityMode: normalizedFidelityMode,
+      shootConfig: normalizedShootConfig,
+      variantIndex: safeVariantIndex
+    };
+  }
 
   if (eventTemplateId) {
     const EventTemplate = require('../models/EventTemplate');
@@ -716,7 +808,11 @@ async function generateVariantImage({
   }
 
   // ── 3. Run the AI + post-process + persist (single try/finally for credit safety) ──
+  // Structured timing/outcome logs (plan §6 "Reliability, lifecycle, and
+  // observability" — generation latency, success/failure, provider errors)
+  // deliberately avoid raw prompts/image bytes, only ids/config/duration.
   let deducted = 0;
+  const genStartedAt = Date.now();
   try {
     const { result: genResult, aiApiUsageId } = await runWithAiContextAndUsageId(
       {
@@ -753,7 +849,7 @@ async function generateVariantImage({
       { req, kind: 'image' }
     );
 
-    const savedToLibrary = await saveMediaLibraryEntry({
+    const mediaLibraryId = await saveMediaLibraryEntry({
       filename,
       filePath: persisted.filePath,
       publicUrl: persisted.publicUrl,
@@ -764,8 +860,19 @@ async function generateVariantImage({
       size: finalBuffer.length,
       userId,
       organizationId,
-      tags: ['ai-generated', 'content-studio'],
-      description: `Reppy generated for: ${topic.substring(0, 80)}`
+      tags: isProductShoot ? ['ai-generated', 'content-studio', 'product-shoot'] : ['ai-generated', 'content-studio'],
+      description: `Reppy generated for: ${topic.substring(0, 80)}`,
+      // Provenance (plan: "Preserve generation provenance in output metadata")
+      // — ids/config only, never raw prompts or image bytes.
+      metadata: isProductShoot ? {
+        source: 'product_shoot',
+        productReferenceImageId: productReferenceImageId || null,
+        inputImageId: inputImageId || null,
+        styleReferenceImageIds: productShootRefs?.styleImageUrls?.length ? (styleReferenceImageIds || []) : [],
+        fidelityMode: normalizedFidelityMode,
+        shootConfig: normalizedShootConfig,
+        generatedBy: userId
+      } : null
     });
 
     await aiCreditService.deductCredits(
@@ -782,9 +889,20 @@ async function generateVariantImage({
 
     const updated = await aiCreditService.getUsage(organizationId);
 
+    logger.info('[metrics] content_studio.variant_image.generated', {
+      organizationId, variantIndex: safeVariantIndex, isProductShoot,
+      fidelityMode: isProductShoot ? normalizedFidelityMode : undefined,
+      preset: isProductShoot ? normalizedShootConfig.preset : undefined,
+      outcome: 'success', durationMs: Date.now() - genStartedAt
+    });
+
     return {
       imageUrl: persisted.publicUrl,
-      savedToLibrary,
+      savedToLibrary: !!mediaLibraryId,
+      // Lets the frontend add this exact generated image to an Instagram
+      // carousel later via POST /posts/{save-draft,schedule,publish,to-approval}
+      // { mediaLibraryIds: [...] } without re-uploading or re-resolving it.
+      mediaLibraryId,
       designDna: {
         generationPrompt: capturedImagePrompt,
         layoutType: capturedStyleSpec?.layout || null,
@@ -799,6 +917,13 @@ async function generateVariantImage({
       operation: 'post_variants_image',
       userId,
       reason: err.message
+    });
+
+    logger.warn('[metrics] content_studio.variant_image.generated', {
+      organizationId, variantIndex: safeVariantIndex, isProductShoot,
+      fidelityMode: isProductShoot ? normalizedFidelityMode : undefined,
+      outcome: 'failure', durationMs: Date.now() - genStartedAt,
+      errorCode: err.code || err.name || 'UNKNOWN'
     });
 
     // Re-throw PostAiGenerationError as-is; translate OpenAI safety rejection to 422

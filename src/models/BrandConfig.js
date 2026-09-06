@@ -24,6 +24,12 @@ const brandProfileSchema = new mongoose.Schema({
   logoPlacement: { type: String, trim: true, default: '' },
   imageMood: { type: String, trim: true, default: '' },
 
+  // Accounts whose posts produced this profile. A connection change makes the
+  // profile stale so old account traits are never injected into new replies.
+  sourceConnectionIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PlatformConnection'
+  }],
   analyzedPostCount: { type: Number, default: 0 },
   analyzedAt: { type: Date, default: null },
   confidence: {
