@@ -4,7 +4,9 @@ const aiService = require('../services/aiService');
 const { runWithAiContextAndUsageId } = require('../services/aiRequestContext');
 const aiCreditService = require('../services/aiCreditService');
 const brandProfileService = require('../services/brandProfileService');
+const brandProfileSourceService = require('../services/brandProfileSourceService');
 const PlatformPost = require('../models/PlatformPost');
+const { validateBrandConfigUpdate, validateProfileOverrides } = require('../utils/brandConfigValidation');
 
 /**
  * @desc    Get brand config for current user's organization
@@ -28,6 +30,21 @@ exports.getBrandConfig = async (req, res) => {
         approvedHashtags: [],
         legalDisclaimers: ''
       });
+    }
+
+    // Profiles are tied to the accounts that produced them. Clear analyzed
+    // values (and their overrides) after an account switch so Brand Hub cannot
+    // display or reuse traits learned from a disconnected account.
+    const activeConnectionIds = await brandProfileSourceService.getActiveConnectionIds(organizationId);
+    if (
+      config.brandProfile?.analyzedAt
+      && !brandProfileSourceService.isProfileCurrent(config.brandProfile, activeConnectionIds)
+    ) {
+      config = await BrandConfig.findOneAndUpdate(
+        { organization: organizationId },
+        { $set: { brandProfile: {}, brandProfileOverrides: null } },
+        { new: true }
+      );
     }
 
     res.status(200).json({
@@ -120,14 +137,13 @@ exports.updateBrandConfig = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Organization not found' });
     }
 
-    const { toneOfVoice, personalityTags, bannedWords, approvedHashtags, legalDisclaimers } = req.body;
-
-    const updateFields = {};
-    if (toneOfVoice !== undefined) updateFields.toneOfVoice = toneOfVoice;
-    if (Array.isArray(personalityTags)) updateFields.personalityTags = personalityTags.map(s => String(s).trim()).filter(Boolean);
-    if (Array.isArray(bannedWords)) updateFields.bannedWords = bannedWords.map(s => String(s).trim()).filter(Boolean);
-    if (Array.isArray(approvedHashtags)) updateFields.approvedHashtags = approvedHashtags.map(s => String(s).trim()).filter(Boolean);
-    if (legalDisclaimers !== undefined) updateFields.legalDisclaimers = String(legalDisclaimers || '').trim();
+    const { errors, values: updateFields } = validateBrandConfigUpdate(req.body);
+    if (errors.length) {
+      return res.status(400).json({ success: false, error: errors.join('; '), errors });
+    }
+    if (!Object.keys(updateFields).length) {
+      return res.status(400).json({ success: false, error: 'No valid fields to update' });
+    }
 
     let config = await BrandConfig.findOneAndUpdate(
       { organization: organizationId },
@@ -200,7 +216,13 @@ exports.analyzeBrandProfile = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Organization not found' });
     }
 
-    const postCount = await PlatformPost.countDocuments({ organization: organizationId });
+    const activeConnectionIds = await brandProfileSourceService.getActiveConnectionIds(organizationId);
+    const postCount = activeConnectionIds.length
+      ? await PlatformPost.countDocuments({
+        organization: organizationId,
+        platformConnection: { $in: activeConnectionIds }
+      })
+      : 0;
     if (postCount < 3) {
       return res.status(400).json({
         success: false,
@@ -236,10 +258,24 @@ exports.updateProfileOverrides = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Organization not found' });
     }
 
+    const { errors, value: overrides } = validateProfileOverrides(req.body.overrides);
+    if (errors.length) {
+      return res.status(400).json({ success: false, error: errors.join('; '), errors });
+    }
+
     const config = await BrandConfig.findOneAndUpdate(
       { organization: organizationId },
-      { $set: { brandProfileOverrides: req.body.overrides || null } },
-      { new: true, upsert: true }
+      { $set: { brandProfileOverrides: overrides } },
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    await auditLogController.log(
+      organizationId,
+      'brand_config',
+      config._id,
+      'profile_overrides_updated',
+      req.user._id,
+      { fields: overrides ? Object.keys(overrides) : [] }
     );
 
     res.status(200).json({ success: true, data: config });
@@ -273,6 +309,15 @@ exports.clearBrandProfile = async (req, res) => {
     if (!config) {
       return res.status(404).json({ success: false, error: 'Brand config not found' });
     }
+
+    await auditLogController.log(
+      organizationId,
+      'brand_config',
+      config._id,
+      'profile_cleared',
+      req.user._id,
+      {}
+    );
 
     res.status(200).json({ success: true, data: config, message: 'Brand profile cleared' });
   } catch (error) {

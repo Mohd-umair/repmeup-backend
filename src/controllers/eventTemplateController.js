@@ -2,6 +2,32 @@ const EventTemplate = require('../models/EventTemplate');
 const storageService = require('../services/storageService');
 const aiService = require('../services/aiService');
 const logger = require('../config/logger');
+const { sanitizeString } = require('../utils/sanitize');
+const { sanitizeStringArray } = require('../utils/brandConfigValidation');
+
+const EVENT_TYPE_OPTIONS = [
+  'christmas', 'new_year', 'eid', 'ramadan', 'diwali',
+  'national_day', 'black_friday', 'cyber_monday', 'valentines',
+  'mothers_day', 'fathers_day', 'halloween', 'thanksgiving', 'custom'
+];
+const NAME_MAX_LEN = 100;
+const CAPTION_MAX_LEN = 500;
+const CTA_MAX_LEN = 100;
+const HASHTAGS_MAX_COUNT = 30;
+const HASHTAGS_MAX_LEN = 60;
+
+function parseHashtagsInput(hashtags) {
+  let parsed = [];
+  if (typeof hashtags === 'string') {
+    try { parsed = JSON.parse(hashtags); } catch {
+      parsed = hashtags.split(',').map((h) => h.trim()).filter(Boolean);
+    }
+  } else if (Array.isArray(hashtags)) {
+    parsed = hashtags;
+  }
+  const { value } = sanitizeStringArray(parsed, { maxItems: HASHTAGS_MAX_COUNT, maxLength: HASHTAGS_MAX_LEN });
+  return value;
+}
 
 const EVENT_STYLE_PROMPT = `Analyze this seasonal/event reference image and return a JSON object:
 {
@@ -32,18 +58,16 @@ exports.create = async (req, res) => {
     if (!name || !eventType) {
       return res.status(400).json({ success: false, error: 'name and eventType are required' });
     }
+    if (!EVENT_TYPE_OPTIONS.includes(eventType)) {
+      return res.status(400).json({ success: false, error: `eventType must be one of: ${EVENT_TYPE_OPTIONS.join(', ')}` });
+    }
+    const cleanName = sanitizeString(name, { maxLength: NAME_MAX_LEN });
+    if (!cleanName) {
+      return res.status(400).json({ success: false, error: 'name cannot be empty' });
+    }
 
     // hashtags may arrive as a JSON string (multipart form) or plain comma-separated string
-    let parsedHashtags = [];
-    if (hashtags) {
-      if (typeof hashtags === 'string') {
-        try { parsedHashtags = JSON.parse(hashtags); } catch {
-          parsedHashtags = hashtags.split(',').map(h => h.trim()).filter(Boolean);
-        }
-      } else if (Array.isArray(hashtags)) {
-        parsedHashtags = hashtags;
-      }
-    }
+    const parsedHashtags = parseHashtagsInput(hashtags);
 
     let referenceImageUrl = null;
     let s3Key = null;
@@ -65,13 +89,13 @@ exports.create = async (req, res) => {
 
     const template = await EventTemplate.create({
       organization: orgId,
-      name,
+      name: cleanName,
       eventType,
       referenceImageUrl,
       s3Key,
-      sampleCaption: sampleCaption || '',
+      sampleCaption: sanitizeString(sampleCaption || '', { maxLength: CAPTION_MAX_LEN }),
       hashtags: parsedHashtags,
-      cta: cta || ''
+      cta: sanitizeString(cta || '', { maxLength: CTA_MAX_LEN })
     });
 
     if (referenceImageUrl) {
@@ -90,23 +114,32 @@ exports.update = async (req, res) => {
   try {
     const orgId = req.user.organization?._id || req.user.organization;
     const update = {};
-    if (req.body.name) update.name = req.body.name;
-    if (req.body.eventType) update.eventType = req.body.eventType;
-    if (req.body.isActive !== undefined) update.isActive = req.body.isActive;
-    if (req.body.sampleCaption !== undefined) update.sampleCaption = req.body.sampleCaption;
-    if (req.body.cta !== undefined) update.cta = req.body.cta;
-    if (req.body.hashtags !== undefined) {
-      let h = req.body.hashtags;
-      if (typeof h === 'string') {
-        try { h = JSON.parse(h); } catch { h = h.split(',').map(x => x.trim()).filter(Boolean); }
+    if (req.body.name) {
+      const cleanName = sanitizeString(req.body.name, { maxLength: NAME_MAX_LEN });
+      if (!cleanName) return res.status(400).json({ success: false, error: 'name cannot be empty' });
+      update.name = cleanName;
+    }
+    if (req.body.eventType) {
+      if (!EVENT_TYPE_OPTIONS.includes(req.body.eventType)) {
+        return res.status(400).json({ success: false, error: `eventType must be one of: ${EVENT_TYPE_OPTIONS.join(', ')}` });
       }
-      update.hashtags = Array.isArray(h) ? h : [];
+      update.eventType = req.body.eventType;
+    }
+    if (req.body.isActive !== undefined) update.isActive = Boolean(req.body.isActive);
+    if (req.body.sampleCaption !== undefined) {
+      update.sampleCaption = sanitizeString(req.body.sampleCaption, { maxLength: CAPTION_MAX_LEN });
+    }
+    if (req.body.cta !== undefined) {
+      update.cta = sanitizeString(req.body.cta, { maxLength: CTA_MAX_LEN });
+    }
+    if (req.body.hashtags !== undefined) {
+      update.hashtags = parseHashtagsInput(req.body.hashtags);
     }
 
     const doc = await EventTemplate.findOneAndUpdate(
       { _id: req.params.id, organization: orgId },
       { $set: update },
-      { new: true }
+      { new: true, runValidators: true }
     );
     if (!doc) return res.status(404).json({ success: false, error: 'Template not found' });
     res.json({ success: true, data: doc });

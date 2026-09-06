@@ -3,6 +3,7 @@ const PlatformPost = require('../models/PlatformPost');
 const BrandConfig = require('../models/BrandConfig');
 const aiService = require('./aiService');
 const logger = require('../config/logger');
+const brandProfileSourceService = require('./brandProfileSourceService');
 
 const TEXT_ANALYSIS_SYSTEM_PROMPT = `You are a brand analyst. Given a set of social media post captions from one organization, analyze them and return a JSON object with these exact keys:
 
@@ -24,12 +25,17 @@ Rules:
 const VISUAL_ANALYSIS_SYSTEM_PROMPT = `You are a visual brand analyst. You will be shown images from a brand's social media posts. Analyze their visual identity and return a JSON object with these exact keys:
 
 {
-  "colorPalette": array of 3-5 dominant brand colors as hex codes (e.g. ["#1A1A2E","#E94560","#F5F5F5"]),
+  "colorPalette": array of 5-8 precise hex colors representing the FULL palette, not just the most obvious one (e.g. ["#1A1A2E","#E94560","#F5F5F5","#8C6A4E","#3B2F2F"]),
   "visualComposition": short phrase (e.g. "minimalist product-focused" or "lifestyle photography with text overlays"),
   "typographyStyle": short phrase (e.g. "bold sans-serif with minimal overlay"),
   "logoPlacement": short phrase (e.g. "bottom-right corner" or "none detected"),
   "imageMood": short phrase (e.g. "bright and airy, warm tones")
 }
+
+colorPalette rules — read carefully, this is the most commonly under-specified field:
+- Sample colors from DIFFERENT regions of each image separately: the background/base, the main subject/product, accent details (buttons, text, borders, packaging), and shadows/highlights.
+- Do NOT collapse the palette down to just the single largest or darkest area you see. A photo that looks "mostly black" still has deeper, more subtle tones in shadows, fabric texture, muted backgrounds, or skin/product tones — extract those too, with accurate hex precision (not rounded to pure #000000/#FFFFFF unless it is truly pure black/white).
+- Order the array from most to least dominant by visual area, but always include at least 1-2 secondary/accent colors even if they occupy a small area — those are often the brand's real signature color.
 
 Rules:
 - Return ONLY valid JSON, no markdown fences, no explanation.
@@ -55,7 +61,27 @@ class BrandProfileService {
    * @returns {{ success: boolean, analyzedCount: number, profile: object }}
    */
   async analyzeOrgContent(organizationId) {
-    const posts = await PlatformPost.find({ organization: organizationId })
+    const sourceConnectionIds = await brandProfileSourceService.getActiveConnectionIds(organizationId);
+    if (!sourceConnectionIds.length) {
+      return {
+        success: false,
+        analyzedCount: 0,
+        error: 'No connected Facebook or Instagram account found. Connect an account and sync its posts first.'
+      };
+    }
+
+    const existingConfig = await BrandConfig.findOne({ organization: organizationId })
+      .select('brandProfile.analyzedAt brandProfile.sourceConnectionIds')
+      .lean();
+    const sourceChanged = Boolean(
+      existingConfig?.brandProfile?.analyzedAt
+      && !brandProfileSourceService.isProfileCurrent(existingConfig.brandProfile, sourceConnectionIds)
+    );
+
+    const posts = await PlatformPost.find({
+      organization: organizationId,
+      platformConnection: { $in: sourceConnectionIds }
+    })
       .sort({ postedAt: -1 })
       .limit(10)
       .lean();
@@ -86,6 +112,7 @@ class BrandProfileService {
       logoPlacement: visualResult?.logoPlacement || '',
       imageMood: visualResult?.imageMood || '',
 
+      sourceConnectionIds,
       analyzedPostCount: count,
       analyzedAt: new Date(),
       confidence
@@ -93,7 +120,12 @@ class BrandProfileService {
 
     const updatedConfig = await BrandConfig.findOneAndUpdate(
       { organization: organizationId },
-      { $set: { brandProfile: profile } },
+      {
+        $set: {
+          brandProfile: profile,
+          ...(sourceChanged ? { brandProfileOverrides: null } : {})
+        }
+      },
       { new: true, upsert: true }
     );
 
@@ -153,7 +185,13 @@ class BrandProfileService {
         const resp = await axios.get(post.mediaUrl, { responseType: 'arraybuffer', timeout: 10000 });
         const mime = resp.headers['content-type'] || 'image/jpeg';
         const b64 = Buffer.from(resp.data).toString('base64');
-        imageContents.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${b64}`, detail: 'low' } });
+        // 'high' detail (vs the previous 'low') lets the vision model see the
+        // image at full resolution instead of a downsampled ~512px tile — low
+        // detail was the main reason color extraction only ever returned the
+        // single largest/darkest block of color and missed subtle/secondary
+        // tones. Costs more per-image tokens; acceptable here since this only
+        // runs on-demand (Re-analyze button), not on every generation.
+        imageContents.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${b64}`, detail: 'high' } });
       } catch (dlErr) {
         logger.warn('Brand visual analysis: could not download image, skipping', {
           url: post.mediaUrl?.substring(0, 120),

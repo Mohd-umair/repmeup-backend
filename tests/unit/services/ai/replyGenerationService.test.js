@@ -31,6 +31,10 @@ jest.mock('../../../../src/services/ai/knowledgeBaseSearchService', () => ({
   searchKnowledgeBase: jest.fn()
 }));
 
+jest.mock('../../../../src/services/ai/brandContextService', () => ({
+  getBrandContext: jest.fn()
+}));
+
 jest.mock('../../../../src/models/IntentBucket', () => {
   const state = { findByIdResult: null };
   globalThis.__intentBucketState = state;
@@ -53,6 +57,7 @@ jest.mock('../../../../src/models/BrandConfig', () => {
 
 const openaiClient = require('../../../../src/services/ai/openaiClient');
 const knowledgeBaseSearchService = require('../../../../src/services/ai/knowledgeBaseSearchService');
+const brandContextService = require('../../../../src/services/ai/brandContextService');
 // Force lazy-required mocks to run
 require('../../../../src/models/IntentBucket');
 require('../../../../src/models/BrandConfig');
@@ -70,6 +75,7 @@ beforeEach(() => {
   openaiClient.chatCompletion.mockReset();
   knowledgeBaseSearchService.searchKnowledgeBase.mockReset()
     .mockResolvedValue({ entries: [], fromFallback: false });
+  brandContextService.getBrandContext.mockReset().mockResolvedValue(null);
   bucketState.findByIdResult = null;
   brandState.findOneResult = null;
 });
@@ -172,6 +178,21 @@ describe('generateResponseOpenAI() — standard mode', () => {
     expect(result.confidence).toBeCloseTo(0.78 + 0.04, 5); // base + 1 KB
     expect(result.resolvable).toBe(true);
     expect(result.resolvableReason).toBeNull();
+  });
+
+  it('injects the current account-aware Brand Hub voice into reply prompts', async () => {
+    brandContextService.getBrandContext.mockResolvedValue(
+      'Writing style: concise luxury product copy. Brand character: refined, modern.'
+    );
+    openaiClient.chatCompletion.mockResolvedValue(okChat('We would be happy to help.'));
+
+    await generateResponseOpenAI(makeInteraction(), 'org_1');
+
+    const sysPrompt = openaiClient.chatCompletion.mock.calls[0][0].messages[0].content;
+    expect(brandContextService.getBrandContext).toHaveBeenCalledWith('org_1');
+    expect(sysPrompt).toContain('CURRENT BRAND VOICE');
+    expect(sysPrompt).toContain('concise luxury product copy');
+    expect(sysPrompt).not.toContain('cricket');
   });
 
   it('does NOT increment usage on top-priority fallback results', async () => {

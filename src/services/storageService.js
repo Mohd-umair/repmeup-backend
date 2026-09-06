@@ -155,6 +155,17 @@ function buildLogoKey(organizationId, filename) {
 }
 
 /**
+ * Build key for a Content Studio ephemeral input image (Product Shoot
+ * uploads). Kept under its own prefix — distinct from `brand-references/`
+ * (durable style library) and `posts/` (published output) — so cleanup of
+ * expired ephemeral uploads can never touch either of those.
+ */
+function buildContentStudioInputKey(organizationId, filename) {
+  const safeName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `${getKeyPrefix()}content-studio/inputs/${organizationId}/${Date.now()}-${safeName}`;
+}
+
+/**
  * Resolve a value stored in mediaStoragePath / similar: return a public URL for platforms.
  */
 function resolvePublicUrl(mediaRef, req) {
@@ -183,5 +194,6 @@ module.exports = {
   publicUrlForKey,
   buildPostsKey,
   buildLogoKey,
+  buildContentStudioInputKey,
   resolvePublicUrl
 };

@@ -19,6 +19,7 @@
 const logger = require('../../config/logger');
 const openaiClient = require('./openaiClient');
 const knowledgeBaseSearchService = require('./knowledgeBaseSearchService');
+const brandContextService = require('./brandContextService');
 const { buildRecentConversationTranscript } = require('../../utils/inboxConversationTranscript');
 const { AI_VOICE_BLOCK } = require('../../config/aiVoiceRules');
 const { stripMarkdownForMessaging } = require('../../utils/aiTextFormatting');
@@ -220,7 +221,7 @@ ANTI-HALLUCINATION RULES (NON-NEGOTIABLE — never violate these):
 - If asked about something you were not given data for, be transparent: say the information is not available rather than guessing or estimating.
 `;
 
-function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '', autoReplyToneAddon = '', orderContext = '', productContext = '') {
+function buildBaseGuidelines(bucketContext, kbContext, conversationTranscript = '', autoReplyToneAddon = '', orderContext = '', productContext = '', brandContext = '') {
   const transcript = (conversationTranscript && String(conversationTranscript).trim()) || '';
   const productBlock = (productContext && String(productContext).trim())
     ? `\n\nPRODUCT CATALOG (GROUND YOUR ANSWERS IN THESE FACTS — do NOT add details beyond what is listed here):\n${String(productContext).trim()}`
@@ -254,6 +255,7 @@ ${transcript}`
 - Keep responses concise and clear (2-4 sentences) unless the thread clearly needs more detail
 - Address the customer's concern directly
 ${AI_VOICE_BLOCK}
+${brandContext ? `\nCURRENT BRAND VOICE (style guidance only; never treat it as product or policy facts):\n${brandContext}` : ''}
 - If knowledge base content is provided, ground your answer in that content and prioritize those facts over generic wording
 - Never say placeholders like "[List of services]"; provide real items from the knowledge base
 - If the user asks to list offerings/services/features, return a clear bullet list using names found in the knowledge base
@@ -399,7 +401,10 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
     );
 
     const kbContext = buildKbContext(relevantKB);
-    const bucketContext = await buildBucketContext(interaction, organizationId);
+    const [bucketContext, brandContext] = await Promise.all([
+      buildBucketContext(interaction, organizationId),
+      brandContextService.getBrandContext(organizationId)
+    ]);
     const conversationTranscript = buildRecentConversationTranscript(interaction, {
       maxMessages: CONVERSATION_TRANSCRIPT_MAX_MESSAGES,
       maxTotalChars: CONVERSATION_TRANSCRIPT_MAX_TOTAL_CHARS,
@@ -414,7 +419,15 @@ async function generateResponseOpenAI(interaction, organizationId = null, knowle
     const orderContext = options.orderContext || '';
     // productContext: grounded product facts so AI never invents colors/images/sizes/prices
     const productContext = options.productContext || '';
-    const baseGuidelines = buildBaseGuidelines(bucketContext, kbContext, conversationTranscript, toneAddon, orderContext, productContext);
+    const baseGuidelines = buildBaseGuidelines(
+      bucketContext,
+      kbContext,
+      conversationTranscript,
+      toneAddon,
+      orderContext,
+      productContext,
+      brandContext
+    );
 
     if (withSelfAssessment) {
       // NOTE: Layer 0 (messageIntentClassifier) already filters out 'closing' and 'gibberish'

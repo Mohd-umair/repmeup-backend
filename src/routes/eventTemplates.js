@@ -8,9 +8,13 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 
 router.use(protect);
 
+// 'super_admin' is a distinct role from 'admin' (see User.js role enum) and
+// must be listed explicitly or a super_admin gets 403 managing occasion templates.
+const TEMPLATE_MANAGERS = ['super_admin', 'admin', 'manager'];
+
 router.get('/', eventTemplateController.list);
-router.post('/', authorize('admin', 'manager'), upload.single('referenceImage'), eventTemplateController.create);
-router.put('/:id', authorize('admin', 'manager'), eventTemplateController.update);
-router.delete('/:id', authorize('admin', 'manager'), eventTemplateController.remove);
+router.post('/', authorize(...TEMPLATE_MANAGERS), upload.single('referenceImage'), eventTemplateController.create);
+router.put('/:id', authorize(...TEMPLATE_MANAGERS), eventTemplateController.update);
+router.delete('/:id', authorize(...TEMPLATE_MANAGERS), eventTemplateController.remove);
 
 module.exports = router;

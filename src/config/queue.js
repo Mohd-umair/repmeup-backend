@@ -58,6 +58,11 @@ const publicAuditQueue = new Queue('public-audit', queueOptions);
 // Appointment reminders + no-show sweep — a periodic scan (every ~10 min).
 const appointmentReminderQueue = new Queue('appointment-reminder', queueOptions);
 
+// Content Studio ephemeral input-image cleanup (Product Shoot uploads) —
+// purges storage objects + DB rows past expiresAt. Runs ahead of the Mongo
+// TTL sweep, which only removes the document, never the S3/local object.
+const contentStudioInputCleanupQueue = new Queue('content-studio-input-cleanup', queueOptions);
+
 // Review request delivery — send WhatsApp flows with delay/reminder support.
 const reviewRequestQueue = new Queue('review-request', queueOptions);
 
@@ -121,7 +126,8 @@ const queues = [
   socialCampaignSendQueue,
   activationCampaignLaunchQueue,
   contactIntelligenceQueue,
-  duplicateScanQueue
+  duplicateScanQueue,
+  contentStudioInputCleanupQueue
 ];
 
 queues.forEach(queue => {
@@ -179,6 +185,7 @@ module.exports = {
   activationCampaignLaunchQueue,
   contactIntelligenceQueue,
   duplicateScanQueue,
+  contentStudioInputCleanupQueue,
   queueConfig,
   // Helper to get the queue (called from services)
   getReviewRequestQueue: () => reviewRequestQueue

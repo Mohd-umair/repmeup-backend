@@ -83,6 +83,14 @@ const mediaSchema = new mongoose.Schema({
     type: String,
     trim: true,
     maxlength: 500
+  },
+
+  // Generation provenance (e.g. Content Studio Product Shoot) — small JSON
+  // fields only (ids, mode, config echo). Never raw prompts/image bytes.
+  // Optional/additive so existing Media rows and callers are unaffected.
+  metadata: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
   }
 }, {
   timestamps: true
